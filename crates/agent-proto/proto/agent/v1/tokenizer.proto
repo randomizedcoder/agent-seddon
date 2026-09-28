@@ -14,10 +14,24 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 service TokenizerService {
-  rpc Count(TokCountRequest) returns (TokCount);
-  rpc CountMessages(TokCountMessagesRequest) returns (TokCount);
+  // REST mappings (docs/design/rest-openapi/), under /v1/tokenizer/. Count takes a
+  // scalar (text + model) → GET; CountMessages carries a repeated nested `Message`
+  // → POST body:*. Both are side-effect-free.
+  rpc Count(TokCountRequest) returns (TokCount) {
+    option (google.api.http) = {get: "/v1/tokenizer/count"};
+  }
+  rpc CountMessages(TokCountMessagesRequest) returns (TokCount) {
+    option (google.api.http) = {
+      post: "/v1/tokenizer/count-messages"
+      body: "*"
+    };
+  }
 }
 
 message TokCountRequest {

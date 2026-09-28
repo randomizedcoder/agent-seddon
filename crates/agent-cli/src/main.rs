@@ -42,6 +42,30 @@ async fn main() -> Result<()> {
     // Record where the config came from so the `ConfigStore` seam (portal
     // settings) can write edits back to the same file.
     config.source_path = Some(config_path.clone());
+    // `agent login` / `logout` / `whoami` (security-hardening S12): talk to the IdP
+    // and the agent's `AuthService`, then exit. Before the egress proxy (the IdP is
+    // not on its allow-list), telemetry, and any server.
+    #[cfg(feature = "auth")]
+    match &mode {
+        Mode::Login { issuer, endpoint } => {
+            return agent_runtime::login::login(&config, issuer.as_deref(), endpoint.as_deref())
+                .await;
+        }
+        Mode::Logout { issuer } => {
+            return agent_runtime::login::logout(&config, issuer.as_deref()).await;
+        }
+        Mode::WhoAmI { issuer } => {
+            return agent_runtime::login::whoami(&config, issuer.as_deref()).await;
+        }
+        _ => {}
+    }
+    #[cfg(not(feature = "auth"))]
+    if matches!(
+        mode,
+        Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. }
+    ) {
+        anyhow::bail!("`agent login` needs the agent built with the `auth` feature");
+    }
     // `--cognition-graph FILE` = `[graph] store = "file", file = FILE` — the
     // scenario-file form (config/cognition/*.textproto).
     if let Some(file) = cognition_graph {
@@ -588,6 +612,9 @@ async fn main() -> Result<()> {
                     .await
                     .map(|()| None)
             }
+            Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } => {
+                unreachable!("login/logout/whoami return before the run")
+            }
         }
     })
     .await;
@@ -758,6 +785,25 @@ enum Mode {
     /// planner's provider. The bare word `campaign` selects this only as the first
     /// non-option token — after `--` it is a goal word like any other.
     Campaign(campaign_cli::CampaignArgs),
+    /// Sign in (`agent login [--issuer NAME] [--endpoint ADDR]`): the device flow at
+    /// the login issuer, then an agent token kept in
+    /// `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json`
+    /// (docs/design/security-hardening/01-authentication.md "CLI").
+    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
+    Login {
+        issuer: Option<String>,
+        endpoint: Option<String>,
+    },
+    /// Revoke the stored login's session and forget it (`agent logout`).
+    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
+    Logout {
+        issuer: Option<String>,
+    },
+    /// Print who the stored login is (`agent whoami`).
+    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
+    WhoAmI {
+        issuer: Option<String>,
+    },
 }
 
 /// What a planner verb (`plan`, `run --once`) carries from the config load to the
@@ -848,6 +894,11 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut check_config = false;
     let mut doctor = false;
     let mut campaign: Option<campaign_cli::CampaignArgs> = None;
+    let mut login = false;
+    let mut logout = false;
+    let mut whoami = false;
+    let mut issuer: Option<String> = None;
+    let mut auth_endpoint: Option<String> = None;
     let mut cognition_graph: Option<String> = None;
     let mut model_router_config: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
@@ -896,6 +947,16 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                 }
                 campaign = Some(parsed);
                 break;
+            }
+            // `agent login` / `logout` / `whoami`: bare words, like `doctor`.
+            "login" => login = true,
+            "logout" => logout = true,
+            "whoami" => whoami = true,
+            "--issuer" => {
+                issuer = Some(args.next().context("--issuer requires an issuer name")?);
+            }
+            "--endpoint" => {
+                auth_endpoint = Some(args.next().context("--endpoint requires an address")?);
             }
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
@@ -952,6 +1013,9 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                      --check-config      load + validate the config, print the selected impls, and exit\n  \
                      doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
                      campaign <verb> …   manage campaigns — add / plan / list / show / approve / answer … (`agent campaign --help`)\n  \
+                     login              sign in at the login issuer (device code) and keep an agent token [--issuer NAME] [--endpoint ADDR]\n  \
+                     logout              revoke the stored login's session and forget it [--issuer NAME]\n  \
+                     whoami              print the stored login's tenant, roles and permissions [--issuer NAME]\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -969,7 +1033,25 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     }
 
     let goal = goal_parts.join(" ");
-    let mode = if check_config {
+    if [login, logout, whoami].iter().filter(|b| **b).count() > 1 {
+        anyhow::bail!("pick one of `login`, `logout`, `whoami`");
+    }
+    if auth_endpoint.is_some() && !login {
+        anyhow::bail!("--endpoint only applies to `agent login`");
+    }
+    if issuer.is_some() && !(login || logout || whoami) {
+        anyhow::bail!("--issuer only applies to `login`, `logout` and `whoami`");
+    }
+    let mode = if login {
+        Mode::Login {
+            issuer,
+            endpoint: auth_endpoint,
+        }
+    } else if logout {
+        Mode::Logout { issuer }
+    } else if whoami {
+        Mode::WhoAmI { issuer }
+    } else if check_config {
         Mode::CheckConfig
     } else if doctor {
         Mode::Doctor
@@ -1138,5 +1220,38 @@ mod tests {
             Mode::OneShot(goal) => assert_eq!(goal, "--run-scheduled-job"),
             _ => panic!("expected OneShot (the token is a goal, not a mode)"),
         }
+    }
+
+    /// What the parsed mode is, for the login table below.
+    fn login_mode(argv: &[&str]) -> Result<String> {
+        parse(argv).map(|a| match a.mode {
+            Mode::Login { issuer, endpoint } => format!("login {issuer:?} {endpoint:?}"),
+            Mode::Logout { issuer } => format!("logout {issuer:?}"),
+            Mode::WhoAmI { issuer } => format!("whoami {issuer:?}"),
+            Mode::OneShot(goal) => format!("oneshot {goal}"),
+            _ => "other".into(),
+        })
+    }
+
+    // desc: `agent login` / `logout` / `whoami` (security-hardening S12) are bare
+    // words like `doctor`; `--issuer` and `--endpoint` only go with them.
+    #[rstest::rstest]
+    #[case::positive_login(&["login"], "login None None")]
+    #[case::positive_login_with_options(&["login", "--issuer", "google", "--endpoint", "https://a:1"], "login Some(\"google\") Some(\"https://a:1\")")]
+    #[case::positive_logout(&["logout", "--issuer", "kc"], "logout Some(\"kc\")")]
+    #[case::positive_whoami(&["whoami"], "whoami None")]
+    #[case::corner_login_after_double_dash_is_a_goal(&["--", "login"], "oneshot login")]
+    fn login_words_parse(#[case] argv: &[&str], #[case] want: &str) {
+        assert_eq!(login_mode(argv).expect("parses"), want);
+    }
+
+    #[rstest::rstest]
+    #[case::negative_two_words(&["login", "logout"], "pick one")]
+    #[case::negative_endpoint_without_login(&["whoami", "--endpoint", "https://a:1"], "--endpoint only")]
+    #[case::negative_issuer_alone(&["--issuer", "google", "hello"], "--issuer only")]
+    #[case::boundary_issuer_missing_value(&["login", "--issuer"], "requires an issuer name")]
+    fn login_words_refused(#[case] argv: &[&str], #[case] want: &str) {
+        let err = login_mode(argv).expect_err("refused");
+        assert!(format!("{err:#}").contains(want), "{err:#}");
     }
 }

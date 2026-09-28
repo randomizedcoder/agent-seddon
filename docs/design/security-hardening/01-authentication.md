@@ -134,6 +134,22 @@ existing admission layer, so it is rate-limited. Portal details: [`06-portal-and
 - The stored token feeds the process `BearerSource` ([04](04-service-integration.md)), which
   refreshes in the background.
 
+> **As built (S12).** The device flow is the only CLI path. The loopback-redirect code flow is
+> deferred: every IdP we target advertises the device endpoint, and a loopback listener is a second
+> surface to harden.
+> - Discovery must name the configured issuer.
+> - The device and token endpoints and the shown URLs must be `https://` (plain `http` only to a
+>   loopback IP).
+> - The user code and URL are refused if they carry control characters.
+> - Google's pre-RFC `verification_url` is accepted.
+> - Google also wants its client secret from a device client, so `[[auth.issuers]]` gained
+>   `client_secret` (an `env:`/`file:` reference, never inline).
+> - The refresh handle rotates on every use, so the token file is locked across a refresh.
+>   Another process's newer token is adopted instead of spending the handle again.
+> - Code: [`client/login.rs`](../../../crates/agent-grpc/src/client/login.rs) and
+>   [`agent-runtime/src/login.rs`](../../../crates/agent-runtime/src/login.rs).
+> - Config: `[grpc.client] auth_endpoint` and `bearer`.
+
 The CLI is hand-parsed with a bare-word subcommand pattern
 ([`main.rs`](../../../crates/agent-cli/src/main.rs):766-768 for `doctor`); `login` / `logout` /
 `whoami` follow it.

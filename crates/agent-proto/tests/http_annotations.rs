@@ -164,12 +164,16 @@ fn methods() -> BTreeMap<String, MethodInfo> {
 }
 
 /// Expected `google.api.http` mapping for an RPC.
+///
+/// There is deliberately no "present but unmapped" expectation: the full-surface
+/// sweep (03a–03g4) annotated every RPC, and `adversarial_every_method_has_a_route`
+/// now asserts that end-state whole-set — a routeless method fails that invariant
+/// rather than being an expected per-row outcome. (If a future increment ever defers
+/// an RPC, reintroduce an `Unmapped` variant here and exempt it there.)
 #[derive(Debug)]
 enum Expect {
     /// Exactly these `(verb, path)` routes, in binding order.
     Routes(&'static [(&'static str, &'static str)]),
-    /// Present in the descriptor but carrying no `google.api.http` rule.
-    Unmapped,
     /// Not a real method — the lookup must fail closed (junk name).
     Absent,
 }
@@ -395,12 +399,181 @@ enum Expect {
     "ForgeService.ReviewPr",
     Expect::Routes(&[("POST", "/v1/forge/prs/{number}/reviews")])
 )]
-// negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
-// positive `Routes` case when `policy.proto` is annotated in a later increment.
-#[case::negative_unannotated_rpc_has_no_rule(
-    "Policy.Authorize is not annotated yet -> no google.api.http rule",
+// --- 03g1: LLM plane (provider / llm_pool / embed / tokenizer) --------------
+// positive — the LAST of the five server-streaming RPCs: streaming completion is a
+// side-effecting action → POST body:*. With this the streaming set is complete.
+#[case::positive_provider_stream_last_server_streaming(
+    "Provider.Stream (server-streaming) -> POST /v1/provider/stream",
+    "Provider.Stream",
+    Expect::Routes(&[("POST", "/v1/provider/stream")])
+)]
+// positive — a nested `CompletionRequest` maps to POST body:* (the buffered path).
+#[case::positive_provider_complete_nested_maps_to_post(
+    "Provider.Complete -> POST /v1/provider/complete",
+    "Provider.Complete",
+    Expect::Routes(&[("POST", "/v1/provider/complete")])
+)]
+// corner — a repeated-scalar CONTENT payload (document bodies to embed) maps to POST,
+// NOT GET: query strings carry selectors, not payloads (content-payload refinement).
+#[case::corner_embed_docs_content_payload_maps_to_post(
+    "EmbedService.EmbedDocs -> POST /v1/embed/docs (repeated content payload)",
+    "EmbedService.EmbedDocs",
+    Expect::Routes(&[("POST", "/v1/embed/docs")])
+)]
+// corner — the single-query counterpart stays GET: one short query scalar is a
+// selector, so it rides as a query param (the direct contrast to EmbedDocs).
+#[case::corner_embed_query_single_scalar_maps_to_get(
+    "EmbedService.EmbedQuery -> GET /v1/embed/query (single query scalar)",
+    "EmbedService.EmbedQuery",
+    Expect::Routes(&[("GET", "/v1/embed/query")])
+)]
+// corner — counting messages carries a repeated NESTED `Message`, so → POST body:*
+// (nested-body rule), while the scalar-text `Count` stays GET.
+#[case::corner_tokenizer_count_messages_nested_repeated_maps_to_post(
+    "TokenizerService.CountMessages -> POST /v1/tokenizer/count-messages",
+    "TokenizerService.CountMessages",
+    Expect::Routes(&[("POST", "/v1/tokenizer/count-messages")])
+)]
+// --- 03g2: cognition / memory (memory / context / dimension / mode / digest /
+//          reference) -----------------------------------------------------------
+// positive — a bounded read whose only field is a scalar `limit` maps to GET (the
+// limit rides as a query param), in a fresh proto group.
+#[case::positive_episodic_recent_scalar_limit_read_maps_to_get(
+    "Episodic.Recent -> GET /v1/episodic/recent (scalar limit as query param)",
+    "Episodic.Recent",
+    Expect::Routes(&[("GET", "/v1/episodic/recent")])
+)]
+// corner — a read whose request is a nested `RecallQuery` maps to POST body:*
+// (nested-body-read convention) even though it is side-effect-free.
+#[case::corner_memory_recall_nested_body_read_maps_to_post(
+    "Memory.Recall -> POST /v1/memory/recall (nested RecallQuery in the request)",
+    "Memory.Recall",
+    Expect::Routes(&[("POST", "/v1/memory/recall")])
+)]
+// corner — a read keyed by a `safe_segment` slug captures it as a path param (the
+// first identifier-is-a-slug capture, contrast the query-param revision reads).
+#[case::corner_dimension_recall_slug_path_param(
+    "DimensionService.Recall -> GET /v1/dimensions/{dimension} (slug identifier as path param)",
+    "DimensionService.Recall",
+    Expect::Routes(&[("GET", "/v1/dimensions/{dimension}")])
+)]
+// corner — a ledger read keyed by `session_id` (path param) whose `keywords_any` is a
+// repeated-scalar FILTER stays GET (the keywords ride as repeated query params) — the
+// filter half of the content-payload-vs-filter refinement.
+#[case::corner_digest_query_repeated_scalar_filter_stays_get(
+    "DigestService.Query -> GET /v1/digests/{session_id} (repeated-scalar keyword filter)",
+    "DigestService.Query",
+    Expect::Routes(&[("GET", "/v1/digests/{session_id}")])
+)]
+// corner — resolving `@`-mentions carries a whole `prompt` CONTENT payload, so it is
+// POST body:* even though it never mutates state (content-payload refinement, scalar
+// form: a prompt is a payload, not a URL-friendly selector).
+#[case::corner_reference_resolve_content_payload_maps_to_post(
+    "ReferenceService.Resolve -> POST /v1/references/resolve (prompt content payload)",
+    "ReferenceService.Resolve",
+    Expect::Routes(&[("POST", "/v1/references/resolve")])
+)]
+// boundary — an action whose request is EMPTY still maps to POST body:* (a distiller
+// trigger has no query surface); contrast the empty-request GET reads (Preflight).
+#[case::boundary_memory_distill_empty_request_action_maps_to_post(
+    "Memory.Distill (empty request) -> POST /v1/memory/distill",
+    "Memory.Distill",
+    Expect::Routes(&[("POST", "/v1/memory/distill")])
+)]
+// --- 03g3: analysis + control (graph / scanner / lsp / metrics_proxy / policy /
+//          review) — only auth.proto (AuthService) remains, deferred to 03g4 ------
+// corner — a document read with an EMPTY request shares its resource path with the
+// POST that replaces it (GET /v1/graph reads, POST /v1/graph writes) — verb-
+// disambiguated like RepoService.WorktreeList/WorktreeAdd.
+#[case::corner_graph_get_shares_resource_path_via_verb(
+    "GraphService.Get -> GET /v1/graph (same path as POST Put)",
+    "GraphService.Get",
+    Expect::Routes(&[("GET", "/v1/graph")])
+)]
+// corner — validation is side-effect-free but carries the whole `CognitionGraph`
+// document, so → POST body:* (nested-body-read convention), not GET.
+#[case::corner_graph_validate_nested_body_read_maps_to_post(
+    "GraphService.Validate -> POST /v1/graph/validate (whole document in the body)",
+    "GraphService.Validate",
+    Expect::Routes(&[("POST", "/v1/graph/validate")])
+)]
+// corner — scanning carries the untrusted `content` to inspect (a CONTENT payload, not
+// a URL-friendly selector), so → POST body:* (content-payload refinement).
+#[case::corner_scanner_scan_content_payload_maps_to_post(
+    "ScannerService.Scan -> POST /v1/scanner/scan (content payload)",
+    "ScannerService.Scan",
+    Expect::Routes(&[("POST", "/v1/scanner/scan")])
+)]
+// corner — a pure read whose scalar `query` is a PromQL SELECTOR expression stays GET
+// (it rides as a query param, like Prometheus's own /api/v1/query) — the direct
+// contrast to a scalar CONTENT payload (Reference.Resolve/Scanner.Scan → POST).
+#[case::corner_metrics_query_promql_selector_stays_get(
+    "MetricsProxyService.Query -> GET /v1/metrics/query (PromQL selector as query param)",
+    "MetricsProxyService.Query",
+    Expect::Routes(&[("GET", "/v1/metrics/query")])
+)]
+// corner — a fact-collection read whose `target` selector can contain `:` and `/`
+// (`branch:feature/x`) rides as a query param, never a `{param}` capture — the same
+// shape as RepoService.ReadFile's revision (GET with ZERO path params).
+#[case::corner_review_collect_slashy_selector_is_query_param(
+    "FactCollectorService.Collect -> GET /v1/review/facts (slashy target as query param)",
+    "FactCollectorService.Collect",
+    Expect::Routes(&[("GET", "/v1/review/facts")])
+)]
+// positive — the tool-approval gate carries a nested `ToolCall` → POST body:*. This is
+// the row that was the `Unmapped` sentinel until policy.proto was annotated here.
+#[case::positive_policy_authorize_nested_maps_to_post(
+    "Policy.Authorize -> POST /v1/policy/authorize (nested ToolCall)",
     "Policy.Authorize",
-    Expect::Unmapped
+    Expect::Routes(&[("POST", "/v1/policy/authorize")])
+)]
+// --- 03g4: auth (AuthService) — the FINAL batch; the whole surface is now annotated -
+// positive — a paramless identity read maps to a bare GET. This was the `Unmapped`
+// sentinel until auth.proto was annotated here; with it, every RPC in the descriptor
+// carries a route (see `adversarial_every_method_has_a_route`).
+#[case::positive_auth_whoami_paramless_read_maps_to_get(
+    "AuthService.WhoAmI -> GET /v1/auth/whoami (paramless identity read)",
+    "AuthService.WhoAmI",
+    Expect::Routes(&[("GET", "/v1/auth/whoami")])
+)]
+// positive — the token-mint endpoint (trade an ID token / client cert for an agent
+// token) is a credential-bearing action → POST body:*, like an OAuth token endpoint.
+#[case::positive_auth_exchange_token_mint_maps_to_post(
+    "AuthService.Exchange -> POST /v1/auth/exchange (token mint)",
+    "AuthService.Exchange",
+    Expect::Routes(&[("POST", "/v1/auth/exchange")])
+)]
+// corner — revoking one of the caller's OWN sessions is a removal by id nested under
+// the `/my/` sub-collection: DELETE with a `{sid}` path param (distinct from the
+// tenant-wide RevokeSession under /v1/auth/sessions/{sid}).
+#[case::corner_auth_revoke_my_session_nested_delete(
+    "AuthService.RevokeMySession -> DELETE /v1/auth/my/sessions/{sid}",
+    "AuthService.RevokeMySession",
+    Expect::Routes(&[("DELETE", "/v1/auth/my/sessions/{sid}")])
+)]
+// corner — a role binding's read/delete share `/v1/auth/bindings/{id}` (GET reads,
+// DELETE removes), while list/create share the `/v1/auth/bindings` collection — four
+// RPCs over two paths, each unique by `(verb, path)`. This locks the DELETE-by-id; the
+// `tenant`/`keep_sessions` scalars ride as query params (no body on a DELETE).
+#[case::corner_auth_delete_binding_by_id_maps_to_delete(
+    "AuthService.DeleteBinding -> DELETE /v1/auth/bindings/{id}",
+    "AuthService.DeleteBinding",
+    Expect::Routes(&[("DELETE", "/v1/auth/bindings/{id}")])
+)]
+// positive — browser sign-in (S13): listing the configured login issuers is a
+// bearer-less read → GET. It carries no request fields, so it maps to a bare path.
+#[case::positive_auth_issuers_read_maps_to_get(
+    "AuthService.Issuers -> GET /v1/auth/issuers (login-issuer list)",
+    "AuthService.Issuers",
+    Expect::Routes(&[("GET", "/v1/auth/issuers")])
+)]
+// positive — starting a browser sign-in mints single-use server-side `state` bound to
+// the issuer, redirect URI and PKCE challenge; that is a credential-adjacent action, so
+// it maps to POST body:* (the challenge/redirect ride in the JSON body, not the URL).
+#[case::positive_auth_begin_starts_flow_maps_to_post(
+    "AuthService.Begin -> POST /v1/auth/begin (start browser sign-in)",
+    "AuthService.Begin",
+    Expect::Routes(&[("POST", "/v1/auth/begin")])
 )]
 // negative — a junk method name must not resolve to any rule (fail closed).
 #[case::negative_junk_method_is_absent(
@@ -419,16 +592,6 @@ fn http_annotation_coverage(
             !map.contains_key(method),
             "expected `{method}` to be absent from the descriptor, but it is present"
         ),
-        Expect::Unmapped => {
-            let info = map
-                .get(method)
-                .unwrap_or_else(|| panic!("`{method}` not found in descriptor"));
-            assert!(
-                info.routes.is_empty(),
-                "expected `{method}` to carry no google.api.http rule, got {:?}",
-                info.routes
-            );
-        }
         Expect::Routes(expected) => {
             let info = map
                 .get(method)
@@ -531,5 +694,26 @@ fn boundary_surface_has_no_client_or_bidi_streaming_rpcs() {
     assert!(
         offenders.is_empty(),
         "client-streaming/bidi RPCs are not REST-transcodable; mark them gRPC-only: {offenders:?}"
+    );
+}
+
+// adversarial — the end-state of the full-surface sweep (03a–03g4): EVERY RPC in the
+// emitted descriptor carries at least one `google.api.http` route. Since the surface
+// has no client/bidi-streaming RPCs (the invariant above), none is legitimately
+// unmappable — so a routeless method means a new RPC was added without an annotation.
+// This fires as the reminder to annotate it (or, for a future client/bidi RPC, to mark
+// it gRPC-only in docs/design/rest-openapi/ and exempt it here).
+#[test]
+fn adversarial_every_method_has_a_route() {
+    let map = methods();
+    let unmapped: Vec<&String> = map
+        .iter()
+        .filter(|(_, i)| i.routes.is_empty())
+        .map(|(m, _)| m)
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "these RPCs carry no google.api.http route (annotate them, or mark gRPC-only \
+         and exempt): {unmapped:?}"
     );
 }

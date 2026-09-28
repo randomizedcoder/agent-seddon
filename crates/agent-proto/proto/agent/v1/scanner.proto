@@ -13,6 +13,14 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
+// REST mapping (docs/design/rest-openapi/), under /v1/scanner/. Scan carries the
+// `content` to inspect — an untrusted CONTENT payload, not a URL-friendly selector →
+// POST body:* (content-payload refinement).
 service ScannerService {
   // Findings in `content`, in the order the rules ran.
   //
@@ -21,7 +29,12 @@ service ScannerService {
   // return an empty result rather than an error — the `Scanner` trait is
   // deliberately fail-open on infrastructure failure so an unreachable advisory
   // database can never block a tool call.
-  rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc Scan(ScanRequest) returns (ScanResponse) {
+    option (google.api.http) = {
+      post: "/v1/scanner/scan"
+      body: "*"
+    };
+  }
 }
 
 enum ScanKind {

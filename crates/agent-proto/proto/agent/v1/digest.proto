@@ -9,6 +9,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // One ledger row. `kind` is a CLOSED set ("summary" | "facts" | "objective" |
 // "alternatives") — an unknown discriminator is rejected/skipped, never stored.
 message Digest {
@@ -50,7 +55,19 @@ message QueryDigestsResponse {
   repeated Digest digests = 1;
 }
 
+// REST mappings (docs/design/rest-openapi/), under /v1/digests/. Put writes a row →
+// POST body:*. Query is a ledger read keyed by `session_id` (the identifier) → GET
+// with the session as a `{session_id}` path param; the `kind`/`since_seq`/`limit`
+// scalars and the repeated-scalar `keywords_any` FILTER all ride as query params
+// (repeated-scalar filters stay GET — content-payload-vs-filter refinement).
 service DigestService {
-  rpc Put(PutDigestRequest) returns (PutDigestResponse);
-  rpc Query(QueryDigestsRequest) returns (QueryDigestsResponse);
+  rpc Put(PutDigestRequest) returns (PutDigestResponse) {
+    option (google.api.http) = {
+      post: "/v1/digests"
+      body: "*"
+    };
+  }
+  rpc Query(QueryDigestsRequest) returns (QueryDigestsResponse) {
+    option (google.api.http) = {get: "/v1/digests/{session_id}"};
+  }
 }

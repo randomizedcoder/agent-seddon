@@ -19,8 +19,9 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S10 | mTLS service identity | D6 | ✅ | #516 |
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
-| S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
-| S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
+| S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
+| S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
+| S13b | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
@@ -559,3 +560,86 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       loopback fake OIDC issuer. This covers discovery naming another issuer and URL
       credentials never echoed.
     - `der_time` / `validity` tables, including every truncation of a real leaf.
+- **2026-09-27 — S12 (#524).** `agent login` / `logout` / `whoami`, and `[grpc.client] bearer`.
+  - Device flow (RFC 8628) in `agent_grpc::client::login`:
+    - Discovery must name the issuer, and every endpoint and shown URL passes `check_fetch_url`.
+    - IdP answers are capped at 64 KiB. `interval` is clamped to 1–60 s (a `slow_down` adds 5 s)
+      and the code window to 30 min.
+    - The user code and URLs are refused if they carry control characters, so a hostile IdP
+      cannot rewrite the terminal. Google's `verification_url` is accepted.
+  - `AgentAuth` wraps `Exchange` / `Refresh` / `Logout` / `WhoAmI` at one endpoint.
+    - A stored token that cannot be a header value is refused, not sent.
+  - `TokenFile` keeps `<issuer>.json`:
+    - The file is `0600` in a `0700` directory, written by an atomic rename.
+    - Load refuses group/other-readable files, symlinks, non-files, files over 64 KiB and
+      garbage.
+  - `refresh_stored` holds `<issuer>.json.lock` across a refresh.
+    - If another process already wrote a newer usable token, it is adopted without spending the
+      handle.
+    - `UNAUTHENTICATED` / `PERMISSION_DENIED` / `INVALID_ARGUMENT` mean the session ended; the
+      rest is transient.
+  - `LoginBearerSource` is the process `BearerSource`.
+    - It refreshes at two thirds of each lifetime and backs off through `agent-retry`.
+    - It drops the token once the session ends.
+  - Config:
+    - `[grpc.client] bearer`: `login` | `login:<issuer>` | `env:` | `file:`. A raw token is
+      refused, as is `bearer` together with `[auth.mtls] token_endpoint`.
+    - `[grpc.client] auth_endpoint` must be https, a loopback IP or `unix:`.
+    - `[[auth.issuers]] client_secret` must be a reference, checked in every mode.
+    - `AuthCfg::login_issuer` picks the named issuer or the only one.
+  - `agent-cli`: bare `login` / `logout` / `whoami`, with `--issuer` and `--endpoint`.
+    - They run before the egress proxy and telemetry.
+    - `logout` deletes the local file even when the agent cannot be reached, and says the
+      session stays live there until it expires.
+  - Tests:
+    - Tables for poll classification, pacing, device answers (escape sequences,
+      `javascript:`, remote `http`, embedded credentials, oversize codes) and token-file
+      refusals.
+    - Device flow against the testkit `FakeIssuer`, which now scripts `/device` + `/token`:
+      `slow_down`, `pending`, grant, deny, expire, and the client secret on every request.
+    - `tests/cli_login.rs` over a real tonic `AuthService`: login → `WhoAmI`; refresh rotates
+      and persists the handle; two sources sharing a file refresh together without revoking
+      the session; logout ends the stored login; a forged handle ends it.
+    - Config load tables; CLI parse table.
+  - Deferred: the loopback-redirect code flow (see 01's as-built note), and a keyring backend
+    (parity 50).
+- **2026-09-27 — S13a (#528).** Browser sign-in, server side. S13 is split: the portal (S13b) needs
+  RPCs that did not exist.
+  - Design change: `Begin` / `Exchange{code}` are new `AuthService` RPCs and fields (additive,
+    no `buf` baseline move). `06-portal-and-edge.md` assumed them.
+  - `CodeFlow` in `server/auth/code_flow.rs`:
+    - `Begin` checks the issuer, the exact redirect URI and the S256 challenge shape before
+      touching the network, then discovers the issuer's endpoints (cached) and stores a random
+      single-use `state` (10 min, ≤ 1024 in flight) with a `nonce`.
+    - `Exchange{code, state, code_verifier}` spends the `state` first, checks the verifier
+      against the challenge (so the IdP is never asked with a wrong one), and redeems the code
+      with the redirect URI, the verifier and the `client_secret`. IdP answers are capped at
+      64 KiB, with a 10 s timeout.
+    - The ID token then goes through the normal login verifier. It must name the issuer `Begin`
+      chose and carry the `nonce`.
+    - One credential per `Exchange`: ID token, code or client certificate.
+  - `Issuers` / `Begin` are public, alongside `Exchange` / `Jwks` / `Refresh`: `is_exempt`,
+    `gate_of`, `test/mt-audit/authz.toml`.
+  - Config:
+    - `[auth] redirect_uris`: `https`, or `http` to a loopback IP; no fragment, no surrounding
+      whitespace, ≤ 16; needs `[auth.token]`. Checked at load and again by the layer.
+    - `[[auth.issuers]] client_secret` is resolved by the serve path only when browser sign-in
+      is on (`serving_issuer_params`). A failed resolution refuses to start.
+    - `IssuerParams.client_secret` is a `ClientSecret` whose `Debug` redacts the value.
+  - Testkit `FakeIssuer::start_code`:
+    - `/authorize` answers `302` to `redirect_uri?code&state`.
+    - `/token` redeems each code once, checking the client, the secret, the redirect URI and
+      PKCE S256.
+    - A script can forge `nonce` / `iss` / `aud`.
+  - Tests:
+    - `code_flow` tables: challenge / verifier shapes (42/43/128/129), the S256 value
+      cross-checked against Python hashlib, redirect-URI rules (`javascript:`, `data:`,
+      userinfo, fragment, LAN `http`), parameter encoding, `state` expiry / single use / cap,
+      nonce and issuer checks, and `Begin` / redeem refusals made before any network call.
+    - `tests/browser_login.rs` over a real tonic server: `Issuers` → `Begin` → IdP redirect →
+      `Exchange` → `WhoAmI`, and the secret and verifier reach the IdP. Refused: a spent
+      `state`, a wrong verifier (the IdP gets no request), a code swapped between two sign-ins,
+      a forged `nonce`, a wrong client secret, a redirect URI off the list, an unknown issuer,
+      an ID token and a code together, and sign-in with no `redirect_uris`.
+    - Found by the tests: `with_code_flow(None)` dropped the whole `AuthService`; fixed before
+      commit.

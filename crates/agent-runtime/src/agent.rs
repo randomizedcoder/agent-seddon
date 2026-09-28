@@ -123,6 +123,8 @@ pub struct GrpcAuthSettings {
     pub operator_subjects: Vec<String>,
     /// `[auth.mtls]`: service identity from client certificates (S10).
     pub mtls: Option<crate::config::AuthMtlsCfg>,
+    /// `[auth] redirect_uris`: browser sign-in's allowed return URIs (S13).
+    pub redirect_uris: Vec<String>,
     /// The backend `[auth.token] session_store` resolved to (S6); `None` ⇒ memory.
     #[cfg(feature = "auth")]
     pub sessions: Option<agent_grpc::server::SessionBackend>,

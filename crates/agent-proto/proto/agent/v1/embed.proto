@@ -11,13 +11,32 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 service EmbedService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/embed/. Capabilities and the
+  // single-query EmbedQuery are reads → GET; EmbedDocs carries a repeated CONTENT
+  // payload (document bodies to embed, not a URL-friendly filter), so it is POST
+  // body:* per the content-payload-vs-filter refinement (README convention).
+  //
   // The fixed dimensionality and batch ceiling. Fetched so a client can VERIFY
   // the remote against its configured `[embedder] dimensions` rather than
   // assuming — a mismatch silently corrupts a vector index.
-  rpc Capabilities(EmbCapabilitiesRequest) returns (EmbCapabilities);
-  rpc EmbedQuery(EmbQueryRequest) returns (EmbVector);
-  rpc EmbedDocs(EmbDocsRequest) returns (EmbVectors);
+  rpc Capabilities(EmbCapabilitiesRequest) returns (EmbCapabilities) {
+    option (google.api.http) = {get: "/v1/embed/capabilities"};
+  }
+  rpc EmbedQuery(EmbQueryRequest) returns (EmbVector) {
+    option (google.api.http) = {get: "/v1/embed/query"};
+  }
+  rpc EmbedDocs(EmbDocsRequest) returns (EmbVectors) {
+    option (google.api.http) = {
+      post: "/v1/embed/docs"
+      body: "*"
+    };
+  }
 }
 
 message EmbCapabilitiesRequest {}

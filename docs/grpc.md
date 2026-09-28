@@ -500,6 +500,69 @@ grpcurl -cacert "$PKI/ca/root.crt" -cert "$PKI/fleet/cert.pem" -key "$PKI/fleet/
   -d '{"use_client_cert": true}' "$ADDR" agent.v1.AuthService/Exchange
 ```
 
+**A person at a terminal** (S12, [`client/login.rs`](../crates/agent-grpc/src/client/login.rs),
+[`agent-runtime/src/login.rs`](../crates/agent-runtime/src/login.rs)).
+
+- `agent login [--issuer NAME] [--endpoint ADDR]` runs the OAuth device flow (RFC 8628) at the
+  login issuer. It prints a URL and a code. Once the code is approved, it trades the ID token at
+  `AuthService.Exchange` (`client_kind = "cli"`).
+  - The issuer comes from `[[auth.issuers]]`: its `audience` is the OAuth client id, and
+    `client_secret` is an `env:`/`file:` reference for IdPs that want one from a device client
+    (Google).
+  - The agent is `[grpc.client] auth_endpoint` or `--endpoint`. It must be `https://`, a
+    loopback IP or `unix:`, because the ID token travels on it.
+- The agent token and its refresh handle are kept in
+  `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json`:
+  - The file is mode `0600` in a `0700` directory, written atomically.
+  - A file others can read, a symlink or an oversized file is refused, not used.
+- `agent whoami` prints tenant, subject, roles, permissions and session id; `agent logout`
+  revokes the session and deletes the file.
+- `[grpc.client] bearer = "login"` (or `"login:<issuer>"`) makes the stored login the process's
+  outbound bearer (the S9 fallback). It is refreshed at two thirds of each lifetime.
+  - The file is locked across a refresh: two `agent` processes sharing one login never both spend
+    the rotating handle, which the server would take as theft.
+  - `bearer = "env:VAR"` / `"file:/path"` sends a token issued elsewhere instead.
+  - A process has one credential of its own: `bearer` and `[auth.mtls] token_endpoint` together
+    are refused at load.
+
+```sh
+agent login --issuer google       # prints: Open https://www.google.com/device … code ABCD-EFGH
+agent whoami
+agent logout
+```
+
+**A person in a browser** (S13a, [`server/auth/code_flow.rs`](../crates/agent-grpc/src/server/auth/code_flow.rs)).
+The portal signs in with the OAuth authorization-code flow and PKCE (RFC 7636). The agent
+redeems the code, so a client secret (Google asks for one even with PKCE) never reaches the
+browser.
+
+- `[auth] redirect_uris` lists the exact URIs an IdP may send the browser back to (the portal's
+  own address). Setting it turns browser sign-in on. Each must be `https`, or plain `http` to a
+  loopback IP, with no fragment. Register the same URIs with the IdP.
+- `AuthService.Issuers` lists the login issuers a browser can use (`name`, `profile`). An issuer
+  that accepts several `iss` URLs (an Entra issuer spanning directories) is left out, because
+  which one to discover is ambiguous.
+- `AuthService.Begin{issuer, redirect_uri, code_challenge}` returns the IdP's authorization URL
+  and a `state`.
+  - The client keeps the PKCE verifier and sends only its S256 challenge.
+  - The `state` is random, single use and good for 10 minutes. It binds the issuer, the redirect
+    URI, the challenge and an OIDC `nonce`.
+  - At most 1024 sign-ins can be in flight; beyond that `Begin` answers `RESOURCE_EXHAUSTED`.
+- The IdP redirects to `redirect_uri?code&state`. The client then calls
+  `AuthService.Exchange{code, state, code_verifier}` (`client_kind` defaults to `portal`). The
+  agent:
+  - spends the `state` (a second use is refused, whatever the first did);
+  - checks the verifier against the challenge before contacting the IdP;
+  - redeems the code at the token endpoint with the redirect URI, the verifier and the issuer's
+    `client_secret`;
+  - verifies the returned ID token like any other, and requires it to come from the issuer
+    `Begin` named and to carry that sign-in's `nonce`.
+- Every refusal is the usual opaque `UNAUTHENTICATED`, audited with a reason:
+  `unknown_state`, `pkce_mismatch`, `code_refused`, `idp_unavailable`, `issuer_mismatch`,
+  `nonce_mismatch`, `malformed_code`, `code_flow_off`. `Issuers` and `Begin` need no bearer.
+- With browser sign-in on, the serve path resolves each issuer's `client_secret` at startup. A
+  reference that does not resolve refuses to start.
+
 **Audit trail** (S11, [`server/audit.rs`](../crates/agent-grpc/src/server/audit.rs)). Every
 auth event is a row in ClickHouse `agent.agent_auth_events` when `[telemetry]` is on.
 

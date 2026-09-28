@@ -4,7 +4,18 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
+// REST mapping (docs/design/rest-openapi/), under /v1/policy/. Authorize carries a
+// nested `ToolCall` to gate → POST body:* (nested-body).
 service Policy {
-  rpc Authorize(ToolCall) returns (Decision);
+  rpc Authorize(ToolCall) returns (Decision) {
+    option (google.api.http) = {
+      post: "/v1/policy/authorize"
+      body: "*"
+    };
+  }
 }

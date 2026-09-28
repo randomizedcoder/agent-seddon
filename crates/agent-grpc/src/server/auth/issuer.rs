@@ -34,6 +34,15 @@ pub enum Profile {
 }
 
 impl Profile {
+    /// The config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Google => "google",
+            Profile::Entra => "entra",
+            Profile::Generic => "generic",
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim() {
             "" | "generic" => Ok(Profile::Generic),
@@ -402,7 +411,7 @@ fn or_default(value: &str, default: &str) -> String {
 /// to a numeric loopback address (a local test issuer), with no embedded
 /// credentials. Keys fetched over plaintext from the network could be swapped in
 /// transit. The same rule the config loader applies to `jwks_url`.
-pub(super) fn check_fetch_url(raw: &str) -> Result<(), String> {
+pub fn check_fetch_url(raw: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(raw).map_err(|e| format!("is not a valid URL ({e})"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err("must not embed credentials".into());

@@ -10,7 +10,7 @@ the as-built log) in the PR that lands the increment.
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | [Design directory](README.md) (design-of-record + STATUS + index) | — | — | — | — | — | ✅ merged (#510) |
 | 02 | Groundwork: vendor `google/api/{annotations,http}.proto`, wire `tonic-build` + buf-lint exemption, annotate one RPC, coverage-test skeleton | ✅ | — | — | ✅ | — | ✅ merged (#512) |
-| 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | 🟡 | — | — | 🟡 | — | 🟡 in flight |
+| 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | ✅ | — | — | ✅ | — | ✅ complete (03a–03g4) |
 | 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ⬜ |
 | 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (port via `nix/constants.nix`), filter before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | — | — | ⬜ |
 | 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ⬜ |
@@ -49,10 +49,15 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ✅ merged (#519) |
 | 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ✅ merged (#520) |
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ✅ merged (#522) |
-| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | 🟡 in flight |
-| 03g | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto`, `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `graph.proto`, `digest.proto`, `reference.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (remaining seams) | ⬜ |
+| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ✅ merged (#523) |
+| 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | ✅ merged (#526) |
+| 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | ✅ merged (#527) |
+| 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | ✅ merged (#529) |
+| 03g4 | `auth.proto` (AuthService, 15 RPCs — OIDC/JWT/RBAC/sessions/bindings + S13 browser sign-in `Issuers`/`Begin`) — **final batch; whole surface now annotated** | 🟡 in flight |
 
-(Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR.)
+(Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR. The original
+16-proto `03g` was split into reviewable sub-batches — smaller PRs; `auth.proto` surfaced as a
+distinct control-plane group during the sweep and became its own final batch, 03g4.)
 
 ## Implementation log (as-built deviations)
 
@@ -147,3 +152,64 @@ added, it fires as a reminder to list it here as gRPC-only.
   same seam, same loopback/UDS confinement. Added 6 class-tagged coverage rows (name-in-path + body,
   exec action, pty cursor read → GET, numeric path param, collection-level DELETE, write under a numeric
   parent); the whole-set invariants cover the rest.
+- **03g1 (LLM plane: provider / llm-pool / embed / tokenizer).** Annotated `Provider`
+  (`/v1/provider/`), `LlmPoolService` (`/v1/llm-pool/`), `EmbedService` (`/v1/embed/`), and
+  `TokenizerService` (`/v1/tokenizer/`). `Provider.Stream` is the **last of the five server-streaming
+  RPCs** → POST body:*, so the streaming set is now complete (none gRPC-only). New refinement
+  (documented in the README convention): **content-payload vs filter** — the repeated-scalar-stays-GET
+  rule is for *filters* (tags/globs/ids), but a repeated-scalar **content payload** (document bodies)
+  uses POST body:* since a query string carries selectors, not payloads: `EmbedService.EmbedDocs` →
+  POST `/v1/embed/docs`, while the single-query `EmbedQuery` stays GET `/v1/embed/query`. Nested-request
+  completions/counts → POST (`Provider.Complete`, `LlmPool.Complete`, `Tokenizer.CountMessages`); reads
+  → GET (`*.Capabilities`/`Health`, `Tokenizer.Count`). Added 5 class-tagged coverage rows (last
+  server-streaming → POST, nested complete → POST, content-payload EmbedDocs → POST vs single-query
+  EmbedQuery → GET, repeated-nested CountMessages → POST); the whole-set invariants cover the rest.
+- **03g2 (cognition / memory: memory / context / dimension / mode / digest / reference).** Annotated the
+  three memory services (`Memory` `/v1/memory/`, `Episodic` `/v1/episodic/`, `Semantic` `/v1/semantic/`),
+  `ContextService` (`/v1/context/`), `DimensionService` (`/v1/dimensions/`), `ModeService` (`/v1/mode/`),
+  `DigestService` (`/v1/digests/`), and `ReferenceService` (`/v1/references/`). Nested-request reads and
+  content payloads → POST body:* (`Memory.Recall`/`Semantic.Recall` carry a `RecallQuery`;
+  `Context.Assemble`/`Compact`, `Dimension.Summarize`, `Mode.Classify` carry nested/history payloads;
+  `Reference.Resolve` carries a whole prompt — the **scalar** form of the content-payload refinement).
+  Scalar-only reads → GET (`Episodic.Recent`, `limit` as query). Two new addressing shapes: a read keyed
+  by a `safe_segment` **slug** captures it as a path param (`Dimension.Recall` → GET
+  `/v1/dimensions/{dimension}`), and a ledger read keyed by `session_id` keeps its repeated-scalar
+  `keywords_any` **filter** as query params (`Digest.Query` → GET `/v1/digests/{session_id}` — the filter
+  half of the content-payload-vs-filter rule). Writes/triggers → POST (`*.Append`, `Digest.Put`,
+  `Memory.Distill` even with an empty request). Added 6 class-tagged coverage rows (scalar-limit read →
+  GET, nested-body Recall → POST, slug path param, repeated-scalar filter stays GET, content-payload
+  Resolve → POST, empty-request action → POST); the whole-set invariants cover the rest.
+- **03g3 (analysis + control: graph / scanner / lsp / metrics_proxy / policy / review).** Annotated
+  `GraphService` (`/v1/graph/`), `ScannerService` (`/v1/scanner/`), `LspService` (`/v1/lsp/`),
+  `MetricsProxyService` (`/v1/metrics/`), `Policy` (`/v1/policy/`), and `FactCollectorService`
+  (`/v1/review/`). `GraphService.Get`/`Put` share `/v1/graph` (verb-disambiguated, like
+  WorktreeList/Add); `Validate` carries the whole document → POST body:* (nested-body-read). Content
+  payloads → POST (`Scanner.Scan`, `Lsp.Open`/`Request`); `Policy.Authorize` carries a nested `ToolCall`
+  → POST (this **flipped the former `Unmapped` sentinel** to a positive row). Two read shapes worth
+  noting: `MetricsProxy.Query`/`QueryRange` are pure reads whose PromQL `query` is a **selector**
+  expression over stored series (not a content payload), so they stay GET with the query as a query
+  param — mirroring Prometheus's own `/api/v1/query`; and `FactCollector.Collect`'s `target` selector can
+  contain `:`/`/` (`branch:feature/x`), so — like `RepoService.ReadFile`'s revision — it rides as a query
+  param, never a `{param}` capture (GET `/v1/review/facts`). Added 6 class-tagged coverage rows
+  (shared-path GET, nested-body Validate → POST, content-payload Scan → POST, PromQL selector stays GET,
+  slashy selector as query param, the Policy.Authorize flip). **Completeness:** a sweep of `proto/agent/v1/`
+  found `auth.proto` (`AuthService`, 13 RPCs) as the sole remaining unannotated service — carved out as
+  the final batch **03g4**; the `Unmapped` sentinel now points at `AuthService.WhoAmI` until then.
+- **03g4 (auth: AuthService) — FINAL batch; increment 03 complete.** Annotated all 15 RPCs under
+  `/v1/auth/`: token-mint/rotate/mutations → POST body:* (`Exchange`, `Begin`, `Refresh`, `Logout`,
+  `PutBinding`), reads → GET (`Issuers`, `Jwks`, `WhoAmI`, `ListMySessions` `/my/sessions`, `ListSessions`
+  + `ListBindings` with `tenant` as a query param, `GetBinding` `/bindings/{id}`), and session/binding
+  removals → DELETE by id (`RevokeMySession` `/my/sessions/{sid}`, `RevokeSession` `/sessions/{sid}`,
+  `DeleteBinding` `/bindings/{id}` — the `tenant`/`keep_sessions` scalars ride as query params, no body on
+  a DELETE). `bindings` (GET list / POST create) and `bindings/{id}` (GET get / DELETE remove) each pair
+  two verbs on one path. The S13 browser sign-in RPCs (`Issuers` → GET `/v1/auth/issuers`, `Begin` → POST
+  `/v1/auth/begin` — it mints single-use server-side `state`, so its PKCE challenge/redirect ride in the
+  body, not the URL) landed on `main` (#528) after this batch was cut and were folded in on rebase.
+  **Flipped** the `AuthService.WhoAmI` `Unmapped` sentinel to a positive GET row and added a new end-state
+  invariant — `adversarial_every_method_has_a_route` — asserting EVERY RPC in the descriptor now carries
+  ≥1 route (a routeless method = a new RPC added without an annotation; this is what caught `Issuers`/`Begin`
+  on rebase). Added 6 class-tagged rows (paramless WhoAmI → GET, Exchange token-mint → POST, RevokeMySession
+  nested DELETE, DeleteBinding DELETE-by-id, Issuers read → GET, Begin start-flow → POST); now 55 rows + 5
+  invariants = 60 tests. With this, **the whole surface is annotated** and increment 03 (03a–03g4) is
+  complete — REST bypasses no authz (transcoded calls hit the same gRPC handler behind the same
+  `AuthLayer`). Next: increment 04 (OpenAPI doc + drift gate).

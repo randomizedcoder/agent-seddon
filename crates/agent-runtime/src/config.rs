@@ -2757,6 +2757,111 @@ pub struct GrpcCfg {
     /// security-hardening S4). Checked at load by [`GrpcTlsCfg::validate`].
     #[serde(default)]
     pub tls: GrpcTlsCfg,
+    /// The credential this process sends on outbound seam calls, and where
+    /// `agent login` signs in (`[grpc.client]`, security-hardening S12).
+    #[serde(default)]
+    pub client: GrpcClientCfg,
+}
+
+/// `[grpc.client]` — the bearer token this process sends on outbound seam calls
+/// made with no caller token in scope, and the agent `agent login` signs in at
+/// (docs/design/security-hardening/01-authentication.md "CLI").
+///
+/// Unknown keys are an error: a misspelt `bearer` would otherwise silently send
+/// no credential.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct GrpcClientCfg {
+    /// `""` (none) | `login` (the stored `agent login`; needs exactly one login
+    /// issuer) | `login:<issuer>` | `env:VAR` | `file:/path` (a token issued
+    /// elsewhere, read once at startup). Not together with `[auth.mtls]
+    /// token_endpoint`: a process has one credential of its own.
+    #[serde(default)]
+    pub bearer: String,
+    /// The agent's `AuthService` address `agent login` exchanges at: `https://…`,
+    /// or plaintext only to a loopback IP or a unix socket (the IdP's ID token
+    /// travels on it). `agent login --endpoint` overrides it.
+    #[serde(default)]
+    pub auth_endpoint: String,
+}
+
+/// What `[grpc.client] bearer` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientBearer<'a> {
+    None,
+    /// The stored login for this issuer (`None` = the only configured one).
+    Login(Option<&'a str>),
+    /// A token from `env:` / `file:`.
+    Ref(&'a str),
+}
+
+impl GrpcClientCfg {
+    /// Parse `bearer`.
+    pub fn bearer_kind(&self) -> Result<ClientBearer<'_>, String> {
+        match self.bearer.trim() {
+            "" => Ok(ClientBearer::None),
+            "login" => Ok(ClientBearer::Login(None)),
+            b => {
+                if let Some(name) = b.strip_prefix("login:") {
+                    return if agent_core::safe_segment(name) {
+                        Ok(ClientBearer::Login(Some(name)))
+                    } else {
+                        Err(format!(
+                            "`[grpc.client] bearer`: issuer `{name}` is not a plain identifier"
+                        ))
+                    };
+                }
+                match agent_core::ApiKeyRef::parse(b) {
+                    Ok(_) => Ok(ClientBearer::Ref(b)),
+                    Err(_) => Err("`[grpc.client] bearer` must be `login`, `login:<issuer>`, \
+                                   `env:VAR` or `file:/path` (never a raw token)"
+                        .into()),
+                }
+            }
+        }
+    }
+
+    /// Load-time checks against `[auth]`.
+    pub fn validate(&self, auth: &AuthCfg) -> Result<(), String> {
+        let bearer = self.bearer_kind()?;
+        let mtls = auth
+            .mtls
+            .as_ref()
+            .is_some_and(|m| !m.token_endpoint.trim().is_empty());
+        if bearer != ClientBearer::None && mtls {
+            return Err(
+                "`[grpc.client] bearer` and `[auth.mtls] token_endpoint` both give \
+                        this process a credential; set one"
+                    .into(),
+            );
+        }
+        if let ClientBearer::Login(wanted) = bearer {
+            auth.login_issuer(wanted).map(|_| ())?;
+        }
+        let endpoint = self.auth_endpoint.trim();
+        if !endpoint.is_empty() && !private_or_tls_endpoint(endpoint) {
+            return Err(format!(
+                "`[grpc.client] auth_endpoint` `{endpoint}` must be `https://…`, a loopback \
+                 IP or `unix:` (an ID token is sent on it)"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `https://…`, `unix:…`, or a plaintext address whose host is a loopback IP.
+pub fn private_or_tls_endpoint(endpoint: &str) -> bool {
+    if endpoint.starts_with("https://") || endpoint.starts_with("unix:") {
+        return true;
+    }
+    let hostport = endpoint.strip_prefix("http://").unwrap_or(endpoint);
+    hostport
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_loopback())
 }
 
 /// `[grpc.tls]` — PEM file paths for TLS on the gRPC TCP transport
@@ -2918,6 +3023,13 @@ pub struct AuthCfg {
     /// change who is one. Needs `[auth.token]`.
     #[serde(default)]
     pub operator_subjects: Vec<String>,
+    /// Browser sign-in (security-hardening S13): the exact URIs an identity
+    /// provider may send a browser back to (the portal's own address, e.g.
+    /// `https://portal.example/`). Non-empty turns on `AuthService.Begin`; each
+    /// must be `https`, or plain `http` to a loopback IP, with no fragment, and be
+    /// registered with the IdP too. Needs `[auth.token]`.
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
     /// Service identity from mutual TLS (`[auth.mtls]`, security-hardening S10).
     #[serde(default)]
     pub mtls: Option<AuthMtlsCfg>,
@@ -3177,6 +3289,12 @@ pub struct AuthIssuerCfg {
     /// Tenant for tokens that carry none (a single-organization deployment).
     #[serde(default)]
     pub default_tenant: String,
+    /// `env:VAR` / `file:/path` reference to the OAuth client secret, for IdPs that
+    /// demand one even from a device or web client (Google). Read by `agent login`,
+    /// and by the serve path when `[auth] redirect_uris` turns on browser sign-in
+    /// (the agent redeems the code). Never a raw value.
+    #[serde(default)]
+    pub client_secret: String,
 }
 
 impl AuthIssuerCfg {
@@ -3223,6 +3341,31 @@ impl AuthIssuerCfg {
 }
 
 impl AuthCfg {
+    /// The login issuer `agent login` and `[grpc.client] bearer = "login"` mean:
+    /// the one named, or the only one configured. `default` is the legacy
+    /// single-issuer form.
+    pub fn login_issuer(&self, wanted: Option<&str>) -> Result<&str, String> {
+        let legacy = (!self.issuer.trim().is_empty()).then_some("default");
+        let names: Vec<&str> = legacy
+            .into_iter()
+            .chain(self.issuers.iter().map(|i| i.name.trim()))
+            .collect();
+        match (wanted, names.as_slice()) {
+            (_, []) => Err("signing in needs a login issuer (`[[auth.issuers]]`)".into()),
+            (None, [only]) => Ok(only),
+            (None, _) => Err(format!(
+                "more than one login issuer is configured ({}); name one \
+                 (`--issuer <name>`, or `bearer = \"login:<name>\"`)",
+                names.join(", ")
+            )),
+            (Some(w), _) => names
+                .iter()
+                .find(|n| **n == w)
+                .copied()
+                .ok_or_else(|| format!("no login issuer is named `{w}`")),
+        }
+    }
+
     /// The largest accepted `leeway_secs`. A larger skew window would let an
     /// expired token keep working for longer than the token's own lifetime.
     pub const MAX_LEEWAY_SECS: u64 = 300;
@@ -3257,6 +3400,23 @@ impl AuthCfg {
         }
         if let Some(mtls) = &self.mtls {
             mtls.validate(self.token.is_some())?;
+        }
+        if !self.redirect_uris.is_empty() {
+            if self.token.is_none() {
+                return Err("`[auth] redirect_uris` needs `[auth.token]` (a browser \
+                            sign-in ends in an agent token)"
+                    .into());
+            }
+            check_redirect_uris(&self.redirect_uris)?;
+        }
+        for issuer in &self.issuers {
+            if agent_core::ApiKeyRef::parse(&issuer.client_secret).is_err() {
+                return Err(format!(
+                    "`[[auth.issuers]]` `{}`: `client_secret` must be `env:VAR` or \
+                     `file:/path` (never the secret itself)",
+                    issuer.name.trim()
+                ));
+            }
         }
         match self.mode.trim() {
             "" | "none" if self.token.is_some() => {
@@ -3348,6 +3508,33 @@ fn check_operator_subjects(entries: &[String]) -> Result<(), String> {
             return Err(format!(
                 "`[auth] operator_subjects` entry `{entry}` is not `email:<address>` or \
                  `sub:<issuer>/<sub>`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `[auth] redirect_uris` at load: a handful of exact, absolute URIs an IdP may
+/// send a browser to. The same rules the serve path applies (`check_fetch_url`
+/// plus no fragment); whitespace is refused rather than trimmed, since the match
+/// is exact.
+fn check_redirect_uris(uris: &[String]) -> Result<(), String> {
+    const MAX: usize = 16;
+    if uris.len() > MAX {
+        return Err(format!(
+            "`[auth] redirect_uris` has more than {MAX} entries"
+        ));
+    }
+    for uri in uris {
+        if uri.trim() != uri || uri.is_empty() {
+            return Err(format!(
+                "`[auth] redirect_uris` entry `{uri}` has surrounding whitespace or is empty"
+            ));
+        }
+        check_fetch_url("redirect_uris", uri).map_err(|e| format!("`[auth]` {e}"))?;
+        if uri.contains('#') {
+            return Err(format!(
+                "`[auth] redirect_uris` entry `{uri}` must not have a fragment"
             ));
         }
     }
@@ -5064,6 +5251,16 @@ mod tests {
     #[case::boundary_session_ttl_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 900, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_000, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_below_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 899, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
+    // --- `[auth] redirect_uris` (security-hardening S13) ---
+    #[case::positive_redirect_uris(AuthCfg { redirect_uris: vec!["https://portal.example/".into(), "http://127.0.0.1:8092/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::negative_redirect_uris_without_token(AuthCfg { redirect_uris: vec!["https://portal.example/".into()], ..oidc(GOOD_JWKS) }, true, Some("redirect_uris` needs `[auth.token]`"))]
+    #[case::negative_redirect_uri_lan_http(AuthCfg { redirect_uris: vec!["http://172.16.50.46:8092/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("must use https"))]
+    #[case::negative_redirect_uri_fragment(AuthCfg { redirect_uris: vec!["https://portal.example/#cb".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("fragment"))]
+    #[case::corner_redirect_uri_padded(AuthCfg { redirect_uris: vec![" https://portal.example/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("whitespace"))]
+    #[case::boundary_redirect_uris_at_cap(AuthCfg { redirect_uris: (0..16).map(|i| format!("https://p{i}.example/")).collect(), token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_redirect_uris_over_cap(AuthCfg { redirect_uris: (0..17).map(|i| format!("https://p{i}.example/")).collect(), token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("more than 16"))]
+    #[case::adversarial_redirect_uri_javascript(AuthCfg { redirect_uris: vec!["javascript:alert(1)".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("redirect_uris"))]
+    #[case::adversarial_redirect_uri_credentials(AuthCfg { redirect_uris: vec!["https://u:p@portal.example/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("credentials"))]
     // --- `[auth] operator_subjects` (security-hardening S8) ---
     #[case::positive_operator_subjects(AuthCfg { operator_subjects: vec!["email:root@example.com".into(), "sub:kc/42".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::negative_operator_subjects_without_token(AuthCfg { operator_subjects: vec!["email:root@example.com".into()], ..oidc(GOOD_JWKS) }, true, Some("needs `[auth.token]`"))]
@@ -5325,5 +5522,100 @@ mod tests {
     fn auth_mtls_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
         let token = "[auth]\nmode = \"oidc\"\nissuer = \"https://i.example\"\naudience = \"a\"\njwks_url = \"https://i.example/k\"\n[auth.token]\nissuer = \"https://agent.example\"\naudience = \"a\"\nsigning_key = \"/k\"\n";
         auth_cfg_checked_at_load(&format!("{token}{toml_str}"), want_err);
+    }
+
+    /// `[grpc.client]` and `[[auth.issuers]] client_secret` are checked at load
+    /// (security-hardening S12).
+    #[rstest::rstest]
+    #[case::positive_no_client_block("", None)]
+    #[case::positive_login_single_issuer("[grpc.client]\nbearer = \"login\"\n", None)]
+    #[case::positive_login_named("[grpc.client]\nbearer = \"login:google\"\n", None)]
+    #[case::positive_env_token("[grpc.client]\nbearer = \"env:AGENT_TOKEN\"\n", None)]
+    #[case::positive_file_token("[grpc.client]\nbearer = \"file:/run/agent/token\"\n", None)]
+    #[case::positive_https_endpoint(
+        "[grpc.client]\nauth_endpoint = \"https://agent.example:50090\"\n",
+        None
+    )]
+    #[case::positive_loopback_endpoint(
+        "[grpc.client]\nauth_endpoint = \"127.0.0.1:50090\"\n",
+        None
+    )]
+    #[case::positive_uds_endpoint(
+        "[grpc.client]\nauth_endpoint = \"unix:/run/agent/auth.sock\"\n",
+        None
+    )]
+    #[case::positive_secret_ref("[[auth.issuers]]\nname = \"g2\"\nprofile = \"google\"\naudience = \"c\"\nallowed_domains = [\"example.com\"]\nclient_secret = \"file:/run/secrets/g\"\n", None)]
+    #[case::negative_unknown_login_issuer(
+        "[grpc.client]\nbearer = \"login:okta\"\n",
+        Some("no login issuer is named `okta`")
+    )]
+    #[case::negative_plaintext_remote_endpoint(
+        "[grpc.client]\nauth_endpoint = \"http://agent.example:50090\"\n",
+        Some("must be `https://…`")
+    )]
+    #[case::negative_hostname_localhost_is_not_loopback(
+        "[grpc.client]\nauth_endpoint = \"localhost:50090\"\n",
+        Some("must be `https://…`")
+    )]
+    #[case::adversarial_raw_token_refused(
+        "[grpc.client]\nbearer = \"eyJhbGciOi.x.y\"\n",
+        Some("never a raw token")
+    )]
+    #[case::adversarial_traversal_issuer(
+        "[grpc.client]\nbearer = \"login:../../etc\"\n",
+        Some("not a plain identifier")
+    )]
+    #[case::adversarial_misspelt_key_refused(
+        "[grpc.client]\nbaerer = \"login\"\n",
+        Some("unknown field `baerer`")
+    )]
+    #[case::adversarial_inline_client_secret("[[auth.issuers]]\nname = \"g2\"\nprofile = \"google\"\naudience = \"c\"\nallowed_domains = [\"example.com\"]\nclient_secret = \"GOCSPX-abc\"\n", Some("never the secret itself"))]
+    fn grpc_client_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
+        let google = "[auth]\n[[auth.issuers]]\nname = \"google\"\nprofile = \"google\"\naudience = \"c\"\nallowed_domains = [\"example.com\"]\n";
+        // TOML: `[grpc.client]` after `[[auth.issuers]]` is fine; a second
+        // `[[auth.issuers]]` appends.
+        auth_cfg_checked_at_load(&format!("{google}{toml_str}"), want_err);
+    }
+
+    #[rstest::rstest]
+    #[case::negative_login_with_two_issuers(
+        "[grpc.client]\nbearer = \"login\"\n",
+        Some("more than one login issuer")
+    )]
+    #[case::positive_named_with_two_issuers("[grpc.client]\nbearer = \"login:kc\"\n", None)]
+    #[case::corner_legacy_issuer_is_default("[grpc.client]\nbearer = \"login:default\"\n", None)]
+    fn grpc_client_login_needs_one_issuer(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
+        let two = "[auth]\nissuer = \"https://legacy.example\"\naudience = \"a\"\njwks_url = \"https://legacy.example/k\"\n[[auth.issuers]]\nname = \"kc\"\nissuer = \"https://kc.example\"\naudience = \"a\"\n";
+        auth_cfg_checked_at_load(&format!("{two}{toml_str}"), want_err);
+    }
+
+    #[test]
+    fn negative_login_without_any_issuer() {
+        auth_cfg_checked_at_load(
+            "[grpc.client]\nbearer = \"login\"\n",
+            Some("needs a login issuer"),
+        );
+    }
+
+    #[test]
+    fn negative_bearer_beside_service_token() {
+        auth_cfg_checked_at_load(
+            "[auth]\nmode = \"oidc\"\nissuer = \"https://i.example\"\naudience = \"a\"\njwks_url = \"https://i.example/k\"\n[auth.token]\nissuer = \"https://agent.example\"\naudience = \"a\"\nsigning_key = \"/k\"\n[auth.mtls]\ntoken_endpoint = \"https://auth.internal:50090\"\n[grpc.tls.client]\ncert = \"c\"\nkey = \"k\"\n[grpc.client]\nbearer = \"env:T\"\n",
+            Some("set one"),
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::positive_https("https://agent.example:1", true)]
+    #[case::positive_uds("unix:/run/a.sock", true)]
+    #[case::positive_loopback_v4("127.0.0.1:1", true)]
+    #[case::positive_loopback_v6("http://[::1]:1", true)]
+    #[case::boundary_other_loopback("127.9.9.9:1", true)]
+    #[case::negative_lan_ip("10.0.0.5:1", false)]
+    #[case::negative_all_interfaces("0.0.0.0:1", false)]
+    #[case::negative_hostname("agent.example:1", false)]
+    #[case::corner_no_port("127.0.0.1", false)]
+    fn private_or_tls_endpoint_cases(#[case] endpoint: &str, #[case] want: bool) {
+        assert_eq!(private_or_tls_endpoint(endpoint), want);
     }
 }

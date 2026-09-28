@@ -46,7 +46,7 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
     use ResourceType::*;
     Some(match (service, method) {
         // `Refresh` carries its own credential (the refresh handle).
-        ("AuthService", "Exchange" | "Jwks" | "Refresh") => Public,
+        ("AuthService", "Exchange" | "Jwks" | "Refresh" | "Issuers" | "Begin") => Public,
         ("AuthService", "WhoAmI" | "Logout" | "ListMySessions" | "RevokeMySession") => {
             Authenticated
         }
@@ -252,6 +252,8 @@ mod tests {
         Some(Gate::Authenticated)
     )]
     #[case::corner_exchange_is_public("/agent.v1.AuthService/Exchange", Some(Gate::Public))]
+    #[case::corner_begin_is_public("/agent.v1.AuthService/Begin", Some(Gate::Public))]
+    #[case::corner_issuers_is_public("/agent.v1.AuthService/Issuers", Some(Gate::Public))]
     // boundary: Route is what the agent calls; the rest of the registry is admin.
     #[case::boundary_route_uses_agent(
         "/agent.v1.ProviderRegistryService/Route",
