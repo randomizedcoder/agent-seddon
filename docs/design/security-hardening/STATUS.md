@@ -20,7 +20,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
 | S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
-| S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | 🟡 | — |
+| S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
 | S13b | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
@@ -603,7 +603,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - Config load tables; CLI parse table.
   - Deferred: the loopback-redirect code flow (see 01's as-built note), and a keyring backend
     (parity 50).
-- **2026-09-27 — S13a.** Browser sign-in, server side. S13 is split: the portal (S13b) needs
+- **2026-09-27 — S13a (#528).** Browser sign-in, server side. S13 is split: the portal (S13b) needs
   RPCs that did not exist.
   - Design change: `Begin` / `Exchange{code}` are new `AuthService` RPCs and fields (additive,
     no `buf` baseline move). `06-portal-and-edge.md` assumed them.
