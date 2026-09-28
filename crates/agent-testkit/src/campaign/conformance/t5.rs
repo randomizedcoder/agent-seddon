@@ -630,6 +630,121 @@ pub async fn corner_attempt_exhausted(h: &Harness) {
     assert_eq!(r.attempts, 0);
 }
 
+/// A prompt input carried an injection marker: `Injection { field }` blocks the node
+/// with `detail.reason = injection` and `detail.field`, closes the attempt as `error`
+/// naming the field, counts **no** attempt, and rolls the parent up to `blocked`.
+pub async fn positive_plan_close_injection(h: &Harness) {
+    let s = h.a();
+    let root = campaign(&*s, "inj").await;
+    let c = split(&*s, root.task_id, 1).await.children.remove(0);
+    let (_, expected_version) = started(&*s, c.task_id).await;
+    let t = s
+        .plan_close(PlanClose {
+            task: c.task_id,
+            expected_version,
+            attempt: attempt(70),
+            outcome: PlanCloseOutcome::Injection {
+                field: "ancestor:1:goal".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(t.state, TaskState::Blocked);
+    assert_eq!(
+        t.attempts, 0,
+        "an input injection is not the model's attempt"
+    );
+    assert_eq!(t.version, expected_version + 1);
+    let ev = events(&*s, c.task_id).await;
+    let last = ev.last().unwrap();
+    assert_eq!(last.from_state, Some(TaskState::Decomposing));
+    assert_eq!(last.to_state, TaskState::Blocked);
+    assert_eq!(
+        last.detail["reason"],
+        json!(BlockReason::Injection.as_str())
+    );
+    assert_eq!(last.detail["field"], json!("ancestor:1:goal"));
+    let attempts = s.attempts(c.task_id).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].kind, AttemptKind::Decompose);
+    assert_eq!(attempts[0].outcome, AttemptOutcome::Error);
+    assert_eq!(
+        attempts[0].error.as_deref(),
+        Some("injection: ancestor:1:goal")
+    );
+    assert_eq!(last.actor, format!("model:{}", attempts[0].attempt_id));
+    // A blocked child rolls up exactly like a `reject`.
+    assert_eq!(state(&*s, root.task_id).await, TaskState::Blocked);
+    assert_eq!(events_by(&*s, root.task_id, "rollup").await.len(), 1);
+    // Not plannable until a human edits the text and retries.
+    let err = s.plan_start(c.task_id).await.unwrap_err();
+    assert!(matches!(err, CampaignError::Conflict(_)), "{err}");
+}
+
+/// `mark_leaf` with `confidence < 0.4` is accepted and the finishing event carries
+/// `detail.low_confidence = true`; at or above the threshold the key is absent.
+pub async fn corner_mark_leaf_low_confidence(h: &Harness) {
+    let s = h.a();
+    let root = campaign(&*s, "lowc").await;
+    let kids = split(&*s, root.task_id, 2).await.children;
+    for (i, (confidence, low)) in [(0.2f32, true), (0.9f32, false)].into_iter().enumerate() {
+        let c = &kids[i];
+        let (_, expected_version) = started(&*s, c.task_id).await;
+        let t = s
+            .mark_leaf(MarkLeaf {
+                task: c.task_id,
+                expected_version,
+                attempt: attempt(71 + i as u64),
+                acceptance: vec!["a".into()],
+                touches: vec!["src/a.rs".into()],
+                est_size: EstSize::S,
+                reason: "small".into(),
+                confidence,
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.kind, TaskKind::Leaf);
+        let ev = events(&*s, c.task_id).await;
+        let last = ev.last().unwrap();
+        assert_eq!(last.detail["execute"], json!(true));
+        assert_eq!(
+            last.detail.get("low_confidence").is_some(),
+            low,
+            "{}",
+            last.detail
+        );
+        if low {
+            assert_eq!(last.detail["low_confidence"], json!(true));
+        }
+    }
+}
+
+/// The same marker on `decompose` (a low-confidence `split`).
+pub async fn corner_decompose_low_confidence(h: &Harness) {
+    let s = h.a();
+    for (i, (confidence, low)) in [(0.39f32, true), (0.4f32, false)].into_iter().enumerate() {
+        let root = campaign(&*s, "lowsplit").await;
+        let (_, expected_version) = started(&*s, root.task_id).await;
+        let d = s
+            .decompose(Decomposition {
+                confidence,
+                ..decomposition(root.task_id, expected_version, 73 + i as u64, children(2))
+            })
+            .await
+            .unwrap();
+        assert_eq!(d.parent.state, TaskState::Decomposed);
+        let ev = events(&*s, root.task_id).await;
+        let last = ev.last().unwrap();
+        assert_eq!(last.detail["children"], json!(2));
+        assert_eq!(
+            last.detail.get("low_confidence").is_some(),
+            low,
+            "{}",
+            last.detail
+        );
+    }
+}
+
 /// A child carries no `path` / `ordinal` / `depth`: the request has no such fields
 /// (the exhaustive literal would not compile) and the store computes them.
 pub async fn adversarial_child_path_supplied(h: &Harness) {

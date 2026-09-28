@@ -150,9 +150,67 @@ pub const MAX_PROMPT_HASH: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 4096;
 pub const MAX_CHILDREN: usize = 8;
 pub const MAX_DEPTH: u8 = 6;
+/// A planner `confidence` under this is recorded as `detail.low_confidence = true`
+/// on the finishing event (`03-decomposition.md` step 4); v1 has no automatic gate.
+pub const LOW_CONFIDENCE: f32 = 0.4;
 
 /// The header the `answer` protocol appends to `goal` (`02-transactions.md` (e)).
 pub const CLARIFICATION_HEADER: &str = "\n\n## Clarification\n\n";
+
+/// The `detail` of a `mark_leaf` / `decompose` event: `base` (an object) plus
+/// `low_confidence: true` when `confidence` is under [`LOW_CONFIDENCE`] or not a finite
+/// number (a hostile `NaN` counts as low, never as high).
+pub fn plan_detail(mut base: serde_json::Value, confidence: f32) -> serde_json::Value {
+    if !confidence.is_finite() || confidence < LOW_CONFIDENCE {
+        if let Some(obj) = base.as_object_mut() {
+            obj.insert("low_confidence".to_string(), serde_json::Value::Bool(true));
+        }
+    }
+    base
+}
+
+/// `children[i].depends_on` are batch ordinals: each in `1..=n`, not self, acyclic
+/// (Kahn over the batch). Shared by the planner's post-validation and both stores.
+pub fn check_deps(children: &[ChildSpec]) -> CampaignResult<()> {
+    let n = children.len();
+    for (i, c) in children.iter().enumerate() {
+        let me = i + 1;
+        for d in &c.depends_on {
+            let d = usize::from(*d);
+            if d < 1 || d > n {
+                return Err(CampaignError::Invalid(format!(
+                    "children[{i}].depends_on: ordinal {d} is not in this batch"
+                )));
+            }
+            if d == me {
+                return Err(CampaignError::Invalid(format!(
+                    "children[{i}].depends_on: depends on itself"
+                )));
+            }
+        }
+    }
+    // Kahn: every node must drain.
+    let mut indeg: Vec<usize> = children.iter().map(|c| c.depends_on.len()).collect();
+    let mut ready: Vec<usize> = (0..n).filter(|i| indeg[*i] == 0).collect();
+    let mut drained = 0;
+    while let Some(i) = ready.pop() {
+        drained += 1;
+        for (j, c) in children.iter().enumerate() {
+            if c.depends_on.contains(&(i as u8 + 1)) {
+                indeg[j] -= 1;
+                if indeg[j] == 0 {
+                    ready.push(j);
+                }
+            }
+        }
+    }
+    if drained != n {
+        return Err(CampaignError::Invalid(
+            "children: depends_on has a cycle".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// `1..=max` chars → `Ok`; empty → `Invalid`; over → `TooLong`. Both name `field`.
 pub fn check_len(field: &str, s: &str, max: usize) -> CampaignResult<()> {
@@ -253,7 +311,8 @@ impl std::fmt::Display for Owner {
 }
 
 /// `task_attempts.idem_key`: 64 lowercase hex chars. Computed by the planner (a
-/// sha256 over `(task_id, version, prompt_hash)`, CP-03) and only **validated** here.
+/// sha256 over `tenant \0 task_id \0 expected_version \0 prompt_hash`,
+/// `agent_campaign::planner`) and only **validated** here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct IdemKey(String);
@@ -668,6 +727,13 @@ pub enum PlanCloseOutcome {
     Reject { reason: String },
     /// `decomposing → ready` with `attempts + 1`, or `blocked` at the cap.
     Error { error: String },
+    /// A prompt **input** (the node's own text, an ancestor's goal, a sibling's
+    /// title) carried an injection marker, so no provider call was made:
+    /// `decomposing → blocked`, `detail.reason = injection`, `detail.field`; the
+    /// attempt closes `error` naming the field; `attempts` is **not** counted (the
+    /// text, not the model, is at fault — `retry` re-queues the node once a human
+    /// has looked at the named field).
+    Injection { field: String },
 }
 
 /// `plan_start`'s answer.
@@ -1148,6 +1214,55 @@ mod tests {
                 let e = got.unwrap_err().to_string();
                 assert!(e.contains(field), "{e}");
             }
+        }
+    }
+
+    fn dep(deps: &[u8]) -> ChildSpec {
+        ChildSpec {
+            depends_on: deps.to_vec(),
+            ..child()
+        }
+    }
+
+    #[rstest]
+    #[case::positive_chain(vec![dep(&[]), dep(&[1]), dep(&[2])], Ok(()))]
+    #[case::positive_fan_in(vec![dep(&[]), dep(&[]), dep(&[1, 2])], Ok(()))]
+    #[case::corner_empty_batch(vec![], Ok(()))]
+    #[case::corner_no_deps(vec![dep(&[]); 8], Ok(()))]
+    #[case::boundary_ordinal_n(vec![dep(&[2]), dep(&[])], Ok(()))]
+    #[case::negative_ordinal_zero(vec![dep(&[0])], Err("not in this batch"))]
+    #[case::negative_ordinal_over(vec![dep(&[2])], Err("not in this batch"))]
+    #[case::negative_self(vec![dep(&[1])], Err("depends on itself"))]
+    #[case::negative_two_cycle(vec![dep(&[2]), dep(&[1])], Err("cycle"))]
+    #[case::negative_chain_cycle(vec![dep(&[3]), dep(&[1]), dep(&[2])], Err("cycle"))]
+    #[case::adversarial_ordinal_255(vec![dep(&[255])], Err("not in this batch"))]
+    fn check_deps_rows(#[case] children: Vec<ChildSpec>, #[case] want: Result<(), &str>) {
+        let got = check_deps(&children);
+        match want {
+            Ok(()) => got.unwrap(),
+            Err(msg) => {
+                let e = got.unwrap_err();
+                assert!(matches!(e, CampaignError::Invalid(_)), "{e}");
+                assert!(e.to_string().contains(msg), "{e}");
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::positive_high(0.9, false)]
+    #[case::boundary_at_threshold(0.4, false)]
+    #[case::boundary_just_under(0.39, true)]
+    #[case::corner_zero(0.0, true)]
+    #[case::corner_one(1.0, false)]
+    #[case::adversarial_nan(f32::NAN, true)]
+    #[case::adversarial_neg_inf(f32::NEG_INFINITY, true)]
+    #[case::adversarial_inf(f32::INFINITY, true)]
+    fn plan_detail_rows(#[case] confidence: f32, #[case] low: bool) {
+        let d = plan_detail(serde_json::json!({"execute": true}), confidence);
+        assert_eq!(d["execute"], serde_json::json!(true));
+        assert_eq!(d.get("low_confidence").is_some(), low, "{d}");
+        if low {
+            assert_eq!(d["low_confidence"], serde_json::json!(true));
         }
     }
 

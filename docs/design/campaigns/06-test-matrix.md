@@ -15,6 +15,15 @@ its owning increment and harness:
 - **pg**: live Postgres, `#[ignore = "requires a live Postgres (AGENT_CAMPAIGN_TEST_DSN)"]`,
   `TRUNCATE` between cases, run by `nix run .#integration` (`nix/pg-integration.nix`).
 - **fake**: fake provider (`agent-testkit`) returning scripted JSON; fake forge; tempdir repo.
+  T9 / T10 (CP-03) run in `crates/agent-campaign/src/planner/tests/{t9,t10}.rs`, one
+  `#[tokio::test]` per row (an rstest fn with `#[case::<row>]` where rows share a shape), over
+  `MemCampaigns` under tenant `ta`, a `ScriptedProvider` wrapped in a request-recording
+  `Recorder`, and a tempdir worktree (`src/lib.rs`, `src/a.rs` … `src/m.rs`,
+  `docs/architecture.md`, `CLAUDE.md`). Rows that need state the real tiers refuse to write (an
+  injected sibling title; an attempt under the key about to be computed) go through `Overlay`,
+  a store double that delegates every seam method and adds the planted row on the way out. The
+  pure half of T9 (schema and post-validation) also runs as rstest rows inside
+  `planner/schema.rs` and `planner/validate.rs`.
 
 The CP-nn PR that owns a table names it in its description; a reviewer checks the table against
 the cases, not the other way round.
@@ -157,6 +166,9 @@ the cases, not the other way round.
 | `corner_idem_replay` | same `idem_key` twice | second call `AlreadyApplied`; state unchanged; one attempt row |
 | `corner_idem_same_key_other_tenant` | same `idem_key` under tenant B | accepted (UNIQUE is per tenant) |
 | `corner_attempt_exhausted` | third validation failure, `max_plan_attempts 3` | node `blocked`, `detail.reason = attempts_exhausted` |
+| `corner_mark_leaf_low_confidence` | `execute` with `confidence 0.2` / `0.9` | accepted; event `detail.low_confidence = true` only under 0.4 (CP-03) |
+| `corner_decompose_low_confidence` | `split` with `confidence 0.39` / `0.4` | same marker on the `decomposed` event (CP-03) |
+| `positive_plan_close_injection` | `plan_close` with `Injection { field }` (a prompt input hit `scan_for_injection`) | node `blocked`, `detail.reason = injection`, `detail.field`; attempt `error` = `injection: <field>`; `attempts` unchanged; parent rolls up (CP-03) |
 | `adversarial_child_path_supplied` | caller supplies `path` / `ordinal` / `depth` for a child | ignored; computed under the lock |
 | `adversarial_child_policy` | child carries `policy` | rejected (CHECK `policy IS NULL OR depth = 0`) |
 | `adversarial_parent_other_tenant` | `parent_id` from tenant B | `NotFound` |
@@ -289,12 +301,20 @@ the cases, not the other way round.
 | `adversarial_schema_escape` | extra top-level key `tool_calls` | schema failure (`additionalProperties false`) |
 | `adversarial_nan_confidence` | `confidence NaN` | schema failure; never reaches a metric |
 
+The † rows wait for RK-08 (CP-07); CP-03 has no stubs for them. CP-03 added rows beyond the table:
+`corner_confidence_low_split` (`low_confidence` on `decompose` too), `corner_brief_unavailable_still_plans`,
+`corner_tick_plans_the_queue`, `corner_plan_leaf_is_skipped`, the upper boundaries
+`boundary_acceptance_7` / `boundary_touches_13` / `boundary_title_121` / `boundary_goal_2001`,
+`adversarial_touches_glob` / `adversarial_touches_backslash` / `adversarial_touches_symlink_escape`,
+`adversarial_confidence_string`, `adversarial_model_label_capped`, and `corner_unchanged_input_no_call`
+(listed under T10, where its overlay lives).
+
 ## T10 Prompt assembly (CP-03 fake)
 
 | case | input / description | expected |
 |---|---|---|
 | `positive_ancestors_included` | node at depth 3 | root → parent titles and goals in order |
-| `positive_siblings_bounded` | 8 live siblings | ≤ 8 lines; title and state only |
+| `positive_siblings_bounded` | a parent with 8 live children, one asked | 7 lines (the node itself is not a sibling; 8 is the cap), title and state only, in ordinal order |
 | `positive_brief_present` | RK-12 brief available | inside a labelled fence; ≤ 6 KiB |
 | `positive_rules_fixed` | any node | the rules block is byte-identical across nodes |
 | `positive_enum_narrowed_root` | root | schema enum `split \| needs_info \| reject` |
@@ -304,8 +324,9 @@ the cases, not the other way round.
 | `boundary_prompt_cap` | maximal fields everywhere | ≤ 24 KiB; brief truncated first; `[truncated]` marker present; every fence closed |
 | `boundary_prompt_hash_stable` | same inputs twice | same `prompt_hash` (idempotency depends on it) |
 | `adversarial_goal_screened` | an ancestor goal flagged by `scan_for_injection` | no provider call; node `blocked`; `detail.field` names the ancestor |
-| `adversarial_fence_breakout` | goal contains a closing fence marker | random-tag fence; the marker does not close the block |
-| `adversarial_sibling_title_injection` | sibling title flagged | node `blocked`; no call |
+| `adversarial_fence_breakout` | goal contains the canonical closing fence marker | random-tag fence; the marker appears once, verbatim, inside the block |
+| `adversarial_sibling_title_injection` | a sibling whose title is flagged (planted through `Overlay`: the store screens titles on `decompose`) | node `blocked`; `detail.field = sibling:<id>:title`; no call |
+| `corner_unchanged_input_no_call` | the node's attempts already hold the `idem_key` about to be computed (planted through `Overlay` from a first tick's `prompt_hash`) | no provider call; `Skipped(AlreadyApplied)`; the node is released to `ready` under a distinct replay key |
 
 ## T11 Driver tick (CP-05, mem + in-process exec)
 

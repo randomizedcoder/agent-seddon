@@ -226,8 +226,16 @@ reason in `detail`. A validation failure leaves the node `ready` with `attempts 
 and closes the attempt as `error`; at `attempts >= policy.max_plan_attempts` the node goes to
 `blocked` instead.
 
-A node the **planner** moves to `blocked` — `reject`, attempts exhausted, or the `plan_start`
-caps in [`03-decomposition.md`](03-decomposition.md) step 1 — is a failure state for its parent
+A prompt **input** that fails `scan_for_injection` (the node's own text, an ancestor's goal, a
+sibling's title) closes through `plan_close` with `Injection { field }`: `decomposing → blocked`,
+`detail.reason = injection`, `detail.field`, attempt `error` naming the field, **no** attempt
+counted (the text is at fault, not the model; `retry` re-queues the node once a human has
+looked at the named field). A
+`mark_leaf` / `decompose` with `confidence < 0.4` (or a non-finite value) adds
+`detail.low_confidence = true` to its finishing event.
+
+A node the **planner** moves to `blocked` — `reject`, an input injection, attempts exhausted, or
+the `plan_start` caps in [`03-decomposition.md`](03-decomposition.md) step 1 — is a failure state for its parent
 exactly like a failed leaf: the transaction locks the ancestors first (lock order) and runs the
 rollup pass of (d) step 5 after the CAS. Without it the rule's "any `failed` or `blocked` child"
 row is unreachable from (b) (T8 `positive_retry_blocked_task`).
@@ -390,7 +398,7 @@ exist); the node goes `decomposed | blocked → decomposing` with `version + 1` 
 | Error | Raised when | Caller's response |
 |---|---|---|
 | `NotFound` | no row for `(tenant, task_id)`; includes every cross-tenant access | report; never echo the foreign id's data |
-| `Conflict` | version or state CAS failed | re-read and retry at most once (planner), or report (user) |
+| `Conflict` | version or state CAS failed | the planner writes nothing further and lets the next tick re-read ([`03-decomposition.md`](03-decomposition.md) step 5); the user re-reads and reports |
 | `AlreadyApplied` | `idem_key` already present | success, no-op |
 | `LeaseLost` | owner check failed on heartbeat, complete, fail | worker aborts, no repo writes |
 | `Denied` | `allowed()` returned false or the actor class is wrong | report |

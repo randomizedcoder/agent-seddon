@@ -7,12 +7,12 @@
 //! transaction. Time is epoch milliseconds from an injectable clock.
 
 use agent_core::campaign::{
-    allowed, check_len, check_list, check_max, clamp_lease, rollup, screen, truncate_chars, Actor,
-    AttemptId, AttemptKind, AttemptOutcome, BlockReason, CampaignError, CampaignResult,
-    CampaignStore, ChildSpec, ClaimRequest, Claimed, Complete, Decomposed, Decomposition, EventId,
-    Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner, PlanAttempt, PlanClose,
-    PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome, Task, TaskAttempt, TaskEvent,
-    TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER, MAX_ACCEPTANCE,
+    allowed, check_deps, check_len, check_list, check_max, clamp_lease, plan_detail, rollup,
+    screen, truncate_chars, Actor, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
+    CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete, Decomposed,
+    Decomposition, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner, PlanAttempt,
+    PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome, Task, TaskAttempt,
+    TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER, MAX_ACCEPTANCE,
     MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR, MAX_GOAL, MAX_QUESTION, MAX_REASON,
     MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
 };
@@ -423,48 +423,6 @@ impl Tx<'_> {
     }
 }
 
-/// `children[i].depends_on` are batch ordinals: each in `1..=n`, not self, acyclic.
-fn check_deps(children: &[ChildSpec]) -> CampaignResult<()> {
-    let n = children.len();
-    for (i, c) in children.iter().enumerate() {
-        let me = i + 1;
-        for d in &c.depends_on {
-            let d = usize::from(*d);
-            if d < 1 || d > n {
-                return Err(CampaignError::Invalid(format!(
-                    "children[{i}].depends_on: ordinal {d} is not in this batch"
-                )));
-            }
-            if d == me {
-                return Err(CampaignError::Invalid(format!(
-                    "children[{i}].depends_on: depends on itself"
-                )));
-            }
-        }
-    }
-    // Kahn: every node must drain.
-    let mut indeg: Vec<usize> = children.iter().map(|c| c.depends_on.len()).collect();
-    let mut ready: Vec<usize> = (0..n).filter(|i| indeg[*i] == 0).collect();
-    let mut drained = 0;
-    while let Some(i) = ready.pop() {
-        drained += 1;
-        for (j, c) in children.iter().enumerate() {
-            if c.depends_on.contains(&(i as u8 + 1)) {
-                indeg[j] -= 1;
-                if indeg[j] == 0 {
-                    ready.push(j);
-                }
-            }
-        }
-    }
-    if drained != n {
-        return Err(CampaignError::Invalid(
-            "children: depends_on has a cycle".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn session_ok(s: &Option<String>) -> CampaignResult<()> {
     match s {
         Some(v) => check_len("session_id", v, MAX_SESSION_ID),
@@ -694,7 +652,10 @@ impl CampaignStore for MemCampaigns {
                 parent.task_id,
                 TaskState::Decomposed,
                 &by,
-                json!({"children": n, "reason": req.reason, "confidence": req.confidence}),
+                plan_detail(
+                    json!({"children": n, "reason": req.reason, "confidence": req.confidence}),
+                    req.confidence,
+                ),
             )?;
             let children = ids
                 .iter()
@@ -757,7 +718,10 @@ impl CampaignStore for MemCampaigns {
                 t.task_id,
                 to,
                 &by,
-                json!({"execute": true, "reason": req.reason, "confidence": req.confidence}),
+                plan_detail(
+                    json!({"execute": true, "reason": req.reason, "confidence": req.confidence}),
+                    req.confidence,
+                ),
             )?;
             let task = tx.task_mut(t.task_id)?;
             task.kind = TaskKind::Leaf;
@@ -806,6 +770,25 @@ impl CampaignStore for MemCampaigns {
                     )?;
                     // A `blocked` child is a failure state: the parent is recomputed
                     // (`02-transactions.md` "Rollup rule").
+                    tx.rollup_from(t.parent_id)?;
+                    Ok(task)
+                }
+                PlanCloseOutcome::Injection { field } => {
+                    check_len("field", field, MAX_ERROR)?;
+                    let id = tx.plan_attempt(
+                        t.task_id,
+                        &req.attempt,
+                        AttemptOutcome::Error,
+                        Some(format!("injection: {field}")),
+                    )?;
+                    // Blocked like a `reject`, without counting an attempt: the input,
+                    // not the model, is at fault (`03-decomposition.md` step 2).
+                    let task = tx.transition(
+                        t.task_id,
+                        TaskState::Blocked,
+                        &Actor::Attempt(id),
+                        json!({"reason": BlockReason::Injection.as_str(), "field": field}),
+                    )?;
                     tx.rollup_from(t.parent_id)?;
                     Ok(task)
                 }

@@ -179,6 +179,10 @@ libc = "0.2"
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"
 uuid = { version = "1", features = ["v4"] }
+# campaigns: the planner's `prompt_hash` / `idem_key` (docs/design/campaigns README D4).
+# Already in the lock file transitively via sqlx; pinned here so the planner
+# owns the hash it writes.
+sha2 = "0.10"
 
 # metrics — text exposition only (no protobuf/push features)
 prometheus = { version = "0.13", default-features = false }

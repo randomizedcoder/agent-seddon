@@ -94,10 +94,11 @@ by humans only. Defaults: `approve_levels = [1]`, `require_pr_approval = true`, 
 
 **D6 — The planner asks one question with one schema.** `{ decision: execute | split |
 needs_info | reject, reason, confidence, question?, children[≤ 8] }` through the existing
-schema-validated call with bounded repairs (`complete_structured`,
-`crates/agent-runtime/src/structured.rs:36`; `Agent::complete_structured`,
-`crates/agent-runtime/src/agent.rs:1163`; the Draft-07 `OutputSchema` seam,
-`crates/agent-core/src/lib.rs:1121`). Post-validation is fail-closed in Rust, and the counts are
+schema-validated call with bounded repairs (as built: `ask_structured`,
+`crates/agent-campaign/src/planner/ask.rs`, the same loop shape as `Agent::complete_structured`,
+`crates/agent-runtime/src/agent.rs:1184`, kept separate for the dependency direction and the
+token sum; the Draft-07 `OutputSchema` seam, `crates/agent-core/src/lib.rs:1135`).
+Post-validation is fail-closed in Rust, and the counts are
 re-checked **inside** the decompose transaction under the parent lock. Details in
 [`03-decomposition.md`](03-decomposition.md).
 

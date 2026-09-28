@@ -7,7 +7,7 @@ license.workspace = true
 
 # Campaigns (docs/design/campaigns): the pure rules and the `CampaignStore` seam live
 # in `agent_core::campaign`; this crate holds what only a consumer needs (display
-# letters) and the Postgres tier behind `campaign-postgres`.
+# letters, the planner) and the Postgres tier behind `campaign-postgres`.
 
 [features]
 # Postgres tier — `PgCampaigns`, every protocol (a)–(g) as one transaction over a
@@ -18,13 +18,23 @@ license.workspace = true
 # Deliberately NO `sqlx/migrate` / `sqlx/macros` — they pull in `sqlx-mysql` →
 # `rsa` (RUSTSEC-2023-0071, rejected by cargo-audit); the in-crate versioned runner
 # over the embedded `migrations/` set stands in (see `postgres.rs`).
-campaign-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]
+campaign-postgres = ["dep:sqlx"]
 
 [dependencies]
 agent-core.workspace = true
-async-trait = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# The planner (`planner/`) is always built: it asks a `LlmProvider` for one
+# structured decision per node and validates it fail-closed against the seam's
+# caps. `agent-validate` is the Draft-07 `OutputSchema` behind `Planner::draft07`
+# (the workspace entry turns its default feature off, so it is named here);
+# `sha2` mints `prompt_hash` / `idem_key`; `uuid` mints the random fence tags
+# model text cannot close.
+agent-validate = { workspace = true, features = ["validate-draft07"] }
+async-trait.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, optional = true }
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 agent-testkit.workspace = true

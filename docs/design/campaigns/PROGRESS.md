@@ -1,4 +1,4 @@
-# Campaigns — implementation progress (lane A: CP-01 → CP-02)
+# Campaigns — implementation progress (lane A: CP-01 → CP-02; lane B: CP-03 → CP-04)
 
 Crash-resilient running journal, finer-grained than [`STATUS.md`](STATUS.md) (one row per
 increment). Updated after every step; the decisions log is append-only. Design contract:
@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** lane A is done — CP-01 (#501, `71d4abf`) and CP-02 (#508, `630098a`) are on `main`; `STATUS.md` carries both as-built entries. Next increment is CP-03 (planner over the seam, T9/T10) or lane B per [`05-increments.md`](05-increments.md); it starts with a new plan of record and its own branch off `main`.
+- **Next:** open the CP-03 PR from `campaigns/cp-03` (off `main` at `ddc00e2`; all seven steps committed, gate green at `609e9aa`), merge with a merge commit, then flip STATUS ✅ + as-built entry and start CP-04 on `campaigns/cp-04` off `main`. Lane A is done — CP-01 (#501, `71d4abf`) and CP-02 (#508, `630098a`) are on `main`. Lane B scope = CP-03 (planner, T9/T10) then CP-04 (`agent campaign` CLI, Postgres store only, T16), two PRs each off `main`, never stacked.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
@@ -55,6 +55,30 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | `nix/pg-integration.nix` + config-store `TRUNCATE … CASCADE` | ✅ | `AGENT_CAMPAIGN_TEST_DSN` exported; campaign suite block last; `contract_exit` text += campaign; config-store reset is `TRUNCATE cards, tenants CASCADE` |
 | gate: pg suite local, `nix run .#pg-integration` ×2, `nix flake check` | ✅ | pg suite local green (157); `nix run .#pg-integration` green twice (second pass over the persisted volume, config-store CASCADE proven in place); `nix flake check` green on the committed ref `74c5bcd` — see Gate status |
 
+## CP-03 — planner: prompt, schema, structured ask, post-validation, T9/T10 — 🟡 `campaigns/cp-03`
+
+| Item | State | Notes |
+|---|---|---|
+| 1. seam: `PlanCloseOutcome::Injection { field }`, `LOW_CONFIDENCE` / `plan_detail`, shared `check_deps`; mem + pg arms; t5 rows | ✅ | `check_deps` (Kahn) moved from the two private store copies to `agent_core::campaign` (11 unit rows); `plan_detail` adds `low_confidence: true` under 0.4 or non-finite on **both** `mark_leaf` and `decompose` (8 unit rows); `Injection` arm: attempt `error` = `injection: <field>`, `blocked` with `detail.reason = injection` + `detail.field`, `attempts` untouched, rollup; t5 rows `positive_plan_close_injection`, `corner_mark_leaf_low_confidence`, `corner_decompose_low_confidence` run on mem and pg via the macro list; 02 (b) tail + 06 T5 amended |
+| 2. Cargo (`sha2` workspace dep, manifest, `pub mod planner`) + `hash.rs` + `schema.rs` | ✅ | `sha256_joined` (NUL-separated) + `idem_key`; `Decision`, `allowed_decisions(depth, cap)` (root never executes, `cap − 1` and deeper never split, cap 1 keeps the root rule), `decision_schema(allowed)` over the seam caps (child goal 2000, reason 600), `MAX_RESPONSE_BYTES = 1 MiB`; T9's pure schema-failure rows (25) run through `Draft07Validator` here; `agent-validate` (`validate-draft07`), `async-trait`, `serde_json`, `sha2`, `uuid` unconditional deps; `campaign-postgres = ["dep:sqlx"]` |
+| 3. `prompt.rs` (random fence, 24 KiB cap, canonical hash render), `brief.rs`, `touches.rs` | ✅ | fences are `BEGIN <name> <tag>` / `END <name> <tag>` lines, tag = uuid v4 simple (32 hex) or `"0" × 32` for the hash render; `screen_inputs` names `title` / `goal` / `acceptance[i]` / `touches[i]` / `ancestor:<id>:title\|goal` / `sibling:<id>:title`; cap loop brief → siblings → ancestor goals (halving), `[truncated]` markers, `TooLarge` when the node's own block is over (multibyte flood row); `FallbackBrief` = `docs/architecture.md` (cut to what is left) + CLAUDE.md `## Conventions` / `## Security` (≤ 3 KiB), 64 KiB read cap, one source may be missing; `WorktreeTouches::check`: ≤ 200 chars, no `: % * ? [ { \`, not absolute, `safe_segment` per segment, `confine`, exists, not a symlink |
+| 4. `ask.rs` (structured loop, byte cap, usage sum), `validate.rs` (03 step 4 table) | ✅ | `ask_structured`: `response_format` always set (`campaign_decision`, strict) + a schema directive only when the provider cannot constrain natively; body over 1 MiB refused unparsed (no repair); repairs as assistant / user pairs ≤ `max_repairs`; `AskError { failure: Provider \| TooLarge \| Exhausted, tokens, calls, repairs }` so a failed ask still costs what it cost (`u32` → `i64`, saturating). `post_validate(&Value, &Ctx) -> Result<Validated, ValidateError::{Injection{field}, Invalid}>`: screening first in answer order (`reason`, `question`, `acceptance[i]`, `touches[i]`, `children[i].title\|goal\|acceptance[j]\|touches[j]`), then the step-4 table (root never executes, no live children, leaf size, ≥ 1 acceptance / touch, `children` ≤ `min(8, max_children − live)`, `check_deps`, depth, `max_nodes`); 48 rstest rows (T9's `negative_*` / `corner_*` / `boundary_*` / `adversarial_*` pure half) |
+| 5. `planner/mod.rs` (`Planner`, `plan_node`, `tick`), exports, tests harness, T9 | ✅ | rows: 36/36 (+ 13 extra: `corner_confidence_low_split`, `corner_brief_unavailable_still_plans`, `corner_tick_plans_the_queue`, `corner_plan_leaf_is_skipped`, the upper boundaries `boundary_acceptance_7` / `boundary_touches_13` / `boundary_title_121` / `boundary_goal_2001`, `adversarial_touches_glob` / `_backslash`, `adversarial_nan_confidence`, `adversarial_confidence_string`, `adversarial_model_label_capped`; `corner_unchanged_input_no_call` lands with the overlay in item 6; † `positive_execute_node_key` / `negative_execute_unknown_node_key` deferred to CP-07). `Planner::{new, draft07, with_route, with_max_repairs, with_max_tokens, plan_node, tick}`; `PlanOutcome::{Executed, Split, NeedsInfo, Rejected, Blocked, Errored, Skipped(NotReady \| AlreadyApplied), Conflict}` + `label()`; `Planned { calls, repairs, tokens, prompt_hash }`; `TickSummary` tallies + `failures` (store errors never fail a tick). Sequence: `plan_start` → context (root policy, ≤ 6 ancestors, live siblings, live children, `subtree` count, existing attempt keys; a store error closes the node best-effort before propagating so it cannot wedge in `decomposing`) → brief (`Err` → `[brief unavailable: …]`) → `allowed_decisions` / schema → `build_prompt` (`Screened` → `plan_close(Injection)` → `Blocked`, no call; `TooLarge` → attempt `error`) → pre-call idem scan (hit → closed under a replay key, `Skipped(AlreadyApplied)`, no call) → `ask_structured` → `post_validate` → `touches.resolve` → the write. Write errors: `Conflict` → nothing written, warn, `Conflict`; `AlreadyApplied` → `Skipped`; `Invalid \| TooLong \| Denied` → the same attempt closes `error`; `NotFound \| Backend \| LeaseLost` propagate. Answer-side injection → attempt `error` `injection: <field>: …`, node `ready`, `attempts + 1`. `low_confidence` reported on `Executed` and `Split`. Harness: `Fx` (`MemCampaigns` under `ta`, `Recorder` = `ScriptedProvider` + request log, tempdir worktree with `src/lib.rs`, `src/a..m.rs`, `docs/architecture.md`, `CLAUDE.md`), JSON builders; `tracing` dep added |
+| 6. T10 + `Overlay` double | ✅ | rows: 13/13 (+ T9's `corner_unchanged_input_no_call`). `planner/tests/t10.rs`: `Overlay` delegates all 27 seam methods to a `MemCampaigns` and plants what the real tiers refuse to write — `children(parent)` may add a fabricated sibling (`adversarial_sibling_title_injection` → `Blocked{Injection}`, `detail.field = sibling:999:title`, no call), `attempts(task)` may add a closed attempt under `idem_key(tenant, task, task.version, hash)` (`corner_unchanged_input_no_call`: a first tick's `prompt_hash` replayed → `Skipped(AlreadyApplied)`, no call, node released `ready` under a distinct replay key). `adversarial_goal_screened` needs no overlay: `NewCampaign` does not screen the goal, so an injected root goal is stored and the child blocks with `ancestor:<root>:goal`. `boundary_prompt_cap` seeds five levels of eight maximal children (goal 4000, title 120, 6 × 300 acceptance, 12 touches) under a 6 KiB brief: ≤ 24 KiB, brief cut to `none [truncated]`, siblings dropped, ancestor goals halved, every fence closed, the node's own block intact. `boundary_prompt_hash_stable` = two fresh stores with identical trees → same `Planned.prompt_hash` and same `attempts()[0].prompt_hash`, different user messages of the same length. `adversarial_fence_breakout` plants the canonical `END node 0…0` line in a goal: it appears once, verbatim, inside the random-tag block. `positive_siblings_bounded` asserts 7 lines (8 live children minus self; doc says 8 — amended in item 7). Harness: `Fx::with_brief` (`StaticBrief`), `Fx::user_message(n)`, `root_and_child` / `node_at_depth` / `BAD` shared with T9 |
+| 7. docs (03 / 02 / 06 / 05 amendments, STATUS 🟡, PROGRESS); gate | ✅ | 03: as-built preamble (`Planner`, own structured loop and why), `(campaign_id, path)` order, NUL-separated idem formula + the pre-call scan and replay key, screening order and the `Injection` close (`attempts` untouched; brief not screened), random fences + canonical hash render, cap tiers, step 3 cites `planner/ask.rs` (stale `agent.rs:1163` → `1184`, `lib.rs:1121` → `1135`, also in README D6), enum narrowed at `depth ≥ depth_cap − 1` with the store as backstop, `TouchResolver` paths-only until RK-08, shared `check_deps`, answer-side injection rule, `low_confidence` on execute and split, Conflict = write nothing (+ store-error best-effort close, CP-05 reaper), cost-controls pre-call scan; 02: Errors-table `Conflict` row; 06: T9/T10 harness paragraph in the legend, T9 extra-row note, `positive_siblings_bounded` → 7, `adversarial_sibling_title_injection` / `corner_unchanged_input_no_call` via `Overlay`, `adversarial_fence_breakout` wording; 05: CP-03 row; STATUS: CP-03 🟡 `campaigns/cp-03`. Verification (2026-09-27): `cargo fmt --check` clean; workspace clippy `--all-targets --all-features -D warnings` clean; `cargo test -p agent-campaign --all-features` 279 passed / 160 ignored (pg suite); `-p agent-testkit campaign` 149; `-p agent-core campaign` 290; `cargo machete` clean; `cargo deny check licenses bans sources` (the flake's scope) ok — the full `cargo deny check` fails only on `advisories` from a freshly fetched RustSec DB (`rustls` RUSTSEC-2026-0285, `rustls-pemfile` RUSTSEC-2025-0134, `proc-macro-error2` RUSTSEC-2026-0173), none touched by this branch (`Cargo.lock` differs from `main` only by `agent-campaign`'s `tracing` edge) and the flake's `cargo-audit` runs against the pinned advisory-db input — to be handled on `main` as its own change; T9 row diff: only the two † rows missing; T10: 13/13 + 1 |
+
+## CP-04 — `agent campaign …` CLI + runtime wiring — ⬜ (branch off `main` after CP-03 merges)
+
+| Item | State | Notes |
+|---|---|---|
+| 1. `is_hidden_control` pub; `display::escape_terminal` + rows; `PgCampaigns::ensure_migrated` | ⬜ | |
+| 2. `CampaignCfg` + `Config.campaign` + validator; `config/agent.toml` block; config tests | ⬜ | |
+| 3. runtime features / dep, `mod dsn` list, `campaign.rs` resolver, planner provider on `Agent`; `multi-tenant.toml`; fixture 10; cli-help require | ⬜ | |
+| 4. `campaign_cli.rs` parse + refs + tests; `Mode::Campaign`, parser arm, help, `--check-config`; e2e rows | ⬜ | |
+| 5. `run()` store-only verbs + `render`; early dispatch; `MemCampaigns` run-level tests; disabled-store e2e | ⬜ | |
+| 6. `plan` / `run --once` via `Planner::draft07`; in-process test | ⬜ | |
+| 7. docs (component doc, README / extending, 04 / 05, STATUS 🟡, PROGRESS); gate | ⬜ | T16 rows: 0/8 |
+
 ## Decisions log (append-only)
 
 - 2026-09-26 — Everything pure (`allowed()`, `rollup()`, `TaskPath`, `Policy`, the seam) lives in
@@ -95,6 +119,47 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   same code path as every other write, one event per row, and nothing to keep in step with the
   memory tier. `complete` locks the leaf only (no rollup); `fail`, `resolve_review`, `retry`,
   `cancel`, `replan`, `plan_start` and `plan_close` lock the ancestors first.
+- 2026-09-27 — Lane B scope: CP-03 then CP-04, two PRs each off `main`, never stacked; the CLI
+  store is Postgres only (`MemCampaigns` reaches the CLI only by injection in tests).
+- 2026-09-27 — The planner owns its structured-output loop in `agent-campaign` (`planner/ask.rs`):
+  `agent_runtime::structured` cannot be reused (agent-runtime will depend on agent-campaign for
+  CP-04, and the runtime loop discards `Usage` and has no byte cap). `agent-validate` is an
+  unconditional dep (`validate-draft07`) so `Planner::draft07` can build the validator.
+- 2026-09-27 — Hashing: `sha2 = "0.10"` workspace dep. `prompt_hash = sha256(SYSTEM ‖ \0 ‖
+  user_canonical ‖ \0 ‖ schema json)` where the user message is rendered with a canonical fence
+  tag (`"0" × 32`); the messages sent use a random 32-hex tag (`uuid` v4 simple) of the same
+  length, so truncation is byte-identical and model text cannot close a fence. `idem_key =
+  sha256(tenant \0 task_id \0 expected_version \0 prompt_hash)`.
+- 2026-09-27 — Seam additions for the planner: `PlanCloseOutcome::Injection { field }` (a prompt
+  **input** hit `scan_for_injection` → `blocked`, `attempts` untouched; a hit inside the model's
+  **answer** is an ordinary attempt `error` prefixed `injection: <field>` and the node returns to
+  `ready`); `low_confidence` marker on both `mark_leaf` and `decompose` (03 said execute only;
+  amended for symmetry so `show` can mark both); `check_deps` shared from `agent_core::campaign`.
+- 2026-09-27 — `Conflict` at the finishing write: the planner writes nothing further (the attempt
+  row was inside the rolled-back tx), warns and counts it; a `plan_close(Error{conflict})` would
+  CAS on the same stale version. Pre-call idempotency: the planner scans `attempts(task)` for the
+  computed key and skips the provider call on a hit; the store's `AlreadyApplied` stays the
+  backstop.
+- 2026-09-27 — Touches resolve through `TouchResolver` (`WorktreeTouches { root }`: relative,
+  `safe_segment` per segment, `confine`, exists, not a symlink; node-key syntax rejected until
+  RK-08 / CP-07). Brief through `BriefSource` (`FallbackBrief { repo_root }` = first 6 KiB of
+  `docs/architecture.md` + CLAUDE.md `## Conventions` / `## Security` sections; not
+  injection-screened because CLAUDE.md discusses injection phrases). Plannable order is the
+  store's `(campaign_id, path)`.
+- 2026-09-27 — CP-04: `[campaign]` config reuses `[config_store] dsn_ref` (no `dsn_ref` of its
+  own); the store opens with `connect_lazy` and migrates on the first verb via
+  `PgCampaigns::ensure_migrated` when `migrate_on_start`, never eagerly (fixture 10's dummy DSN
+  must not dial). Store-only verbs run before metrics / `build_agent`; every untrusted string is
+  rendered through `display::escape_terminal` (`is_hidden_control` becomes pub); letters are
+  minted from the unfiltered listing so `A` is stable across `list` / `show` / `add`.
+- 2026-09-27 — A pre-call idempotency hit is closed under a distinct *replay* key
+  (`sha256("replay" ‖ \0 ‖ prompt_hash)`), not the original: the store would answer
+  `AlreadyApplied` to the original key and leave the node in `decomposing`. The enum is narrowed
+  at every `depth ≥ depth_cap − 1` (not only `=`) so a row deeper than the cap cannot split; the
+  store's depth check stays the backstop. `TouchResolver` / `BriefSource` errors, prompt
+  `TooLarge` and store `Invalid | TooLong | Denied` at the write all close the same attempt as
+  `error`; only `NotFound` and backend errors leave `plan_node`, and `tick` counts those as
+  `failures` without failing.
 
 ## Gate status
 
@@ -115,7 +180,20 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | #501 merged (`71d4abf`, merge commit); `git rebase --autostash --onto origin/main 6d7b87f campaigns/cp-02` | clean, six commits replayed; `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` + `cargo test -p agent-campaign --features campaign-postgres` (34 in-gate) green |
 | 2026-09-27 | post-rebase `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green on the combined tree: config-store 34 (33 + #502's `boundary_tenants_dedups_many_per_tenant`, `CASCADE` reset in place), campaign 157/157 (108 s) |
 | 2026-09-27 | post-rebase `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `2cc7fdd`) | green, `all checks passed!` — a cold build (the rebase changed the source hash), ~35 min alongside another nix build on the host |
+| 2026-09-27 | CP-03 step 1: `cargo fmt --all` + `cargo clippy -p agent-core -p agent-testkit -p agent-campaign --all-targets --all-features -- -D warnings` + `cargo test -p agent-core campaign` / `-p agent-testkit campaign` / `-p agent-campaign --all-features` | green first run: 290 / 149 / 34 in-gate (pg suite `#[ignore]`) |
+| 2026-09-27 | CP-03 step 1: `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green first run (`PASS: …`); campaign pg suite 160/160 (157 + the three new t5 rows), 91 s |
+| 2026-09-27 | CP-03 step 7: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test -p agent-campaign --all-features` / `-p agent-testkit campaign` / `-p agent-core campaign`, `cargo machete`, `cargo deny check licenses bans sources` | green first run: fmt clean, clippy clean, 279 (+ 160 `#[ignore]` pg) / 149 / 290, machete clean, deny ok in the flake's scope (the `advisories` scope fails on three pre-existing RustSec entries a fresh DB knows about — `rustls` 2026-0285, `rustls-pemfile` 2025-0134, `proc-macro-error2` 2026-0173 — none from this branch; see step 7 notes) |
+| 2026-09-27 | CP-03 step 7: `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green first run (`PASS: …`); campaign pg suite 160/160, 190 s (the planner tests compile alongside) |
+| 2026-09-27 | CP-03: `nix flake check "git+file://…?ref=refs/heads/campaigns/cp-03"` (@ `609e9aa`) | green, `all checks passed!` — the first client was reaped for host memory pressure (an unrelated `nix eval` held ~105 GB) after 63 of 65 checks had built; the remaining two (`fleet-store`, `review-toolbox`) were built with `nix build` and the full check rerun from cache |
 
 ## Open questions / blockers
 
-- (none)
+- `cargo deny check advisories` against a freshly fetched RustSec DB fails on `rustls`
+  (RUSTSEC-2026-0285, a real vulnerability), `rustls-pemfile` (2025-0134, unmaintained) and
+  `proc-macro-error2` (2026-0173, unmaintained). Not from this track (`Cargo.lock` on
+  `campaigns/cp-03` differs from `main` only by `agent-campaign`'s `tracing` edge); the flake's
+  `cargo-audit` runs against the pinned `advisory-db` input, so the gate does not see it yet. Needs
+  its own change on `main`: bump `rustls`, then bump the `advisory-db` input.
+- A node left in `decomposing` by a crash between `plan_start` and the close (the best-effort
+  close cannot run if the process dies) needs a reaper — CP-05's driver tick (`reap()` already
+  handles leases; `decomposing` older than a bound is the analogous rule).
