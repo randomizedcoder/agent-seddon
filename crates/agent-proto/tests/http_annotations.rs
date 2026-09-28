@@ -476,11 +476,59 @@ enum Expect {
     "Memory.Distill",
     Expect::Routes(&[("POST", "/v1/memory/distill")])
 )]
-// negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
-// positive `Routes` case when `policy.proto` is annotated in a later increment.
-#[case::negative_unannotated_rpc_has_no_rule(
-    "Policy.Authorize is not annotated yet -> no google.api.http rule",
+// --- 03g3: analysis + control (graph / scanner / lsp / metrics_proxy / policy /
+//          review) — only auth.proto (AuthService) remains, deferred to 03g4 ------
+// corner — a document read with an EMPTY request shares its resource path with the
+// POST that replaces it (GET /v1/graph reads, POST /v1/graph writes) — verb-
+// disambiguated like RepoService.WorktreeList/WorktreeAdd.
+#[case::corner_graph_get_shares_resource_path_via_verb(
+    "GraphService.Get -> GET /v1/graph (same path as POST Put)",
+    "GraphService.Get",
+    Expect::Routes(&[("GET", "/v1/graph")])
+)]
+// corner — validation is side-effect-free but carries the whole `CognitionGraph`
+// document, so → POST body:* (nested-body-read convention), not GET.
+#[case::corner_graph_validate_nested_body_read_maps_to_post(
+    "GraphService.Validate -> POST /v1/graph/validate (whole document in the body)",
+    "GraphService.Validate",
+    Expect::Routes(&[("POST", "/v1/graph/validate")])
+)]
+// corner — scanning carries the untrusted `content` to inspect (a CONTENT payload, not
+// a URL-friendly selector), so → POST body:* (content-payload refinement).
+#[case::corner_scanner_scan_content_payload_maps_to_post(
+    "ScannerService.Scan -> POST /v1/scanner/scan (content payload)",
+    "ScannerService.Scan",
+    Expect::Routes(&[("POST", "/v1/scanner/scan")])
+)]
+// corner — a pure read whose scalar `query` is a PromQL SELECTOR expression stays GET
+// (it rides as a query param, like Prometheus's own /api/v1/query) — the direct
+// contrast to a scalar CONTENT payload (Reference.Resolve/Scanner.Scan → POST).
+#[case::corner_metrics_query_promql_selector_stays_get(
+    "MetricsProxyService.Query -> GET /v1/metrics/query (PromQL selector as query param)",
+    "MetricsProxyService.Query",
+    Expect::Routes(&[("GET", "/v1/metrics/query")])
+)]
+// corner — a fact-collection read whose `target` selector can contain `:` and `/`
+// (`branch:feature/x`) rides as a query param, never a `{param}` capture — the same
+// shape as RepoService.ReadFile's revision (GET with ZERO path params).
+#[case::corner_review_collect_slashy_selector_is_query_param(
+    "FactCollectorService.Collect -> GET /v1/review/facts (slashy target as query param)",
+    "FactCollectorService.Collect",
+    Expect::Routes(&[("GET", "/v1/review/facts")])
+)]
+// positive — the tool-approval gate carries a nested `ToolCall` → POST body:*. This is
+// the row that was the `Unmapped` sentinel until policy.proto was annotated here.
+#[case::positive_policy_authorize_nested_maps_to_post(
+    "Policy.Authorize -> POST /v1/policy/authorize (nested ToolCall)",
     "Policy.Authorize",
+    Expect::Routes(&[("POST", "/v1/policy/authorize")])
+)]
+// negative — the LAST not-yet-annotated RPC: AuthService is deferred to 03g4 (auth is
+// its own batch). This row flips to a positive `Routes` case when auth.proto is
+// annotated, and the completeness invariant lands with it.
+#[case::negative_auth_whoami_not_annotated_yet(
+    "AuthService.WhoAmI is not annotated yet (deferred to 03g4) -> no google.api.http rule",
+    "AuthService.WhoAmI",
     Expect::Unmapped
 )]
 // negative — a junk method name must not resolve to any rule (fail closed).

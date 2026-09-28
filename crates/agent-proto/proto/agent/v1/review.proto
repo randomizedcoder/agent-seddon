@@ -8,11 +8,21 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/repo.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
+// REST mapping (docs/design/rest-openapi/), under /v1/review/. Collect is a fail-soft
+// read (grounded fact collection). Its `target` (`pr:<n>` | `branch:<name>` |
+// `worktree`) can contain `:` and `/`, so — like RepoService.ReadFile's revision — it
+// rides as a query param, never a `{param}` path capture: GET /v1/review/facts.
 service FactCollectorService {
   // Collect grounded facts for a target. Fail-soft: a partial bundle is a
   // success; only an unresolvable target is an error.
-  rpc Collect(ReviewCollectRequest) returns (ReviewFacts);
+  rpc Collect(ReviewCollectRequest) returns (ReviewFacts) {
+    option (google.api.http) = {get: "/v1/review/facts"};
+  }
 }
 
 // The target, encoded: `pr:<n>` | `branch:<name>` | `worktree`.
