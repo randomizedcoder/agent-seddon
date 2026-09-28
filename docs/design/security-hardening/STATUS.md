@@ -24,7 +24,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
 | S15a | auth-e2e gate (process wire) | testing | ✅ | #537 |
-| S15b | integration tiers (step-ca daemon, Postgres sessions, ClickHouse audit) | testing | 🟡 | — |
+| S15b | integration tiers (step-ca daemon, Postgres sessions, ClickHouse audit) | testing | ✅ | #543 |
 | S15c | `portal-e2e` under auth | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
@@ -725,7 +725,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - The harness has its own grpcurl client, so `dial_for` did not grow `--bearer` / `--cert`
       modes. The loopback harnesses stay header-free; the S2 helpers (ghz `-m`, fleet-e2e
       `DIAL_FLAGS`, `scoped_request()`) remain unneeded.
-- **2026-09-28 — S15b.** New `nix run .#auth-integration`, registered in the model-free tier of
+- **2026-09-28 — S15b (#543).** New `nix run .#auth-integration`, registered in the model-free tier of
   `nix run .#integration`, and a gate check `auth-integration-tests`. The harness
   ([`test/auth-integration/auth_integration.py`](../../../test/auth-integration/auth_integration.py))
   reuses the S15a issuer, config renderer, grpcurl client and steps, and the S16 ClickHouse
