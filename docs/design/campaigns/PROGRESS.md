@@ -234,7 +234,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 - ~~`agent-runtime --no-default-features` (bare, `campaign`, `campaign-postgres`) fails to build
   on `main` (CP-04 item 7: 21 errors in `metered.rs` / `builder.rs` / the web-search and
   context-bench paths); no gate compiles a lean build, so it regressed silently.~~ **Resolved in
-  #PR3.** Five gating mistakes, fixed by one rule (widen the gate on the *definition* for a
+  #546.** Five gating mistakes, fixed by one rule (widen the gate on the *definition* for a
   generic helper, gate the *caller* for a feature-specific item): `expand_tilde` ungated; the
   `provider-router` cfg + doc comment that had drifted onto `struct RoleScoped` moved back onto
   `build_route_upstream`, `record_route_event` router-gated, `provider-router` implies
