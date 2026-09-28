@@ -121,6 +121,15 @@ store = "postgres"
 # Campaigns (docs/design/campaigns, CP-04): the `agent campaign …` task tree on
 # Postgres. Opened lazily (no dial until the first verb) over the same
 # `[config_store] dsn_ref`; the schema is applied on the first verb under
-# `migrate_on_start`. Postgres is the only backing tier.
+# `migrate_on_start`. Postgres is the only backing tier. The resident driver
+# (CP-05, `agent campaign run`) is off until `enabled = true`; `run --once`
+# works regardless. Under `[tenancy] per_tenant` it serves every tenant with
+# live work, else the `local` tenant.
 [campaign]
 store = "postgres"
+enabled = false
+tick_secs = 30
+per_tenant_workers = 2
+global_workers = 8
+sandbox = "subprocess"
+worker_timeout_secs = 3600

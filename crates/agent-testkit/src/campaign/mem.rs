@@ -9,12 +9,12 @@
 use agent_core::campaign::{
     allowed, check_deps, check_len, check_list, check_max, clamp_lease, plan_detail, rollup,
     screen, truncate_chars, Actor, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
-    CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete, Decomposed,
-    Decomposition, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner, PlanAttempt,
-    PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome, Task, TaskAttempt,
-    TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER, MAX_ACCEPTANCE,
-    MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR, MAX_GOAL, MAX_QUESTION, MAX_REASON,
-    MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
+    CampaignBackend, CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete,
+    Decomposed, Decomposition, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner,
+    PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome, Task,
+    TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
+    LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR,
+    MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
 };
 use agent_core::{safe_segment, scan_for_injection, UserId};
 use async_trait::async_trait;
@@ -98,6 +98,18 @@ impl MemCampaigns {
     pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
         self.now_ms = now_ms;
         self
+    }
+
+    /// The same backend under `tenant` **without** the [`safe_segment`] check: plants
+    /// a row no real tier can write, so `adversarial_tenants_never_unsafe` can prove
+    /// [`CampaignBackend::tenants`] drops it on the way out. Test-only by nature.
+    #[doc(hidden)]
+    pub fn with_tenant_unchecked(&self, tenant: &str) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            tenant: tenant.to_string(),
+            now_ms: Arc::clone(&self.now_ms),
+        }
     }
 
     fn tx<T>(&self, f: impl FnOnce(&mut Tx<'_>) -> CampaignResult<T>) -> CampaignResult<T> {
@@ -926,6 +938,31 @@ impl CampaignStore for MemCampaigns {
         })
     }
 
+    async fn reap_decomposing(&self, max_age_secs: i64) -> CampaignResult<Vec<TaskId>> {
+        let bound = u64::from(clamp_lease(max_age_secs)) * 1000;
+        self.tx(|tx| {
+            let now = tx.now;
+            // Strictly older than the bound (at exactly the bound the node holds,
+            // like a lease at `lease_until == now`); a leaf is never `decomposing`,
+            // but the filter keeps the write on the table's non-leaf row.
+            let stale: Vec<TaskId> = tx
+                .tenant_tasks()
+                .filter(|t| t.state == TaskState::Decomposing && t.kind != TaskKind::Leaf)
+                .filter(|t| t.updated_at_ms.saturating_add(bound) < now)
+                .map(|t| t.task_id)
+                .collect();
+            for id in &stale {
+                tx.transition(
+                    *id,
+                    TaskState::Ready,
+                    &Actor::Reaper,
+                    json!({"reason": "plan_stale"}),
+                )?;
+            }
+            Ok(stale)
+        })
+    }
+
     async fn start(&self, task: TaskId, owner: &Owner) -> CampaignResult<Task> {
         self.tx(|tx| {
             let t = tx.task(task)?;
@@ -1309,5 +1346,27 @@ impl CampaignStore for MemCampaigns {
             v.truncate(limit);
             Ok(v)
         })
+    }
+}
+
+#[async_trait]
+impl CampaignBackend for MemCampaigns {
+    /// Every tenant with a node in a live state, sorted and distinct (`BTreeSet`); a
+    /// tenant that is not a `safe_segment` (only plantable through
+    /// [`MemCampaigns::with_tenant_unchecked`]) is dropped, never returned.
+    async fn tenants(&self) -> CampaignResult<Vec<String>> {
+        let guard = self.inner.lock().expect("campaign store poisoned");
+        let live: BTreeSet<&str> = guard
+            .tasks
+            .iter()
+            .filter(|(_, t)| LIVE_STATES.contains(&t.state))
+            .map(|((tenant, _), _)| tenant.as_str())
+            .filter(|tenant| safe_segment(tenant))
+            .collect();
+        Ok(live.into_iter().map(str::to_string).collect())
+    }
+
+    fn with_tenant(&self, tenant: &str) -> CampaignResult<Arc<dyn CampaignStore>> {
+        MemCampaigns::with_tenant(self, tenant).map(|s| Arc::new(s) as Arc<dyn CampaignStore>)
     }
 }

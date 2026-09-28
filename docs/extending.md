@@ -42,10 +42,13 @@ classifier** (`[mode]`, see [mode](components/mode.md)), and **dimensional memor
 (`[dimensions]`, see [dimensions](components/dimensions.md)). To swap one of these,
 add a branch in the builder keyed on its config string — the trait is still the seam.
 The **campaign store** (`[campaign] store`, see [campaigns](components/campaigns.md))
-follows the same pattern from `agent_runtime::campaign::open_campaign_store`: the
+follows the same pattern from `agent_runtime::campaign::open_campaign_store` (and
+`open_campaign_backend`, the driver's multi-tenant `CampaignBackend` handle): the
 seam is `agent_core::campaign::CampaignStore`, `"postgres"` is the only shipped arm,
 and a new tier is a feature-gated branch there plus the shared conformance rows
-(`agent_testkit::campaign::conformance`) rerun over it.
+(`agent_testkit::campaign::conformance`) rerun over it. The driver's own seams
+(`TickPlanner`, `PrPoller`, `WorkerExec` in `agent_campaign::driver`) are wired in
+`agent_runtime::campaign_driver::build_driver`.
 
 ## In-tree (contribute a built-in)
 

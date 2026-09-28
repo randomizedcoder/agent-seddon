@@ -200,7 +200,7 @@ pub struct TickSummary {
 }
 
 impl TickSummary {
-    fn add(&mut self, planned: &Planned) {
+    pub(crate) fn add(&mut self, planned: &Planned) {
         match &planned.outcome {
             PlanOutcome::Executed { .. } => self.executed += 1,
             PlanOutcome::Split { .. } => self.split += 1,

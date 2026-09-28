@@ -543,6 +543,19 @@ claim_ttl_secs = 900
 # migrate_on_start. The driver's tick / worker keys land with CP-05.
 [campaign]
 store          = ""
+# The resident driver (`agent campaign run`, CP-05): reap expired leases and stale
+# plans, poll open PRs, plan, claim leaves and dispatch workers, every `tick_secs`
+# (5..=3600). `enabled = true` needs a `store`; `run --once` ignores `enabled`.
+enabled        = false
+tick_secs      = 30
+# Concurrent workers per tenant (1..=32) and across every tenant (1..=256).
+per_tenant_workers = 2
+global_workers = 8
+# How a worker runs: "subprocess" (`agent --run-task` under the sandbox) or
+# "in_process". Validated now; dispatched by the worker increment (CP-06).
+sandbox        = "subprocess"
+# Wall clock per worker in seconds (60..=86400); past it the leaf fails `timeout`.
+worker_timeout_secs = 3600
 # Pool ceiling for the campaign store's own pool (1..=64).
 pool_max       = 4
 # Role routing: the provider the planner's decomposition calls use (a

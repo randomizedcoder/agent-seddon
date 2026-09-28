@@ -247,6 +247,28 @@ pub(super) const REAP: &str = "WITH exp AS MATERIALIZED (
          version = version + 1, updated_at = to_timestamp($2::double precision / 1000.0)
      FROM exp WHERE tasks.tenant = $1 AND tasks.task_id = exp.eid
      RETURNING task_id, exp.from_state, exp.lost_owner, version";
+/// `$2` now_ms, `$3` bound in seconds: every non-leaf `decomposing` for longer than
+/// the bound back to `ready` (`SKIP LOCKED`: a planner mid-write holds its row and
+/// is left alone; one that is merely slow loses its CAS afterwards). The driver's
+/// reaper for a plan a crashed process never closed (CP-05).
+pub(super) const REAP_DECOMPOSING: &str = "WITH stale AS MATERIALIZED (
+       SELECT task_id AS sid
+       FROM tasks
+       WHERE tenant = $1 AND state = 'decomposing' AND kind <> 'leaf'
+         AND updated_at + make_interval(secs => $3::double precision)
+             < to_timestamp($2::double precision / 1000.0)
+       ORDER BY task_id
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE tasks
+     SET state = 'ready', version = version + 1,
+         updated_at = to_timestamp($2::double precision / 1000.0)
+     FROM stale WHERE tasks.tenant = $1 AND tasks.task_id = stale.sid
+     RETURNING task_id, version";
+/// `$1` the live states (`LIVE_STATES` as text): the distinct tenants the driver
+/// tick has work for, sorted (`CampaignBackend::tenants`).
+pub(super) const TENANTS_LIVE: &str =
+    "SELECT DISTINCT tenant FROM tasks WHERE state = ANY ($1::text[]) ORDER BY tenant";
 
 // -- (d) complete -----------------------------------------------------------------
 

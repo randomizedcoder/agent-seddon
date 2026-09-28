@@ -33,13 +33,19 @@ async-trait.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, optional = true }
+# The driver (`driver/`, CP-05) holds its workers in a `JoinSet` under two
+# `Semaphore`s and bounds each one with `tokio::time::timeout`; `uuid` also mints
+# the per-process owner token.
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 agent-testkit.workspace = true
 rstest.workspace = true
-tokio = { workspace = true }
+# `test-util` for the paused clock T11's `adversarial_worker_hangs` advances past
+# `worker_timeout` without sleeping.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

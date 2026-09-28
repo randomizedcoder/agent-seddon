@@ -89,7 +89,10 @@ the cases, not the other way round.
 | `corner_same_state` | `ready → ready` | denied (no self-loops) |
 | `corner_leaf_to_decomposing` | leaf, planner | denied |
 | `corner_replan_while_decomposing` | task, user: `decomposing → decomposing` | denied |
-| `boundary_exhaustive` | every (from, to, kind, actor) tuple, 13 × 13 × 3 × 8 actor classes | the allowed set equals the documented table exactly; count (82) asserted |
+| `positive_decomposing_to_ready_reaper_task` | task, reaper (CP-05 `reap_decomposing`) | allowed |
+| `positive_decomposing_to_ready_reaper_objective` | objective, reaper | allowed |
+| `negative_decomposing_to_ready_reaper_leaf` | leaf, reaper | denied (a leaf is never `decomposing`) |
+| `boundary_exhaustive` | every (from, to, kind, actor) tuple, 13 × 13 × 3 × 8 actor classes | the allowed set equals the documented table exactly; count (84) asserted |
 
 ## T3 Rollup (CP-01 mem, CP-02 pg)
 
@@ -203,6 +206,15 @@ the cases, not the other way round.
 | `adversarial_owner_forged` | a second driver reuses A's owner token under tenant B | affects only tenant B's rows; A's leases untouched |
 | `adversarial_lease_negative` | `lease = -1` passed programmatically | clamped to the floor; `lease_until > now()` |
 | `adversarial_owner_empty` | `owner = ""` | `Invalid` |
+| `positive_reap_decomposing_stale` | a node `decomposing` for 901 s, bound 900 (CP-05) | `ready`; event `actor reaper`, `detail.reason = plan_stale`; `attempts` unchanged; no attempt row touched; `version + 1`; plannable again |
+| `corner_reap_decomposing_fresh_untouched` | `decomposing` for 899 s | untouched; no event |
+| `boundary_reap_decomposing_at_bound` | exactly 900 s, then 900 s + 1 ms | holds at the bound; released one millisecond past it |
+| `corner_reap_decomposing_no_attempt_closed` | a leaf whose lease also expired, beside the stale node | only the node is released; the leaf keeps `claimed` and its `pending` attempt until `reap()` |
+| `adversarial_reap_decomposing_bound_clamped` | bound `0` / `-5` / `10^9` | clamped to `60` / `60` / `86400` |
+| `positive_tenants_live_only` | A `ready` root; B cancelled; C draft; D a gated split | `CampaignBackend::tenants()` = `["ta"]` |
+| `corner_tenants_none` | no live node | `[]`; `with_tenant` still opens a view |
+| `boundary_tenants_sorted_distinct` | several live nodes per tenant, created out of order | each tenant once, sorted |
+| `adversarial_tenants_never_unsafe` | a live node under a tenant that is not a `safe_segment` (mem only: planted through `with_tenant_unchecked`; no real tier can write it) | dropped from `tenants()`; `with_tenant` refuses it |
 
 ## T7 Complete and fail, protocol (d) (CP-01 mem, CP-02 pg)
 
@@ -330,6 +342,18 @@ The † rows wait for RK-08 (CP-07); CP-03 has no stubs for them. CP-03 added ro
 
 ## T11 Driver tick (CP-05, mem + in-process exec)
 
+As built: `crates/agent-campaign/src/driver/tests.rs`, over `MemCampaigns` behind a recording
+store / backend double (the phase methods logged per tenant), a recording poller, a counting
+`TickPlanner` that splits each plannable node, and `ClosureExec` execs (ok, pending, start-then-
+pend, panic). `boundary_config_floor` / `boundary_config_ceiling` are `campaign_validate_cases`
+rows in `crates/agent-runtime/src/config.rs` (every bound both sides); `adversarial_owner_from_env_missing`
+is a `cli_e2e` row over the `--run-task` stub plus `run_task_stub_rows` unit rows. Extra rows
+beyond the table: `adversarial_tenant_unsafe_skipped` (a fixed tenant that is not a
+`safe_segment` is skipped, nothing opened), `positive_mint_owner_hex`, the pure `interleave_rows`
+/ `claim_limit_rows` / `adversarial_panic_text_bounded` (a 10 000-char panic payload → 2000), the
+CLI's `positive_run_once_reports_phases` / `positive_run_once_reaps_decomposing`, and the runtime's
+`build_driver` / `tenants_for` rows.
+
 | case | input / description | expected |
 |---|---|---|
 | `positive_phase_order` | one tick, recording store | per tenant: reap, poll, plan, claim, in that order |
@@ -340,16 +364,16 @@ The † rows wait for RK-08 (CP-07); CP-03 has no stubs for them. CP-03 added ro
 | `corner_no_tenants` | empty tenant list | no-op |
 | `corner_tenant_all_blocked` | tenant with only `blocked` nodes | skipped; others proceed |
 | `corner_in_review_not_counted` | 5 `in_review` leaves, `per_tenant_workers 2` | 2 new claims still made |
-| `boundary_per_tenant_workers` | `per_tenant_workers 2`, 5 leaves | 2 running; 3 stay `ready` |
-| `boundary_global_workers` | 3 tenants × 2, `global_workers 4` | never more than 4 in flight (probe on the semaphore) |
-| `boundary_plan_per_tick` | 10 planable nodes, `plan_per_tick 4` | exactly 4 planner calls |
+| `boundary_per_tenant_workers` | `per_tenant_workers 2`, 5 leaves | 2 running; 3 stay `ready`; a second tick claims nothing more |
+| `boundary_global_workers` | 3 tenants × 2, `global_workers 4` | exactly 4 dispatched, the semaphore at 0 (probe `global_available()`), every permit back after `drain` |
+| `boundary_plan_per_tick` | 10 plannable nodes, `plan_per_tick 4` | the planner sees limit 4; exactly 4 `decomposed` |
 | `boundary_plan_per_tick_zero` | `plan_per_tick 0` | no planner calls; claims still happen |
-| `boundary_config_floor` | `tick_secs 4`; `worker_timeout_secs 59` | config load error naming the field |
-| `boundary_config_ceiling` | `global_workers 257` | config load error |
-| `adversarial_worker_panics` | in-process exec panics | leaf `failed` with a bounded error; permits released; next tick runs |
-| `adversarial_worker_hangs` | exec never returns | aborted at `worker_timeout_secs`; leaf `failed` (`timeout`); permits released |
-| `adversarial_store_error_mid_tick` | store errors on claim for tenant A | logged; tenant B still served; no permit leak |
-| `adversarial_owner_from_env_missing` | subprocess started without the owner variable | exits `LeaseLost`; nothing touched |
+| `boundary_config_floor` | `tick_secs 4`; `worker_timeout_secs 59`; `per_tenant_workers 0`; `global_workers 0` (5 / 60 / 1 / 1 accepted) | config load error naming the field |
+| `boundary_config_ceiling` | `global_workers 257`; `per_tenant_workers 33`; `tick_secs 3601`; `worker_timeout_secs 86401` (256 / 32 / 3600 / 86400 accepted) | config load error |
+| `adversarial_worker_panics` | in-process exec panics | leaf `failed` with a bounded error (`worker panicked: …` ≤ 2000 chars); permits released; next tick runs |
+| `adversarial_worker_hangs` | exec never returns (paused clock) | cut at `worker_timeout_secs`; leaf `failed` (`timeout`); permits released |
+| `adversarial_store_error_mid_tick` | store errors on claim for tenant A | logged and counted (`errors 1`); tenant B still served; no permit leak; A's leaf untouched |
+| `adversarial_owner_from_env_missing` | `agent --run-task` started without `AGENT_CAMPAIGN_OWNER` (e2e; the config path does not even exist) | exit 3 `lease lost`; nothing opened; stdout empty. Owner present ⇒ exit 4 `not implemented` (CP-06), the token never printed |
 
 ## T12 Worker `--run-task` (CP-06 fake forge + fake provider + tempdir repo)
 

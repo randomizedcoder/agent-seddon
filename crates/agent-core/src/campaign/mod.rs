@@ -20,6 +20,7 @@
 use crate::{safe_segment, scan_for_injection, UserId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Seam: CampaignStore (hierarchical task tree — docs/design/campaigns/)
@@ -156,6 +157,25 @@ pub const LOW_CONFIDENCE: f32 = 0.4;
 
 /// The header the `answer` protocol appends to `goal` (`02-transactions.md` (e)).
 pub const CLARIFICATION_HEADER: &str = "\n\n## Clarification\n\n";
+
+/// The environment variable a driver hands its owner token to a worker subprocess
+/// through (`04-executor.md` "Dispatch"): an argument would be visible to every
+/// process on the host. A worker started without it (or with a value that is not
+/// a path-safe segment) exits as `lease lost` before it opens anything.
+pub const CAMPAIGN_OWNER_ENV: &str = "AGENT_CAMPAIGN_OWNER";
+
+/// The states the driver tick acts on (`04-executor.md`): a lease to reap
+/// (`claimed`, `running`), a stale plan to release (`decomposing`), a PR to poll
+/// (`in_review`), a node to plan or a leaf to claim (`ready`). A tenant whose every
+/// node is elsewhere (`draft`, `awaiting_approval`, `blocked`, `failed`, terminal)
+/// has nothing for the tick, so [`CampaignBackend::tenants`] leaves it out.
+pub const LIVE_STATES: [TaskState; 5] = [
+    TaskState::Ready,
+    TaskState::Decomposing,
+    TaskState::Claimed,
+    TaskState::Running,
+    TaskState::InReview,
+];
 
 /// The `detail` of a `mark_leaf` / `decompose` event: `base` (an object) plus
 /// `low_confidence: true` when `confidence` is under [`LOW_CONFIDENCE`] or not a finite
@@ -866,6 +886,14 @@ pub trait CampaignStore: Send + Sync {
     async fn heartbeat(&self, task: TaskId, owner: &Owner, lease_secs: i64) -> CampaignResult<()>;
     /// Return every expired lease to `ready`, closing its attempt as `lease_lost`.
     async fn reap(&self) -> CampaignResult<Vec<Reaped>>;
+    /// Return every non-leaf that has sat in `decomposing` for more than
+    /// `max_age_secs` (clamped by [`clamp_lease`]; the driver passes
+    /// [`DECOMPOSING_MAX_SECS`]) to `ready`, by `actor = reaper` with
+    /// `detail.reason = plan_stale`. A planner that died between `plan_start` and
+    /// its close left no attempt row (the row is written inside the finishing
+    /// transaction), so nothing is closed and `attempts` is untouched; a planner
+    /// still alive loses its CAS at the finishing write. Ascending `task_id`.
+    async fn reap_decomposing(&self, max_age_secs: i64) -> CampaignResult<Vec<TaskId>>;
 
     // -- (d) execute --------------------------------------------------------------
     /// `claimed → running` by the owner.
@@ -925,6 +953,21 @@ pub trait CampaignStore: Send + Sync {
     async fn plannable(&self, limit: usize) -> CampaignResult<Vec<Task>>;
     /// `in_review` leaves, oldest first (the poller's queue).
     async fn in_review(&self, limit: usize) -> CampaignResult<Vec<Task>>;
+}
+
+/// The multi-tenant side of a campaign backend, for the driver tick
+/// (`04-executor.md`): which tenants have work, and a [`CampaignStore`] bound to
+/// one of them. The config store's `tenants()` enumerates config cards, which
+/// campaigns never write, so the campaign tables answer for themselves. Every
+/// tenant returned is a [`safe_segment`] (a row that is not is dropped, never
+/// opened), and `with_tenant` refuses anything that is not, before any statement.
+#[async_trait]
+pub trait CampaignBackend: Send + Sync {
+    /// The distinct tenants with at least one node in a [`LIVE_STATES`] state,
+    /// sorted ascending.
+    async fn tenants(&self) -> CampaignResult<Vec<String>>;
+    /// The store bound to `tenant`.
+    fn with_tenant(&self, tenant: &str) -> CampaignResult<Arc<dyn CampaignStore>>;
 }
 
 #[cfg(test)]
@@ -1270,6 +1313,38 @@ mod tests {
     fn positive_fail_cause_outcomes() {
         assert_eq!(FailCause::Error.outcome(), AttemptOutcome::Error);
         assert_eq!(FailCause::Timeout.outcome(), AttemptOutcome::Timeout);
+    }
+
+    /// Every state the tick touches is live, every state that waits on a human or
+    /// is over is not, and the list is exactly the phases' union.
+    #[test]
+    fn positive_live_states_are_the_ticks_states() {
+        let live: std::collections::BTreeSet<TaskState> = LIVE_STATES.into_iter().collect();
+        assert_eq!(live.len(), LIVE_STATES.len(), "no duplicates");
+        for s in [
+            TaskState::Ready,
+            TaskState::Decomposing,
+            TaskState::Claimed,
+            TaskState::Running,
+            TaskState::InReview,
+        ] {
+            assert!(live.contains(&s), "{s:?} is a tick state");
+        }
+        for s in TaskState::ALL {
+            if s.is_terminal()
+                || matches!(
+                    s,
+                    TaskState::Draft
+                        | TaskState::AwaitingApproval
+                        | TaskState::Decomposed
+                        | TaskState::Blocked
+                        | TaskState::Failed
+                )
+            {
+                assert!(!live.contains(&s), "{s:?} has nothing for the tick");
+            }
+        }
+        assert_eq!(CAMPAIGN_OWNER_ENV, "AGENT_CAMPAIGN_OWNER");
     }
 
     #[test]

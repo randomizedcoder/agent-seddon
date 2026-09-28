@@ -13,8 +13,8 @@
 mod common;
 
 use common::{
-    run_agent, run_agent_env, status, status_retry_after, text, tool, write_config, FakeLlm, Fault,
-    FaultServer, TempWorkspace,
+    run_agent, run_agent_env, run_agent_with, status, status_retry_after, text, tool, write_config,
+    FakeLlm, Fault, FaultServer, TempWorkspace,
 };
 use serde_json::json;
 
@@ -706,5 +706,115 @@ store = "bogus"
     assert!(
         !stdout.contains("config: OK"),
         "a failed check must not print OK, got:\n{stdout}"
+    );
+}
+
+/// T11 `adversarial_owner_from_env_missing` (campaigns CP-05): the hidden worker
+/// mode started without `AGENT_CAMPAIGN_OWNER` exits `lease lost` (3) before the
+/// config is read — the config path here does not even exist — and touches
+/// nothing: no store is named, stdout is empty.
+#[test]
+fn adversarial_owner_from_env_missing() {
+    let ws = TempWorkspace::new("run-task-no-owner");
+    let missing_cfg = ws.path("does-not-exist.toml");
+
+    let (code, stdout, stderr) = run_agent_with(
+        &missing_cfg,
+        &ws,
+        &["--run-task", "--tenant", "t", "--task", "1"],
+        &[],
+        &["AGENT_CAMPAIGN_OWNER"],
+    );
+
+    assert_eq!(code, 3, "exit code; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("lease lost"),
+        "stderr must say the lease was lost, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("[campaign] store") && !stderr.contains("does-not-exist"),
+        "the stub must exit before the config or store is touched, got:\n{stderr}"
+    );
+    assert!(stdout.is_empty(), "stdout must be empty, got:\n{stdout}");
+}
+
+/// With the owner present the stub exits `no worker` (4) until CP-06, and the
+/// token never reaches stderr.
+#[test]
+fn corner_run_task_owner_present_exits_no_worker() {
+    let ws = TempWorkspace::new("run-task-owner");
+    let missing_cfg = ws.path("does-not-exist.toml");
+    let token = "0123456789abcdef0123456789abcdef";
+
+    let (code, stdout, stderr) = run_agent_env(
+        &missing_cfg,
+        &ws,
+        &["--run-task", "--tenant", "t", "--task", "1"],
+        &[("AGENT_CAMPAIGN_OWNER", token)],
+    );
+
+    assert_eq!(code, 4, "exit code; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("not implemented"),
+        "stderr must name the stub, got:\n{stderr}"
+    );
+    assert!(!stderr.contains(token), "the token leaked:\n{stderr}");
+    assert!(stdout.is_empty(), "stdout must be empty, got:\n{stdout}");
+}
+
+/// A bad `--task` (zero, a word) is an argument error (1), never a worker exit.
+#[test]
+fn negative_run_task_bad_task_id() {
+    let ws = TempWorkspace::new("run-task-bad-id");
+    let missing_cfg = ws.path("does-not-exist.toml");
+    for bad in ["0", "abc", "../1"] {
+        let (code, _, stderr) = run_agent_env(
+            &missing_cfg,
+            &ws,
+            &["--run-task", "--tenant", "t", "--task", bad],
+            &[("AGENT_CAMPAIGN_OWNER", "0123456789abcdef0123456789abcdef")],
+        );
+        assert_eq!(code, 1, "--task {bad:?}; stderr:\n{stderr}");
+        assert!(stderr.contains("task ref"), "--task {bad:?}: {stderr}");
+    }
+}
+
+/// `agent campaign run` (the resident driver) is refused unless `[campaign]
+/// enabled`, naming the key — after the config load and before any store opens,
+/// so an unroutable Postgres DSN is never dialed (the process returns in seconds).
+#[test]
+fn negative_campaign_run_disabled_bails_naming_enabled() {
+    let ws = TempWorkspace::new("campaign-run-disabled");
+    let cfg = write_config(
+        &ws,
+        "http://127.0.0.1:1/v1",
+        r#"
+[config_store]
+backend = "postgres"
+dsn_ref = "env:AGENT_CONFIG_STORE_DSN"
+
+[campaign]
+store = "postgres"
+"#,
+    );
+
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_agent_env(
+        &cfg,
+        &ws,
+        &["campaign", "run"],
+        &[("AGENT_CONFIG_STORE_DSN", "postgres://x:x@127.0.0.1:1/x")],
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(code, 1, "exit code; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("[campaign] enabled"),
+        "stderr must name the key, got:\n{stderr}"
+    );
+    assert!(stdout.is_empty(), "stdout must be empty, got:\n{stdout}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the refusal must come before any dial ({elapsed:?})"
     );
 }

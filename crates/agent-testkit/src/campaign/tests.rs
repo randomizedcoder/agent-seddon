@@ -4,7 +4,7 @@
 use super::conformance::Harness;
 use super::MemCampaigns;
 use agent_core::campaign::{
-    Actor, CampaignError, CampaignStore, NewCampaign, Policy, TaskId, TaskState,
+    Actor, CampaignBackend, CampaignError, CampaignStore, NewCampaign, Policy, TaskId, TaskState,
 };
 use agent_core::UserId;
 use rstest::rstest;
@@ -109,6 +109,30 @@ fn positive_debug_names_tenant_only() {
     let store = MemCampaigns::new().with_tenant("ta").unwrap();
     let dbg = format!("{store:?}");
     assert!(dbg.contains("ta") && !dbg.contains("tasks"), "{dbg}");
+}
+
+/// T6 `adversarial_tenants_never_unsafe` (mem-only: no real tier can write such a
+/// row — `with_tenant` refuses it before any statement — so the store is planted
+/// through the doc-hidden unchecked constructor): a live node under a tenant that
+/// is not a `safe_segment` is dropped from `CampaignBackend::tenants`, and the
+/// backend's `with_tenant` refuses to open it.
+#[tokio::test]
+async fn adversarial_tenants_never_unsafe() {
+    let base = MemCampaigns::new();
+    for bad in ["../x", "-x", "a/b", "a'; DROP TABLE tasks; --"] {
+        let planted = base.with_tenant_unchecked(bad);
+        planted.create(campaign("planted"), &user()).await.unwrap();
+        assert!(
+            CampaignBackend::with_tenant(&base, bad).is_err(),
+            "{bad:?} must be refused"
+        );
+    }
+    let ok = base.with_tenant("ta").unwrap();
+    ok.create(campaign("legit"), &user()).await.unwrap();
+    assert_eq!(
+        CampaignBackend::tenants(&base).await.unwrap(),
+        vec!["ta".to_string()]
+    );
 }
 
 // The shared rows (`06-test-matrix.md` T3–T8) against `MemCampaigns`:

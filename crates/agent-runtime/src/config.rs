@@ -510,11 +510,12 @@ fn default_claim_ttl_secs() -> u64 {
 }
 
 /// Campaigns (`[campaign]`, design track `docs/design/campaigns/`): the planner and
-/// the `agent campaign …` CLI (CP-04). Empty `store` = off, and every `agent campaign`
-/// verb refuses with a hint. `"postgres"` reuses `[config_store] dsn_ref` for its DSN,
-/// like the scheduler and digest tiers — there is deliberately no `dsn_ref` here
-/// (`04-executor.md`). The driver's tick / worker keys land in CP-05. Validated at
-/// config load, so the CLI, `doctor` and `--check-config` all refuse a bad block.
+/// the `agent campaign …` CLI (CP-04) and the resident driver (CP-05). Empty `store`
+/// = off, and every `agent campaign` verb refuses with a hint. `"postgres"` reuses
+/// `[config_store] dsn_ref` for its DSN, like the scheduler and digest tiers — there
+/// is deliberately no `dsn_ref` here (`04-executor.md`). The worker's own keys
+/// (`worker_model`, `poll_batch`) land with the worker in CP-06. Validated at config
+/// load, so the CLI, `doctor` and `--check-config` all refuse a bad block.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
@@ -526,6 +527,29 @@ pub struct CampaignCfg {
     /// when `[config_store] migrate_on_start`.
     #[serde(default)]
     pub store: String,
+    /// Whether the resident driver (`agent campaign run`) may run; `true` needs a
+    /// `store`. `run --once` ignores it (an explicit human action).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Seconds between resident driver ticks, [`CampaignCfg::TICK_SECS`].
+    #[serde(default = "default_campaign_tick_secs")]
+    pub tick_secs: u64,
+    /// Concurrent workers per tenant, [`CampaignCfg::PER_TENANT_WORKERS`].
+    #[serde(default = "default_campaign_per_tenant_workers")]
+    pub per_tenant_workers: usize,
+    /// Concurrent workers across every tenant, [`CampaignCfg::GLOBAL_WORKERS`]. Not
+    /// cross-checked against `per_tenant_workers`: several tenants may together
+    /// exceed one tenant's share.
+    #[serde(default = "default_campaign_global_workers")]
+    pub global_workers: usize,
+    /// How a worker runs: `"subprocess"` (`agent --run-task` under the sandbox) or
+    /// `"in_process"`; validated here, dispatched by the worker increment (CP-06).
+    #[serde(default = "default_campaign_sandbox")]
+    pub sandbox: String,
+    /// Wall clock per worker in seconds, [`CampaignCfg::WORKER_TIMEOUT_SECS`]; past
+    /// it the leaf is failed with cause `timeout`.
+    #[serde(default = "default_campaign_worker_timeout_secs")]
+    pub worker_timeout_secs: u64,
     /// Connection-pool ceiling for the campaign store's own pool (`postgres` only),
     /// [`CampaignCfg::POOL_MAX`].
     #[serde(default = "default_campaign_pool_max")]
@@ -561,6 +585,16 @@ impl CampaignCfg {
     pub const PLAN_PER_TICK: std::ops::RangeInclusive<usize> = 0..=32;
     /// Accepted `max_repairs`.
     pub const MAX_REPAIRS: std::ops::RangeInclusive<usize> = 0..=5;
+    /// Accepted `tick_secs`.
+    pub const TICK_SECS: std::ops::RangeInclusive<u64> = 5..=3_600;
+    /// Accepted `per_tenant_workers`.
+    pub const PER_TENANT_WORKERS: std::ops::RangeInclusive<usize> = 1..=32;
+    /// Accepted `global_workers`.
+    pub const GLOBAL_WORKERS: std::ops::RangeInclusive<usize> = 1..=256;
+    /// Accepted `worker_timeout_secs`.
+    pub const WORKER_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 60..=86_400;
+    /// Accepted `sandbox` values.
+    pub const SANDBOXES: [&'static str; 2] = ["subprocess", "in_process"];
 
     /// Load-time shape checks. Values are operator input, but a hostile config must
     /// still fail closed rather than reach a `safe_segment`-less path or an unbounded
@@ -574,6 +608,47 @@ impl CampaignCfg {
                     agent_core::campaign::truncate_chars(other, 40)
                 ))
             }
+        }
+        if self.enabled && self.store.trim().is_empty() {
+            return Err("`[campaign] enabled` = true needs `[campaign] store`".into());
+        }
+        if !Self::TICK_SECS.contains(&self.tick_secs) {
+            return Err(format!(
+                "`[campaign] tick_secs` = {} is outside {}..={}",
+                self.tick_secs,
+                Self::TICK_SECS.start(),
+                Self::TICK_SECS.end()
+            ));
+        }
+        if !Self::PER_TENANT_WORKERS.contains(&self.per_tenant_workers) {
+            return Err(format!(
+                "`[campaign] per_tenant_workers` = {} is outside {}..={}",
+                self.per_tenant_workers,
+                Self::PER_TENANT_WORKERS.start(),
+                Self::PER_TENANT_WORKERS.end()
+            ));
+        }
+        if !Self::GLOBAL_WORKERS.contains(&self.global_workers) {
+            return Err(format!(
+                "`[campaign] global_workers` = {} is outside {}..={}",
+                self.global_workers,
+                Self::GLOBAL_WORKERS.start(),
+                Self::GLOBAL_WORKERS.end()
+            ));
+        }
+        if !Self::SANDBOXES.contains(&self.sandbox.trim()) {
+            return Err(format!(
+                "`[campaign] sandbox` = {:?} is not one of \"subprocess\", \"in_process\"",
+                agent_core::campaign::truncate_chars(self.sandbox.trim(), 40)
+            ));
+        }
+        if !Self::WORKER_TIMEOUT_SECS.contains(&self.worker_timeout_secs) {
+            return Err(format!(
+                "`[campaign] worker_timeout_secs` = {} is outside {}..={}",
+                self.worker_timeout_secs,
+                Self::WORKER_TIMEOUT_SECS.start(),
+                Self::WORKER_TIMEOUT_SECS.end()
+            ));
         }
         if !Self::POOL_MAX.contains(&self.pool_max) {
             return Err(format!(
@@ -652,6 +727,12 @@ impl Default for CampaignCfg {
     fn default() -> Self {
         Self {
             store: String::new(),
+            enabled: false,
+            tick_secs: default_campaign_tick_secs(),
+            per_tenant_workers: default_campaign_per_tenant_workers(),
+            global_workers: default_campaign_global_workers(),
+            sandbox: default_campaign_sandbox(),
+            worker_timeout_secs: default_campaign_worker_timeout_secs(),
             pool_max: default_campaign_pool_max(),
             planner_model: String::new(),
             plan_per_tick: default_campaign_plan_per_tick(),
@@ -670,6 +751,21 @@ fn default_campaign_plan_per_tick() -> usize {
 }
 fn default_campaign_max_repairs() -> usize {
     2
+}
+fn default_campaign_tick_secs() -> u64 {
+    30
+}
+fn default_campaign_per_tenant_workers() -> usize {
+    2
+}
+fn default_campaign_global_workers() -> usize {
+    8
+}
+fn default_campaign_sandbox() -> String {
+    "subprocess".to_string()
+}
+fn default_campaign_worker_timeout_secs() -> u64 {
+    3_600
 }
 
 /// Remote code-collaboration platform (the `Forge` seam, parity spec 27).
@@ -4438,6 +4534,59 @@ mod tests {
     #[case::negative_plan_per_tick_33("plan_per_tick = 33", Err("plan_per_tick"))]
     #[case::boundary_max_repairs_5("max_repairs = 5", Ok(()))]
     #[case::negative_max_repairs_6("max_repairs = 6", Err("max_repairs"))]
+    // The CP-05 driver keys (T11 `boundary_config_floor` / `boundary_config_ceiling`).
+    #[case::positive_driver_keys(
+        r#"
+        store = "postgres"
+        enabled = true
+        tick_secs = 10
+        per_tenant_workers = 4
+        global_workers = 16
+        sandbox = "in_process"
+        worker_timeout_secs = 600
+        "#,
+        Ok(())
+    )]
+    #[case::boundary_config_floor_ok(
+        "tick_secs = 5\nworker_timeout_secs = 60\nper_tenant_workers = 1\nglobal_workers = 1",
+        Ok(())
+    )]
+    #[case::boundary_config_ceiling_ok(
+        "tick_secs = 3600\nworker_timeout_secs = 86400\nper_tenant_workers = 32\nglobal_workers = 256",
+        Ok(())
+    )]
+    #[case::boundary_config_floor_tick_secs("tick_secs = 4", Err("tick_secs"))]
+    #[case::boundary_config_floor_worker_timeout(
+        "worker_timeout_secs = 59",
+        Err("worker_timeout_secs")
+    )]
+    #[case::boundary_config_floor_per_tenant_workers(
+        "per_tenant_workers = 0",
+        Err("per_tenant_workers")
+    )]
+    #[case::boundary_config_floor_global_workers("global_workers = 0", Err("global_workers"))]
+    #[case::boundary_config_ceiling_global_workers("global_workers = 257", Err("global_workers"))]
+    #[case::boundary_config_ceiling_per_tenant_workers(
+        "per_tenant_workers = 33",
+        Err("per_tenant_workers")
+    )]
+    #[case::boundary_config_ceiling_tick_secs("tick_secs = 3601", Err("tick_secs"))]
+    #[case::boundary_config_ceiling_worker_timeout(
+        "worker_timeout_secs = 86401",
+        Err("worker_timeout_secs")
+    )]
+    #[case::negative_sandbox_unknown(r#"sandbox = "docker""#, Err("sandbox"))]
+    #[case::corner_sandbox_padded(r#"sandbox = " in_process ""#, Ok(()))]
+    #[case::adversarial_sandbox_huge_is_truncated_in_the_error(
+        r#"sandbox = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx""#,
+        Err("sandbox")
+    )]
+    #[case::adversarial_sandbox_control_chars(
+        "sandbox = \"subprocess\\u001b[31m\"",
+        Err("sandbox")
+    )]
+    #[case::negative_enabled_without_store("enabled = true", Err("enabled"))]
+    #[case::corner_enabled_false_without_store("enabled = false", Ok(()))]
     #[case::negative_unknown_store(r#"store = "sqlite""#, Err("store"))]
     #[case::corner_store_padded(r#"store = " postgres ""#, Ok(()))]
     #[case::adversarial_store_huge_is_truncated_in_the_error(
@@ -4523,6 +4672,12 @@ mod tests {
     fn positive_campaign_defaults_match_the_shipped_reference() {
         let cfg = CampaignCfg::default();
         assert_eq!(cfg.store, "");
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.tick_secs, 30);
+        assert_eq!(cfg.per_tenant_workers, 2);
+        assert_eq!(cfg.global_workers, 8);
+        assert_eq!(cfg.sandbox, "subprocess");
+        assert_eq!(cfg.worker_timeout_secs, 3_600);
         assert_eq!(cfg.pool_max, 4);
         assert_eq!(cfg.planner_model, "");
         assert_eq!(cfg.plan_per_tick, 4);
@@ -4530,6 +4685,22 @@ mod tests {
         assert_eq!(cfg.repo_root, "");
         assert!(cfg.repos.is_empty());
         assert_eq!(cfg.validate(), Ok(()));
+        // The shipped `[campaign]` block is these defaults, key for key.
+        let toml = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/agent.toml"
+        ))
+        .expect("read reference config");
+        let shipped = crate::parse_config(&toml).expect("parse reference config");
+        assert_eq!(shipped.campaign.enabled, cfg.enabled);
+        assert_eq!(shipped.campaign.tick_secs, cfg.tick_secs);
+        assert_eq!(shipped.campaign.per_tenant_workers, cfg.per_tenant_workers);
+        assert_eq!(shipped.campaign.global_workers, cfg.global_workers);
+        assert_eq!(shipped.campaign.sandbox, cfg.sandbox);
+        assert_eq!(
+            shipped.campaign.worker_timeout_secs,
+            cfg.worker_timeout_secs
+        );
     }
 
     #[rstest::rstest]

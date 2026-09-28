@@ -78,6 +78,9 @@ impl CampaignStore for Overlay {
     async fn reap(&self) -> CampaignResult<Vec<Reaped>> {
         self.inner.reap().await
     }
+    async fn reap_decomposing(&self, max_age_secs: i64) -> CampaignResult<Vec<TaskId>> {
+        self.inner.reap_decomposing(max_age_secs).await
+    }
     async fn start(&self, task: TaskId, owner: &Owner) -> CampaignResult<Task> {
         self.inner.start(task, owner).await
     }

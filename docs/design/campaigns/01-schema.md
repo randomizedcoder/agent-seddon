@@ -216,5 +216,10 @@ are sufficient.
 ## Deferred
 
 - Postgres row-level security across all Pg tiers: RK-14, multi-tenancy plane 02.
+- A partial index `tasks_live (tenant) WHERE state IN ('ready', 'decomposing', 'claimed',
+  'running', 'in_review')` for the driver's tenant discovery (CP-05 `CampaignBackend::tenants`:
+  one `SELECT DISTINCT tenant … WHERE state = ANY (live)` per tick). A sequential scan is cheap
+  at ≤ 200 nodes per campaign; add the index in a later migration when campaigns number in the
+  thousands.
 - A `campaigns` view (`SELECT … WHERE depth = 0`) for listing: trivial, added in CP-04 if the
   CLI wants it.
