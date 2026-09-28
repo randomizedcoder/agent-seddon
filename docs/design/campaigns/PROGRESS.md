@@ -71,7 +71,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 | Item | State | Notes |
 |---|---|---|
-| 1. `is_hidden_control` pub; `display::escape_terminal` + rows; `PgCampaigns::ensure_migrated` | ⬜ | |
+| 1. `is_hidden_control` pub; `display::escape_terminal` + rows; `PgCampaigns::ensure_migrated` | ✅ | `agent_core::is_hidden_control` is `pub` (re-exported by `pub use security::*`) so the renderer shares the one table; `escape_terminal` rewrites every `char::is_control` (C0, DEL, C1) and hidden/bidi char as `\u{..}` — 18 rstest rows (`positive_` plain / unicode / empty, `adversarial_` ANSI SGR, OSC + BEL, CRLF, bidi override + isolate, zero-width, C1 CSI, tag block, NUL, inner BOM, `boundary_` DEL / last C0, `corner_tab`) each asserting no control survives, plus `boundary_escape_terminal_output_bounded` (≤ 10 B/char); `PgCampaigns::ensure_migrated(&self)` = `run_migrations` on the store's own pool for the lazy CLI path, with the live row `positive_ensure_migrated_on_lazy_store` (lazy pool → ensure twice → one ledger row → usable under a tenant) |
 | 2. `CampaignCfg` + `Config.campaign` + validator; `config/agent.toml` block; config tests | ⬜ | |
 | 3. runtime features / dep, `mod dsn` list, `campaign.rs` resolver, planner provider on `Agent`; `multi-tenant.toml`; fixture 10; cli-help require | ⬜ | |
 | 4. `campaign_cli.rs` parse + refs + tests; `Mode::Campaign`, parser arm, help, `--check-config`; e2e rows | ⬜ | |

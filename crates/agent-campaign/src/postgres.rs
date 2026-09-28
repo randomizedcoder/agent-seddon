@@ -335,6 +335,13 @@ impl PgCampaigns {
         self
     }
 
+    /// Apply the embedded migrations to this store's pool: [`Self::run_migrations`] for
+    /// a store built with [`Self::connect_lazy`] (the CLI opens lazily so a config check
+    /// never dials, then migrates on the first real verb). Idempotent.
+    pub async fn ensure_migrated(&self) -> CampaignResult<()> {
+        Self::run_migrations(&self.pool).await
+    }
+
     /// Apply the embedded [`MIGRATIONS`] set exactly once, in order, under a
     /// transaction-scoped advisory lock (concurrent starters serialize; the second sees
     /// a full ledger and no-ops). DDL is transactional, so a step and its ledger row
