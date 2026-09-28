@@ -2,7 +2,7 @@
 
 ## `CampaignDriver::tick`
 
-Mirrors `SchedulerDriver::tick_with_exec` (`crates/agent-runtime/src/scheduler_driver.rs:233-288`):
+Mirrors `SchedulerDriver::tick_with_exec` (`crates/agent-runtime/src/scheduler_driver.rs:233-290`):
 tenants in rotated order (`rotated_tenants`, `:208`), a `JoinSet` and `Semaphore`s (`:43-44,266`).
 
 ```
@@ -29,11 +29,77 @@ built from `PgCampaigns::with_tenant`, exactly like the scheduler's `StoreSchedu
 (`crates/agent-scheduler/src/store.rs:123`). A store error for one tenant is logged and the tick
 continues with the next tenant; permits are released by drop.
 
+**As built in CP-05** (`agent_campaign::driver`, `crates/agent-campaign/src/driver/mod.rs`;
+runtime wiring `crates/agent-runtime/src/campaign_driver.rs`; CLI `agent campaign run [--once]`
+in `crates/agent-cli/src/campaign_cli.rs`). The tick is a pure `Driver` over seams so T11 runs
+it on `MemCampaigns` with doubles: the tenants come from a `CampaignBackend`
+(`agent_core::campaign`; `tenants()` = `SELECT DISTINCT tenant FROM tasks WHERE state = ANY
+(live)` over `ready | decomposing | claimed | running | in_review`, results `safe_segment`-filtered,
+`with_tenant(t)` the bound store — the config store's `tenants()` counts config cards, which
+campaigns never write), the plan phase is a `TickPlanner` (`FactoryPlanner` builds a CP-03
+`Planner` per tenant per tick and runs the CLI's own loop: one `plannable` read, `plan_node` per
+node), the poll phase a `PrPoller` (`NoopPoller`, zeros and no store call, until CP-06's forge
+poller; the batch is the const `POLL_BATCH = 20` until `poll_batch` lands with it), the worker a
+`WorkerExec`. Deviations from the sketch above, each for a reason:
+
+- **The tick does not join its workers.** A leaf may legitimately run for `worker_timeout_secs`;
+  a tick that waited on it would stop reaping and planning for every other tenant. The `JoinSet`
+  and both semaphores persist on the `Driver`; each tick first *harvests* the workers that
+  finished since the last one, `running(tenant)` is the tenant semaphore's permits in use, and
+  the claim limit per tenant is `min(free per-tenant permits, remaining global budget)`, so
+  permit acquisition (tenant first, then global) never waits. `Driver::drain(deadline)` joins with
+  a deadline for once-mode, tests and shutdown; whatever it aborts holds a lease that expires and
+  `reap()` returns to `ready`.
+- **The shipped CP-05 driver has no exec, so its claim phase is off.** `fail` blocks dependents
+  and rolls parents to `blocked`, so a stub that failed every leaf would wreck CP-04's `add →
+  run --once → show`; instead `run --once` prints `claimed 0  dispatched 0  (workers: CP-06)`
+  and nothing is burned. When an exec is wired (tests: `ClosureExec`; CP-06: the subprocess), a
+  worker that returns `Err`, times out (`tokio::time::timeout` inside the spawned task, permits
+  held through the settle write) or panics is settled by the driver — `claimed → running →
+  failed` (or `running → failed`) under its owner, cause `error` / `timeout`, error text cut to
+  `MAX_ERROR` — and a worker that already wrote its own terminal state is left alone
+  (`LeaseLost` / `Conflict` swallowed with a warning).
+- **A second reaper: `CampaignStore::reap_decomposing(max_age_secs)`.** A planner that dies
+  between `plan_start` and its close cannot run the best-effort close (`03-decomposition.md`), so
+  every non-leaf `decomposing` for longer than the bound (`DECOMPOSING_MAX_SECS = 900`, clamped
+  like a lease) goes back to `ready` by `actor = reaper` with `detail.reason = plan_stale`, no
+  attempt touched (the planner's row is written inside the finishing transaction) — the new
+  `decomposing → ready | objective, task | reaper` row of `02-transactions.md`. A planner still
+  alive past the bound loses its CAS at the finishing write and writes nothing. Postgres uses
+  `FOR UPDATE SKIP LOCKED`, so a planner mid-write holds its row and is skipped.
+- `ClaimRequest.lease_secs` is `Policy::default().lease_secs` (a claim spans campaigns); the
+  per-campaign lease is honoured by the CP-06 heartbeat. Each tenant's phases run under
+  `agent_core::scope(SessionKey::parse(tenant, "campaign"))`, mirroring the scheduler driver, so
+  provider calls attribute to the tenant; actors are typed inside the stores (claim `driver:<owner>`,
+  reap `reaper`, planner `model:<attempt>`), so nothing here can spoof one. Tracing only
+  (`campaign.tick` span, one `info!` of counts per tick); metrics are CP-08.
+- **Subprocess dispatch moved to CP-06.** `EnvPolicy` is only `Inherit | Scrub`
+  (`agent-core/src/lib.rs`), so handing the owner token to the child through a per-exec
+  variable (never an argument: arguments are visible to every process on the host) needs a new
+  `ExecSpec.env_set` across `agent-core` / `agent-sandbox` / `agent-grpc` / `agent-proto`; with no
+  exec in CP-05 it would be dead plumbing. CP-05 lands what T11 needs: the `[campaign] sandbox`
+  key (validated, unused until CP-06) and the hidden **`agent --run-task --tenant T --task <id>`
+  stub** (`campaign_cli::run_task_stub`): `AGENT_CAMPAIGN_OWNER` (`CAMPAIGN_OWNER_ENV`) missing or
+  not a `safe_segment` ⇒ stderr `run-task: lease lost (owner missing)`, **exit 3**, before the
+  config is read; present ⇒ **exit 4** `run-task: worker not implemented (CP-06)`, store untouched.
+  The token is never printed. `--tenant` is validated fail-closed at parse, `--task` is an id
+  (`[1-9][0-9]{0,17}`), and after `--` both flags are goal words.
+- **CLI.** `agent campaign run` (resident) refuses unless `[campaign] enabled` — after the
+  config load, before any store opens, naming the key — then builds the driver (`build_driver`:
+  `[campaign]` keys → `DriverConfig`, tenants = `--tenant T`, else discovery under `[tenancy]
+  per_tenant`, else `local`), prints `campaign: ticking every Ns — ^C to stop`, and one line per
+  tick `tick: tenants n  reaped n  released n  planned n  claimed n  dispatched n  failed n
+  errors n`; on `^C` / `SIGTERM` it drains for `worker_timeout_secs`. `run --once` is `tick()` +
+  `drain()` over the one tenant the verb's store is bound to, `enabled` ignored, printing
+  `reaped n  released n`, CP-04's per-node plan lines and `plan:` summary, then `claimed n
+  dispatched n  failed n  (workers: CP-06)`.
+
 ## Dispatch
 
 `sandbox = "subprocess"` (default): `agent --run-task --tenant <T> --task <id>`, a hidden mode
-beside `--run-scheduled-job` (`crates/agent-cli/src/main.rs:761,327`), inheriting the same
-sandbox, config path and DSN resolution. The subprocess receives the owner token through an
+beside `--run-scheduled-job` (`crates/agent-cli/src/main.rs`, `parse_args_from` and
+`Mode::RunTask`; a stub in CP-05, see "As built" above), inheriting the same sandbox, config path
+and DSN resolution. The subprocess receives the owner token through an
 environment variable, not an argument (arguments are visible to every process on the host). Exit
 code 0 means the worker wrote its own terminal state; any other exit makes the driver call
 `fail(task, owner, 'worker exited <code>')`, which is a no-op `LeaseLost` if the worker already
@@ -125,9 +191,14 @@ with the keys the CLI needs — `store` (`""` | `"postgres"`), `pool_max` (`4`, 
 `planner_model`, `plan_per_tick` (`4`, `0..=32`), `max_repairs` (`2`, `0..=5`), `repo_root`
 (`""` = `[agent] working_dir`) and `[campaign.repos]` (slug → `repo_id` until RK-02). There is
 **no `dsn_ref`**: like the scheduler and digest tiers the store reuses `[config_store] dsn_ref`,
-so one secret reference names the one Postgres. `enabled`, `tick_secs`, the worker keys,
-`sandbox`, `worker_model`, `worker_timeout_secs` and `poll_batch` land with the driver (CP-05)
-and the workers (CP-06). Component doc: [`docs/components/campaigns.md`](../../components/campaigns.md).
+so one secret reference names the one Postgres. **CP-05** added the driver keys as tabled above
+— `enabled` (`false`; `true` needs a `store`; `run --once` ignores it), `tick_secs`,
+`per_tenant_workers`, `global_workers` (not cross-checked against `per_tenant_workers`: several
+tenants may together exceed one tenant's share), `sandbox` (validated, dispatched in CP-06) and
+`worker_timeout_secs` — each range-checked at load with an error under 200 chars naming the key
+(T11 `boundary_config_floor` / `boundary_config_ceiling` as `campaign_validate_cases` rows).
+`worker_model` and `poll_batch` land with the worker and the poller (CP-06). Component doc:
+[`docs/components/campaigns.md`](../../components/campaigns.md).
 
 ## Observability (CP-08)
 

@@ -33,7 +33,7 @@ for owner-token claims with TTL reclaim is the durable scheduler
 calls it before every write. The table is exhaustive: any pair not listed is denied. `kind` is
 the node's kind **before** the write, so the two "as `kind = leaf`" rows are the `task` rows
 they sit next to (listed for the reader, not counted twice). Expanded over `any` and
-`any non-terminal`, the table holds **82** `(from, to, kind, actor)` tuples out of
+`any non-terminal`, the table holds **84** `(from, to, kind, actor)` tuples out of
 13 × 13 × 3 × 8; T2 `boundary_exhaustive` asserts that count and the set. The actor classes
 are `user`, `model`, `planner`, `driver`, `worker`, `reaper`, `poller`, `rollup`; `model` (the
 LLM as a principal) is allowed nothing.
@@ -51,6 +51,7 @@ LLM as a principal) is allowed nothing.
 | `ready` | `cancelled` | any | user |
 | `decomposing` | `decomposed` | objective, task | planner (`split`) |
 | `decomposing` | `ready` | objective, task | planner (validation error, retry) |
+| `decomposing` | `ready` | objective, task | reaper (plan stale: `decomposing` for longer than `DECOMPOSING_MAX_SECS`, a planner that died before its close — CP-05 `reap_decomposing`; no attempt counted) |
 | `decomposing` | `awaiting_approval` | objective, task | planner (`needs_info`) |
 | `decomposing` | `blocked` | objective, task | planner (`reject`, attempts exhausted) |
 | `decomposing` | `cancelled` | any | user (protocol (f) while a planner call is in flight) |
@@ -297,6 +298,29 @@ SELECT $t, id, fs, 'ready', 'reaper', v, jsonb_build_object('lost_owner', o)
 FROM UNNEST($ids, $from_states, $versions, $owners) AS e (id, fs, v, o);
 UPDATE task_attempts SET outcome = 'lease_lost', ended_at = now()
 WHERE tenant = $t AND task_id = ANY ($ids) AND kind = 'work' AND outcome = 'pending';
+COMMIT;
+```
+
+Release stale plans (`reap_decomposing($bound)`, CP-05; the driver passes `DECOMPOSING_MAX_SECS =
+900`, clamped to `[60, 86400]` like a lease). A planner that died between `plan_start` and its
+close wrote no attempt row (the row lives in the finishing transaction), so nothing is closed and
+`attempts` is untouched; at exactly the bound the node holds, like a lease at `lease_until =
+now()`:
+
+```sql
+BEGIN;
+WITH stale AS (
+  SELECT task_id, version FROM tasks
+  WHERE tenant = $t AND state = 'decomposing' AND kind <> 'leaf'
+    AND updated_at + make_interval(secs => $bound) < now()
+  ORDER BY task_id FOR UPDATE SKIP LOCKED           -- a planner mid-write holds its row: skipped
+)
+UPDATE tasks u SET state = 'ready', version = version + 1, updated_at = now()
+FROM stale WHERE u.tenant = $t AND u.task_id = stale.task_id
+RETURNING u.task_id, u.version;
+INSERT INTO task_events (tenant, task_id, from_state, to_state, actor, version, detail)
+SELECT $t, id, 'decomposing', 'ready', 'reaper', v, '{"reason": "plan_stale"}'
+FROM UNNEST($ids, $versions) AS e (id, v);
 COMMIT;
 ```
 

@@ -174,7 +174,10 @@ the truth. `AlreadyApplied` at the write is reported as skipped. `Invalid | TooL
 the store (its re-check under the lock disagreed, e.g. a `max_nodes` race) close the same attempt
 as `error` (the failed transaction rolled its row back). A store error between `plan_start` and
 the close is answered with a best-effort `plan_close(error)` before it propagates, so the node is
-not left in `decomposing`; a reaper for nodes that still wedge is CP-05's.
+not left in `decomposing`; a node that still wedges (the process died first) is returned to
+`ready` by the driver's `reap_decomposing` (CP-05) once it has sat in `decomposing` for longer
+than `DECOMPOSING_MAX_SECS` (900 s) — actor `reaper`, `detail.reason = plan_stale`, no attempt
+counted, so the next tick simply plans it again.
 
 ## Human interaction points
 
