@@ -534,6 +534,33 @@ sandbox_dispatch = false
 job_timeout_secs = 3600
 claim_ttl_secs = 900
 
+# Campaigns (docs/design/campaigns/): a multi-PR objective the planner decomposes into
+# a task tree, driven by `agent campaign add | plan | list | show | approve | answer |
+# retry | replan | cancel | run --once`. store = "" (default) turns every verb off with
+# a hint; "postgres" (cargo feature campaign-postgres) reuses [config_store] dsn_ref —
+# there is deliberately no dsn_ref here — opens its pool lazily (a config check never
+# dials) and applies the campaign schema on the first verb when [config_store]
+# migrate_on_start. The driver's tick / worker keys land with CP-05.
+[campaign]
+store          = ""
+# Pool ceiling for the campaign store's own pool (1..=64).
+pool_max       = 4
+# Role routing: the provider the planner's decomposition calls use (a
+# [[route.upstreams]] name or a registry provider type); "" = the main provider. Also
+# the model label recorded on every planner attempt.
+planner_model  = ""
+# Nodes one `plan` / `run --once` tick decomposes (0..=32; 0 = reap only).
+plan_per_tick  = 4
+# Schema-repair round trips the planner allows per decision (0..=5).
+max_repairs    = 2
+# Repository root the fallback brief reads and `touches` resolve against; "" =
+# [agent] working_dir.
+repo_root      = ""
+# `--repo <slug>` → repo_id until RK-02 gives the store a repos table (keys are
+# path-safe segments, ids >= 1), e.g.
+#   [campaign.repos]
+#   agent-seddon = 1
+
 [forge]
 backend   = ""              # "" | "github" | "gitlab"
 # github:

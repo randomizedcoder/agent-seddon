@@ -93,6 +93,7 @@ pub use builder::{build_agent, build_agent_with};
 /// C29 config-ownership annotation: the (currently empty) set of tenant-writable
 /// `agent.toml` sections — every section is operator-global. See the fn's docs.
 pub use config::tenant_writable_config_sections;
+pub use config::CampaignCfg;
 pub use config::Config;
 #[cfg(feature = "recall")]
 pub use config::RecallCfg;
@@ -154,5 +155,6 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
             .map_err(anyhow::Error::msg)?;
     }
     cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
+    cfg.campaign.validate().map_err(anyhow::Error::msg)?;
     Ok((cfg, unknown))
 }
