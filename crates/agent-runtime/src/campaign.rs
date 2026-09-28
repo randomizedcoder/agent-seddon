@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use agent_core::campaign::CampaignStore;
+use agent_core::campaign::{CampaignBackend, CampaignStore};
 
 use crate::config::Config;
 
@@ -83,6 +83,46 @@ pub async fn open_campaign_store(
     }
 }
 
+/// Open the configured campaign store as the driver's multi-tenant
+/// [`CampaignBackend`] (`04-executor.md`, CP-05), or `Ok(None)` when `[campaign]
+/// store` is empty. The same lazy rules as [`open_campaign_store`]: nothing dials
+/// here, and the schema is applied only when `apply_migrations` **and**
+/// `[config_store] migrate_on_start`.
+pub async fn open_campaign_backend(
+    cfg: &Config,
+    apply_migrations: bool,
+) -> anyhow::Result<Option<Arc<dyn CampaignBackend>>> {
+    #[cfg(not(feature = "campaign-postgres"))]
+    let _ = apply_migrations;
+    match cfg.campaign.store.trim() {
+        "" => Ok(None),
+        #[cfg(feature = "campaign-postgres")]
+        "postgres" => {
+            use anyhow::Context as _;
+            let dsn = crate::dsn::resolve_dsn_ref(&cfg.config_store.dsn_ref).context(
+                "[campaign] store = \"postgres\" (DSN comes from [config_store] dsn_ref)",
+            )?;
+            let store = agent_campaign::PgCampaigns::connect_lazy(&dsn, cfg.campaign.pool_max)
+                .map_err(|e| anyhow::anyhow!("[campaign] postgres store: {e}"))?;
+            if apply_migrations && cfg.config_store.migrate_on_start {
+                store
+                    .ensure_migrated()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("[campaign] postgres migrations: {e}"))?;
+            }
+            Ok(Some(Arc::new(store)))
+        }
+        #[cfg(not(feature = "campaign-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[campaign] store = \"postgres\" needs the `campaign-postgres` build feature"
+        ),
+        other => anyhow::bail!(
+            "unknown [campaign] store `{}`",
+            agent_core::campaign::truncate_chars(other, 40)
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,17 +179,86 @@ mod tests {
             .err()
             .expect("postgres arm is not linked");
         assert!(err.to_string().contains("campaign-postgres"), "{err}");
+        let err = open_campaign_backend(&cfg_with_store("postgres"), false)
+            .await
+            .err()
+            .expect("postgres arm is not linked");
+        assert!(err.to_string().contains("campaign-postgres"), "{err}");
+    }
+
+    /// The driver's backend resolver mirrors the store resolver row for row.
+    mod backend {
+        use super::*;
+
+        #[tokio::test]
+        async fn corner_store_off_is_none() {
+            let got = open_campaign_backend(&cfg_with_store(""), false)
+                .await
+                .expect("off is not an error");
+            assert!(got.is_none());
+        }
+
+        #[rstest]
+        #[case::negative_unknown_store("sqlite")]
+        #[case::adversarial_unknown_store_huge(&"s".repeat(100_000))]
+        #[tokio::test]
+        async fn negative_unknown_store_bails_bounded(#[case] store: &str) {
+            let err = open_campaign_backend(&cfg_with_store(store), true)
+                .await
+                .err()
+                .expect("unknown store must fail closed");
+            let msg = err.to_string();
+            assert!(msg.contains("unknown [campaign] store"), "{msg}");
+            assert!(msg.len() < 200, "error is unbounded: {} bytes", msg.len());
+        }
+
+        #[cfg(feature = "campaign-postgres")]
+        #[tokio::test]
+        async fn positive_postgres_lazy_open_with_dummy_dsn() {
+            let cfg = super::postgres::pg_cfg(
+                "AGENT_CAMPAIGN_TEST_DSN_BACKEND_LAZY",
+                super::postgres::DUMMY_DSN,
+            );
+            let got = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                open_campaign_backend(&cfg, false),
+            )
+            .await
+            .expect("a lazy open never dials, so it cannot hang")
+            .expect("lazy open")
+            .expect("postgres is configured");
+            // The backend hands out tenant views and refuses unsafe segments
+            // before any statement, like the store resolver's `--tenant`.
+            assert_eq!(got.with_tenant("acme").unwrap().tenant(), "acme");
+            assert!(got.with_tenant("../x").is_err());
+        }
+
+        #[cfg(feature = "campaign-postgres")]
+        #[tokio::test]
+        async fn negative_postgres_missing_dsn_ref_bails() {
+            let mut cfg = cfg_with_store("postgres");
+            cfg.config_store.dsn_ref = String::new();
+            let err = open_campaign_backend(&cfg, false)
+                .await
+                .err()
+                .expect("no DSN reference");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("[campaign] store") && msg.contains("dsn_ref"),
+                "{msg}"
+            );
+        }
     }
 
     #[cfg(feature = "campaign-postgres")]
     mod postgres {
         use super::*;
 
-        const DUMMY_DSN: &str = "postgres://agent:unused@127.0.0.1:1/agent";
+        pub(super) const DUMMY_DSN: &str = "postgres://agent:unused@127.0.0.1:1/agent";
 
         /// A postgres config over an `env:` reference; the var is unique per test
         /// so the parallel runner cannot interleave them.
-        fn pg_cfg(var: &str, dsn: &str) -> Config {
+        pub(super) fn pg_cfg(var: &str, dsn: &str) -> Config {
             std::env::set_var(var, dsn);
             let mut cfg = cfg_with_store("postgres");
             cfg.config_store.dsn_ref = format!("env:{var}");

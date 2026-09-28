@@ -76,6 +76,7 @@ pub const ENUM_CHOICES: &[(&str, &[&str])] = &[
     ("pool.on_saturation", &["shed", "wait"]),
     ("digest.store", &["", "clickhouse", "sqlite"]),
     ("campaign.store", &["", "postgres"]),
+    ("campaign.sandbox", &["subprocess", "in_process"]),
     ("instant.relevance", &["", "llm", "keyword", "all"]),
     ("graph.store", &["file", "grpc", ""]),
     ("registry.store", &["file", "sqlite", "grpc", ""]),
