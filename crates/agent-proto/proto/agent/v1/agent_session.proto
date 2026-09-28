@@ -12,16 +12,36 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 service AgentSessionService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/agent-sessions/. The two
+  // observe RPCs are reads → GET (`session_id` rides as a query param, empty ⇒ the
+  // sole live session): `Subscribe` is server-streaming, so its GET emits a chunked
+  // JSON stream. `Send` DRIVES the agent (arbitrary execution, `--serve-mcp`-class)
+  // → POST body:*, server-streaming the run.
+  //
   // Live event stream. The first item is a `status_snapshot`, then the tail.
-  rpc Subscribe(SubscribeRequest) returns (stream SessionEvent);
+  rpc Subscribe(SubscribeRequest) returns (stream SessionEvent) {
+    option (google.api.http) = {get: "/v1/agent-sessions/events"};
+  }
   // The current session state, one-shot.
-  rpc Snapshot(SnapshotRequest) returns (StatusSnapshot);
+  rpc Snapshot(SnapshotRequest) returns (StatusSnapshot) {
+    option (google.api.http) = {get: "/v1/agent-sessions/snapshot"};
+  }
   // Submit a goal and stream the run live (same `SessionEvent` shape as Subscribe,
   // beginning with a `status_snapshot` and ending on `run_finished`). Dropping the
   // stream (client disconnect) cancels the in-flight run. `--serve-mcp`-class — see
   // the header note. UNIMPLEMENTED on an observe-only endpoint (no session driver).
-  rpc Send(GoalRequest) returns (stream SessionEvent);
+  rpc Send(GoalRequest) returns (stream SessionEvent) {
+    option (google.api.http) = {
+      post: "/v1/agent-sessions/send"
+      body: "*"
+    };
+  }
 }
 
 // `session_id` selects which live session to observe when the server multiplexes

@@ -47,8 +47,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03a | `review_fleet.proto` (ReviewFleetService, 11 RPCs) | ✅ merged (#515) |
 | 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | ✅ merged (#517) |
 | 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ✅ merged (#519) |
-| 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | 🟡 in flight |
-| 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ⬜ |
+| 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ✅ merged (#520) |
+| 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | 🟡 in flight |
 | 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ⬜ |
 | 03g | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto`, `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `graph.proto`, `digest.proto`, `reference.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (remaining seams) | ⬜ |
 
@@ -114,3 +114,19 @@ added, it fires as a reminder to list it here as gRPC-only.
   (GET lists, POST creates). Added 6 class-tagged coverage rows (revision-query-param read, first
   server-streaming annotation, nested-body Callers vs repeated-scalar BlastRadius, and the GET/POST
   shared-collection-path pair); the whole-set invariants cover the rest.
+- **03e (sessions: session / session-registry / agent-session / scheduler).** Annotated the four
+  session-family services under distinct areas so their routes never overlap: `SessionService`
+  (`/v1/sessions/`, the content-addressed checkpoint STORE), `SessionRegistryService`
+  (`/v1/session-registry/`, lifecycle), `AgentSessionService` (`/v1/agent-sessions/`, live view + drive),
+  and `SchedulerService` (`/v1/scheduler/`). New shapes: (1) **a nested composite-key DELETE** — a session
+  is keyed by `(user, session_id)`, so `Close` → DELETE `users/{user}/sessions/{session_id}` (two path
+  params, deeper than the prompt read); `Open`/`Heartbeat` nest the same way. (2) **server-streaming
+  splits by read-vs-action** — `AgentSessionService.Subscribe` is a server-streaming *read* → GET (the
+  first GET-streaming route), while `Send` (drives the agent, `--serve-mcp`-class) and the reindex RPCs
+  are server-streaming *actions* → POST. This closes the streaming set: all five server-streaming RPCs
+  (`Search.Reindex`, `Ast.Reindex`, `AgentSession.Subscribe`, `AgentSession.Send`, and the still-pending
+  `Provider.Stream` in 03g) are accounted for; none is gRPC-only. `SessionService` follows the canonical
+  collection triple (`checkpoints`: POST create / GET list / GET `/{id}` item), head-mutations → POST;
+  `SchedulerService` maps `Cancel` → DELETE `/jobs/{id}` and `History` → GET `/jobs/{id}/runs`. Added 5
+  class-tagged coverage rows (composite-key nested DELETE, server-streaming read → GET, drive → POST,
+  Cancel-as-DELETE, sub-resource read); the whole-set invariants cover the rest.

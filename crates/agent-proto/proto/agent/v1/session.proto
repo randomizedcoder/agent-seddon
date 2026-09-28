@@ -10,24 +10,65 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 service SessionService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/sessions/. This is the
+  // content-addressed checkpoint STORE: `checkpoints` is the collection — POST
+  // creates one, GET lists a session's tree (`?session=`), GET `/{id}` rehydrates
+  // one (a checkpoint id is a content hash, path-safe). `Diff` is a scalar read →
+  // GET; the head-mutating actions (`Branch`/`Undo`/`Fork`/`Prune`) → POST body:*.
+  //
   // Append an immutable checkpoint; same content + parent + label ⇒ same id.
-  rpc Checkpoint(SessionCheckpointRequest) returns (SessionCheckpointRef);
+  rpc Checkpoint(SessionCheckpointRequest) returns (SessionCheckpointRef) {
+    option (google.api.http) = {
+      post: "/v1/sessions/checkpoints"
+      body: "*"
+    };
+  }
   // The branch tree: every checkpoint reachable from any head.
-  rpc List(SessionRef) returns (SessionCheckpointList);
+  rpc List(SessionRef) returns (SessionCheckpointList) {
+    option (google.api.http) = {get: "/v1/sessions/checkpoints"};
+  }
   // Rehydrate the working set stored at an id.
-  rpc Restore(SessionCheckpointRef) returns (WorkingSet);
+  rpc Restore(SessionCheckpointRef) returns (WorkingSet) {
+    option (google.api.http) = {get: "/v1/sessions/checkpoints/{id}"};
+  }
   // Create a new branch head off a checkpoint (and switch to it).
-  rpc Branch(SessionBranchRequest) returns (SessionBranchResponse);
+  rpc Branch(SessionBranchRequest) returns (SessionBranchResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/branches"
+      body: "*"
+    };
+  }
   // Move the current head back n turns; returns the new head id.
-  rpc Undo(SessionUndoRequest) returns (SessionCheckpointRef);
+  rpc Undo(SessionUndoRequest) returns (SessionCheckpointRef) {
+    option (google.api.http) = {
+      post: "/v1/sessions/undo"
+      body: "*"
+    };
+  }
   // Fork into an independent session sharing the immutable objects.
-  rpc Fork(SessionRef) returns (SessionRef);
+  rpc Fork(SessionRef) returns (SessionRef) {
+    option (google.api.http) = {
+      post: "/v1/sessions/fork"
+      body: "*"
+    };
+  }
   // The message/turn delta between two checkpoints.
-  rpc Diff(SessionDiffRequest) returns (SessionCheckpointDiff);
+  rpc Diff(SessionDiffRequest) returns (SessionCheckpointDiff) {
+    option (google.api.http) = {get: "/v1/sessions/diff"};
+  }
   // GC checkpoints unreachable from any live head; returns the count reclaimed.
-  rpc Prune(SessionRef) returns (SessionPruneResponse);
+  rpc Prune(SessionRef) returns (SessionPruneResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/prune"
+      body: "*"
+    };
+  }
 }
 
 // A content-addressed checkpoint id.
