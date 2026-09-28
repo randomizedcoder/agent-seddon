@@ -49,10 +49,13 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ✅ merged (#519) |
 | 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ✅ merged (#520) |
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ✅ merged (#522) |
-| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | 🟡 in flight |
-| 03g | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto`, `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `graph.proto`, `digest.proto`, `reference.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (remaining seams) | ⬜ |
+| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ✅ merged (#523) |
+| 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | 🟡 in flight |
+| 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | ⬜ |
+| 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | ⬜ |
 
-(Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR.)
+(Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR. The original
+16-proto `03g` was split into three reviewable sub-batches — smaller PRs.)
 
 ## Implementation log (as-built deviations)
 
@@ -147,3 +150,15 @@ added, it fires as a reminder to list it here as gRPC-only.
   same seam, same loopback/UDS confinement. Added 6 class-tagged coverage rows (name-in-path + body,
   exec action, pty cursor read → GET, numeric path param, collection-level DELETE, write under a numeric
   parent); the whole-set invariants cover the rest.
+- **03g1 (LLM plane: provider / llm-pool / embed / tokenizer).** Annotated `Provider`
+  (`/v1/provider/`), `LlmPoolService` (`/v1/llm-pool/`), `EmbedService` (`/v1/embed/`), and
+  `TokenizerService` (`/v1/tokenizer/`). `Provider.Stream` is the **last of the five server-streaming
+  RPCs** → POST body:*, so the streaming set is now complete (none gRPC-only). New refinement
+  (documented in the README convention): **content-payload vs filter** — the repeated-scalar-stays-GET
+  rule is for *filters* (tags/globs/ids), but a repeated-scalar **content payload** (document bodies)
+  uses POST body:* since a query string carries selectors, not payloads: `EmbedService.EmbedDocs` →
+  POST `/v1/embed/docs`, while the single-query `EmbedQuery` stays GET `/v1/embed/query`. Nested-request
+  completions/counts → POST (`Provider.Complete`, `LlmPool.Complete`, `Tokenizer.CountMessages`); reads
+  → GET (`*.Capabilities`/`Health`, `Tokenizer.Count`). Added 5 class-tagged coverage rows (last
+  server-streaming → POST, nested complete → POST, content-payload EmbedDocs → POST vs single-query
+  EmbedQuery → GET, repeated-nested CountMessages → POST); the whole-set invariants cover the rest.
