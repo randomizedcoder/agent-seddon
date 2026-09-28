@@ -42,6 +42,30 @@ the portal hardcodes its identity.
 ([`docs/grpc.md`](../../grpc.md), "A person in a browser"). The agent generates the `nonce` and
 the single-use `state`; the portal generates only the PKCE verifier. The portal half is S13b.
 
+**As built (S13b).** The portal half, in
+[`portal/lib/src/auth/`](../../../portal/lib/src/auth/):
+
+- `PORTAL_AUTH` is `auto` by default, not `on`. `auto` asks `Issuers`; when the agent offers no
+  browser sign-in (or is older than S13a and answers `UNIMPLEMENTED`) the portal runs as before,
+  with no bearer. `on` insists on sign-in; `off` never asks. `PORTAL_REDIRECT_URI` overrides
+  the return address (default: the page's own origin and path), which must be in the agent's
+  `[auth] redirect_uris`.
+- The pending sign-in (`state`, verifier, issuer) and the session (token, expiry, refresh handle)
+  live in `sessionStorage`, one tab each. A callback whose `state` is not the one this tab
+  stored is never exchanged; the stored one is spent either way, and the query is stripped
+  before anything else happens. A reload with a live session confirms it with `WhoAmI`; a
+  lapsed one is refreshed.
+- `AccountStrip` at the foot of the navigation rail: who is signed in (tooltip) and sign out.
+- Capability-aware controls: Fleet Approve (`approve:review`), draft edits (`write:review`),
+  Review now (`trigger:fleet`), the enable switch (`write:fleet`); Router add / save / enable
+  (`write:registry`) and delete (`delete:registry`). `perms_ref` tokens show everything.
+  There is no Roles page yet.
+- The Agent tab's `OpenRequest.user` and `x-agent-user-id` carry the verified tenant (advisory).
+- Envoy's CORS `allow_headers` gains `authorization`, so the bearer survives the preflight; the
+  rest of the Envoy hardening is S14.
+- Native desktop cannot redirect, so it shows an error rather than a sign-in button that goes
+  nowhere. Reading the CLI's stored login (S12) there is a follow-up.
+
 ## Envoy hardening
 
 Same heredoc, env knobs with safe defaults:

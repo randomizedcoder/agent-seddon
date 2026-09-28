@@ -37,6 +37,18 @@ class PortalConfig {
   final String hyperdxUrl;
   final String prometheusUrl;
 
+  /// Browser sign-in (security-hardening S13b): `auto` (default) signs in when
+  /// the agent offers it (`AuthService.Issuers` lists an issuer) and runs
+  /// anonymously otherwise; `on` insists; `off` never asks (loopback dev).
+  final String authMode;
+
+  /// Offer only this login issuer (its `[[auth.issuers]]` name) when listed.
+  final String authIssuer;
+
+  /// The redirect URI sent to `Begin`; empty ⇒ the page's own address. Must be
+  /// one of the agent's `[auth] redirect_uris` exactly.
+  final String redirectUri;
+
   // Every endpoint is overridable at build time via `--dart-define=<KEY>=<value>`
   // (threaded through `nix run .#portal` / `.#portal-web` from env vars or flags —
   // see nix/portal/default.nix). `fromEnvironment` bakes the value at compile time,
@@ -91,5 +103,11 @@ class PortalConfig {
       'PORTAL_PROMETHEUS_URL',
       defaultValue: 'http://localhost:9090',
     ),
+    this.authMode = const String.fromEnvironment(
+      'PORTAL_AUTH',
+      defaultValue: 'auto',
+    ),
+    this.authIssuer = const String.fromEnvironment('PORTAL_AUTH_ISSUER'),
+    this.redirectUri = const String.fromEnvironment('PORTAL_REDIRECT_URI'),
   });
 }

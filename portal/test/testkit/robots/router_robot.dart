@@ -181,7 +181,15 @@ class RouterRobot extends Robot {
   /// Advance the fake clock past the timers a completed RPC leaves behind so
   /// none leaks past the test (`!timersPending`): the SnackBar's ~4 s
   /// auto-dismiss timer, and grpc-dart's HTTP/2 connection idle timeout (5 min).
+  ///
+  /// It first waits for any reload to land: a test's `pumpUntil(countOf('List')
+  /// >= 2)` holds as soon as the fake records the call, while the page is still
+  /// showing its spinner, and `pumpAndSettle` cannot finish a spinner whose reply
+  /// only arrives on the real event loop.
   Future<void> settle() async {
+    await pumpUntil(
+        () => find.byType(CircularProgressIndicator).evaluate().isEmpty,
+        reason: 'reload to land');
     await tester.pump(const Duration(seconds: 5));
     await tester.pump(const Duration(minutes: 6));
     await tester.pumpAndSettle();

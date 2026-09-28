@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../clients.dart';
 import '../gen/agent/v1/common.pb.dart';
 import '../gen/agent/v1/upstream.pb.dart';
+import '../auth/capabilities.dart';
 
 /// The **Router** tab: a live CRUD editor over the model-router / provider
 /// registry (`ProviderRegistryService`, `:50084`, hosted by the `--serve-all`
@@ -211,12 +212,15 @@ class _RouterPageState extends State<RouterPage> {
                     const Text('Upstreams',
                         style: TextStyle(fontWeight: FontWeight.bold)),
                     const Spacer(),
-                    FilledButton.tonalIcon(
-                      key: const Key('router.upstream.add'),
-                      onPressed: () => setState(() => _selected = Upstream()),
-                      icon: const Icon(Icons.add, size: 18),
-                      label: const Text('Add'),
-                    ),
+                    // Edits need `write` / `delete` on `registry`
+                    // (security-hardening S13b); the agent enforces it too.
+                    if (CapabilityScope.of(context).can('write', 'registry'))
+                      FilledButton.tonalIcon(
+                        key: const Key('router.upstream.add'),
+                        onPressed: () => setState(() => _selected = Upstream()),
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('Add'),
+                      ),
                   ],
                 ),
               ),
@@ -252,14 +256,19 @@ class _RouterPageState extends State<RouterPage> {
                                 Switch(
                                   key: Key('router.upstream.enable.${u.id}'),
                                   value: u.enabled,
-                                  onChanged: (v) => _toggleEnable(u, v),
+                                  onChanged: CapabilityScope.of(ctx)
+                                          .can('write', 'registry')
+                                      ? (v) => _toggleEnable(u, v)
+                                      : null,
                                 ),
-                                IconButton(
-                                  key: Key('router.upstream.delete.${u.id}'),
-                                  icon: const Icon(Icons.delete_outline),
-                                  tooltip: 'Delete',
-                                  onPressed: () => _delete(u),
-                                ),
+                                if (CapabilityScope.of(ctx)
+                                    .can('delete', 'registry'))
+                                  IconButton(
+                                    key: Key('router.upstream.delete.${u.id}'),
+                                    icon: const Icon(Icons.delete_outline),
+                                    tooltip: 'Delete',
+                                    onPressed: () => _delete(u),
+                                  ),
                               ],
                             ),
                             onTap: () => setState(() => _selected = u),
@@ -403,7 +412,9 @@ class _UpstreamEditorState extends State<_UpstreamEditor> {
             const Spacer(),
             FilledButton.icon(
               key: const Key('router.upstream.save'),
-              onPressed: () => widget.onSave(_build()),
+              onPressed: CapabilityScope.of(context).can('write', 'registry')
+                  ? () => widget.onSave(_build())
+                  : null,
               icon: const Icon(Icons.save, size: 18),
               label: const Text('Save'),
             ),

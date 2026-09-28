@@ -109,7 +109,9 @@ class AgentRobot extends Robot {
   /// but no events have arrived (transcript empty, not down).
   Future<void> pumpLoading() async {
     await pump();
-    await pumpUntil(() => log.fired(_subscribe),
+    // Wait for the server-side stream too, not just the recorded call: the fake
+    // records before it opens the stream.
+    await pumpUntil(() => log.fired(_subscribe) && session.lastSubscribe != null,
         reason: 'subscribe to be dialed');
   }
 

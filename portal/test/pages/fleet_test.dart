@@ -1,3 +1,4 @@
+import 'package:agent_portal/src/auth/capabilities.dart';
 import 'package:agent_portal/src/gen/agent/v1/review_fleet.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -380,6 +381,22 @@ void main() {
           await robot.selectReview('r1');
           expect(robot.detailLoaded, isTrue);
           expect(robot.textShown('image not loaded'), isTrue);
+          await robot.settle();
+
+        case 'adversarial_review_viewer_sees_no_approve_button':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.sessionListResponse = roster([session(id: 's1')]);
+          fake.getReviewResponse = body('# Body');
+          await robot.loadWith(
+              Capabilities.of(const ['read:review', 'read:fleet']));
+          await robot.selectReview('r1');
+          expect(robot.detailLoaded, isTrue);
+          expect(robot.exists('fleet.detail.approve'), isFalse);
+          expect(robot.textShown('read-only'), isTrue);
+          await robot.expandSessions();
+          expect(robot.exists('fleet.session.reviewNow.s1'), isFalse);
+          expect(robot.switchEnabled('fleet.session.enable.s1'), isFalse);
+          expect(robot.log.fired(approveRpc), isFalse);
           await robot.settle();
 
         default:

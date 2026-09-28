@@ -21,7 +21,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
 | S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
 | S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
-| S13b | Portal login + capability-aware UI | P0-4 | ⬜ | — |
+| S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
@@ -643,3 +643,35 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       an ID token and a code together, and sign-in with no `redirect_uris`.
     - Found by the tests: `with_code_flow(None)` dropped the whole `AuthService`; fixed before
       commit.
+- **2026-09-27 — S13b (#533).** Portal browser sign-in over S13a's RPCs.
+  - `AuthState` (`ChangeNotifier`) runs the flow: `Issuers` → PKCE verifier + `Begin` →
+    redirect → callback `?code&state` → `Exchange` → session in `sessionStorage` → refresh one
+    minute before expiry → a refused refresh signs out with "Your session has ended".
+  - `AuthInterceptor` adds the bearer to every unary and streaming call on every client.
+    `AuthPlatform` hides the browser (`package:web`: location, history, sessionStorage); native
+    and tests use `MemoryAuthPlatform`.
+  - `AuthGate` shows `LoginPage` until signed in, then the shell inside a `CapabilityScope`,
+    with an account strip on the navigation rail.
+  - Design change: `PORTAL_AUTH` defaults to `auto` (sign in when the agent offers it), so
+    deployments without `redirect_uris` keep working unchanged. `PORTAL_REDIRECT_URI` added.
+  - Envoy: `authorization` added to CORS `allow_headers` (needed now; the rest is S14).
+  - Only the `auth.*` Dart stubs were regenerated, to keep clear of the REST track's proto
+    annotations.
+  - Tests:
+    - `login_spec` / `login_test` over the real gate and interceptor against a fake
+      `AuthService`: round trip with the bearer on the shell's calls (none on sign-in RPCs),
+      refresh swaps the bearer, sign-out revokes with the bearer, stored-session resume,
+      `auto` / `off` run anonymously, refresh at `expires_at − 60` (and at once under a
+      minute). Adversarial: a mismatched or planted `state` is never exchanged; markup in
+      `?error=` is not echoed.
+    - `FakeGateway` now records request metadata, so bearer assertions are on the wire.
+    - Fleet: a `read:review`-only user sees no Approve, a read-only editor, no Review now and a
+      disabled switch.
+    - L0: the S256 vector matches the agent's; capability near-miss strings; the refresh delay;
+      the `PORTAL_AUTH` parser.
+  - Test de-flakes (the same hangs show on `main` under load): the fake `Subscribe` left an
+    unlistened controller when cancelled mid-handler, and teardown awaited its `close()` for
+    the full 10-minute timeout; the router `settle()` and graph `retry()` now wait for the
+    reload's reply, not just the recorded call; `portal-widget` runs `flutter test
+    --concurrency=4`.
+  - Deferred: native desktop sign-in (read the CLI's stored login), a Roles / bindings page.

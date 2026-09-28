@@ -222,4 +222,13 @@ const fleetSpec = PageSpec('fleet', [
     description: 'a remote image in the model-authored body never fetches',
     expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
   ),
+  SpecRow(
+    elementId: 'fleet.detail.approve',
+    caseClass: CaseClass.adversarial,
+    name: 'review_viewer_sees_no_approve_button',
+    description: 'a user holding only read permissions (security-hardening '
+        'S13b) gets no Approve button, no Review now, a disabled enable switch '
+        'and no editor; the agent still refuses a forged Approve',
+    expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
+  ),
 ]);

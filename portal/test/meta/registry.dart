@@ -2,6 +2,7 @@ import '../pages/agent_spec.dart';
 import '../pages/fleet_spec.dart';
 import '../pages/graph_spec.dart';
 import '../pages/launch_spec.dart';
+import '../pages/login_spec.dart';
 import '../pages/prompts_spec.dart';
 import '../pages/router_spec.dart';
 import '../pages/settings_spec.dart';
@@ -22,4 +23,5 @@ const allSpecs = <PageSpec>[
   routerSpec,
   fleetSpec,
   settingsSpec,
+  loginSpec,
 ];

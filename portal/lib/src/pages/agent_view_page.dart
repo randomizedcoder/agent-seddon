@@ -16,9 +16,14 @@ import '../gen/agent/v1/session_registry.pb.dart';
 /// Everything fails soft: a disconnected gateway greys the affected cell rather than
 /// blanking the view.
 class AgentViewPage extends StatefulWidget {
-  const AgentViewPage({super.key, required this.clients});
+  const AgentViewPage({super.key, required this.clients, this.tenant});
 
   final PortalClients clients;
+
+  /// The signed-in tenant (security-hardening S13b), sent as the advisory
+  /// `x-agent-user-id`; the agent takes the tenant from the token regardless.
+  /// `null` (or returning null) ⇒ the pre-sign-in `portal` identity.
+  final String? Function()? tenant;
 
   @override
   State<AgentViewPage> createState() => _AgentViewPageState();
@@ -88,13 +93,15 @@ class _AgentViewPageState extends State<AgentViewPage> {
   /// gateway requires it — with the session minted once via `SessionRegistry.Open` and
   /// reused, so follow-up goals continue the same conversation. Cancelling the stream
   /// (navigating away / a new goal) cancels the in-flight run server-side.
+  String get _user => widget.tenant?.call() ?? 'portal';
+
   Future<void> _send(String goal) async {
     final g = goal.trim();
     if (g.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
       _sessionId ??=
-          (await widget.clients.registry.open(OpenRequest(user: 'portal')))
+          (await widget.clients.registry.open(OpenRequest(user: _user)))
               .sessionId;
     } catch (_) {
       setState(() {
@@ -104,7 +111,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
       return;
     }
     final opts = grpc.CallOptions(metadata: {
-      'x-agent-user-id': 'portal',
+      'x-agent-user-id': _user,
       'x-agent-session-id': _sessionId!,
     });
     _sub?.cancel();

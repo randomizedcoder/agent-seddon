@@ -172,8 +172,12 @@ class GraphRobot extends Robot {
   Future<void> retry() async {
     await tester.runAsync(() async => tester.tap(byKey('graph.retry')));
     await tester.pump();
+    // Wait for the re-probe's reply to land (banner gone), not just for the call
+    // to be recorded: the fake records before it answers.
     await pumpUntil(
-        () => log.countOf('agent.v1.GraphService/DescribeNodeTypes') >= 2,
+        () =>
+            log.countOf('agent.v1.GraphService/DescribeNodeTypes') >= 2 &&
+            !hasServerBanner,
         reason: 'Retry re-probes node types');
     await tester.pumpAndSettle();
   }

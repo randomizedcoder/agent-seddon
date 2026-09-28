@@ -1,3 +1,4 @@
+import 'package:agent_portal/src/auth/capabilities.dart';
 import 'package:agent_portal/src/pages/fleet_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -120,6 +121,17 @@ class FleetRobot extends Robot {
     await pumpPage(FleetPage(clients: clients));
     await pumpUntil(() => isListLoaded || isError, reason: 'fleet list to settle');
   }
+
+  /// [load] with the signed-in user's [caps] in scope (security-hardening S13b).
+  Future<void> loadWith(Capabilities caps) async {
+    await pumpPage(CapabilityScope(
+        capabilities: caps, child: FleetPage(clients: clients)));
+    await pumpUntil(() => isListLoaded || isError, reason: 'fleet list to settle');
+  }
+
+  /// Whether a keyed [Switch] accepts taps.
+  bool switchEnabled(String key) =>
+      tester.widget<Switch>(byKey(key)).onChanged != null;
 
   /// The whole-view offline panel keys the `_OfflineRetry` widget, not its button
   /// — so the Retry button is addressed by its label text.
