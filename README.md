@@ -169,6 +169,24 @@ fact bundle a model can't hallucinate over
 ([design](docs/design/code-review/README.md)). A **tool-call verifier** seam can gate
 each call before it runs.
 
+Two more capabilities take the agent past a single interactive session. The
+**review-fleet** (`agent --serve-fleet`) is a long-running server that hosts many
+unattended review sessions: it watches Slack and polls a forge for non-draft pull
+requests, checks each one out in an isolated per-session workspace with scoped
+credentials, runs the grounded code-review flow above, and persists a draft review it
+can then approve and post — with a portal tab to see, edit, and approve drafts. It has
+been run end-to-end against a real GitHub PR
+([design](docs/design/review-fleet/README.md),
+[implementation](docs/design/review-fleet/IMPLEMENTATION.md),
+[status](docs/design/review-fleet/STATUS.md)). And the whole agent is **multi-tenant**:
+per-org process isolation (a bwrap `Sandbox` with read-only checkout, seccomp, and an
+egress allow-list), row-level data scoping in ClickHouse, and per-tenant config,
+model-router, and scheduler state — so one deployment can keep many tenants' work from
+touching. A coverage audit (`nix run .#mt-audit`) reconciles that tenancy against a
+manifest so it can't silently regress
+([design](docs/design/multi-tenancy/README.md),
+[status](docs/design/multi-tenancy/STATUS.md)).
+
 ## Understanding what it's doing
 
 This is what the project is actually for.
@@ -284,9 +302,17 @@ landing increment by increment. Design of record and status:
   instruction counts under valgrind, each with a hard ceiling. A regression fails
   the build like a lint, and raising a ceiling shows up in the diff.
 - **Leak budgets.** 18 dhat tests assert hot paths free what they allocate.
-- **One gate.** `nix flake check` runs nine checks: clippy (`-D warnings`), rustfmt,
+- **Multi-tenancy coverage is audited, not assumed.** `nix run .#mt-audit` parses the
+  source and reconciles every served gRPC service and every `agent_*` metric family
+  against a checked-in manifest — governance-by-committed-artifact, the same shape as
+  the generated-constant and buf baselines. A new service whose handler never scopes to
+  the caller's tenant, a `PerTenant`-wrapped seam served without scoping, an
+  unclassified metric family, or a removed span/log mechanism fails the gate. The same
+  entrypoint backs the human report and the gate, so they cannot disagree. See
+  [`docs/components/mt-audit.md`](docs/components/mt-audit.md).
+- **One gate.** `nix flake check` runs ten checks: clippy (`-D warnings`), rustfmt,
   tests, `cargo-audit`, nix-fmt, generated-constant drift, buf lint, buf
-  wire-compatibility, and the bench and leak suites.
+  wire-compatibility, the multi-tenancy coverage audit, and the bench and leak suites.
 
 The security model assumes the model is prompt-injectable: every tool argument and
 every provider-supplied value is treated as attacker-controlled. The rules are in
