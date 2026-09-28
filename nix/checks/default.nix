@@ -310,6 +310,10 @@ in
   # they cannot drift. Asserts a populated, all-`agent.v1.*` list. The live transcoder
   # listener is validated by `portal-envoy` (`envoy --mode validate`). rest-openapi 05.
   rest-descriptor = import ./rest-descriptor.nix { inherit pkgs versions; };
+  # The sign-in chain end to end over real processes: fake OIDC issuer + dev PKI +
+  # `--serve-all` whose memory is a `= "grpc"` client of `--serve-memory`, mTLS, two
+  # tenants; tables + check-the-checks + the live run (security-hardening S15a).
+  auth-e2e = agentCheck ./auth-e2e.nix { inherit versions; };
   # The ClickHouse credentials helper's own tests + check-the-checks for the live RLS
   # harness's matcher (security-hardening S16). Pure stdlib Python.
   ch-creds-tests = import ./ch-creds-tests.nix { inherit pkgs; };
