@@ -3,6 +3,8 @@
 mod agent;
 #[cfg(feature = "ast")]
 mod ast;
+#[cfg(feature = "grpc")]
+pub mod auth_params;
 mod builder;
 #[cfg(feature = "graph")]
 mod cognition;

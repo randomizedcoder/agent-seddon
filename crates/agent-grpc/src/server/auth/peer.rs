@@ -190,5 +190,120 @@ pub fn san_uris(der: &[u8]) -> Option<Vec<String>> {
     )
 }
 
+/// `UTCTime` and `GeneralizedTime` inside `Validity`.
+const UTC_TIME: u8 = 0x17;
+const GENERALIZED_TIME: u8 = 0x18;
+/// `[0] EXPLICIT Version` at the head of `TBSCertificate`.
+const VERSION: u8 = 0xa0;
+
+/// A DER certificate's validity window `(notBefore, notAfter)` as unix seconds;
+/// `None` when the structure or a time is malformed, or the window is inverted
+/// (security-hardening S11b, `agent doctor`).
+pub fn validity(der: &[u8]) -> Option<(u64, u64)> {
+    let (tag, cert, trailing) = tlv(der)?;
+    if tag != SEQUENCE || !trailing.is_empty() {
+        return None;
+    }
+    let (tag, tbs, _) = tlv(cert)?;
+    if tag != SEQUENCE {
+        return None;
+    }
+    let fields = children(tbs)?;
+    // version?, serialNumber, signature, issuer, validity, ...
+    let skip = usize::from(fields.first()?.0 == VERSION);
+    let (tag, validity) = *fields.get(skip + 3)?;
+    if tag != SEQUENCE {
+        return None;
+    }
+    let times = children(validity)?;
+    if times.len() != 2 {
+        return None;
+    }
+    let from = der_time(times[0].0, times[0].1)?;
+    let until = der_time(times[1].0, times[1].1)?;
+    (from <= until).then_some((from, until))
+}
+
+/// `YYMMDDHHMMSSZ` (UTCTime, RFC 5280: YY < 50 is 20YY) or `YYYYMMDDHHMMSSZ`
+/// (GeneralizedTime) as unix seconds. Only the `Z` forms RFC 5280 allows.
+fn der_time(tag: u8, raw: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let digits = text.strip_suffix('Z')?;
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| digits.get(r)?.parse::<u64>().ok();
+    let (year, rest) = match (tag, digits.len()) {
+        (UTC_TIME, 12) => {
+            let yy = num(0..2)?;
+            (if yy < 50 { 2000 + yy } else { 1900 + yy }, 2)
+        }
+        (GENERALIZED_TIME, 14) => (num(0..4)?, 4),
+        _ => return None,
+    };
+    let month = num(rest..rest + 2)?;
+    let day = num(rest + 2..rest + 4)?;
+    let (h, m, sec) = (
+        num(rest + 4..rest + 6)?,
+        num(rest + 6..rest + 8)?,
+        num(rest + 8..rest + 10)?,
+    );
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || h > 23 || m > 59 || sec > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + h * 3600 + m * 60 + sec)
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (H. Hinnant's algorithm);
+/// `None` before the epoch.
+fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    let y = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe).checked_sub(719_468)
+}
+
+/// The DER of every `CERTIFICATE` block in a PEM file, in order.
+pub fn pem_certificates(pem: &[u8]) -> Vec<Vec<u8>> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let Ok(text) = std::str::from_utf8(pem) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(BEGIN) {
+        let body = &rest[start + BEGIN.len()..];
+        let Some(end) = body.find(END) else {
+            break;
+        };
+        let b64: String = body[..end].chars().filter(|c| !c.is_whitespace()).collect();
+        if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            out.push(der);
+        }
+        rest = &body[end + END.len()..];
+    }
+    out
+}
+
+/// The [`validity`] of the first certificate in a PEM file: a listener's or
+/// client's leaf. Read with the TLS loader's size cap.
+pub fn cert_file_validity(path: &std::path::Path) -> Result<(u64, u64), String> {
+    let pem = crate::tls::read_pem(path)?;
+    let first = pem_certificates(&pem)
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("`{}` holds no CERTIFICATE block", path.display()))?;
+    validity(&first).ok_or_else(|| format!("`{}` is not a readable certificate", path.display()))
+}
+
 #[cfg(test)]
 mod tests;

@@ -202,7 +202,7 @@ fn validate_domain(domain: &str) -> Result<(), String> {
 /// Read one PEM file: size-capped before buffering, and required to contain a PEM
 /// block (a DER file or a wrong path fails with a clear message rather than a
 /// rustls parse error).
-fn read_pem(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_pem(path: &Path) -> Result<Vec<u8>, String> {
     let shown = path.display();
     let file = std::fs::File::open(path).map_err(|e| format!("TLS file `{shown}`: {e}"))?;
     let mut buf = Vec::new();

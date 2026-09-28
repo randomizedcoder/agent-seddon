@@ -896,7 +896,11 @@ fn auth_layer(
         tenant_claim: a.tenant_claim.clone(),
         roles_claim: a.roles_claim.clone(),
         leeway_secs: a.leeway_secs,
-        issuers: a.issuers.iter().map(issuer_params).collect(),
+        issuers: a
+            .issuers
+            .iter()
+            .map(agent_runtime::auth_params::issuer_params)
+            .collect(),
         token: a.token.as_ref().map(|t| agent_grpc::server::TokenParams {
             issuer: t.issuer.clone(),
             audience: t.audience.clone(),
@@ -929,25 +933,6 @@ fn auth_layer(
             .with_require_identity(require_identity(a.require_identity, listen))
     })
     .map_err(anyhow::Error::msg)
-}
-
-/// One `[[auth.issuers]]` entry as the verifier's params (field for field).
-fn issuer_params(c: &agent_runtime::AuthIssuerCfg) -> agent_grpc::server::IssuerParams {
-    agent_grpc::server::IssuerParams {
-        name: c.name.clone(),
-        profile: c.profile.clone(),
-        issuer: c.issuer.clone(),
-        audience: c.audience.clone(),
-        jwks_url: c.jwks_url.clone(),
-        tenant_claim: c.tenant_claim.clone(),
-        subject_claim: c.subject_claim.clone(),
-        roles_claim: c.roles_claim.clone(),
-        trust_roles_claim: c.trust_roles_claim,
-        require_email_verified: c.require_email_verified,
-        allowed_domains: c.allowed_domains.clone(),
-        allowed_tenants: c.allowed_tenants.clone(),
-        default_tenant: c.default_tenant.clone(),
-    }
 }
 
 /// The base router every serve entry point seeds its seams onto: admission, the

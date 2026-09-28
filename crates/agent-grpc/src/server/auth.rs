@@ -846,20 +846,25 @@ pub use binding::{
 #[cfg(feature = "auth")]
 pub use issuer::{ClaimRejection, KeySource, Profile, ResolvedIssuer};
 #[cfg(feature = "auth")]
-pub use jwt::{Clock, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock};
+pub use jwt::{
+    probe_issuer_keys, Clock, IssuerKeys, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock,
+};
 #[cfg(feature = "auth")]
 pub use mtls::{
     cnf_allows, valid_san, MtlsBindings, ServiceBinding, MAX_MTLS_BINDINGS, MAX_MTLS_ROLES,
 };
 #[cfg(feature = "auth")]
-pub use peer::{san_uris, thumbprint, PeerCert, MAX_SAN_ENTRIES, MAX_URI_BYTES};
+pub use peer::{
+    cert_file_validity, pem_certificates, san_uris, thumbprint, validity, PeerCert,
+    MAX_SAN_ENTRIES, MAX_URI_BYTES,
+};
 #[cfg(feature = "auth")]
 pub use service::{AuthSvc, MAX_ID_TOKEN_BYTES};
 #[cfg(feature = "auth")]
 pub use session::{
-    AuthSession, RefreshError, SessionStore, DEFAULT_MAX_SESSIONS_PER_TENANT,
-    DEFAULT_SESSION_TTL_SECS, LIVE_CACHE_SECS, MAX_REFRESH_HANDLE_BYTES, MAX_SESSION_TTL_SECS,
-    MIN_SESSION_TTL_SECS,
+    AuthSession, RefreshError, SessionStore, COLLECTION as SESSION_COLLECTION,
+    DEFAULT_MAX_SESSIONS_PER_TENANT, DEFAULT_SESSION_TTL_SECS, LIVE_CACHE_SECS,
+    MAX_REFRESH_HANDLE_BYTES, MAX_SESSION_TTL_SECS, MIN_SESSION_TTL_SECS,
 };
 #[cfg(feature = "auth")]
 pub use token::{

@@ -1,4 +1,4 @@
-use agent_testkit::pki::{LeafSpec, TestPki};
+use agent_testkit::pki::{LeafSpec, TestPki, Validity};
 use base64::engine::general_purpose::STANDARD;
 use rstest::rstest;
 
@@ -152,4 +152,122 @@ fn adversarial_every_truncation_of_a_real_leaf_is_refused_without_panicking() {
     for cut in 0..der.len() {
         assert_eq!(san_uris(&der[..cut]), None, "truncated at {cut}");
     }
+}
+
+// --- validity window (security-hardening S11b, `agent doctor`) -----------------------
+
+#[rstest]
+#[case::positive_utc_time(UTC_TIME, "200101000000Z", Some(1_577_836_800))]
+#[case::positive_generalized_time(GENERALIZED_TIME, "20990101000000Z", Some(4_070_908_800))]
+#[case::boundary_utc_49_is_2049(UTC_TIME, "490101000000Z", Some(2_493_072_000))]
+#[case::boundary_utc_50_is_1950_before_the_epoch(UTC_TIME, "500101000000Z", None)]
+#[case::corner_leap_day(UTC_TIME, "240229235959Z", Some(1_709_251_199))]
+#[case::corner_leap_second(UTC_TIME, "200101000060Z", Some(1_577_836_860))]
+#[case::negative_no_zulu(UTC_TIME, "200101000000", None)]
+#[case::negative_offset_form(UTC_TIME, "200101000000+0100", None)]
+#[case::negative_month_13(UTC_TIME, "201301000000Z", None)]
+#[case::negative_day_zero(UTC_TIME, "200100000000Z", None)]
+#[case::negative_hour_24(UTC_TIME, "200101240000Z", None)]
+#[case::adversarial_utc_length_under_generalized_tag(GENERALIZED_TIME, "200101000000Z", None)]
+#[case::adversarial_non_digit(UTC_TIME, "2a0101000000Z", None)]
+#[case::adversarial_signed_digits(UTC_TIME, "+20101000000Z", None)]
+#[case::adversarial_wrong_tag(OCTET_STRING, "200101000000Z", None)]
+fn der_time_cases(#[case] tag: u8, #[case] raw: &str, #[case] want: Option<u64>) {
+    assert_eq!(der_time(tag, raw.as_bytes()), want);
+}
+
+#[test]
+fn adversarial_der_time_not_utf8() {
+    assert_eq!(der_time(UTC_TIME, &[0xff; 13]), None);
+}
+
+/// `TBSCertificate` with (or without) a version, then `serial, sig, issuer,
+/// validity{from, until}`.
+fn with_validity(version: bool, from: (u8, &str), until: (u8, &str)) -> Vec<u8> {
+    let mut fields = Vec::new();
+    if version {
+        fields.push(der(VERSION, &der(0x02, &[0x02])));
+    }
+    fields.push(der(0x02, &[0x01]));
+    fields.push(der(SEQUENCE, &[]));
+    fields.push(der(SEQUENCE, &[]));
+    fields.push(der(
+        SEQUENCE,
+        &cat(&[
+            der(from.0, from.1.as_bytes()),
+            der(until.0, until.1.as_bytes()),
+        ]),
+    ));
+    let tbs = der(SEQUENCE, &cat(&fields));
+    der(
+        SEQUENCE,
+        &cat(&[tbs, der(SEQUENCE, &[]), der(0x03, &[0x00])]),
+    )
+}
+
+#[rstest]
+#[case::positive_current_leaf(Validity::Current, (1_577_836_800, 4_070_908_800))]
+#[case::negative_expired_leaf(Validity::Expired, (946_684_800, 978_307_200))]
+#[case::corner_not_yet_valid_leaf(Validity::NotYetValid, (4_039_372_800, 4_070_908_800))]
+fn validity_of_issued_leaves(#[case] v: Validity, #[case] want: (u64, u64)) {
+    let pki = TestPki::new("peer test CA");
+    let der = pem_der(
+        &pki.issue(&LeafSpec::service("svc").with_validity(v))
+            .cert_pem,
+    );
+    assert_eq!(validity(&der), Some(want));
+}
+
+#[rstest]
+#[case::positive_v3_shape(with_validity(true, (UTC_TIME, "200101000000Z"), (UTC_TIME, "210101000000Z")), Some((1_577_836_800, 1_609_459_200)))]
+#[case::corner_v1_without_version(with_validity(false, (UTC_TIME, "200101000000Z"), (GENERALIZED_TIME, "20990101000000Z")), Some((1_577_836_800, 4_070_908_800)))]
+#[case::boundary_zero_length_window(with_validity(true, (UTC_TIME, "200101000000Z"), (UTC_TIME, "200101000000Z")), Some((1_577_836_800, 1_577_836_800)))]
+#[case::adversarial_inverted_window(with_validity(true, (UTC_TIME, "210101000000Z"), (UTC_TIME, "200101000000Z")), None)]
+#[case::adversarial_bad_time(with_validity(true, (UTC_TIME, "20010100000Z"), (UTC_TIME, "210101000000Z")), None)]
+#[case::adversarial_no_validity_field(cert(&[]), None)]
+#[case::adversarial_empty(vec![], None)]
+#[case::adversarial_trailing_bytes(cat(&[with_validity(true, (UTC_TIME, "200101000000Z"), (UTC_TIME, "210101000000Z")), vec![0]]), None)]
+fn validity_cases(#[case] der: Vec<u8>, #[case] want: Option<(u64, u64)>) {
+    assert_eq!(validity(&der), want);
+}
+
+#[test]
+fn adversarial_every_truncation_has_no_validity() {
+    let pki = TestPki::new("peer test CA");
+    let der = pem_der(&pki.issue(&LeafSpec::service("fleet")).cert_pem);
+    for cut in 0..der.len() {
+        assert_eq!(validity(&der[..cut]), None, "truncated at {cut}");
+    }
+}
+
+#[test]
+fn positive_pem_certificates_reads_every_block_in_order() {
+    let pki = TestPki::new("peer test CA");
+    let a = pki.issue(&LeafSpec::service("a")).cert_pem;
+    let b = pki.issue(&LeafSpec::service("b")).cert_pem;
+    let got = pem_certificates(format!("junk\n{a}\n{b}").as_bytes());
+    assert_eq!(got, vec![pem_der(&a), pem_der(&b)]);
+}
+
+#[rstest]
+#[case::negative_no_blocks(b"hello".as_slice())]
+#[case::corner_unterminated_block(b"-----BEGIN CERTIFICATE-----\nAAAA\n".as_slice())]
+#[case::adversarial_not_base64(b"-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n".as_slice())]
+#[case::adversarial_not_utf8(&[0xff, 0xfe, 0x00][..])]
+fn pem_certificates_yields_nothing(#[case] pem: &[u8]) {
+    assert!(pem_certificates(pem).is_empty());
+}
+
+#[test]
+fn cert_file_validity_reads_the_first_leaf_and_names_bad_files() {
+    let dir = agent_testkit::tempdir();
+    let pki = TestPki::new("peer test CA");
+    let (cert, key) = pki.issue(&LeafSpec::service("svc")).write_to(&dir, "svc");
+    assert_eq!(
+        cert_file_validity(&cert),
+        Ok((1_577_836_800, 4_070_908_800))
+    );
+    let err = cert_file_validity(&key).unwrap_err();
+    assert!(err.contains("no CERTIFICATE block"), "{err}");
+    assert!(cert_file_validity(&dir.join("absent.crt")).is_err());
 }

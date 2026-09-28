@@ -91,6 +91,11 @@ previous_key = ""                                              # kept in the JWK
   the previous `kid` verify for one TTL, then the old key is removed. The certificate lifecycle
   (issuance, renewal, `not_after`) is step-ca's ([07](07-transport-tls-and-pki.md)); the agent refuses
   to start with an expired signer certificate and `agent doctor` warns two days before expiry.
+
+> **As built (S11b).** `[auth.token]` names a signing *key*, not a certificate, so there is no signer
+> expiry to check. `agent doctor` probes that the key (and `previous_key`) loads and is not readable
+> by group or other (`auth.signer`). Certificate expiry is checked for the gRPC listener and client
+> certificates (`tls.certs`), which warns once less than a third of a certificate's lifetime is left.
 - One signing key per deployment. Every `--serve-*` process that hosts `AuthService` must share it
   (a file on a shared secret mount); processes that only *verify* need the JWKS URL.
 

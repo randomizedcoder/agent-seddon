@@ -134,7 +134,7 @@ bound certificate is rejected.
 | Process wire (gate) | `nix flake check` **auth-e2e**: the testkit fake OIDC issuer + a real `agent --serve-all` under `mode = "oidc"` + step-cli certificates; `grpcurl -H authorization` for the portal / CLI path and `--cert` / `--key` for the service path; two-tenant isolation; audit rows read from the file-tier session store | new `nix/checks/auth-e2e.nix`; `dial_for` in [`serve-wire.sh`](../../../nix/lib/serve-wire.sh):22-40 grows `--bearer` and `--cert` modes |
 | REST (gate, once §4 lands) | curl → Envoy transcoder → agent: 401 without a token, 200 with; JWKS at `/.well-known/jwks.json` | `envoy --mode validate` in the gate; the live path in `nix run .#integration` |
 | Integration (`nix run .#integration`) | `step-ca` daemon issuing certificates over ACME; Postgres session store; ClickHouse audit + RLS harness; portal-e2e under auth; fleet-e2e chain with a real forge post attributed to the approver | container up → barrier → tests → down (the `pg-integration` shape) |
-| Continuous | `agent doctor` probes: signer certificate validity and expiry, JWKS reachable, IdP discovery reachable, session store reachable | the [`Probe` seam](../doctor/README.md) |
+| Continuous | `agent doctor` probes (built in S11b): `auth.signer` (key loads, file mode), `auth.issuer.<name>` (key set or discovery reachable), `auth.sessions` (session store answers), `tls.certs` (listener and client certificates inside their window) | the [`Probe` seam](../doctor/README.md) |
 
 ### Chain test, concretely
 
