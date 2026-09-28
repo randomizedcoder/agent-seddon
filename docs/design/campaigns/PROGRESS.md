@@ -205,7 +205,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   `campaigns/cp-03` differs from `main` only by `agent-campaign`'s `tracing` edge); the flake's
   `cargo-audit` runs against the pinned `advisory-db` input, so the gate does not see it yet. Needs
   its own change on `main`: bump `rustls`, then bump the `advisory-db` input.~~ **Resolved in
-  #PR4.** `cargo update -p h2 -p rustls` (h2 0.4.15 → 0.4.19 for RUSTSEC-2026-0258, rustls
+  #547.** `cargo update -p h2 -p rustls` (h2 0.4.15 → 0.4.19 for RUSTSEC-2026-0258, rustls
   0.23.42 → 0.23.45 + rustls-webpki 0.103.15 for RUSTSEC-2026-0285; three lock entries), then
   `nix flake update advisory-db` (2026-07-17 → 2026-09-25), in that order. The hermetic
   `cargo-audit` check now sees the same DB as a local `cargo audit`: 0 vulnerabilities, six
