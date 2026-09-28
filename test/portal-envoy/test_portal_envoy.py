@@ -342,6 +342,13 @@ class Render(unittest.TestCase):
             binds = {l["address"]["socket_address"]["address"] for l in cfg["static_resources"]["listeners"]}
             self.assertEqual(binds, {want})
 
+    def test_positive_every_listener_disables_nagle_tcp_nodelay(self):
+        # Every downstream listener carries TCP_NODELAY, or a multi-segment response
+        # over a keep-alive connection stalls ~40ms (Nagle vs the client's delayed-ACK).
+        nodelay = {"level": 6, "name": 1, "int_value": 1, "state": "STATE_PREBIND"}
+        for l in rendered({})["static_resources"]["listeners"]:
+            self.assertIn(nodelay, l["socket_options"], l["name"])
+
     def test_positive_cors_is_exact_and_allows_authorization(self):
         cfg = rendered({"PORTAL_WEB_ORIGIN": "https://portal.example.com"})
         for i in range(len(SPEC.listeners)):
@@ -712,6 +719,11 @@ class RestTranscoder(unittest.TestCase):
         policy = rest_hcm(self.render({}))["route_config"]["virtual_hosts"][0][
             "typed_per_filter_config"]["envoy.filters.http.cors"]
         self.assertIn("authorization", policy["allow_headers"].split(","))
+
+    def test_positive_rest_listener_disables_nagle_tcp_nodelay(self):
+        # The listener whose large keep-alive responses exposed the ~40ms stall.
+        nodelay = {"level": 6, "name": 1, "int_value": 1, "state": "STATE_PREBIND"}
+        self.assertIn(nodelay, rest_listener_of(self.render({}))["socket_options"])
 
     def test_positive_rest_stays_loopback_even_when_grpc_web_binds_lan(self):
         cfg = self.render({"PORTAL_GRPC_WEB_HOST": "0.0.0.0"})

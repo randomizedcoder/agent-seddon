@@ -595,6 +595,17 @@ def http_filters(jwt: Jwt | None) -> list:
     return out
 
 
+# Disable Nagle on downstream listener sockets. Without TCP_NODELAY, a multi-segment
+# response over a keep-alive connection stalls ~40ms on its last partial segment
+# (Nagle holds it awaiting an ACK the client delays) — measured on the REST transcoder
+# (a 34KB read: ~41ms over keep-alive vs ~1.5ms on a fresh conn). Envoy does not set
+# NODELAY on downstream listeners by default. level 6 = IPPROTO_TCP, name 1 = TCP_NODELAY
+# (Linux); STATE_PREBIND sets it on the listen socket, which accepted sockets inherit.
+TCP_NODELAY_SOCKET_OPTIONS = [
+    {"level": 6, "name": 1, "int_value": 1, "state": "STATE_PREBIND"},
+]
+
+
 def listener(l: Listener, k: Knobs, jwt: Jwt | None, tls: Tls | None) -> dict:
     hcm = {
         "@type": any_type(
@@ -633,6 +644,7 @@ def listener(l: Listener, k: Knobs, jwt: Jwt | None, tls: Tls | None) -> dict:
     return {
         "name": l.name,
         "address": {"socket_address": {"address": k.host, "port_value": l.port}},
+        "socket_options": TCP_NODELAY_SOCKET_OPTIONS,
         "filter_chains": [chain],
     }
 
@@ -713,6 +725,7 @@ def rest_listener(rest: Rest, k: Knobs, descriptor_path: str, tls: Tls | None) -
     return {
         "name": rest.name,
         "address": {"socket_address": {"address": "127.0.0.1", "port_value": rest.port}},
+        "socket_options": TCP_NODELAY_SOCKET_OPTIONS,
         "filter_chains": [chain],
     }
 
