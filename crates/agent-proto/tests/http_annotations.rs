@@ -312,6 +312,45 @@ enum Expect {
     "RepoService.WorktreeAdd",
     Expect::Routes(&[("POST", "/v1/repo/worktrees")])
 )]
+// --- 03e: sessions (session / session_registry / agent_session / scheduler) --
+// corner — a session is keyed by the `(user, session_id)` PAIR, so Close nests as a
+// child collection: a DELETE carrying TWO path params (composite key + DELETE, deeper
+// than the single-param prompt read).
+#[case::corner_close_composite_key_nested_delete(
+    "SessionRegistryService.Close -> DELETE /v1/session-registry/users/{user}/sessions/{session_id}",
+    "SessionRegistryService.Close",
+    Expect::Routes(&[(
+        "DELETE",
+        "/v1/session-registry/users/{user}/sessions/{session_id}"
+    )])
+)]
+// corner — a server-streaming READ maps to GET (chunked JSON): the first GET-streaming
+// row, the direct contrast to 03d's server-streaming action (Reindex → POST).
+#[case::corner_subscribe_server_streaming_read_maps_to_get(
+    "AgentSessionService.Subscribe (server-streaming read) -> GET /v1/agent-sessions/events",
+    "AgentSessionService.Subscribe",
+    Expect::Routes(&[("GET", "/v1/agent-sessions/events")])
+)]
+// positive — the drive RPC (submit a goal, stream the run) is a side-effecting action
+// → POST body:*, even though it too server-streams.
+#[case::positive_send_drive_server_streaming_maps_to_post(
+    "AgentSessionService.Send (drive) -> POST /v1/agent-sessions/send",
+    "AgentSessionService.Send",
+    Expect::Routes(&[("POST", "/v1/agent-sessions/send")])
+)]
+// corner — cancelling a scheduled job is a removal → DELETE by id (a second DELETE-verb
+// site outside the CRUD registries).
+#[case::corner_scheduler_cancel_maps_to_delete(
+    "SchedulerService.Cancel -> DELETE /v1/scheduler/jobs/{id}",
+    "SchedulerService.Cancel",
+    Expect::Routes(&[("DELETE", "/v1/scheduler/jobs/{id}")])
+)]
+// corner — reading a job's runs is a child-collection read addressed by the parent id.
+#[case::corner_scheduler_history_sub_resource_read(
+    "SchedulerService.History -> GET /v1/scheduler/jobs/{id}/runs",
+    "SchedulerService.History",
+    Expect::Routes(&[("GET", "/v1/scheduler/jobs/{id}/runs")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(

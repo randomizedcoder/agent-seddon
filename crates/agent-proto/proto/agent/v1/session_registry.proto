@@ -10,14 +10,37 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 service SessionRegistryService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/session-registry/. A session
+  // is keyed by the `(user, session_id)` PAIR (both path-safe, server-validated), so —
+  // per the composite-key convention — the routes nest as
+  // `users/{user}/sessions/{session_id}`: POST the collection to Open (mints + returns
+  // the id), DELETE the item to Close, POST an item action to Heartbeat.
+  //
   // Mint a fresh **server-side** session id for `user` and pre-allocate the session.
   // Rejected with RESOURCE_EXHAUSTED when a capacity cap is reached.
-  rpc Open(OpenRequest) returns (OpenResponse);
+  rpc Open(OpenRequest) returns (OpenResponse) {
+    option (google.api.http) = {
+      post: "/v1/session-registry/users/{user}/sessions"
+      body: "*"
+    };
+  }
   // Free a session's state (best-effort; idle-GC is the real guarantee).
-  rpc Close(CloseRequest) returns (CloseResponse);
+  rpc Close(CloseRequest) returns (CloseResponse) {
+    option (google.api.http) = {delete: "/v1/session-registry/users/{user}/sessions/{session_id}"};
+  }
   // Reset a session's idle timer, keeping a long-lived but quiet session warm.
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {
+    option (google.api.http) = {
+      post: "/v1/session-registry/users/{user}/sessions/{session_id}/heartbeat"
+      body: "*"
+    };
+  }
 }
 
 // `user` is advisory until the auth follow-up (07-security.md) — the server MAY

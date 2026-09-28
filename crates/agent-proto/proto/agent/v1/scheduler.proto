@@ -11,11 +11,30 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 service SchedulerService {
-  rpc Schedule(SchedScheduleRequest) returns (SchedJobRef);
-  rpc List(SchedListRequest) returns (SchedJobList);
-  rpc Cancel(SchedJobRef) returns (SchedCancelResponse);
-  rpc History(SchedJobRef) returns (SchedRunList);
+  // REST mappings (docs/design/rest-openapi/), under /v1/scheduler/. `jobs` is the
+  // collection — POST schedules one, GET lists them, DELETE `/{id}` cancels one (a
+  // path-safe job id); `History` reads one job's runs → GET `/{id}/runs`.
+  rpc Schedule(SchedScheduleRequest) returns (SchedJobRef) {
+    option (google.api.http) = {
+      post: "/v1/scheduler/jobs"
+      body: "*"
+    };
+  }
+  rpc List(SchedListRequest) returns (SchedJobList) {
+    option (google.api.http) = {get: "/v1/scheduler/jobs"};
+  }
+  rpc Cancel(SchedJobRef) returns (SchedCancelResponse) {
+    option (google.api.http) = {delete: "/v1/scheduler/jobs/{id}"};
+  }
+  rpc History(SchedJobRef) returns (SchedRunList) {
+    option (google.api.http) = {get: "/v1/scheduler/jobs/{id}/runs"};
+  }
 }
 
 message SchedJobRef {
