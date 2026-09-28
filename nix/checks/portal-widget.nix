@@ -54,7 +54,10 @@ in
       # consume; tee it so the build log still shows progress, and let pipefail
       # surface a red suite as a failed build.
       set -o pipefail
-      flutter test --no-pub --machine | tee "$TMPDIR/report/widget.jsonl"
+      # `--concurrency=4`: by default flutter runs one test file per core, and on a
+      # many-core box the resulting CPU contention starves the tests that pump the
+      # real event loop (`tester.runAsync`), so different ones time out on each run.
+      flutter test --no-pub --concurrency=4 --machine | tee "$TMPDIR/report/widget.jsonl"
       runHook postBuild
     '';
     installPhase = ''

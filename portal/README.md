@@ -35,3 +35,18 @@ nix run .#portal                          # native desktop (dials :50100 directl
 nix run .#grpc-web-up                      # envoy: grpc-web :8090 → gateway :50100
 nix run .#portal -- -d chrome
 ```
+
+### Sign-in (security-hardening S13b)
+
+When the agent offers browser sign-in (`[auth] redirect_uris` lists the portal's address), the web
+portal shows a sign-in page first and every call then carries the user's agent token. Build-time
+knobs (`--dart-define`, wired in `nix/portal/default.nix`):
+
+| Define | Default | Meaning |
+|---|---|---|
+| `PORTAL_AUTH` | `auto` | `auto` signs in when the agent offers it; `on` insists; `off` never asks |
+| `PORTAL_AUTH_ISSUER` | empty | offer only this login issuer when the agent lists it |
+| `PORTAL_REDIRECT_URI` | the page's own address | where the IdP returns; must be in `[auth] redirect_uris` |
+
+The native desktop build cannot redirect to an IdP; run it with `PORTAL_AUTH=off` against a
+loopback agent.

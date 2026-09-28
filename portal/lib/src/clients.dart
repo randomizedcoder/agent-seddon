@@ -2,6 +2,7 @@ import 'package:grpc/service_api.dart';
 
 import 'config.dart';
 import 'gen/agent/v1/agent_session.pbgrpc.dart';
+import 'gen/agent/v1/auth.pbgrpc.dart';
 import 'gen/agent/v1/config.pbgrpc.dart';
 import 'gen/agent/v1/graph.pbgrpc.dart';
 import 'gen/agent/v1/llm_pool.pbgrpc.dart';
@@ -27,32 +28,41 @@ import 'transport/channel_factory.dart';
 /// (`:50086`) — because roster writes (`SetEnabled`/`ReviewNow`) and the review
 /// draft read/edit/approve RPCs need the orchestrator + approver + history that
 /// only that process wires (a bare gateway answers `UNIMPLEMENTED`).
+///
+/// Every client carries [interceptors] — the portal's `AuthInterceptor`, which
+/// adds the signed-in user's agent token to each call (security-hardening S13b).
+/// One agent token is valid at every seam, so all three channels share it.
 class PortalClients {
   final ClientChannel gatewayChannel;
   final ClientChannel sessionsChannel;
   final ClientChannel fleetChannel;
+  final List<ClientInterceptor> interceptors;
 
-  late final PromptServiceClient prompts = PromptServiceClient(gatewayChannel);
+  // Sign-in (`Issuers` / `Begin` / `Exchange` / `Refresh` / `WhoAmI` / `Logout`).
+  late final AuthServiceClient auth =
+      AuthServiceClient(gatewayChannel, interceptors: interceptors);
+
+  late final PromptServiceClient prompts = PromptServiceClient(gatewayChannel, interceptors: interceptors);
   late final MetricsProxyServiceClient metrics =
-      MetricsProxyServiceClient(gatewayChannel);
-  late final LlmPoolServiceClient pool = LlmPoolServiceClient(gatewayChannel);
-  late final GraphServiceClient graph = GraphServiceClient(gatewayChannel);
+      MetricsProxyServiceClient(gatewayChannel, interceptors: interceptors);
+  late final LlmPoolServiceClient pool = LlmPoolServiceClient(gatewayChannel, interceptors: interceptors);
+  late final GraphServiceClient graph = GraphServiceClient(gatewayChannel, interceptors: interceptors);
   // The model-router / provider registry (live, no-restart control plane).
   late final ProviderRegistryServiceClient providers =
-      ProviderRegistryServiceClient(gatewayChannel);
+      ProviderRegistryServiceClient(gatewayChannel, interceptors: interceptors);
   // The whole-config seam (schema-driven Settings; write-TOML, restart-to-apply).
-  late final ConfigServiceClient config = ConfigServiceClient(gatewayChannel);
+  late final ConfigServiceClient config = ConfigServiceClient(gatewayChannel, interceptors: interceptors);
 
   late final AgentSessionServiceClient session =
-      AgentSessionServiceClient(sessionsChannel);
+      AgentSessionServiceClient(sessionsChannel, interceptors: interceptors);
   late final SessionRegistryServiceClient registry =
-      SessionRegistryServiceClient(sessionsChannel);
+      SessionRegistryServiceClient(sessionsChannel, interceptors: interceptors);
 
   // The full review-fleet process (roster + review drafts + approve).
   late final ReviewFleetServiceClient fleet =
-      ReviewFleetServiceClient(fleetChannel);
+      ReviewFleetServiceClient(fleetChannel, interceptors: interceptors);
 
-  PortalClients(PortalConfig cfg)
+  PortalClients(PortalConfig cfg, {this.interceptors = const []})
       : gatewayChannel = createGatewayChannel(cfg),
         sessionsChannel = createSessionsChannel(cfg),
         fleetChannel = createFleetChannel(cfg);

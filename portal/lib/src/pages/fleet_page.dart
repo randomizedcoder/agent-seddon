@@ -2,6 +2,7 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
+import '../auth/capabilities.dart';
 import '../clients.dart';
 import '../gen/agent/v1/review_fleet.pb.dart';
 
@@ -16,6 +17,11 @@ import '../gen/agent/v1/review_fleet.pb.dart';
 /// now"); and a right detail pane that renders the selected draft's markdown
 /// body and offers **Approve & post** (the only outward-facing action, gated
 /// behind a confirm dialog). Editing the body is increment 4.
+///
+/// Controls follow the signed-in user's permissions ([CapabilityScope],
+/// security-hardening S13b): Approve needs `approve:review`, editing a draft
+/// `write:review`, Review now `trigger:fleet`, enabling a session `write:fleet`.
+/// Hidden controls are a courtesy; the agent refuses the call regardless.
 class FleetPage extends StatefulWidget {
   final PortalClients clients;
   const FleetPage({super.key, required this.clients});
@@ -335,6 +341,7 @@ class _FleetPageState extends State<FleetPage> {
   }
 
   Widget _sessionsStrip() {
+    final caps = CapabilityScope.of(context);
     return ExpansionTile(
       initiallyExpanded: _showSessions,
       onExpansionChanged: (v) => setState(() => _showSessions = v),
@@ -359,16 +366,19 @@ class _FleetPageState extends State<FleetPage> {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        IconButton(
-                          key: Key('fleet.session.reviewNow.${s.id}'),
-                          icon: const Icon(Icons.play_circle_outline),
-                          tooltip: 'Review now',
-                          onPressed: () => _reviewNow(s),
-                        ),
+                        if (caps.can('trigger', 'fleet'))
+                          IconButton(
+                            key: Key('fleet.session.reviewNow.${s.id}'),
+                            icon: const Icon(Icons.play_circle_outline),
+                            tooltip: 'Review now',
+                            onPressed: () => _reviewNow(s),
+                          ),
                         Switch(
                           key: Key('fleet.session.enable.${s.id}'),
                           value: s.enabled,
-                          onChanged: (v) => _toggleEnable(s, v),
+                          onChanged: caps.can('write', 'fleet')
+                              ? (v) => _toggleEnable(s, v)
+                              : null,
                         ),
                       ],
                     ),
@@ -431,7 +441,9 @@ class _DraftDetailState extends State<_DraftDetail> {
   /// A `posted`/`approved` draft can't be edited (matches the server's write
   /// gate — UpdateReview returns `locked`).
   bool get _locked =>
-      widget.summary.status == 'posted' || widget.summary.status == 'approved';
+      widget.summary.status == 'posted' ||
+      widget.summary.status == 'approved' ||
+      !CapabilityScope.of(context).can('write', 'review');
 
   /// The edit buffer differs from the persisted body.
   bool get _dirty => _edit.text != (_body ?? '');
@@ -549,12 +561,13 @@ class _DraftDetailState extends State<_DraftDetail> {
                 ),
               ),
               const SizedBox(width: 12),
-              FilledButton.icon(
-                key: const Key('fleet.detail.approve'),
-                onPressed: canApprove ? widget.onApprove : null,
-                icon: const Icon(Icons.send, size: 18),
-                label: Text(posted ? 'Posted' : 'Approve & post'),
-              ),
+              if (CapabilityScope.of(context).can('approve', 'review'))
+                FilledButton.icon(
+                  key: const Key('fleet.detail.approve'),
+                  onPressed: canApprove ? widget.onApprove : null,
+                  icon: const Icon(Icons.send, size: 18),
+                  label: Text(posted ? 'Posted' : 'Approve & post'),
+                ),
             ],
           ),
         ),

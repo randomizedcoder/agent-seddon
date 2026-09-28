@@ -18,6 +18,9 @@ import 'recording.dart';
 /// and passes them to [start]; the fakes record every call into [log] and return
 /// scripted responses. This keeps FakeGateway seam-agnostic, so a new page adds
 /// its own fake without touching this file.
+///
+/// A server interceptor records every call's request metadata into
+/// [RecordingLog.headers], so a test can assert the bearer the portal sent.
 class FakeGateway {
   FakeGateway._(this._server, this.log, this.port);
 
@@ -33,7 +36,13 @@ class FakeGateway {
   static Future<FakeGateway> start(
       List<Service> Function(RecordingLog log) build) async {
     final log = RecordingLog();
-    final server = Server.create(services: build(log));
+    final server = Server.create(services: build(log), interceptors: [
+      (call, method) {
+        final md = call.clientMetadata ?? const <String, String>{};
+        log.recordHeaders(md[':path'] ?? method.name, md);
+        return null;
+      },
+    ]);
     await server.serve(address: InternetAddress.loopbackIPv4, port: 0);
     return FakeGateway._(server, log, server.port!);
   }
@@ -49,8 +58,10 @@ class FakeGateway {
         fleetPort: port,
       );
 
-  /// A fresh [PortalClients] dialing this fake.
-  PortalClients clients() => PortalClients(config);
+  /// A fresh [PortalClients] dialing this fake, with [interceptors] on every
+  /// client (the portal's `AuthInterceptor` in the sign-in tests).
+  PortalClients clients({List<ClientInterceptor> interceptors = const []}) =>
+      PortalClients(config, interceptors: interceptors);
 
   Future<void> shutdown() async => _server.shutdown();
 }

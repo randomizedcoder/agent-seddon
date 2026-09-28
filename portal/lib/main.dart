@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'src/auth/auth_gate.dart';
+import 'src/auth/auth_interceptor.dart';
+import 'src/auth/auth_state.dart';
+import 'src/auth/platform_factory.dart';
 import 'src/clients.dart';
 import 'src/config.dart';
 import 'src/pages/agent_view_page.dart';
@@ -16,7 +20,9 @@ void main() {
 
 /// The Agent Portal — a gRPC-only client for agent-seddon (docs/design/portal).
 /// Talks to the `--serve-all` gateway (`:50100`) for everything; opens the
-/// observability UIs in the browser from the Launcher.
+/// observability UIs in the browser from the Launcher. When the agent offers
+/// browser sign-in, [AuthGate] shows the sign-in page first and every call then
+/// carries the user's agent token (security-hardening S13b).
 class AgentPortalApp extends StatefulWidget {
   const AgentPortalApp({super.key});
 
@@ -26,8 +32,24 @@ class AgentPortalApp extends StatefulWidget {
 
 class _AgentPortalAppState extends State<AgentPortalApp> {
   static const _config = PortalConfig();
-  final _clients = PortalClients(_config);
+  late final PortalClients _clients = PortalClients(
+    _config,
+    interceptors: [AuthInterceptor(() => _auth.token)],
+  );
+  late final AuthState _auth = AuthState(
+    client: _clients.auth,
+    platform: createAuthPlatform(),
+    mode: parseAuthMode(_config.authMode),
+    preferredIssuer: _config.authIssuer,
+    redirectUriOverride: _config.redirectUri,
+  );
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _auth.start();
+  }
 
   /// Nav-rail items in display order (index-aligned with [_pages]). Each carries
   /// a muted, dull-primary tint so the rail reads at a glance — following
@@ -80,6 +102,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
 
   @override
   void dispose() {
+    _auth.dispose();
     _clients.shutdown();
     super.dispose();
   }
@@ -90,7 +113,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       const LauncherPage(config: _config),
       PromptsPage(clients: _clients),
       GraphPage(clients: _clients),
-      AgentViewPage(clients: _clients),
+      AgentViewPage(clients: _clients, tenant: () => _auth.tenant),
       RouterPage(clients: _clients),
       FleetPage(clients: _clients),
       SettingsPage(clients: _clients),
@@ -110,7 +133,9 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
         useMaterial3: true,
         fontFamily: 'SourceSerif4',
       ),
-      home: Scaffold(
+      home: AuthGate(
+        auth: _auth,
+        builder: (context, account) => Scaffold(
         body: Row(
           children: [
             NavigationRail(
@@ -121,6 +146,11 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
                 padding: EdgeInsets.symmetric(vertical: 12),
                 child: Icon(Icons.hub, color: Color(0xFF8A9199)),
               ),
+              trailing: account == null
+                  ? null
+                  : Expanded(
+                      child: Align(
+                          alignment: Alignment.bottomCenter, child: account)),
               destinations: [
                 for (final it in _navItems)
                   NavigationRailDestination(
@@ -134,6 +164,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
             Expanded(child: IndexedStack(index: _index, children: pages)),
           ],
         ),
+      ),
       ),
     );
   }

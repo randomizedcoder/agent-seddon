@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:grpc/grpc.dart';
 
 import '../testkit/fakes/agent_session_service.dart';
+import '../testkit/fakes/auth_service.dart';
 import '../testkit/fakes/config_service.dart';
 import '../testkit/fakes/graph_service.dart';
 import '../testkit/fakes/llm_pool_service.dart';
@@ -45,6 +46,7 @@ void main() {
       FakeSessionRegistryService(log),
       FakeLlmPoolService(log),
       FakeMetricsProxyService(log),
+      FakeAuthService(log),
     ])
       s.$name: s,
   };

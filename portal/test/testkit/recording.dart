@@ -23,6 +23,20 @@ class RecordedCall {
 class RecordingLog {
   final List<RecordedCall> calls = [];
 
+  /// The request metadata of every call the gateway served, in order, as
+  /// `(path, headers)` — what proves the portal sent (or withheld) a bearer.
+  final List<RecordedHeaders> headers = [];
+
+  void recordHeaders(String path, Map<String, String> metadata) =>
+      headers.add(RecordedHeaders(path, Map.unmodifiable(metadata)));
+
+  /// The `authorization` value of every call to [path], in order (null where the
+  /// call carried none).
+  List<String?> authorizationFor(String path) => [
+        for (final h in headers)
+          if (h.path == path) h.authorization,
+      ];
+
   void record(String method, GeneratedMessage request) =>
       calls.add(RecordedCall(method, request));
 
@@ -43,5 +57,22 @@ class RecordingLog {
     return m.isEmpty ? null : m.last;
   }
 
-  void clear() => calls.clear();
+  void clear() {
+    calls.clear();
+    headers.clear();
+  }
+}
+
+/// One served call's request metadata (see [RecordingLog.headers]).
+class RecordedHeaders {
+  RecordedHeaders(this.path, this.metadata);
+
+  /// e.g. `/agent.v1.ReviewFleetService/ListReviews`.
+  final String path;
+  final Map<String, String> metadata;
+
+  String? get authorization => metadata['authorization'];
+
+  @override
+  String toString() => '$path authorization=${authorization ?? "-"}';
 }

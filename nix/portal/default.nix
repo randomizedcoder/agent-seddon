@@ -66,6 +66,8 @@ let
 
   # Forward configurable endpoints to Flutter as --dart-define flags. Any set PORTAL_*
   # env var is threaded through; `-- <extra flags>` still passes through via "$@".
+  # PORTAL_AUTH (auto|on|off), PORTAL_AUTH_ISSUER and PORTAL_REDIRECT_URI steer
+  # browser sign-in (security-hardening S13b).
   # Shared by the `portal` (native) and `portal-web` builds.
   dartDefines = ''
     defines=()
@@ -74,7 +76,8 @@ let
       PORTAL_SESSIONS_HOST PORTAL_SESSIONS_PORT \
       PORTAL_FLEET_HOST PORTAL_FLEET_PORT \
       PORTAL_GRPC_WEB_URL PORTAL_SESSIONS_GRPC_WEB_URL PORTAL_FLEET_GRPC_WEB_URL \
-      PORTAL_GRAFANA_URL PORTAL_HYPERDX_URL PORTAL_PROMETHEUS_URL; do
+      PORTAL_GRAFANA_URL PORTAL_HYPERDX_URL PORTAL_PROMETHEUS_URL \
+      PORTAL_AUTH PORTAL_AUTH_ISSUER PORTAL_REDIRECT_URI; do
       val="''${!key:-}"
       if [ -n "$val" ]; then defines+=("--dart-define=$key=$val"); fi
     done
@@ -258,7 +261,7 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,authorization,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
                               max_age: "1728000"
                               expose_headers: grpc-status,grpc-message,x-envoy-upstream-service-time,traceparent,tracestate
                           routes:
@@ -345,7 +348,7 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,authorization,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
                               max_age: "1728000"
                               expose_headers: grpc-status,grpc-message,x-envoy-upstream-service-time,traceparent,tracestate
                           routes:
@@ -432,7 +435,7 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,authorization,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
                               max_age: "1728000"
                               expose_headers: grpc-status,grpc-message,x-envoy-upstream-service-time,traceparent,tracestate
                           routes:

@@ -92,9 +92,17 @@ class FakeAgentSessionService extends AgentSessionServiceBase {
   }
 
   /// Close any still-open stream controllers (call from the robot's teardown).
+  ///
+  /// Only a *listened* controller's `close()` is awaited: when the client cancels
+  /// while the handler is still at `await _delay()`, the generator ends without
+  /// ever listening to the controller it then creates, and awaiting that
+  /// `close()` never completes (it waits for a listener to take the done event),
+  /// which used to hang the test for its full 10-minute timeout.
   Future<void> disposeControllers() async {
     for (final c in [...subscribeControllers, ...sendControllers]) {
-      if (!c.isClosed) await c.close();
+      if (c.isClosed) continue;
+      final closed = c.close();
+      if (c.hasListener) await closed;
     }
   }
 }
