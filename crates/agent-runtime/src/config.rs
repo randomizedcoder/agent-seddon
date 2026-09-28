@@ -2858,6 +2858,13 @@ pub struct AuthCfg {
     /// change who is one. Needs `[auth.token]`.
     #[serde(default)]
     pub operator_subjects: Vec<String>,
+    /// Browser sign-in (security-hardening S13): the exact URIs an identity
+    /// provider may send a browser back to (the portal's own address, e.g.
+    /// `https://portal.example/`). Non-empty turns on `AuthService.Begin`; each
+    /// must be `https`, or plain `http` to a loopback IP, with no fragment, and be
+    /// registered with the IdP too. Needs `[auth.token]`.
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
     /// Service identity from mutual TLS (`[auth.mtls]`, security-hardening S10).
     #[serde(default)]
     pub mtls: Option<AuthMtlsCfg>,
@@ -3118,8 +3125,9 @@ pub struct AuthIssuerCfg {
     #[serde(default)]
     pub default_tenant: String,
     /// `env:VAR` / `file:/path` reference to the OAuth client secret, for IdPs that
-    /// demand one even from a device client (Google). Read by `agent login` only;
-    /// never a raw value.
+    /// demand one even from a device or web client (Google). Read by `agent login`,
+    /// and by the serve path when `[auth] redirect_uris` turns on browser sign-in
+    /// (the agent redeems the code). Never a raw value.
     #[serde(default)]
     pub client_secret: String,
 }
@@ -3228,6 +3236,14 @@ impl AuthCfg {
         if let Some(mtls) = &self.mtls {
             mtls.validate(self.token.is_some())?;
         }
+        if !self.redirect_uris.is_empty() {
+            if self.token.is_none() {
+                return Err("`[auth] redirect_uris` needs `[auth.token]` (a browser \
+                            sign-in ends in an agent token)"
+                    .into());
+            }
+            check_redirect_uris(&self.redirect_uris)?;
+        }
         for issuer in &self.issuers {
             if agent_core::ApiKeyRef::parse(&issuer.client_secret).is_err() {
                 return Err(format!(
@@ -3327,6 +3343,33 @@ fn check_operator_subjects(entries: &[String]) -> Result<(), String> {
             return Err(format!(
                 "`[auth] operator_subjects` entry `{entry}` is not `email:<address>` or \
                  `sub:<issuer>/<sub>`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `[auth] redirect_uris` at load: a handful of exact, absolute URIs an IdP may
+/// send a browser to. The same rules the serve path applies (`check_fetch_url`
+/// plus no fragment); whitespace is refused rather than trimmed, since the match
+/// is exact.
+fn check_redirect_uris(uris: &[String]) -> Result<(), String> {
+    const MAX: usize = 16;
+    if uris.len() > MAX {
+        return Err(format!(
+            "`[auth] redirect_uris` has more than {MAX} entries"
+        ));
+    }
+    for uri in uris {
+        if uri.trim() != uri || uri.is_empty() {
+            return Err(format!(
+                "`[auth] redirect_uris` entry `{uri}` has surrounding whitespace or is empty"
+            ));
+        }
+        check_fetch_url("redirect_uris", uri).map_err(|e| format!("`[auth]` {e}"))?;
+        if uri.contains('#') {
+            return Err(format!(
+                "`[auth] redirect_uris` entry `{uri}` must not have a fragment"
             ));
         }
     }
@@ -4892,6 +4935,16 @@ mod tests {
     #[case::boundary_session_ttl_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 900, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_000, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_below_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 899, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
+    // --- `[auth] redirect_uris` (security-hardening S13) ---
+    #[case::positive_redirect_uris(AuthCfg { redirect_uris: vec!["https://portal.example/".into(), "http://127.0.0.1:8092/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::negative_redirect_uris_without_token(AuthCfg { redirect_uris: vec!["https://portal.example/".into()], ..oidc(GOOD_JWKS) }, true, Some("redirect_uris` needs `[auth.token]`"))]
+    #[case::negative_redirect_uri_lan_http(AuthCfg { redirect_uris: vec!["http://172.16.50.46:8092/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("must use https"))]
+    #[case::negative_redirect_uri_fragment(AuthCfg { redirect_uris: vec!["https://portal.example/#cb".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("fragment"))]
+    #[case::corner_redirect_uri_padded(AuthCfg { redirect_uris: vec![" https://portal.example/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("whitespace"))]
+    #[case::boundary_redirect_uris_at_cap(AuthCfg { redirect_uris: (0..16).map(|i| format!("https://p{i}.example/")).collect(), token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_redirect_uris_over_cap(AuthCfg { redirect_uris: (0..17).map(|i| format!("https://p{i}.example/")).collect(), token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("more than 16"))]
+    #[case::adversarial_redirect_uri_javascript(AuthCfg { redirect_uris: vec!["javascript:alert(1)".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("redirect_uris"))]
+    #[case::adversarial_redirect_uri_credentials(AuthCfg { redirect_uris: vec!["https://u:p@portal.example/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("credentials"))]
     // --- `[auth] operator_subjects` (security-hardening S8) ---
     #[case::positive_operator_subjects(AuthCfg { operator_subjects: vec!["email:root@example.com".into(), "sub:kc/42".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::negative_operator_subjects_without_token(AuthCfg { operator_subjects: vec!["email:root@example.com".into()], ..oidc(GOOD_JWKS) }, true, Some("needs `[auth.token]`"))]

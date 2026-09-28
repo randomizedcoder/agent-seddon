@@ -17,7 +17,8 @@ tables. Tracker: [`STATUS.md`](STATUS.md).
 | S10 | mTLS service identity: `PeerVerifier`, `[auth.mtls] bindings`, `Exchange{client_cert}` service tokens with `cnf`, non-loopback plaintext refusal | D6 (machine) | S4, S5, S9 |
 | S11 | Audit stream: `agent_auth_events` table + policy + writer hooks for every auth / authz / binding event; `doctor` probes (signer cert, JWKS, IdP discovery, session store). Built as S11a (audit) and S11b (probes) | D11 | S6, S8 |
 | S12 | CLI: `BearerSource` token file, `agent login/logout/whoami` (device flow → `Exchange`), `[grpc.client] bearer` | D6 (human) | S6 |
-| S13 | Portal login: `AuthState`, `AuthInterceptor`, `LoginPage`, callback, capability-aware controls, Layer-A fakes | P0-4 (portal) | S6, S8 |
+| S13a | Browser sign-in server side: `AuthService.Issuers` / `Begin`, `Exchange{code, state, code_verifier}` (authorization code + PKCE, redeemed by the agent with the client secret), `[auth] redirect_uris`, testkit fake IdP `/authorize` | P0-4 (portal) | S6, S12 |
+| S13b | Portal login: `AuthState`, `AuthInterceptor`, `LoginPage`, callback, capability-aware controls, Layer-A fakes | P0-4 (portal) | S13a, S8 |
 | S14 | Envoy hardening: loopback bind, exact-origin CORS, `authorization`, `jwt_authn` against the agent JWKS, `PORTAL_AUTH=off`, `--mode validate` check, portal-e2e under auth, optional TLS / mTLS contexts | P0-4 | S5, S13 |
 | S15 | `nix flake check` **auth-e2e** (fake issuer + real `--serve-all` + step-cli certs + two-tenant isolation + chain through a `= "grpc"` seam) and the `nix run .#integration` step-ca / Postgres / ClickHouse tiers | testing | S9, S10, S11 |
 | S16 | ClickHouse lockdown: passwords from files, `users_without_row_policies_can_read_rows = false`, writer / reader split, per-query tenant setting, HyperDX wiring, RLS harness | P0-6 | — (S11 adds its table) |
@@ -31,7 +32,7 @@ S1 → S3 → S5 → S6 → S8 ───┼→ S11 ─┐
           S5 → S9 ─────────┼───────┼→ S15
 S4 ──────────→ S10 ────────┘       │
 S6 → S12                            │
-S6, S8 → S13 → S14 ─────────────────┘
+S6, S8 → S13a → S13b → S14 ─────────┘
 S16, S17 independent
 ```
 

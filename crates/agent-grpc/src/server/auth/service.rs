@@ -6,9 +6,13 @@
 //! login's trusted claim roles, the tenant's bindings that name the caller, and
 //! `operator` for `[auth] operator_subjects`.
 //!
-//! `Exchange`, `Jwks` and `Refresh` are reachable without a bearer (the layer
-//! exempts them; `Refresh` carries its own credential, the refresh handle). Every
-//! other RPC needs an agent token. Every refusal is the same opaque
+//! `Exchange`, `Jwks`, `Refresh`, `Issuers` and `Begin` are reachable without a
+//! bearer (the layer exempts them; `Refresh` carries its own credential, the
+//! refresh handle). Every other RPC needs an agent token.
+//!
+//! `Exchange` takes one credential: an ID token, a browser sign-in's authorization
+//! code (with its `state` and PKCE verifier, redeemed by [`CodeFlow`], S13), or the
+//! connection's client certificate. Every refusal is the same opaque
 //! `UNAUTHENTICATED`; the reason is logged.
 
 use std::sync::Arc;
@@ -22,6 +26,7 @@ use super::binding::{
     self, check_binding_write, removes_last_admin, BindingStore, Granter, OperatorSubjects,
     RoleBinding, SubjectKind, Who,
 };
+use super::code_flow::{check_login, CodeFlow, CodeRefusal};
 use super::mtls::MtlsBindings;
 use super::peer::{self, PeerCert};
 use super::session::{
@@ -45,6 +50,8 @@ pub struct AuthSvc {
     operators: Arc<OperatorSubjects>,
     /// `[auth.mtls] bindings`: which client certificates are services (S10).
     mtls: Arc<MtlsBindings>,
+    /// Browser sign-in (S13); `None` ⇒ `Begin` and code exchanges are refused.
+    code: Option<Arc<CodeFlow>>,
 }
 
 impl AuthSvc {
@@ -63,7 +70,97 @@ impl AuthSvc {
             bindings,
             operators,
             mtls,
+            code: None,
         }
+    }
+
+    /// Serve browser sign-in with `code`.
+    pub fn with_code_flow(mut self, code: Arc<CodeFlow>) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    /// `Exchange{code, state, code_verifier}`: redeem a browser sign-in's code for
+    /// an ID token, then continue as an ID-token exchange. The token must come from
+    /// the issuer `Begin` named and carry its nonce.
+    async fn exchange_code(
+        &self,
+        req: &pb::ExchangeRequest,
+        meta: &str,
+    ) -> Result<pb::ExchangeResponse, Status> {
+        let refuse = |why: CodeRefusal| {
+            tracing::warn!(reason = why.reason(), "exchange refused: browser sign-in");
+            exchange_refused(why.reason())
+        };
+        let Some(code) = &self.code else {
+            return Err(refuse(CodeRefusal::NotConfigured));
+        };
+        let redeemed = code
+            .redeem(&req.code, &req.state, &req.code_verifier)
+            .await
+            .map_err(refuse)?;
+        let identity = self.login.verify(&redeemed.id_token).await.map_err(|()| {
+            tracing::warn!("exchange refused: the redeemed ID token did not verify");
+            exchange_refused("login_invalid")
+        })?;
+        check_login(&identity.issuer, &redeemed).map_err(refuse)?;
+        let kind = match req.client_kind.as_str() {
+            "" => "portal",
+            k => k,
+        };
+        self.exchange_login(identity, kind, meta).await
+    }
+
+    /// A verified login: open a session and mint its first token.
+    async fn exchange_login(
+        &self,
+        identity: super::VerifiedIdentity,
+        client_kind: &str,
+        meta: &str,
+    ) -> Result<pb::ExchangeResponse, Status> {
+        let (session, handle) = self
+            .sessions
+            .open(&identity, client_kind, meta)
+            .await
+            .map_err(|e| {
+                tracing::warn!(reason = %e, "exchange refused: no session");
+                exchange_refused("no_session")
+            })?;
+        // The first token never outlives the login token or the session.
+        let mut grant = Grant::from_login(&identity, &session.sid);
+        grant.not_after = grant.not_after.min(session.expires_at);
+        grant.roles = match self.resolve(&session.roles, &session_who(&session)).await {
+            Ok(roles) => roles,
+            Err(e) => {
+                let _ = self
+                    .sessions
+                    .revoke(&session.tenant, &session.sid, "system", "logout")
+                    .await;
+                record_mint_refused(EXCHANGE, &session);
+                return Err(e);
+            }
+        };
+        let out = match self.mint(&grant, &session, handle) {
+            Ok(out) => out,
+            Err(e) => {
+                // Do not leave a session behind that no token names.
+                let _ = self
+                    .sessions
+                    .revoke(&session.tenant, &session.sid, "system", "logout")
+                    .await;
+                record_mint_refused(EXCHANGE, &session);
+                return Err(e);
+            }
+        };
+        tracing::info!(
+            tenant = %session.tenant,
+            subject = %session.subject,
+            sid = %session.sid,
+            client_kind = %session.client_kind,
+            "agent session opened"
+        );
+        record_auth_event(session_event(AuthEventKind::Login, &session));
+        Ok(out)
     }
 
     /// `Exchange{use_client_cert}`: a known service's certificate for a service
@@ -229,6 +326,26 @@ fn exchange_refused(reason: &'static str) -> Status {
     unauthenticated()
 }
 
+/// A `Begin` the agent will not start. Each answer concerns only what the caller
+/// sent (issuer names are public through `Issuers`); the IdP's trouble is not
+/// detailed.
+fn begin_refused(why: CodeRefusal) -> Status {
+    match why {
+        CodeRefusal::UnknownIssuer => Status::invalid_argument("unknown login issuer"),
+        CodeRefusal::RedirectNotAllowed => {
+            Status::invalid_argument("redirect_uri is not one of `[auth] redirect_uris`")
+        }
+        CodeRefusal::BadChallenge => Status::invalid_argument(
+            "code_challenge must be an S256 challenge (43 base64url characters)",
+        ),
+        CodeRefusal::Busy => Status::resource_exhausted("too many sign-ins in progress"),
+        CodeRefusal::NotConfigured => {
+            Status::failed_precondition("browser sign-in is not configured")
+        }
+        _ => Status::unavailable("the login issuer is unavailable"),
+    }
+}
+
 /// A session that verified but could not be given a token (bindings unavailable,
 /// the mint refused): the session is known, so the row names it.
 fn record_mint_refused(rpc: &str, session: &AuthSession) {
@@ -367,12 +484,19 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 .to_string();
             let peer = request.peer_certs().and_then(|c| peer::of_certs(&c));
             let req = request.into_inner();
+            // One credential per exchange: an ID token, a code, or the certificate.
+            let code_parts = !req.code.is_empty() || !req.state.is_empty();
+            let given = usize::from(!req.id_token.is_empty())
+                + usize::from(code_parts)
+                + usize::from(req.use_client_cert);
+            if given > 1 {
+                return Err(exchange_refused("two_credentials"));
+            }
             if req.use_client_cert {
-                // One credential per exchange: never both.
-                if !req.id_token.is_empty() {
-                    return Err(exchange_refused("two_credentials"));
-                }
                 return self.exchange_service(peer, &meta).await.map(Response::new);
+            }
+            if code_parts {
+                return self.exchange_code(&req, &meta).await.map(Response::new);
             }
             if req.id_token.is_empty() || req.id_token.len() > MAX_ID_TOKEN_BYTES {
                 return Err(exchange_refused("malformed_login"));
@@ -381,49 +505,54 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 tracing::warn!("exchange refused: login token did not verify");
                 exchange_refused("login_invalid")
             })?;
-            let (session, handle) = self
-                .sessions
-                .open(&identity, &req.client_kind, &meta)
+            self.exchange_login(identity, &req.client_kind, &meta)
                 .await
-                .map_err(|e| {
-                    tracing::warn!(reason = %e, "exchange refused: no session");
-                    exchange_refused("no_session")
+                .map(Response::new)
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn issuers(
+        &self,
+        _request: Request<pb::IssuersRequest>,
+    ) -> Result<Response<pb::IssuersResponse>, Status> {
+        let issuers = self
+            .code
+            .iter()
+            .flat_map(|c| c.issuers())
+            .map(|(name, profile)| pb::LoginIssuer {
+                name,
+                profile: profile.to_string(),
+            })
+            .collect();
+        Ok(Response::new(pb::IssuersResponse { issuers }))
+    }
+
+    async fn begin(
+        &self,
+        request: Request<pb::BeginRequest>,
+    ) -> Result<Response<pb::BeginResponse>, Status> {
+        let sp = span("auth.begin", request.metadata());
+        async move {
+            let req = request.into_inner();
+            let Some(code) = &self.code else {
+                return Err(Status::failed_precondition(
+                    "browser sign-in is not configured (`[auth] redirect_uris`)",
+                ));
+            };
+            let begun = code
+                .begin(&req.issuer, &req.redirect_uri, &req.code_challenge)
+                .await
+                .map_err(|why| {
+                    tracing::info!(reason = why.reason(), "browser sign-in not started");
+                    begin_refused(why)
                 })?;
-            // The first token never outlives the login token or the session.
-            let mut grant = Grant::from_login(&identity, &session.sid);
-            grant.not_after = grant.not_after.min(session.expires_at);
-            grant.roles = match self.resolve(&session.roles, &session_who(&session)).await {
-                Ok(roles) => roles,
-                Err(e) => {
-                    let _ = self
-                        .sessions
-                        .revoke(&session.tenant, &session.sid, "system", "logout")
-                        .await;
-                    record_mint_refused(EXCHANGE, &session);
-                    return Err(e);
-                }
-            };
-            let out = match self.mint(&grant, &session, handle) {
-                Ok(out) => out,
-                Err(e) => {
-                    // Do not leave a session behind that no token names.
-                    let _ = self
-                        .sessions
-                        .revoke(&session.tenant, &session.sid, "system", "logout")
-                        .await;
-                    record_mint_refused(EXCHANGE, &session);
-                    return Err(e);
-                }
-            };
-            tracing::info!(
-                tenant = %session.tenant,
-                subject = %session.subject,
-                sid = %session.sid,
-                client_kind = %session.client_kind,
-                "agent session opened"
-            );
-            record_auth_event(session_event(AuthEventKind::Login, &session));
-            Ok(Response::new(out))
+            Ok(Response::new(pb::BeginResponse {
+                authorize_url: begun.authorize_url,
+                state: begun.state,
+                expires_at: begun.expires_at,
+            }))
         }
         .instrument(sp)
         .await

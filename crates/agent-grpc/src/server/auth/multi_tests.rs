@@ -390,6 +390,13 @@ async fn call_through(
 #[rstest]
 #[case::positive_exchange_needs_no_bearer("/agent.v1.AuthService/Exchange", false, None)]
 #[case::positive_jwks_needs_no_bearer("/agent.v1.AuthService/Jwks", false, None)]
+#[case::positive_issuers_needs_no_bearer("/agent.v1.AuthService/Issuers", false, None)]
+#[case::positive_begin_needs_no_bearer("/agent.v1.AuthService/Begin", false, None)]
+#[case::adversarial_begin_suffix_is_not_exempt(
+    "/agent.v1.AuthService/BeginAdmin",
+    false,
+    Some("16")
+)]
 #[case::negative_who_am_i_needs_a_bearer("/agent.v1.AuthService/WhoAmI", false, Some("16"))]
 #[case::positive_agent_token_scopes_the_bearer("/agent.v1.EmbedService/EmbedQuery", true, None)]
 #[case::negative_seam_needs_a_bearer("/agent.v1.EmbedService/EmbedQuery", false, Some("16"))]

@@ -899,8 +899,11 @@ fn auth_layer(
         issuers: a
             .issuers
             .iter()
-            .map(agent_runtime::auth_params::issuer_params)
-            .collect(),
+            .map(|c| {
+                agent_runtime::auth_params::serving_issuer_params(c, !a.redirect_uris.is_empty())
+            })
+            .collect::<Result<_, _>>()
+            .map_err(anyhow::Error::msg)?,
         token: a.token.as_ref().map(|t| agent_grpc::server::TokenParams {
             issuer: t.issuer.clone(),
             audience: t.audience.clone(),
@@ -926,6 +929,7 @@ fn auth_layer(
                 roles: b.roles.clone(),
             })
             .collect(),
+        redirect_uris: a.redirect_uris.clone(),
     })
     .map(|layer| {
         layer

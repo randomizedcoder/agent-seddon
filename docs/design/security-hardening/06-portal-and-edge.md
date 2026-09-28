@@ -37,6 +37,11 @@ the portal hardcodes its identity.
 - `--dart-define`: `PORTAL_AUTH_ISSUER` (issuer *name*), `PORTAL_AUTH=off` for loopback dev; both
   wired into the nix build.
 
+**As built (S13a).** The server half is in: `AuthService.Issuers`, `AuthService.Begin` and
+`Exchange{code, state, code_verifier}`, with `[auth] redirect_uris` as the exact return URIs
+([`docs/grpc.md`](../../grpc.md), "A person in a browser"). The agent generates the `nonce` and
+the single-use `state`; the portal generates only the PKCE verifier. The portal half is S13b.
+
 ## Envoy hardening
 
 Same heredoc, env knobs with safe defaults:

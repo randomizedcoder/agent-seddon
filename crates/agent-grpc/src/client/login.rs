@@ -170,13 +170,16 @@ pub fn next_interval(current: Duration, answer: &PollAnswer, timing: PollTiming)
 }
 
 /// Printable, no control characters, bounded: safe to write to a terminal.
-fn display_safe(s: &str, max: usize) -> bool {
+pub(crate) fn display_safe(s: &str, max: usize) -> bool {
     !s.is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control)
 }
 
 /// GET or POST and read a JSON body, capped. Errors are short classes, never the
 /// URL or the body.
-async fn fetch_json(req: reqwest::RequestBuilder, what: &str) -> Result<(bool, Value), String> {
+pub(crate) async fn fetch_json(
+    req: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<(bool, Value), String> {
     let mut resp = req.send().await.map_err(|e| {
         if e.is_timeout() {
             format!("{what}: timed out")

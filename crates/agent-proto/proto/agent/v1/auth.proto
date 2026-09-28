@@ -8,8 +8,15 @@
 // block; there is no dedicated port.
 //
 // Security contract:
-//   - `Exchange` and `Jwks` need no bearer (a caller has no agent token yet, and a
-//     verifier fetches the public keys). Every other RPC needs an agent token.
+//   - `Exchange`, `Jwks`, `Issuers` and `Begin` need no bearer (a caller has no
+//     agent token yet, and a verifier fetches the public keys). Every other RPC
+//     needs an agent token.
+//   - Browser sign-in (S13) is the OAuth authorization-code flow with PKCE, the
+//     code redeemed by the agent (a confidential client when the issuer has a
+//     `client_secret`): `Begin` returns the IdP URL and a single-use `state`
+//     bound to the issuer, the redirect URI and the PKCE challenge; `Exchange`
+//     takes the code back with that `state` and the verifier. The redirect URI
+//     must be one `[auth] redirect_uris` lists exactly.
 //   - `Exchange` accepts only ID tokens from a configured `[auth]` issuer; an agent
 //     token is not accepted there, and an ID token is not accepted anywhere else.
 //   - `Exchange{use_client_cert}` accepts a known service's client certificate
@@ -29,8 +36,13 @@ syntax = "proto3";
 package agent.v1;
 
 service AuthService {
-  // Trade an identity provider's ID token for an agent token.
+  // Trade an identity provider's ID token, a browser sign-in's authorization
+  // code, or a service's client certificate for an agent token.
   rpc Exchange(ExchangeRequest) returns (ExchangeResponse);
+  // The login issuers a browser can sign in with.
+  rpc Issuers(IssuersRequest) returns (IssuersResponse);
+  // Start a browser sign-in: where to send the user, and the `state` to expect back.
+  rpc Begin(BeginRequest) returns (BeginResponse);
   // The public keys agent tokens are signed with, as a JWK Set.
   rpc Jwks(JwksRequest) returns (JwksResponse);
   // Who the caller's agent token says they are, and what it lets them do.
@@ -70,6 +82,14 @@ message ExchangeRequest {
   // `sub = svc:<name>` and `amr = ["mtls"]`, and has no refresh handle: exchange
   // again before it expires.
   bool use_client_cert = 3;
+  // A browser sign-in's authorization code (S13), from the IdP's redirect. Needs
+  // `state` and `code_verifier`; `id_token` must be empty. At most 4 KiB.
+  string code = 4;
+  // The `state` `Begin` returned, echoed by the IdP's redirect. Single use.
+  string state = 5;
+  // The PKCE verifier whose S256 challenge went to `Begin` (RFC 7636: 43-128
+  // unreserved characters).
+  string code_verifier = 6;
 }
 
 message ExchangeResponse {
@@ -85,6 +105,39 @@ message ExchangeResponse {
   string refresh_handle = 5;
   // Unix seconds after which the session cannot be refreshed; sign in again.
   uint64 session_expires_at = 6;
+}
+
+message IssuersRequest {}
+
+message IssuersResponse {
+  // Empty when browser sign-in is not configured (no `[auth] redirect_uris`).
+  repeated LoginIssuer issuers = 1;
+}
+
+message LoginIssuer {
+  // The `[[auth.issuers]]` name `Begin` takes.
+  string name = 1;
+  // `google` | `entra` | `generic`, so a client can label the button.
+  string profile = 2;
+}
+
+message BeginRequest {
+  // A name from `Issuers`.
+  string issuer = 1;
+  // Where the IdP sends the browser back; exactly one of `[auth] redirect_uris`.
+  string redirect_uri = 2;
+  // The PKCE S256 challenge: base64url (no padding) of SHA-256 of the verifier,
+  // 43 characters. The verifier stays with the client until `Exchange`.
+  string code_challenge = 3;
+}
+
+message BeginResponse {
+  // The IdP's authorization URL, with every parameter set; navigate to it.
+  string authorize_url = 1;
+  // Opaque and single use; the IdP echoes it to the redirect URI.
+  string state = 2;
+  // Unix seconds after which `state` is no longer accepted.
+  uint64 expires_at = 3;
 }
 
 message JwksRequest {}

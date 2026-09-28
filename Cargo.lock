@@ -712,14 +712,17 @@ dependencies = [
  "agent-mcp",
  "agent-metrics",
  "async-trait",
+ "base64 0.22.1",
  "jsonwebtoken",
  "rcgen",
+ "ring",
  "rstest",
  "serde_json",
  "tiny_http",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -34,6 +34,15 @@ pub enum Profile {
 }
 
 impl Profile {
+    /// The config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Google => "google",
+            Profile::Entra => "entra",
+            Profile::Generic => "generic",
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim() {
             "" | "generic" => Ok(Profile::Generic),

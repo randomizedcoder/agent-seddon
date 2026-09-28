@@ -1382,6 +1382,7 @@ pub async fn build_agent_with(
             issuers: cfg.auth.issuers.clone(),
             token: cfg.auth.token.clone(),
             operator_subjects: cfg.auth.operator_subjects.clone(),
+            redirect_uris: cfg.auth.redirect_uris.clone(),
             mtls: cfg.auth.mtls.clone(),
             #[cfg(feature = "auth")]
             sessions: resolve_auth_session_backend(&cfg, &metrics)?,

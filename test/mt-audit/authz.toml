@@ -8,7 +8,7 @@
 #                                    (watching a session someone else owns; another
 #                                    tenant's sign-in sessions)
 #   "authenticated"                  any verified caller (WhoAmI, Logout, own sessions)
-#   "public"                         no bearer at all (Exchange, Jwks, Refresh)
+#   "public"                         no bearer at all (Exchange, Jwks, Refresh, Issuers, Begin)
 #
 # Regenerate after an intentional change with `python3 test/mt-audit/audit.py --dump-authz`,
 # then review the diff.
@@ -28,9 +28,11 @@
 "AstService.InterfaceOf" = "use:agent"
 "AstService.Reindex" = "use:agent"
 "AstService.Status" = "use:agent"
+"AuthService.Begin" = "public"
 "AuthService.DeleteBinding" = "field-checked:delete:binding"
 "AuthService.Exchange" = "public"
 "AuthService.GetBinding" = "field-checked:read:binding"
+"AuthService.Issuers" = "public"
 "AuthService.Jwks" = "public"
 "AuthService.ListBindings" = "field-checked:read:binding"
 "AuthService.ListMySessions" = "authenticated"
