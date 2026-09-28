@@ -194,16 +194,27 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-28 | Hygiene PR 1 (`fix/progress-span-callsite-race` @ `b43e825`): `cargo test -p agent-testkit observe` (6, incl. the three new rows; the race row verified red with the pin commented out), `progress::tests` 20/20 consecutive at `--test-threads=8` + green at 32, `cargo fmt --check`, `clippy --workspace --all-targets --all-features -D warnings`, then `nix flake check` on the committed ref | green first pass, 56 checks, `all checks passed!` |
 | 2026-09-28 | Hygiene PR 2 (`fix/search-leak-two-window` @ `adb01dd`): `cargo test -p agent-search` (52 + 8, incl. `positive_reindex_reloads_reader_after_commit`, verified red with the explicit `reload()` commented out: `first commit not visible after reindex: []`), the dhat leak test 20/20 consecutive and 5/5 with every core burning, `cargo fmt --check`, `clippy --workspace --all-targets --all-features -D warnings`, then `nix flake check` on the committed ref (sharing the host with another session's full gate, load ≈ 50) | green first pass, 65 checks, `all checks passed!` |
 | 2026-09-28 | Hygiene PR 3 (`fix/runtime-feature-matrix` @ `ddce56f`, rebased onto #545): the seven `cargo check` matrix rows via `nix develop` (bare / `campaign` / `campaign-postgres` / `provider-router` lean, `role-postgres`, `auth-postgres`, `agent-cli --no-default-features`; 21 → 0 errors), `nix build .#checks.x86_64-linux.feature-matrix` on the ref (1 min 38 s build phase), `cargo fmt --check`, `clippy --workspace --all-targets --all-features -D warnings`, then `nix flake check` on the committed ref (concurrently with the PR 4 and PR 5 gates) | green first pass, 58 checks incl. the new `feature-matrix`, `all checks passed!` |
+| 2026-09-28 | Hygiene PR 4 (`chore/rustsec-h2-rustls`): `cargo update -p h2 -p rustls` (3 lock entries), `nix flake update advisory-db`, `cargo audit` online (0 vulnerabilities, 6 allowed warnings), `nix build .#checks.x86_64-linux.cargo-audit` on the ref with the new DB, `cargo test --workspace` (6979 passed, 0 failed), then `nix flake check` on the committed ref | **first pass red in `cargo-deny`** (`bans`: `r-efi` 5.3.0 + 6.0.0 — the re-resolve had silently moved `tempfile`'s `getrandom` edge (`>=0.3, <0.5`) from 0.4.3 to 0.3.4, making `r-efi 5` reachable next to `r-efi 6`; `main` is `bans ok`). `cargo update -p tempfile` ("Locking 0 packages") put the edge back; lock re-committed as exactly the three patched entries (`6890de23`), `cargo deny check bans` green locally; **second pass green**, 60 checks, `all checks passed!` (@ `64180ea2`, then rebased onto #546 with no overlapping hunks) |
 | 2026-09-28 | #531 refused by GitHub (conflicts): `main` advanced by #524–#530 (S12 `agent login` / `logout` / `whoami`, S13a, rest-03g1–g4); `git merge origin/main` into `campaigns/cp-04` (`6503044`), five additive hunks in `crates/agent-cli/src/main.rs` resolved by keeping both sides; `cargo fmt --check`, `clippy -p agent-cli -D warnings`, `cargo test -p agent-cli` (223 bin + 22 e2e), then the full gate on the merged ref | green first pass, `all checks passed!` |
 
 ## Open questions / blockers
 
-- `cargo deny check advisories` against a freshly fetched RustSec DB fails on `rustls`
+- ~~`cargo deny check advisories` against a freshly fetched RustSec DB fails on `rustls`
   (RUSTSEC-2026-0285, a real vulnerability), `rustls-pemfile` (2025-0134, unmaintained) and
   `proc-macro-error2` (2026-0173, unmaintained). Not from this track (`Cargo.lock` on
   `campaigns/cp-03` differs from `main` only by `agent-campaign`'s `tracing` edge); the flake's
   `cargo-audit` runs against the pinned `advisory-db` input, so the gate does not see it yet. Needs
-  its own change on `main`: bump `rustls`, then bump the `advisory-db` input.
+  its own change on `main`: bump `rustls`, then bump the `advisory-db` input.~~ **Resolved in
+  #547.** `cargo update -p h2 -p rustls` (h2 0.4.15 → 0.4.19 for RUSTSEC-2026-0258, rustls
+  0.23.42 → 0.23.45 + rustls-webpki 0.103.15 for RUSTSEC-2026-0285; three lock entries), then
+  `nix flake update advisory-db` (2026-07-17 → 2026-09-25), in that order. The hermetic
+  `cargo-audit` check now sees the same DB as a local `cargo audit`: 0 vulnerabilities, six
+  allowed warnings left alone on purpose (`rustls-pemfile` unmaintained → tonic 0.13 is its own
+  bump; `proc-macro-error2` + `bincode` unmaintained → iai-callgrind bench harness; `paste`
+  unmaintained → klickhouse; `lru` 0.16.4 unsound → pinned by the tantivy git rev; `chacha20`
+  0.10.1 yanked → transitive). No `deny.toml [advisories]`: advisories stay with the pinned
+  cargo-audit input by design, and a cargo-deny advisories check would need a second,
+  non-hermetic DB.
 - `agent --config config/multi-tenant.toml --check-config` fails on `main` before any campaign
   code runs: `[role] store = "postgres"` dials eagerly (`config error: postgres: pool timed out
   while waiting for an open connection` against the dummy DSN). Fixture 10 in
