@@ -11,8 +11,8 @@ the as-built log) in the PR that lands the increment.
 | 01 | [Design directory](README.md) (design-of-record + STATUS + index) | — | — | — | — | — | ✅ merged (#510) |
 | 02 | Groundwork: vendor `google/api/{annotations,http}.proto`, wire `tonic-build` + buf-lint exemption, annotate one RPC, coverage-test skeleton | ✅ | — | — | ✅ | — | ✅ merged (#512) |
 | 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | ✅ | — | — | ✅ | — | ✅ complete (03a–03g4) |
-| 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | 🟡 in flight |
-| 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (port via `nix/constants.nix`), filter before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | — | — | ⬜ |
+| 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ✅ merged (#534) |
+| 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (`:8094`, in the `portal_envoy.py` renderer), filter after `cors`/before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | ✅ | — | ✅ complete |
 | 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ⬜ |
 | 07 | `nix run .#rest-bench` (REST-vs-gRPC via `ghz` + HTTP load; descriptor/config-size note) | — | ✅ | ✅ | — | ✅ | ⬜ |
 
@@ -53,7 +53,7 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | ✅ merged (#526) |
 | 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | ✅ merged (#527) |
 | 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | ✅ merged (#529) |
-| 03g4 | `auth.proto` (AuthService, 15 RPCs — OIDC/JWT/RBAC/sessions/bindings + S13 browser sign-in `Issuers`/`Begin`) — **final batch; whole surface now annotated** | 🟡 in flight |
+| 03g4 | `auth.proto` (AuthService, 15 RPCs — OIDC/JWT/RBAC/sessions/bindings + S13 browser sign-in `Issuers`/`Begin`) — **final batch; whole surface now annotated** | ✅ merged (#530) |
 
 (Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR. The original
 16-proto `03g` was split into reviewable sub-batches — smaller PRs; `auth.proto` surfaced as a
@@ -237,3 +237,42 @@ distinct control-plane group during the sweep and became its own final batch, 03
   02) so they can never disagree. Doc = 146 unique paths / 172 `(verb,path)` routes; 4 parity tests + the
   refactored 60 annotation tests all green. Verified: `nix run .#gen-openapi` no-diffs a clean tree, and a
   hand-edit makes `openapi-sync` fail (the gate bites both ways). Next: increment 05 (Envoy transcoder).
+- **05 (Envoy `grpc_json_transcoder` — the live REST path).** Added a REST/JSON transcoder listener on
+  **`127.0.0.1:8094`** that fronts the SAME `agent_gateway` cluster the grpc-web bridge uses, so a REST
+  call is projected to gRPC per the `.proto` `(google.api.http)` routes and hits the SAME handler behind
+  the SAME `AuthLayer` — REST bypasses no authz. Filter chain `cors → grpc_json_transcoder → router`
+  (the transcoder must precede `router`); `typed_config`: `auto_mapping: false` (every RPC is annotated),
+  `match_incoming_request_route: true` (an unmapped path 404s rather than being force-mapped),
+  `convert_grpc_status: true`, `request_validation_options.{reject_unknown_method,reject_unknown_query_parameters}:
+  true` (the REST body is attacker-controlled — fail closed), `print_options.{add_whitespace,always_print_primitive_fields}`.
+  CORS `allow_headers` already carries `authorization` (a bearer forwards to the agent's AuthLayer).
+  **Descriptor + service list from one derivation** (`nix/rest-descriptor.nix`): `buf build
+  --as-file-descriptor-set` emits the `agent_descriptor.pb` Envoy loads (imports included → the http
+  options resolve; Envoy's C++ protobuf reads the custom option natively), and the same build derives the
+  service list (all 40 `agent.v1.*` FQNs, via `buf … #format=json | jq`) — so the transcoder's `services:`
+  can never disagree with its descriptor, and a newly-added service is picked up with no hand-maintained
+  list. The descriptor is **not committed**; it is mounted read-only into the Envoy container at bring-up.
+  **Two deviations from the plan** (both driven by #536, which landed between plan and build and replaced
+  the Envoy YAML heredoc with a data-driven Python renderer, `test/portal-envoy/portal_envoy.py`, on the
+  gate):
+  (1) **The REST port lives in `nix/portal/envoy-spec.nix` (`ports.rest = 8094`), not `nix/constants.nix`**
+  — matching the grpc-web/Envoy listener ports, which S14 keeps there as UI plumbing rather than in the
+  seam table, so no `constants.rs`/`gen-constants` churn.
+  (2) **The listener is expressed as a `rest` block in the spec and rendered by `portal_envoy.py`, not a
+  hand-written heredoc.** A new `Rest` dataclass + `load_services()` parse it, failing closed on any
+  non-`agent.v1` / empty / oversized / control-char service file; `rest_listener()` renders the chain; the
+  descriptor is mounted via the same host→container path indirection the TLS files use. The REST listener
+  is **pinned to `127.0.0.1`** and, unlike the grpc-web listeners, **ignores `PORTAL_GRPC_WEB_HOST`** — a
+  LAN bind of the browser bridge never silently exposes an (edge-)unauthenticated REST surface (the agent
+  AuthLayer still applies; edge `jwt_authn` for a publicly-fronted REST listener, which needs REST-path
+  unauthenticated prefixes rather than the grpc-web gRPC-path ones, is deferred with external exposure).
+  **Gate coverage is now stronger than the plan anticipated:** the `portal-envoy` check runs **real `envoy
+  --mode validate`** over the whole spec — which now carries the transcoder listener with the real
+  40-service descriptor — across all five modes (auth off / local JWKS / remote JWKS / LAN bind /
+  TLS+mTLS), so Envoy itself accepts the transcoder config on the hermetic gate (the descriptor store path
+  flows into the check as a build dependency via the spec JSON's string context — IFD-free). Added a
+  `rest-descriptor` check (descriptor non-empty; ≥30 all-`agent.v1.*` services) and 13 new four-class +
+  adversarial `portal_envoy` unit tests (`LoadServices`, `SpecLoadRest`, `RestTranscoder`: filter order,
+  fail-closed transcoder knobs, loopback pin under LAN host, no edge-jwt, cluster reuse, descriptor
+  remap, OTLP-key coverage). A live REST curl round-trip is increment 06 (`nix run .#rest-integration`).
+  Next: increment 06.

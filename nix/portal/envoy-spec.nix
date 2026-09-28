@@ -14,11 +14,18 @@
   versions,
 }:
 let
+  # The Envoy `grpc_json_transcoder` inputs (rest-openapi §4): the descriptor Envoy
+  # loads + the service list to transcode, both derived from the SAME `buf` build so
+  # they cannot drift. Referencing these store paths gives `file` (and hence any
+  # derivation that reads it — the `portal-envoy` check) a build dependency on the
+  # descriptor, so `envoy --mode validate` sees a real file, IFD-free.
+  restDescriptor = import ../rest-descriptor.nix { inherit pkgs versions; };
   ports = {
     grpcWeb = 8090; # browser -> gateway
     grpcWebSessions = 8091; # browser -> sessions
     portalWeb = 8092; # static server for the built web bundle
     grpcWebFleet = 8093; # browser -> fleet (--serve-fleet)
+    rest = 8094; # browser/curl -> gateway via grpc_json_transcoder (REST/JSON)
     # The gateways the proxy forwards to (mirror nix/constants.nix gateway/sessions).
     gateway = 50100;
     sessions = 50080;
@@ -52,6 +59,20 @@ in
           upstream_port = ports.fleet;
         }
       ];
+      # The REST/JSON transcoder listener (rest-openapi §4). A distinct listener kind:
+      # it fronts the SAME agent_gateway cluster the grpc-web gateway uses, but its
+      # filter chain runs `grpc_json_transcoder` (not `grpc_web`), projecting the gRPC
+      # surface to REST per the `.proto` `(google.api.http)` routes. Pinned to loopback
+      # (a compat surface; the agent's own AuthLayer still applies to every transcoded
+      # call), so — unlike the grpc-web listeners — it ignores PORTAL_GRPC_WEB_HOST.
+      rest = {
+        name = "rest_transcoder";
+        port = ports.rest;
+        cluster = "agent_gateway";
+        upstream_port = ports.gateway;
+        descriptor = "${restDescriptor}/agent_descriptor.pb";
+        services_file = "${restDescriptor}/services.txt";
+      };
       otel_port = ports.otelCollector;
       gateway_port = ports.gateway;
     }

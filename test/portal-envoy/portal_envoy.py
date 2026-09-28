@@ -82,12 +82,58 @@ class Listener:
 
 
 @dataclass(frozen=True)
+class Rest:
+    """The REST/JSON transcoder listener (rest-openapi §4): a `grpc_json_transcoder`
+    chain over the agent_gateway cluster, projecting the gRPC surface to REST per the
+    `.proto` `(google.api.http)` routes. Loopback-pinned (compat surface; the agent's
+    own AuthLayer still applies), so it does not honour PORTAL_GRPC_WEB_HOST."""
+
+    name: str
+    port: int
+    cluster: str
+    upstream_port: int
+    descriptor: str  # the FileDescriptorSet path (nix/rest-descriptor.nix)
+    services: tuple[str, ...]  # fully-qualified service names to transcode
+
+
+# The transcoder `services` list is derived from the descriptor (nix/rest-descriptor.nix);
+# a value far above the ~40-service surface means a malformed services file, so cap it.
+MAX_SERVICES = 512
+
+
+def load_services(path: str) -> tuple[str, ...]:
+    """The transcoder's service list, one FQN per line. Every name must be a
+    fully-qualified `agent.v1.*` service — the descriptor and this list come from the
+    same build, so anything else (a google.api service, an unversioned name, an empty
+    file) is a build-shape bug the renderer must fail closed on, not paper over."""
+    try:
+        raw = Path(path).read_text()
+    except OSError as e:
+        raise EnvoyError(f"cannot read the transcoder services file: {e.strerror}") from None
+    names = [n.strip() for n in raw.splitlines() if n.strip()]
+    if not names:
+        raise EnvoyError("the transcoder services file is empty")
+    if len(names) > MAX_SERVICES:
+        raise EnvoyError(f"the transcoder services file lists more than {MAX_SERVICES} services")
+    for n in names:
+        no_controls("a transcoder service name", n)
+        # Fully-qualified `agent.v1.<Name>` — the same shape the rest-descriptor check
+        # asserts. A name outside this shape means the extraction leaked something.
+        parts = n.split(".")
+        if len(parts) != 3 or parts[0] != "agent" or parts[1] != "v1" or not parts[2].isidentifier():
+            raise EnvoyError(f"transcoder service {n!r} is not a fully-qualified agent.v1 name")
+    # Deterministic + de-duplicated: the config must be byte-stable across renders.
+    return tuple(sorted(set(names)))
+
+
+@dataclass(frozen=True)
 class Spec:
     """What nix knows: the listeners, the collector, the agent's protos."""
 
     listeners: tuple[Listener, ...]
     otel_port: int
     gateway_port: int
+    rest: Rest | None = None
 
     @staticmethod
     def load(raw: Mapping) -> "Spec":
@@ -96,7 +142,15 @@ class Spec:
                 Listener(str(l["name"]), int(l["port"]), str(l["cluster"]), int(l["upstream_port"]))
                 for l in raw["listeners"]
             )
-            return Spec(listeners, int(raw["otel_port"]), int(raw["gateway_port"]))
+            rest = None
+            r = raw.get("rest")
+            if r is not None:
+                rest = Rest(
+                    str(r["name"]), int(r["port"]), str(r["cluster"]),
+                    int(r["upstream_port"]), str(r["descriptor"]),
+                    load_services(str(r["services_file"])),
+                )
+            return Spec(listeners, int(raw["otel_port"]), int(raw["gateway_port"]), rest)
         except (KeyError, TypeError, ValueError) as e:
             raise EnvoyError(f"bad spec: {e}") from e
 
@@ -583,6 +637,86 @@ def listener(l: Listener, k: Knobs, jwt: Jwt | None, tls: Tls | None) -> dict:
     }
 
 
+def transcoder_filter(descriptor_path: str, services: Sequence[str]) -> dict:
+    """`grpc_json_transcoder`: HTTP+JSON ⇄ gRPC per the descriptor's `(google.api.http)`
+    routes. `auto_mapping: false` because every RPC is explicitly annotated;
+    `match_incoming_request_route: true` so an unmapped path falls through (404) instead
+    of being force-mapped; validation rejects unknown methods/query params (the request
+    body is attacker-controlled — fail closed)."""
+    return {
+        "name": "envoy.filters.http.grpc_json_transcoder",
+        "typed_config": {
+            "@type": any_type(
+                "envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder"),
+            "proto_descriptor": descriptor_path,
+            "services": list(services),
+            "auto_mapping": False,
+            "match_incoming_request_route": True,
+            "convert_grpc_status": True,
+            "request_validation_options": {
+                "reject_unknown_method": True,
+                "reject_unknown_query_parameters": True,
+            },
+            "print_options": {"add_whitespace": True, "always_print_primitive_fields": True},
+        },
+    }
+
+
+def rest_listener(rest: Rest, k: Knobs, descriptor_path: str, tls: Tls | None) -> dict:
+    """The REST/JSON transcoder listener. Filter order `cors ▶ grpc_json_transcoder ▶
+    router` (the transcoder must precede the router). No `grpc_web` (this is plain
+    HTTP+JSON, not grpc-web framing) and no edge `jwt_authn`: it is pinned to loopback,
+    and every transcoded call is an ordinary gRPC call the agent's AuthLayer still
+    verifies. Bind is FIXED 127.0.0.1 — it does not follow PORTAL_GRPC_WEB_HOST, so a
+    LAN bind of the grpc-web listeners never silently exposes REST."""
+    hcm = {
+        "@type": any_type(
+            "envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"),
+        "stat_prefix": rest.name,
+        "codec_type": "AUTO",
+        "access_log": access_log(k.otlp_authorization),
+        "tracing": tracing(k.otlp_authorization),
+        "route_config": {
+            "name": f"{rest.name}_route",
+            "virtual_hosts": [{
+                "name": rest.cluster,
+                "domains": ["*"],
+                "typed_per_filter_config": {"envoy.filters.http.cors": cors_policy(k.origins)},
+                "routes": [{"match": {"prefix": "/"},
+                            "route": {"cluster": rest.cluster, "timeout": "0s"}}],
+            }],
+        },
+        "http_filters": [
+            {"name": "envoy.filters.http.cors",
+             "typed_config": {"@type": any_type("envoy.extensions.filters.http.cors.v3.Cors")}},
+            transcoder_filter(descriptor_path, rest.services),
+            {"name": "envoy.filters.http.router",
+             "typed_config": {"@type": any_type("envoy.extensions.filters.http.router.v3.Router")}},
+        ],
+    }
+    chain: dict = {"filters": [{
+        "name": "envoy.filters.network.http_connection_manager", "typed_config": hcm}]}
+    if tls is not None:
+        chain["transport_socket"] = {
+            "name": "envoy.transport_sockets.tls",
+            "typed_config": {
+                "@type": any_type("envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext"),
+                "common_tls_context": {
+                    "alpn_protocols": ["h2", "http/1.1"],
+                    "tls_certificates": [{
+                        "certificate_chain": {"filename": tls.cert},
+                        "private_key": {"filename": tls.key},
+                    }],
+                },
+            },
+        }
+    return {
+        "name": rest.name,
+        "address": {"socket_address": {"address": "127.0.0.1", "port_value": rest.port}},
+        "filter_chains": [chain],
+    }
+
+
 def jwks_cluster(url: str) -> dict:
     u = urlsplit(url)
     host = u.hostname or ""
@@ -607,10 +741,11 @@ def render(spec: Spec, k: Knobs, jwt: Jwt | None, paths: Mapping[str, str]) -> d
     clusters.append(cluster("otel_collector", "127.0.0.1", spec.otel_port))
     if jwt is not None and jwt.jwks_url:
         clusters.append(jwks_cluster(jwt.jwks_url))
-    return {"static_resources": {
-        "listeners": [listener(l, k, jwt, tls) for l in spec.listeners],
-        "clusters": clusters,
-    }}
+    listeners = [listener(l, k, jwt, tls) for l in spec.listeners]
+    if spec.rest is not None:
+        # The transcoder fronts an existing cluster (agent_gateway); no new cluster.
+        listeners.append(rest_listener(spec.rest, k, p(spec.rest.descriptor), tls))
+    return {"static_resources": {"listeners": listeners, "clusters": clusters}}
 
 
 def container_paths(k: Knobs) -> dict[str, str]:
@@ -641,6 +776,12 @@ def build(args: argparse.Namespace, env: Mapping[str, str], runner: Runner, cont
     fetch = lambda: fetch_jwks(args.grpcurl, args.proto_dir, k.jwks_from, k.jwks_wait, runner)  # noqa: E731
     jwt = resolve_jwt(k, fetch, lambda p: Path(p).read_text())
     paths = container_paths(k) if container else {}
+    if container and spec.rest is not None:
+        # Mount the (host store-path) descriptor read-only at a fixed container path, and
+        # point the rendered config at that mount — the same host→mount indirection the
+        # TLS files use. For `--mode validate` (container=False) the config names the real
+        # store path, which is readable in the sandbox.
+        paths = {**paths, spec.rest.descriptor: "/etc/envoy/agent_descriptor.pb"}
     return spec, k, jwt, render(spec, k, jwt, paths), paths
 
 
@@ -679,6 +820,10 @@ def cmd_up(args: argparse.Namespace, env: Mapping[str, str], runner: Runner) -> 
     print(f"==> starting grpc-web proxy ({rt}, {args.image}), jwt_authn {'on' if jwt else 'off'}:")
     for l in spec.listeners:
         print(f"      {scheme}://{k.host}:{l.port}  -> 127.0.0.1:{l.upstream_port} ({l.cluster})")
+    if spec.rest is not None:
+        r = spec.rest
+        print(f"      {scheme}://127.0.0.1:{r.port}  -> 127.0.0.1:{r.upstream_port} "
+              f"({r.cluster}, REST/JSON transcoder, {len(r.services)} services)")
     print(f"      CORS origins: {', '.join(k.origins)}")
     argv = [rt, "run", "-d", "--name", args.name, "--network", "host",
             # the container user must read the 0600 config (and any TLS keys) we own

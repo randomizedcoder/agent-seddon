@@ -305,6 +305,11 @@ in
   # jwt_authn, TLS) + `envoy --mode validate` of every mode against the real listener
   # spec, with check-the-checks (security-hardening S14). Python + cached envoy-bin.
   portal-envoy = import ./portal-envoy.nix { inherit pkgs versions; };
+  # The Envoy transcoder inputs (nix/rest-descriptor.nix): the `agent_descriptor.pb`
+  # Envoy loads + the `services.txt` list, both derived from the SAME `buf` build so
+  # they cannot drift. Asserts a populated, all-`agent.v1.*` list. The live transcoder
+  # listener is validated by `portal-envoy` (`envoy --mode validate`). rest-openapi 05.
+  rest-descriptor = import ./rest-descriptor.nix { inherit pkgs versions; };
   # The sign-in chain end to end over real processes: fake OIDC issuer + dev PKI +
   # `--serve-all` whose memory is a `= "grpc"` client of `--serve-memory`, mTLS, two
   # tenants; tables + check-the-checks + the live run (security-hardening S15a).
