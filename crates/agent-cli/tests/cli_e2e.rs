@@ -13,8 +13,8 @@
 mod common;
 
 use common::{
-    run_agent, status, status_retry_after, text, tool, write_config, FakeLlm, Fault, FaultServer,
-    TempWorkspace,
+    run_agent, run_agent_env, status, status_retry_after, text, tool, write_config, FakeLlm, Fault,
+    FaultServer, TempWorkspace,
 };
 use serde_json::json;
 
@@ -633,5 +633,78 @@ fn adversarial_truncated_stream_exits_nonzero() {
     assert!(
         !stdout.contains("=== ANSWER ==="),
         "a partial stream must not surface as an answer, got:\n{stdout}"
+    );
+}
+
+/// `--check-config` against a Postgres `[role]` store must not dial: the build
+/// runs in `BuildMode::CheckConfig`, which defers the one eager startup read (the
+/// RBAC catalog), and the store open itself is lazy. Against an unroutable dummy
+/// DSN the dry run therefore returns in seconds (the sqlx acquire timeout it used
+/// to hit is 30 s) and prints the deferred-catalog selection line.
+#[test]
+fn positive_check_config_role_postgres_no_dial() {
+    let ws = TempWorkspace::new("checkcfg-role-pg");
+    let cfg = write_config(
+        &ws,
+        "http://127.0.0.1:1/v1",
+        r#"
+[config_store]
+backend = "postgres"
+dsn_ref = "env:AGENT_CONFIG_STORE_DSN"
+
+[role]
+store = "postgres"
+"#,
+    );
+
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_agent_env(
+        &cfg,
+        &ws,
+        &["--check-config"],
+        &[("AGENT_CONFIG_STORE_DSN", "postgres://x:x@127.0.0.1:1/x")],
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(code, 0, "exit code; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("config: OK"),
+        "stdout must report a clean check, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("role      = postgres (catalog not loaded: --check-config)"),
+        "stdout must pin the deferred role selection, got:\n{stdout}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a deferred catalog read must not wait on the pool ({elapsed:?})"
+    );
+}
+
+/// An unknown `[role] store` still fails closed under `--check-config`: deferring
+/// the catalog read never skips selector validation, which the factory chain
+/// performs before any mode-dependent I/O.
+#[test]
+fn negative_check_config_role_unknown_store_fails_closed() {
+    let ws = TempWorkspace::new("checkcfg-role-bogus");
+    let cfg = write_config(
+        &ws,
+        "http://127.0.0.1:1/v1",
+        r#"
+[role]
+store = "bogus"
+"#,
+    );
+
+    let (code, stdout, stderr) = run_agent_env(&cfg, &ws, &["--check-config"], &[]);
+
+    assert_ne!(code, 0, "an unknown role store must fail the check");
+    assert!(
+        stderr.contains("[role] store"),
+        "stderr must name the offending key, got:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("config: OK"),
+        "a failed check must not print OK, got:\n{stdout}"
     );
 }

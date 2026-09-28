@@ -215,12 +215,23 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   0.10.1 yanked → transitive). No `deny.toml [advisories]`: advisories stay with the pinned
   cargo-audit input by design, and a cargo-deny advisories check would need a second,
   non-hermetic DB.
-- `agent --config config/multi-tenant.toml --check-config` fails on `main` before any campaign
+- ~~`agent --config config/multi-tenant.toml --check-config` fails on `main` before any campaign
   code runs: `[role] store = "postgres"` dials eagerly (`config error: postgres: pool timed out
   while waiting for an open connection` against the dummy DSN). Fixture 10 in
   `nix/checks/config-roundtrip.nix` omits `[role]`, so the gate never sees it. With `[role]` off
   the shipped file checks clean and prints `campaign  = postgres`. Not from this track; the role
-  registry needs a lazy open like the other domains.
+  registry needs a lazy open like the other domains.~~ **Resolved in #PR5.** Corrected diagnosis:
+  the role store *open* was already lazy (`resolve_role_registry` → `pg_backend` →
+  `connect_lazy`); what dialed was the eager catalog *read* in `build_agent_with`
+  (`load_catalog` + `install_catalog`), which the control-plane gate needs installed before it
+  authorizes anything. Fix: a `BuildMode { Run, CheckConfig }` on the builder
+  (`build_agent_mode` / `build_agent_with_mode`; the existing entry points delegate with `Run`);
+  `--check-config` builds in `CheckConfig`, which skips only that read (it never authorizes a
+  request; the built-in catalog stays installed). A lazy `install_catalog` was rejected: the
+  gate's first request would do I/O with no error channel, a fail-closed violation. Fixture 10
+  now carries `[role] store = "postgres"` and pins `role      = postgres (catalog not loaded:
+  --check-config)`; `cli_e2e` proves the dry run returns in seconds against an unroutable DSN
+  and that an unknown `[role] store` still fails closed.
 - ~~Flaky gate test `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes`
   (#317), 4/20 red on `main` with only the twelve `progress::tests` running.~~ **Resolved in
   #541.** Root cause (tracing-core 0.1.36 `callsite.rs`): with at most one live dispatcher the

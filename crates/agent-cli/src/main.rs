@@ -378,13 +378,23 @@ async fn main() -> Result<()> {
         search: config.search.backend_names().join(","),
         tools: config.tools.enabled.len(),
         campaign: agent_runtime::campaign::backend_label(&config),
+        role: role_label(&config.role.store),
     });
 
-    let agent = agent_runtime::build_agent(
+    // `--check-config` builds in `CheckConfig` mode: every seam still resolves
+    // through the real factory chain, but deferrable startup reads (the RBAC
+    // catalog from a `[role] store = "postgres"`) are skipped, so the dry run of a
+    // Postgres profile opens no socket.
+    let agent = agent_runtime::build_agent_mode(
         config,
         telemetry.clone(),
         session_id.clone(),
         metrics.clone(),
+        if check_config {
+            agent_runtime::BuildMode::CheckConfig
+        } else {
+            agent_runtime::BuildMode::Run
+        },
     )
     .await
     .context("building agent")?;
@@ -402,6 +412,7 @@ async fn main() -> Result<()> {
         println!("  search    = {}", s.search);
         println!("  tools     = {} enabled", s.tools);
         println!("  campaign  = {}", s.campaign);
+        println!("  role      = {}", s.role);
         return Ok(());
     }
 
@@ -828,6 +839,22 @@ struct ConfigSelections {
     tools: usize,
     /// `[campaign] store` as `off` / `postgres` (docs/design/campaigns, CP-04).
     campaign: &'static str,
+    /// `[role] store` via [`role_label`]: `off`, or the store name with a note that
+    /// the catalog was not loaded (the build ran in `CheckConfig` mode).
+    role: String,
+}
+
+/// Render the `[role] store` selection for `--check-config`: `""` (no store, the
+/// built-in catalog) prints as `off`; any store name prints as-is plus a note
+/// that the catalog read was deferred, since `--check-config` builds in
+/// [`agent_runtime::BuildMode::CheckConfig`] and never authorizes a request.
+fn role_label(store: &str) -> String {
+    let store = store.trim();
+    if store.is_empty() {
+        "off".to_string()
+    } else {
+        format!("{store} (catalog not loaded: --check-config)")
+    }
 }
 
 /// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;
@@ -1254,5 +1281,20 @@ mod tests {
     fn login_words_refused(#[case] argv: &[&str], #[case] want: &str) {
         let err = login_mode(argv).expect_err("refused");
         assert!(format!("{err:#}").contains(want), "{err:#}");
+    }
+
+    // desc: the `role = …` line of `--check-config`: no store prints `off`; a
+    // store prints its name plus the deferred-catalog note (the build ran in
+    // `CheckConfig` mode, so nothing was read from it). The store name is echoed
+    // as configured (it was already validated by the config loader), never
+    // interpreted.
+    #[rstest::rstest]
+    #[case::positive_file("file", "file (catalog not loaded: --check-config)")]
+    #[case::positive_postgres("postgres", "postgres (catalog not loaded: --check-config)")]
+    #[case::corner_empty_is_off("", "off")]
+    #[case::corner_whitespace_is_off("  ", "off")]
+    #[case::boundary_trimmed(" postgres ", "postgres (catalog not loaded: --check-config)")]
+    fn role_label_rows(#[case] store: &str, #[case] want: &str) {
+        assert_eq!(role_label(store), want);
     }
 }

@@ -22,6 +22,22 @@ use agent_telemetry::{CompositeMemory, TelemetryHandle};
 use anyhow::Context;
 use std::sync::Arc;
 
+/// What the built agent is for. Every seam is resolved through the real factory
+/// chain in both modes (a missing feature or a bad selector bails either way);
+/// the difference is the build-time **I/O** the process is allowed to perform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildMode {
+    /// The agent will run: eager startup reads happen here (today: the RBAC
+    /// catalog is loaded from the `[role]` store and installed process-wide, so
+    /// the control-plane gate never does I/O on a request).
+    Run,
+    /// `agent --check-config`: the build proves every selector resolves and then
+    /// the process exits without authorizing a single request, so deferrable
+    /// startup reads are skipped. Store *opens* stay lazy (`connect_lazy`) in both
+    /// modes; this only skips the *reads*, keeping the dry run socket-free.
+    CheckConfig,
+}
+
 /// Build the agent with the feature-gated built-in modules. When `telemetry` is
 /// `Some`, the episodic store is wrapped in a `CompositeMemory` that mirrors
 /// events into ClickHouse, and `session_id` is stamped on every recorded event.
@@ -31,8 +47,21 @@ pub async fn build_agent(
     session_id: String,
     metrics: Metrics,
 ) -> anyhow::Result<Arc<Agent>> {
+    build_agent_mode(cfg, telemetry, session_id, metrics, BuildMode::Run).await
+}
+
+/// [`build_agent`] with an explicit [`BuildMode`]. `--check-config` passes
+/// [`BuildMode::CheckConfig`] so a `[role] store = "postgres"` profile validates
+/// without reading the catalog from the server.
+pub async fn build_agent_mode(
+    cfg: Config,
+    telemetry: Option<TelemetryHandle>,
+    session_id: String,
+    metrics: Metrics,
+    mode: BuildMode,
+) -> anyhow::Result<Arc<Agent>> {
     let registry = Registry::with_builtins();
-    build_agent_with(&registry, cfg, telemetry, session_id, metrics).await
+    build_agent_with_mode(&registry, cfg, telemetry, session_id, metrics, mode).await
 }
 
 /// Build a local review engine ([`agent_review::ReviewOrchestrator`]) rooted at `review_root`
@@ -179,6 +208,26 @@ pub async fn build_agent_with(
     telemetry: Option<TelemetryHandle>,
     session_id: String,
     metrics: Metrics,
+) -> anyhow::Result<Arc<Agent>> {
+    build_agent_with_mode(
+        registry,
+        cfg,
+        telemetry,
+        session_id,
+        metrics,
+        BuildMode::Run,
+    )
+    .await
+}
+
+/// [`build_agent_with`] with an explicit [`BuildMode`] (see [`build_agent_mode`]).
+pub async fn build_agent_with_mode(
+    registry: &Registry,
+    cfg: Config,
+    telemetry: Option<TelemetryHandle>,
+    session_id: String,
+    metrics: Metrics,
+    mode: BuildMode,
 ) -> anyhow::Result<Arc<Agent>> {
     // The cognition-graph document (cognition-graph 04), resolved FIRST: a
     // non-empty document is the wiring authority for its three anchor slots,
@@ -1559,11 +1608,21 @@ pub async fn build_agent_with(
     // fold the persisted cards atop the built-ins and install the ambient catalog
     // snapshot the control-plane gate reads — so an operator's roles take effect
     // process-wide from startup. With no store the gate keeps the built-ins (C1).
+    //
+    // The store OPEN is lazy (`pg_backend` → `connect_lazy`), but this catalog
+    // READ is the one eager startup query, so it is the one thing `BuildMode`
+    // skips: `--check-config` never authorizes a request, the built-in catalog
+    // stays installed, and the dry run of `config/multi-tenant.toml` opens no
+    // socket. Deferring the read itself (a lazy `install_catalog`) was rejected —
+    // the gate's first request would do I/O with no error channel, a fail-closed
+    // violation.
     #[cfg(feature = "role-store")]
     let agent = match resolve_role_registry(&cfg, &metrics)? {
         Some(r) => {
-            let catalog = agent_core::load_catalog(r.as_ref()).await?;
-            agent_core::install_catalog(catalog);
+            if mode == BuildMode::Run {
+                let catalog = agent_core::load_catalog(r.as_ref()).await?;
+                agent_core::install_catalog(catalog);
+            }
             agent.with_role_registry(r)
         }
         None => agent,

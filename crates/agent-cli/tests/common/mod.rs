@@ -298,6 +298,17 @@ pub fn run_agent(
     ws: &TempWorkspace,
     goal: &[&str],
 ) -> (i32, String, String) {
+    run_agent_env(cfg, ws, goal, &[])
+}
+
+/// [`run_agent`] with extra environment variables set on the child (e.g. a
+/// `dsn_ref = "env:…"` target for a `--check-config` dry run).
+pub fn run_agent_env(
+    cfg: &std::path::Path,
+    ws: &TempWorkspace,
+    goal: &[&str],
+    env: &[(&str, &str)],
+) -> (i32, String, String) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_agent"))
         .arg("--config")
         .arg(cfg)
@@ -305,6 +316,7 @@ pub fn run_agent(
         .current_dir(&ws.dir)
         // Keep the child's log level predictable regardless of the developer's env.
         .env("RUST_LOG", "warn")
+        .envs(env.iter().copied())
         .output()
         .expect("spawn agent binary");
     (
