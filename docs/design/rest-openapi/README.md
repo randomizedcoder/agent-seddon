@@ -49,9 +49,17 @@ Envoy we already run for grpc-web (`envoyproxy/envoy:v1.31-latest`,
 to the backend.
 
 ```
-   client ──HTTP/JSON──▶ Envoy [ grpc_json_transcoder ▶ cors ▶ router ] ──gRPC──▶ agent --serve-all
-                                                                                    (same AuthLayer)
+   client ──HTTP/JSON──▶ 127.0.0.1:8094 Envoy [ cors ▶ grpc_json_transcoder ▶ router ] ──gRPC──▶ agent --serve-all
+                                                                                                   (same AuthLayer)
 ```
+
+The filter sits **after `cors`** (so preflight/`OPTIONS` is still answered by the CORS filter, not
+transcoded) and **before `router`** (so a matched REST route is rewritten to a gRPC call before
+routing). The listener is a distinct kind rendered by
+[test/portal-envoy/portal_envoy.py](../../../test/portal-envoy/portal_envoy.py) alongside the
+grpc-web listeners: it fronts the **same** `agent_gateway` cluster but runs `grpc_json_transcoder`
+instead of `grpc_web`, and is **pinned to `127.0.0.1`** — a compatibility surface, so unlike the
+grpc-web listeners it ignores `PORTAL_GRPC_WEB_HOST` and is never bound to `0.0.0.0`.
 
 **Why Envoy, and not a Rust gateway or the Go binary.** Rust-native gRPC→REST gateways now exist
 ([`grpc-gw`](https://github.com/youyuanwu/grpc-gw), the [`tonic-rest`](https://docs.rs/tonic-rest/)
@@ -222,9 +230,15 @@ Envoy load time for 157 RPCs (`nix run .#rest-bench`, opt-in like `loadtest`).
    (adding options is additive).
 4. **OpenAPI + drift gate** — pin `protoc-gen-openapiv2`; generate + commit the doc; the
    `gen-openapi` / `openapi-sync` trio; the OpenAPI-parity test.
-5. **Transcoder** — a `buf build --as-file-descriptor-set` descriptor derivation; a new loopback REST
-   listener (port via [`nix/constants.nix`](../../../nix/constants.nix)); the `grpc_json_transcoder`
-   filter before `router`; descriptor mount; `authorization` added to CORS `allow_headers`.
+5. **Transcoder** — a `buf build --as-file-descriptor-set` descriptor derivation
+   ([`nix/rest-descriptor.nix`](../../../nix/rest-descriptor.nix)); a new loopback REST listener
+   (`127.0.0.1:8094`, the port a local UI concern in
+   [`nix/portal/envoy-spec.nix`](../../../nix/portal/envoy-spec.nix)'s `ports`, not the
+   [`nix/constants.nix`](../../../nix/constants.nix) seam table) rendered by
+   [test/portal-envoy/portal_envoy.py](../../../test/portal-envoy/portal_envoy.py); the
+   `grpc_json_transcoder` filter after `cors` and before `router`; descriptor mount; `authorization`
+   in CORS `allow_headers`. Gated by the `portal-envoy` check's real `envoy --mode validate` over the
+   rendered listener + the 40-service descriptor, plus a `rest-descriptor` check.
 6. **`nix run .#rest-integration`** — the live REST harness, folded into `nix/integration.nix`.
 7. **`nix run .#rest-bench`** — the REST-vs-gRPC perf artifact.
 

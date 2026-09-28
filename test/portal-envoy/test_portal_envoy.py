@@ -594,5 +594,154 @@ class EnvoyValidate(unittest.TestCase):
                 self.assertNotEqual(self.validate(path).returncode, 0, f"{name} must fail validate")
 
 
+REST = E.Rest("rest_transcoder", 8094, "agent_gateway", 50100, "/nix/store/desc.pb",
+              ("agent.v1.AuthService", "agent.v1.ReviewFleetService"))
+SPEC_REST = E.Spec(listeners=SPEC.listeners, otel_port=4317, gateway_port=50100, rest=REST)
+
+
+def rest_listener_of(cfg: dict) -> dict:
+    return next(l for l in cfg["static_resources"]["listeners"] if l["name"] == "rest_transcoder")
+
+
+def rest_hcm(cfg: dict) -> dict:
+    return rest_listener_of(cfg)["filter_chains"][0]["filters"][0]["typed_config"]
+
+
+def rest_transcoder_of(cfg: dict) -> dict:
+    return next(f for f in rest_hcm(cfg)["http_filters"]
+               if f["name"].endswith("grpc_json_transcoder"))["typed_config"]
+
+
+class LoadServices(unittest.TestCase):
+    """The transcoder service list is derived from the descriptor build; the renderer
+    fails closed on anything that is not a clean, populated agent.v1 list (untrusted
+    file shape). Each case: description, file contents, expected."""
+
+    def write(self, text: str) -> str:
+        f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        f.write(text)
+        f.close()
+        self.addCleanup(lambda: os.unlink(f.name))
+        return f.name
+
+    def test_positive_reads_sorts_and_dedups(self):
+        got = E.load_services(self.write("agent.v1.B\nagent.v1.A\nagent.v1.A\n"))
+        self.assertEqual(got, ("agent.v1.A", "agent.v1.B"))
+
+    def test_corner_blank_lines_and_whitespace_are_ignored(self):
+        got = E.load_services(self.write("\n  agent.v1.A  \n\n"))
+        self.assertEqual(got, ("agent.v1.A",))
+
+    def test_negative_missing_file(self):
+        with self.assertRaises(E.EnvoyError):
+            E.load_services("/no/such/services.txt")
+
+    def test_adversarial_empty_file(self):
+        with self.assertRaises(E.EnvoyError):
+            E.load_services(self.write("\n   \n"))
+
+    def test_adversarial_non_agent_name(self):
+        for bad in ("google.api.Http", "agent.v2.X", "agent.Foo", "ReviewFleetService", "agent.v1."):
+            with self.subTest(bad), self.assertRaises(E.EnvoyError):
+                E.load_services(self.write(f"agent.v1.Good\n{bad}\n"))
+
+    def test_adversarial_control_character(self):
+        with self.assertRaises(E.EnvoyError):
+            E.load_services(self.write("agent.v1.A\x00Evil\n"))
+
+    def test_adversarial_too_many_services(self):
+        many = "\n".join(f"agent.v1.S{i}" for i in range(E.MAX_SERVICES + 1))
+        with self.assertRaises(E.EnvoyError):
+            E.load_services(self.write(many))
+
+
+class SpecLoadRest(unittest.TestCase):
+    def raw_with_rest(self, services_file: str) -> dict:
+        return {**SPEC_RAW, "rest": {
+            "name": "rest_transcoder", "port": 8094, "cluster": "agent_gateway",
+            "upstream_port": 50100, "descriptor": "/nix/store/desc.pb",
+            "services_file": services_file}}
+
+    def test_positive_rest_is_parsed(self):
+        f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        f.write("agent.v1.AuthService\n")
+        f.close()
+        self.addCleanup(lambda: os.unlink(f.name))
+        spec = E.Spec.load(self.raw_with_rest(f.name))
+        self.assertEqual(spec.rest.name, "rest_transcoder")
+        self.assertEqual(spec.rest.services, ("agent.v1.AuthService",))
+
+    def test_boundary_no_rest_key_is_backward_compatible(self):
+        self.assertIsNone(E.Spec.load(SPEC_RAW).rest)
+
+    def test_negative_bad_rest_services_file_fails_the_whole_spec(self):
+        with self.assertRaises(E.EnvoyError):
+            E.Spec.load(self.raw_with_rest("/no/such/services.txt"))
+
+
+class RestTranscoder(unittest.TestCase):
+    JWT = E.Jwt("https://agent.example", ("agent-seddon",), jwks_inline=E.validate_jwks(JWKS))
+
+    def render(self, env: dict, jwt: E.Jwt | None = None, paths: dict | None = None) -> dict:
+        return E.render(SPEC_REST, E.knobs_from_env(env, SPEC_REST), jwt, paths or {})
+
+    def test_positive_rest_listener_is_appended_after_the_grpc_web_ones(self):
+        cfg = self.render({})
+        names = [l["name"] for l in cfg["static_resources"]["listeners"]]
+        self.assertEqual(names[-1], "rest_transcoder")
+        self.assertEqual(len(names), len(SPEC.listeners) + 1)
+
+    def test_positive_filter_order_is_cors_transcoder_router(self):
+        names = [f["name"] for f in rest_hcm(self.render({}))["http_filters"]]
+        self.assertEqual(names, [
+            "envoy.filters.http.cors",
+            "envoy.filters.http.grpc_json_transcoder",
+            "envoy.filters.http.router"])
+
+    def test_positive_transcoder_config_is_fail_closed(self):
+        tc = rest_transcoder_of(self.render({}))
+        self.assertEqual(tc["proto_descriptor"], "/nix/store/desc.pb")
+        self.assertEqual(tc["services"], ["agent.v1.AuthService", "agent.v1.ReviewFleetService"])
+        self.assertFalse(tc["auto_mapping"])
+        self.assertTrue(tc["match_incoming_request_route"])
+        self.assertTrue(tc["convert_grpc_status"])
+        self.assertTrue(tc["request_validation_options"]["reject_unknown_method"])
+        self.assertTrue(tc["request_validation_options"]["reject_unknown_query_parameters"])
+
+    def test_positive_cors_allows_authorization_on_the_rest_listener(self):
+        policy = rest_hcm(self.render({}))["route_config"]["virtual_hosts"][0][
+            "typed_per_filter_config"]["envoy.filters.http.cors"]
+        self.assertIn("authorization", policy["allow_headers"].split(","))
+
+    def test_positive_rest_stays_loopback_even_when_grpc_web_binds_lan(self):
+        cfg = self.render({"PORTAL_GRPC_WEB_HOST": "0.0.0.0"})
+        self.assertEqual(rest_listener_of(cfg)["address"]["socket_address"]["address"], "127.0.0.1")
+        gw = cfg["static_resources"]["listeners"][0]["address"]["socket_address"]["address"]
+        self.assertEqual(gw, "0.0.0.0", "the grpc-web listener still honours the host knob")
+
+    def test_corner_no_edge_jwt_on_rest_even_with_auth_on(self):
+        # The grpc-web listeners get jwt_authn; the loopback REST surface does not
+        # (the agent's AuthLayer verifies every transcoded call).
+        names = [f["name"] for f in rest_hcm(self.render({}, self.JWT))["http_filters"]]
+        self.assertNotIn("envoy.filters.http.jwt_authn", names)
+
+    def test_positive_rest_reuses_the_gateway_cluster_no_duplicate(self):
+        cfg = self.render({})
+        route = rest_hcm(cfg)["route_config"]["virtual_hosts"][0]["routes"][0]
+        self.assertEqual(route["route"]["cluster"], "agent_gateway")
+        names = [c["name"] for c in cfg["static_resources"]["clusters"]]
+        self.assertEqual(names.count("agent_gateway"), 1)
+
+    def test_positive_container_paths_remap_the_descriptor(self):
+        paths = {REST.descriptor: "/etc/envoy/agent_descriptor.pb"}
+        tc = rest_transcoder_of(self.render({}, None, paths))
+        self.assertEqual(tc["proto_descriptor"], "/etc/envoy/agent_descriptor.pb")
+
+    def test_boundary_otlp_key_covers_the_rest_listener_too(self):
+        # access log + tracer on each grpc-web listener AND the rest listener.
+        text = json.dumps(self.render({"PORTAL_OTLP_AUTHORIZATION": "sekrit"}))
+        self.assertEqual(text.count('"sekrit"'), 2 * (len(SPEC.listeners) + 1))
+
+
 if __name__ == "__main__":
     unittest.main()
