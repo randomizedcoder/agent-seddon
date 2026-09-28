@@ -198,12 +198,22 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Open questions / blockers
 
-- `cargo deny check advisories` against a freshly fetched RustSec DB fails on `rustls`
+- ~~`cargo deny check advisories` against a freshly fetched RustSec DB fails on `rustls`
   (RUSTSEC-2026-0285, a real vulnerability), `rustls-pemfile` (2025-0134, unmaintained) and
   `proc-macro-error2` (2026-0173, unmaintained). Not from this track (`Cargo.lock` on
   `campaigns/cp-03` differs from `main` only by `agent-campaign`'s `tracing` edge); the flake's
   `cargo-audit` runs against the pinned `advisory-db` input, so the gate does not see it yet. Needs
-  its own change on `main`: bump `rustls`, then bump the `advisory-db` input.
+  its own change on `main`: bump `rustls`, then bump the `advisory-db` input.~~ **Resolved in
+  #PR4.** `cargo update -p h2 -p rustls` (h2 0.4.15 → 0.4.19 for RUSTSEC-2026-0258, rustls
+  0.23.42 → 0.23.45 + rustls-webpki 0.103.15 for RUSTSEC-2026-0285; three lock entries), then
+  `nix flake update advisory-db` (2026-07-17 → 2026-09-25), in that order. The hermetic
+  `cargo-audit` check now sees the same DB as a local `cargo audit`: 0 vulnerabilities, six
+  allowed warnings left alone on purpose (`rustls-pemfile` unmaintained → tonic 0.13 is its own
+  bump; `proc-macro-error2` + `bincode` unmaintained → iai-callgrind bench harness; `paste`
+  unmaintained → klickhouse; `lru` 0.16.4 unsound → pinned by the tantivy git rev; `chacha20`
+  0.10.1 yanked → transitive). No `deny.toml [advisories]`: advisories stay with the pinned
+  cargo-audit input by design, and a cargo-deny advisories check would need a second,
+  non-hermetic DB.
 - `agent --config config/multi-tenant.toml --check-config` fails on `main` before any campaign
   code runs: `[role] store = "postgres"` dials eagerly (`config error: postgres: pool timed out
   while waiting for an open connection` against the dummy DSN). Fixture 10 in
