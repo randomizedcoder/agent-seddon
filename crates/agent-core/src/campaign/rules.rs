@@ -322,7 +322,11 @@ pub fn allowed(from: TaskState, to: TaskState, kind: TaskKind, actor: ActorClass
         },
         (S::Ready, S::Cancelled) => user,
 
-        (S::Decomposing, S::Decomposed | S::Ready | S::AwaitingApproval | S::Blocked) => {
+        // The reaper releases a node a crashed planner left in `decomposing` past the
+        // `DECOMPOSING_MAX_SECS` bound (`reap_decomposing`, CP-05); no attempt is
+        // counted, the next tick plans it again.
+        (S::Decomposing, S::Ready) => non_leaf && matches!(actor, A::Planner | A::Reaper),
+        (S::Decomposing, S::Decomposed | S::AwaitingApproval | S::Blocked) => {
             non_leaf && actor == A::Planner
         }
         (S::Decomposing, S::Cancelled) => user,
@@ -394,6 +398,15 @@ pub fn rollup(parent: TaskState, children: &[TaskState]) -> Option<TaskState> {
 /// it is handed, so a hostile or programmatic value never reaches `make_interval`).
 pub const LEASE_MIN_SECS: u32 = 60;
 pub const LEASE_MAX_SECS: u32 = 86_400;
+
+/// How long a node may sit in `decomposing` before the driver's reaper returns it to
+/// `ready` (`CampaignStore::reap_decomposing`, `04-executor.md`): a planner call that
+/// died between `plan_start` and its close cannot run the best-effort close, so the
+/// bound is the only way such a node is ever planned again. Fifteen minutes is far
+/// past the longest decision call (one structured ask plus two repairs); a planner
+/// still alive past it loses its CAS at the finishing write and writes nothing.
+/// Clamped by [`clamp_lease`] like a lease.
+pub const DECOMPOSING_MAX_SECS: i64 = 900;
 
 /// Clamp a lease length into `[60, 86400]` seconds (T6 `adversarial_lease_negative`).
 pub fn clamp_lease(secs: i64) -> u32 {
@@ -504,6 +517,35 @@ mod tests {
     #[case::negative_supersede_root(S::Ready, S::Superseded, K::Objective, A::User, false)]
     #[case::negative_supersede_done(S::Done, S::Superseded, K::Leaf, A::User, false)]
     #[case::negative_blocked_root_retry(S::Blocked, S::Ready, K::Objective, A::User, false)]
+    // The CP-05 reaper row: a stale `decomposing` non-leaf back to `ready`.
+    #[case::positive_decomposing_to_ready_reaper_task(
+        S::Decomposing,
+        S::Ready,
+        K::Task,
+        A::Reaper,
+        true
+    )]
+    #[case::positive_decomposing_to_ready_reaper_objective(
+        S::Decomposing,
+        S::Ready,
+        K::Objective,
+        A::Reaper,
+        true
+    )]
+    #[case::negative_decomposing_to_ready_reaper_leaf(
+        S::Decomposing,
+        S::Ready,
+        K::Leaf,
+        A::Reaper,
+        false
+    )]
+    #[case::negative_decomposing_to_decomposed_reaper(
+        S::Decomposing,
+        S::Decomposed,
+        K::Task,
+        A::Reaper,
+        false
+    )]
     fn allowed_rows(
         #[case] from: S,
         #[case] to: S,
@@ -606,7 +648,7 @@ mod tests {
             from: &[S::Decomposing],
             to: S::Ready,
             kinds: NON_LEAF,
-            actors: &[A::Planner],
+            actors: &[A::Planner, A::Reaper],
         },
         Row {
             from: &[S::Decomposing],
@@ -761,10 +803,11 @@ mod tests {
     ];
 
     /// Expanded tuple count of `TABLE`: draft 2, awaiting 6, ready 2 + 1 + 5 + 3, decomposing
-    /// 2 + 2 + 2 + 2 + 3, decomposed 4 + 2 + 3, claimed 3, running 4, in_review 3, blocked
-    /// 2 + 2 + 3 + 2 + 2, failed 2, superseded 10 × 2. Re-derived by hand whenever the doc
-    /// table changes; the sweep must land on exactly this.
-    const EXPECTED_ALLOWED: usize = 82;
+    /// 2 + 4 + 2 + 2 + 3 (the `→ ready` row carries planner and reaper), decomposed
+    /// 4 + 2 + 3, claimed 3, running 4, in_review 3, blocked 2 + 2 + 3 + 2 + 2, failed 2,
+    /// superseded 10 × 2. Re-derived by hand whenever the doc table changes; the sweep
+    /// must land on exactly this.
+    const EXPECTED_ALLOWED: usize = 84;
 
     #[test]
     fn boundary_exhaustive() {
@@ -895,6 +938,18 @@ mod tests {
     #[case::adversarial_i64_max(i64::MAX, 86_400)]
     fn clamp_lease_rows(#[case] secs: i64, #[case] expected: u32) {
         assert_eq!(clamp_lease(secs), expected);
+    }
+
+    /// The `decomposing` bound is a lease-shaped number: inside the clamp range and
+    /// unchanged by it, and longer than any lease floor a planner call could need.
+    #[test]
+    fn boundary_decomposing_bound_is_within_the_lease_range() {
+        assert_eq!(
+            i64::from(clamp_lease(DECOMPOSING_MAX_SECS)),
+            DECOMPOSING_MAX_SECS
+        );
+        assert!(DECOMPOSING_MAX_SECS > i64::from(LEASE_MIN_SECS));
+        assert_eq!(DECOMPOSING_MAX_SECS, 900);
     }
 
     // -- vocabularies -------------------------------------------------------------

@@ -35,12 +35,12 @@ mod sql;
 use agent_core::campaign::{
     allowed, check_deps, check_len, check_list, check_max, clamp_lease, plan_detail, rollup,
     screen, truncate_chars, Actor, ActorClass, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
-    CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete, Decomposed,
-    Decomposition, EstSize, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner,
-    PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome, Task,
-    TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
-    MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR, MAX_GOAL,
-    MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
+    CampaignBackend, CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete,
+    Decomposed, Decomposition, EstSize, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign,
+    Owner, PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome,
+    Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
+    LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR,
+    MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
 };
 use agent_core::{safe_segment, scan_for_injection, UserId};
 use async_trait::async_trait;
@@ -1312,6 +1312,49 @@ impl CampaignStore for PgCampaigns {
         Ok(out)
     }
 
+    async fn reap_decomposing(&self, max_age_secs: i64) -> CampaignResult<Vec<TaskId>> {
+        // The static pair the one-statement release performs, asserted like `claim`
+        // and `reap` do before their statements run (both non-leaf kinds share it).
+        if !allowed(
+            TaskState::Decomposing,
+            TaskState::Ready,
+            TaskKind::Task,
+            ActorClass::Reaper,
+        ) {
+            return Err(backend("transition table: decomposing → ready by reaper"));
+        }
+        let bound = clamp_lease(max_age_secs);
+        let mut tx = self.begin().await?;
+        let now = ms(tx.now);
+        let rows = sqlx::query(sql::REAP_DECOMPOSING)
+            .bind(&tx.tenant)
+            .bind(now)
+            .bind(i64::from(bound))
+            .fetch_all(&mut *tx.conn)
+            .await
+            .map_err(map_db)?;
+        let mut released = Vec::with_capacity(rows.len());
+        for row in &rows {
+            released.push((TaskId(col(row, "task_id")?), unsigned(col(row, "version")?)));
+        }
+        released.sort_by_key(|r| r.0);
+        let mut out = Vec::with_capacity(released.len());
+        for (task_id, version) in released {
+            tx.event(
+                task_id,
+                Some(TaskState::Decomposing),
+                TaskState::Ready,
+                &Actor::Reaper,
+                version,
+                json!({"reason": "plan_stale"}),
+            )
+            .await?;
+            out.push(task_id);
+        }
+        tx.commit().await?;
+        Ok(out)
+    }
+
     async fn start(&self, task: TaskId, owner: &Owner) -> CampaignResult<Task> {
         let mut tx = self.begin().await?;
         let t = tx.lock(task).await?;
@@ -1757,6 +1800,26 @@ impl CampaignStore for PgCampaigns {
                 .bind(limit_bind(limit)),
         )
         .await
+    }
+}
+
+#[async_trait]
+impl CampaignBackend for PgCampaigns {
+    /// `SELECT DISTINCT tenant … WHERE state = ANY (live) ORDER BY tenant`; a stored
+    /// tenant that is not a `safe_segment` (unreachable through this store, which
+    /// binds only checked tenants) is dropped rather than handed to a caller.
+    async fn tenants(&self) -> CampaignResult<Vec<String>> {
+        let live: Vec<String> = LIVE_STATES.iter().map(|s| s.as_str().to_string()).collect();
+        let rows: Vec<String> = sqlx::query_scalar(sql::TENANTS_LIVE)
+            .bind(live)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_db)?;
+        Ok(rows.into_iter().filter(|t| safe_segment(t)).collect())
+    }
+
+    fn with_tenant(&self, tenant: &str) -> CampaignResult<Arc<dyn CampaignStore>> {
+        PgCampaigns::with_tenant(self, tenant).map(|s| Arc::new(s) as Arc<dyn CampaignStore>)
     }
 }
 
