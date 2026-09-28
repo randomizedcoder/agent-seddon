@@ -23,7 +23,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
 | S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
-| S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
+| S15a | auth-e2e gate (process wire) | testing | 🟡 | — |
+| S15b | integration tiers (step-ca, Postgres, ClickHouse audit, portal-e2e under auth) | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 
@@ -690,3 +691,36 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Verified live on l2 with podman on side ports (CORS, missing / garbage / valid / wrong-`iss`
     tokens, bypass paths, TLS).
   - Moved to S15: `portal-e2e` under auth (needs S15's fake-issuer agent).
+- **2026-09-27 — S15a.** S15 is split in two: the in-gate process test (here) and the
+  `nix run .#integration` tiers (S15b). New `auth-e2e` check and `nix run .#auth-e2e`, both
+  running [`test/auth-e2e/auth_e2e.py`](../../../test/auth-e2e/auth_e2e.py) on loopback:
+  - Set-up: a fake OIDC issuer (discovery + JWKS over http, ES256 ID tokens from a key made at
+    start-up), the offline dev PKI (`pki-dev`), server B = `agent --serve-memory` and server
+    A = `agent --serve-all` with `[memory] backend = "grpc"` pointed at B. Both listen over mTLS
+    under `mode = "oidc"` with `[auth.token]` (one signer, file session store).
+  - The live steps, in order: health is exempt; no bearer is `UNAUTHENTICATED`; `Exchange`
+    refuses an unpublished key, an expired token, a foreign `aud`, an unknown `iss`, `alg=none`
+    and garbage; it mints agent tokens for two tenants; a login token is refused at `WhoAmI` and
+    `Memory`; `WhoAmI` returns the token's tenant over a spoofed `x-agent-user-id`.
+  - The chain: alice's `Memory.Append` through A, with a spoofed tenant-B header, lands in B's
+    `tenant-a/` partition and nowhere else (not in A, not in tenant B). That shows the bearer
+    crossed the `= "grpc"` hop and B scoped by the verified tenant. Bob's `Recall` at A and at B
+    returns none of it.
+  - `x-agent-hops: 9` is `FAILED_PRECONDITION`.
+  - Service identity: the `fleet` certificate exchanges for a `svc:` token in tenant A. That token
+    over the `cli` certificate is refused (`cnf`), the unbound `cli` certificate can't exchange,
+    and a client with no certificate is refused at the handshake.
+  - `Refresh` rotates the handle; a replayed handle is refused and kills the rotated one;
+    `Refresh` after `Logout` is refused.
+  - Tables: four-class plus `adversarial_` (grpcurl output parsing, config rendering against TOML
+    injection through paths, the issuer, the store-partition scan). Check-the-checks: every live
+    step must fail against a fake agent that gets it wrong.
+  - The check runs in about 16 s. It is the first gate check that starts agent processes; loopback
+    works in the sandbox, as the in-process Rust auth tests already rely on.
+  - Differences from the design:
+    - The chain is asserted from B's on-disk tenant partition, not a `Recall`: the file backend's
+      `Recall` reads the semantic store, which `Append` doesn't fill until a distill.
+    - Audit rows live only in ClickHouse, so they move to S15b.
+    - The harness has its own grpcurl client, so `dial_for` did not grow `--bearer` / `--cert`
+      modes. The loopback harnesses stay header-free; the S2 helpers (ghz `-m`, fleet-e2e
+      `DIAL_FLAGS`, `scoped_request()`) remain unneeded.

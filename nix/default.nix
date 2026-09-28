@@ -324,6 +324,11 @@ let
   # hardening S4). nix/pki-dev.nix + test/pki-dev/pki_dev.py (tested by `pki-dev-tests`).
   pki-dev = import ./pki-dev.nix { inherit pkgs; };
 
+  # `nix run .#auth-e2e` — the sign-in chain over real processes (fake OIDC issuer, dev
+  # PKI, two agents over mTLS, a `= "grpc"` hop); the `auth-e2e` check runs the same
+  # (security-hardening S15a). nix/auth-e2e.nix + test/auth-e2e/auth_e2e.py.
+  auth-e2e = import ./auth-e2e.nix { inherit pkgs versions agent; };
+
   # `nix run .#portal-test-report -- <jsonl>...` — render the portal GUI test
   # report (page → element → case) from the hermetic checks' `flutter test
   # --machine` streams + the Layer-B rich records. See nix/portal-test-report.nix
@@ -692,6 +697,7 @@ in
         fleet-measure
         mt-audit
         pki-dev
+        auth-e2e
         fleet-redeploy
         portal-test-report
         graph-arena
