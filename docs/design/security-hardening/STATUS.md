@@ -19,7 +19,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S10 | mTLS service identity | D6 | ✅ | #516 |
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
-| S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
+| S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
@@ -559,3 +559,46 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       loopback fake OIDC issuer. This covers discovery naming another issuer and URL
       credentials never echoed.
     - `der_time` / `validity` tables, including every truncation of a real leaf.
+- **2026-09-27 — S12 (#524).** `agent login` / `logout` / `whoami`, and `[grpc.client] bearer`.
+  - Device flow (RFC 8628) in `agent_grpc::client::login`:
+    - Discovery must name the issuer, and every endpoint and shown URL passes `check_fetch_url`.
+    - IdP answers are capped at 64 KiB. `interval` is clamped to 1–60 s (a `slow_down` adds 5 s)
+      and the code window to 30 min.
+    - The user code and URLs are refused if they carry control characters, so a hostile IdP
+      cannot rewrite the terminal. Google's `verification_url` is accepted.
+  - `AgentAuth` wraps `Exchange` / `Refresh` / `Logout` / `WhoAmI` at one endpoint.
+    - A stored token that cannot be a header value is refused, not sent.
+  - `TokenFile` keeps `<issuer>.json`:
+    - The file is `0600` in a `0700` directory, written by an atomic rename.
+    - Load refuses group/other-readable files, symlinks, non-files, files over 64 KiB and
+      garbage.
+  - `refresh_stored` holds `<issuer>.json.lock` across a refresh.
+    - If another process already wrote a newer usable token, it is adopted without spending the
+      handle.
+    - `UNAUTHENTICATED` / `PERMISSION_DENIED` / `INVALID_ARGUMENT` mean the session ended; the
+      rest is transient.
+  - `LoginBearerSource` is the process `BearerSource`.
+    - It refreshes at two thirds of each lifetime and backs off through `agent-retry`.
+    - It drops the token once the session ends.
+  - Config:
+    - `[grpc.client] bearer`: `login` | `login:<issuer>` | `env:` | `file:`. A raw token is
+      refused, as is `bearer` together with `[auth.mtls] token_endpoint`.
+    - `[grpc.client] auth_endpoint` must be https, a loopback IP or `unix:`.
+    - `[[auth.issuers]] client_secret` must be a reference, checked in every mode.
+    - `AuthCfg::login_issuer` picks the named issuer or the only one.
+  - `agent-cli`: bare `login` / `logout` / `whoami`, with `--issuer` and `--endpoint`.
+    - They run before the egress proxy and telemetry.
+    - `logout` deletes the local file even when the agent cannot be reached, and says the
+      session stays live there until it expires.
+  - Tests:
+    - Tables for poll classification, pacing, device answers (escape sequences,
+      `javascript:`, remote `http`, embedded credentials, oversize codes) and token-file
+      refusals.
+    - Device flow against the testkit `FakeIssuer`, which now scripts `/device` + `/token`:
+      `slow_down`, `pending`, grant, deny, expire, and the client secret on every request.
+    - `tests/cli_login.rs` over a real tonic `AuthService`: login → `WhoAmI`; refresh rotates
+      and persists the handle; two sources sharing a file refresh together without revoking
+      the session; logout ends the stored login; a forged handle ends it.
+    - Config load tables; CLI parse table.
+  - Deferred: the loopback-redirect code flow (see 01's as-built note), and a keyring backend
+    (parity 50).

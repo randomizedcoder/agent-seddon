@@ -22,6 +22,8 @@ mod fleet_review;
 #[cfg(feature = "git")]
 mod git;
 pub mod hooks;
+#[cfg(feature = "auth")]
+pub mod login;
 mod metered;
 mod policy;
 #[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
@@ -97,7 +99,9 @@ pub use config::Config;
 #[cfg(feature = "recall")]
 pub use config::RecallCfg;
 /// One `[[auth.issuers]]` entry (security-hardening S3), mapped by the serve path.
-pub use config::{AuthIssuerCfg, AuthMtlsBindingCfg, AuthMtlsCfg, AuthTokenCfg};
+pub use config::{
+    AuthIssuerCfg, AuthMtlsBindingCfg, AuthMtlsCfg, AuthTokenCfg, ClientBearer, GrpcClientCfg,
+};
 #[cfg(feature = "config-schema")]
 pub use config_schema::{build_schema, validate_config};
 #[cfg(feature = "config")]
@@ -153,6 +157,10 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
         mtls.validate_client(&cfg.grpc.tls.client)
             .map_err(anyhow::Error::msg)?;
     }
+    cfg.grpc
+        .client
+        .validate(&cfg.auth)
+        .map_err(anyhow::Error::msg)?;
     cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
     Ok((cfg, unknown))
 }
