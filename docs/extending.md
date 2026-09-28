@@ -119,4 +119,14 @@ instead of hand-rolling doubles. Then:
   `cargo build -p agent-runtime --no-default-features --features provider-openai-compat,tool-core,context-sliding-window,memory-file`
 - `cargo test -p <your-crate> --features <your-feature>`
 - `nix flake check` runs `clippy --all-features -D warnings`, rustfmt, tests, and
-  cargo-audit hermetically — the source of truth for CI.
+  cargo-audit hermetically — the source of truth for CI. Its **`feature-matrix`** check
+  ([`nix/checks/feature-matrix.nix`](../nix/checks/feature-matrix.nix)) type-checks a
+  small matrix of lean builds (`agent-runtime --no-default-features`, plus single
+  features such as `campaign` / `provider-router` / `role-postgres`, and `agent-cli
+  --no-default-features`), so a `#[cfg(feature = …)]` that is too narrow on a
+  definition or missing on a caller fails the gate rather than the next hand-rolled
+  lean build. The rule when it fires: widen the gate on the **definition** when the
+  item is a generic helper (`expand_tilde`, `estimate_tokens`); gate the **caller**
+  when the item is genuinely feature-specific (`build_route_upstream`,
+  `record_route_event`). Add a row to the matrix when a feature gets its own factory
+  line or store module.

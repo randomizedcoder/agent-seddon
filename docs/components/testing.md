@@ -106,6 +106,18 @@ than its loop:
   unknown-backend config must fail closed. Catches config-schema drift no in-process
   test sees.
 
+A third offline gate, **`feature-matrix`**
+([`nix/checks/feature-matrix.nix`](../../nix/checks/feature-matrix.nix)), covers the
+build *shape* rather than the binary: `cargo check` over `agent-runtime
+--no-default-features`, a few single-feature builds (`campaign`, `campaign-postgres`,
+`provider-router`, `role-postgres`, `auth-postgres`) and `agent-cli
+--no-default-features`. Every other check compiles the default or `--all-features`
+set, so a `#[cfg(feature = …)]` that is too narrow on a definition (or missing on a
+caller) used to surface only in a hand-rolled lean build; `agent-runtime
+--no-default-features` had silently regressed to 21 errors that way. rmeta only, so
+it costs minutes. See [extending.md](../extending.md) for the fix rule and when to
+add a row.
+
 Two model-free **real-wire** apps probe the gRPC seam surface directly (they spawn a
 server + dial a socket, so — like `e2e-live` — they are opt-in apps, not gates):
 `nix run .#loadtest-wire` drives two seams hard for throughput/overload, and

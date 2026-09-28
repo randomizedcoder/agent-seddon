@@ -142,6 +142,11 @@ in
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
   bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };
   leak = craneCheck ./leak.nix { inherit cargoArtifacts; };
+  # Lean-feature build gate: `cargo check` over a small matrix of
+  # `--no-default-features` / single-feature builds of agent-runtime + agent-cli, so
+  # a `#[cfg(feature = …)]` that is too narrow on a definition (or missing on a
+  # caller) fails the gate instead of the next hand-rolled lean build. rmeta only.
+  feature-matrix = craneCheck ./feature-matrix.nix { inherit cargoArtifacts; };
   # Source-based test-coverage (cargo-llvm-cov): runs the default-feature test
   # suite instrumented and emits lcov.info. Non-gating on the number (no
   # `--fail-under`); the human report is `nix run .#coverage`. See

@@ -40,7 +40,8 @@ pub mod lens;
 pub mod system_fragments;
 
 #[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
-use agent_core::{ContextInput, Message};
+use agent_core::ContextInput;
+use agent_core::Message;
 
 /// Build the initial `[system, user, (system-append)]` message list: fold the
 /// prepend context + recalled memory into the system prompt, add the goal, and
@@ -73,7 +74,10 @@ pub(crate) fn assemble_messages(input: ContextInput) -> Vec<Message> {
 }
 
 /// Very rough token estimate: ~4 chars per token, plus a small per-message tax.
-#[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
+///
+/// Pure and feature-independent (the run loop calls it through
+/// [`bench_estimate_tokens`] regardless of which strategies are compiled in), so
+/// it is deliberately not gated on a strategy feature.
 pub(crate) fn estimate_tokens(messages: &[Message]) -> u32 {
     let mut tokens = 0u32;
     for m in messages {
@@ -98,8 +102,8 @@ pub(crate) fn estimate_tokens(messages: &[Message]) -> u32 {
 }
 
 /// Benchmark hook: `estimate_tokens` is called repeatedly inside the compaction
-/// loop, so guard its cost. Exposed for `benches/context.rs` (the fn is crate-private).
-#[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
+/// loop, so guard its cost. Exposed for `benches/context.rs` (the fn is crate-private)
+/// and for the runtime's run loop; always compiled.
 #[doc(hidden)]
 pub fn bench_estimate_tokens(messages: &[Message]) -> u32 {
     estimate_tokens(messages)

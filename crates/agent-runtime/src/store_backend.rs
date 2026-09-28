@@ -36,6 +36,8 @@ use agent_config_store::Backend;
 /// — behind any registry/scheduler/prompt domain — counts and spans as `backend =
 /// postgres` at the single data-owner choke point.
 #[cfg(any(
+    feature = "auth-postgres",
+    feature = "role-postgres",
     feature = "registry-postgres",
     feature = "fleet-postgres",
     feature = "prompt-postgres",

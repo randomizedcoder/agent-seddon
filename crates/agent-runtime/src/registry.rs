@@ -1075,7 +1075,7 @@ pub fn register_builtins(r: &mut Registry) {
     // These are ORDINARY factory lines. Each needs config + the API key + retry
     // settings and nothing else, so nothing has to be special-cased in the
     // builder — the whole point of `FactoryCtx`.
-    #[cfg(feature = "websearch-brave")]
+    //
     // Search behind one process: the API keys live there, so an agent can
     // search without ever holding one.
     #[cfg(feature = "grpc")]
@@ -1087,6 +1087,7 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(agent_grpc::client::GrpcWebSearch::connect(&ep)?)
             as Arc<dyn agent_core::WebSearch>)
     });
+    #[cfg(feature = "websearch-brave")]
     r.web_search("brave", |ctx| {
         let cfg = &ctx.cfg.web_search;
         Ok(Arc::new(agent_web_search::BraveSearch::new(
@@ -1308,7 +1309,10 @@ pub(crate) fn grpc_client_endpoint(
 
 /// Resolve a web-search API key: inline value first, then the named env var.
 /// The key is never logged or echoed — see `agent-web-search`.
-#[cfg(any(feature = "web-search", feature = "forge"))]
+///
+/// Gated on every caller's feature (`websearch-brave` can be enabled on its own,
+/// without the `web-search` umbrella), so a lean build never loses it.
+#[cfg(any(feature = "web-search", feature = "websearch-brave", feature = "forge"))]
 fn resolve_ws_key(inline: &str, env_var: &str) -> String {
     if !inline.is_empty() {
         return inline.to_string();

@@ -1763,6 +1763,7 @@ pub(crate) fn record_gate_outcome(m: &Metrics, o: &agent_providers::GateOutcome)
     );
 }
 
+#[cfg(feature = "provider-router")]
 pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_>) {
     use agent_providers::RouteEvent;
     match ev {
