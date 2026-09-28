@@ -320,3 +320,23 @@ distinct control-plane group during the sweep and became its own final batch, 03
   (`let` def + `mkApps`), deliberately **not** a `check` and **not** in `nix/integration.nix` (throughput
   is machine-dependent and needs a live server + container). Gate green (flake-eval + shellcheck-build).
   **Track complete.** A live l2 run (podman) will fill in the concrete delta number.
+
+- **Post-verification finding (2026-09-28) — the "+12ms overhead" was a bench artifact; it exposed a real
+  ~40ms Nagle stall.** The first l2/podman run reported gRPC p95 ~30ms vs REST p95 ~42ms → "+12ms
+  transcoding overhead". That number is **not** transcoding cost: the bench compared a **pooled** gRPC leg
+  (`ghz --connections 8`) against a **fresh-process/fresh-TCP-per-request** REST leg (`xargs curl`), and the
+  two opposite confounds canceled at p50 while the p95 tail was a connection-reuse difference, not the Envoy
+  hop. JSON↔protobuf transcoding actually measures ~1–2ms. The diagnostic instead surfaced a genuine bug: a
+  classic **Nagle + delayed-ACK stall** (~40ms) on large unary replies over keep-alive connections. Root
+  cause is the **agent side** — tonic's `serve_with_incoming_shutdown` does not apply `TCP_NODELAY` to a
+  caller-provided incoming stream (only its own `serve(addr)` path does), so accepted gRPC sockets held the
+  final small TRAILERS frame until the peer's delayed-ACK timer fired. A raw gRPC client that ACKs promptly
+  masks it; the transcoder (which must buffer the whole unary reply before emitting a byte) surfaces it.
+  Envoy already sets `TCP_NODELAY` by default (strace-confirmed).
+  - **Fix (PR #555):** `enable_nodelay` maps the accepted `TcpListenerStream` in
+    `crates/agent-grpc/src/transport.rs` before serving — measured **42ms → 1.20ms** on the 34 KB keep-alive
+    path. (An earlier no-op that set `TCP_NODELAY` in the Envoy config, PR #552, was closed as redundant.)
+  - **Bench methodology fix (PR #556):** both legs pooled (REST leg → `hey`, pinned `versions.hey`);
+    benchmarks `ConfigService.Status` (~116 B) as the headline small-read overhead and keeps `GetValues`
+    (~34 KB) as a large-read keep-alive witness. Corrected takeaway: transcoding ≈ 1–2ms/call — still
+    "prefer gRPC for hot paths", but the honest number is ~1–2ms, not +12ms.
