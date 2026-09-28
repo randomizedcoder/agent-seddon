@@ -124,7 +124,7 @@ pub(crate) fn build_review_orchestrator(
 /// public web roots and present no certificate); `http://` / bare `host:port`
 /// endpoints are plaintext either way.
 #[cfg(feature = "grpc")]
-fn install_client_tls(c: &crate::config::GrpcTlsClientCfg) -> anyhow::Result<()> {
+pub(crate) fn install_client_tls(c: &crate::config::GrpcTlsClientCfg) -> anyhow::Result<()> {
     let path = |s: &str| (!s.trim().is_empty()).then(|| std::path::PathBuf::from(s.trim()));
     let (ca, cert, key) = (path(&c.ca), path(&c.cert), path(&c.key));
     let domain = (!c.domain.trim().is_empty()).then(|| c.domain.trim());
@@ -225,6 +225,13 @@ pub async fn build_agent_with(
     install_client_tls(&cfg.grpc.tls.client)?;
     #[cfg(feature = "grpc")]
     install_service_token(cfg.auth.mtls.as_ref())?;
+    // `[grpc.client] bearer` (S12); load refused it together with a service token.
+    #[cfg(feature = "auth")]
+    crate::login::install_client_bearer(&cfg)?;
+    #[cfg(not(feature = "auth"))]
+    if !cfg.grpc.client.bearer.trim().is_empty() {
+        anyhow::bail!("`[grpc.client] bearer` needs the agent built with the `auth` feature");
+    }
 
     // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. Built
     // BEFORE the provider so the fork observer can file loser alternatives, and

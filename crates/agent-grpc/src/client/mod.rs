@@ -47,6 +47,8 @@ mod exec;
 mod forge;
 mod graph;
 mod llm_pool;
+#[cfg(feature = "auth")]
+pub mod login;
 mod lsp;
 mod memory;
 mod metrics_proxy;

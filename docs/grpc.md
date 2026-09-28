@@ -500,6 +500,37 @@ grpcurl -cacert "$PKI/ca/root.crt" -cert "$PKI/fleet/cert.pem" -key "$PKI/fleet/
   -d '{"use_client_cert": true}' "$ADDR" agent.v1.AuthService/Exchange
 ```
 
+**A person at a terminal** (S12, [`client/login.rs`](../crates/agent-grpc/src/client/login.rs),
+[`agent-runtime/src/login.rs`](../crates/agent-runtime/src/login.rs)).
+
+- `agent login [--issuer NAME] [--endpoint ADDR]` runs the OAuth device flow (RFC 8628) at the
+  login issuer. It prints a URL and a code. Once the code is approved, it trades the ID token at
+  `AuthService.Exchange` (`client_kind = "cli"`).
+  - The issuer comes from `[[auth.issuers]]`: its `audience` is the OAuth client id, and
+    `client_secret` is an `env:`/`file:` reference for IdPs that want one from a device client
+    (Google).
+  - The agent is `[grpc.client] auth_endpoint` or `--endpoint`. It must be `https://`, a
+    loopback IP or `unix:`, because the ID token travels on it.
+- The agent token and its refresh handle are kept in
+  `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json`:
+  - The file is mode `0600` in a `0700` directory, written atomically.
+  - A file others can read, a symlink or an oversized file is refused, not used.
+- `agent whoami` prints tenant, subject, roles, permissions and session id; `agent logout`
+  revokes the session and deletes the file.
+- `[grpc.client] bearer = "login"` (or `"login:<issuer>"`) makes the stored login the process's
+  outbound bearer (the S9 fallback). It is refreshed at two thirds of each lifetime.
+  - The file is locked across a refresh: two `agent` processes sharing one login never both spend
+    the rotating handle, which the server would take as theft.
+  - `bearer = "env:VAR"` / `"file:/path"` sends a token issued elsewhere instead.
+  - A process has one credential of its own: `bearer` and `[auth.mtls] token_endpoint` together
+    are refused at load.
+
+```sh
+agent login --issuer google       # prints: Open https://www.google.com/device … code ABCD-EFGH
+agent whoami
+agent logout
+```
+
 **Audit trail** (S11, [`server/audit.rs`](../crates/agent-grpc/src/server/audit.rs)). Every
 auth event is a row in ClickHouse `agent.agent_auth_events` when `[telemetry]` is on.
 

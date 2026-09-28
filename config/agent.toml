@@ -1175,6 +1175,7 @@ job         = "agent-seddon"
 # client_id       = "1234.apps.googleusercontent.com"  # the expected `aud`
 # allowed_domains = ["example.com"]                    # Workspace domains → tenants
 # # default_tenant = "home"                            # admit consumer accounts (no `hd`) here
+# # client_secret = "file:/run/secrets/google-oauth"   # `agent login` only; Google device clients need it
 #
 # [[auth.issuers]]
 # name              = "keycloak"
@@ -1221,6 +1222,15 @@ job         = "agent-seddon"
 # service = "fleet"
 # tenant  = "example.com"
 # roles   = ["svc_fleet"]
+#
+# A person's credential (security-hardening S12). `agent login [--issuer NAME]` runs the
+# device flow at a login issuer above and keeps an agent token in
+# `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json` (0600); `agent whoami`, `agent logout`.
+# `bearer` sends it on outbound seam calls (refreshed in the background); not together
+# with `[auth.mtls] token_endpoint`.
+# [grpc.client]
+# auth_endpoint = "https://agent.example:50090"   # where `agent login` exchanges (https, loopback or unix:)
+# bearer        = "login"                         # | "login:<issuer>" | "env:VAR" | "file:/path"
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

@@ -150,17 +150,17 @@ impl BearerSource for MtlsBearerSource {
 /// Seconds a returned token may be used for, or `None` when there is no token or it
 /// would expire within the skew window. A lifetime beyond [`MAX_LIFETIME_SECS`] is
 /// capped rather than trusted.
-fn usable_lifetime(token: &str, expires_at: u64, now: u64) -> Option<u64> {
+pub(crate) fn usable_lifetime(token: &str, expires_at: u64, now: u64) -> Option<u64> {
     let lifetime = expires_at.checked_sub(now)?.min(MAX_LIFETIME_SECS);
     (!token.is_empty() && lifetime > REFRESH_SKEW_SECS).then_some(lifetime)
 }
 
 /// Exchange again at two thirds of the lifetime, within bounds.
-fn next_refresh(lifetime_secs: u64) -> Duration {
+pub(crate) fn next_refresh(lifetime_secs: u64) -> Duration {
     Duration::from_secs((lifetime_secs * 2 / 3).clamp(MIN_REFRESH_SECS, MAX_LIFETIME_SECS))
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

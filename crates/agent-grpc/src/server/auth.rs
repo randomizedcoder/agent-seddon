@@ -844,7 +844,7 @@ pub use binding::{
     MAX_BINDINGS_PER_TENANT, MAX_OPERATOR_SUBJECTS, MAX_ROLES_PER_BINDING,
 };
 #[cfg(feature = "auth")]
-pub use issuer::{ClaimRejection, KeySource, Profile, ResolvedIssuer};
+pub use issuer::{check_fetch_url, ClaimRejection, KeySource, Profile, ResolvedIssuer};
 #[cfg(feature = "auth")]
 pub use jwt::{
     probe_issuer_keys, Clock, IssuerKeys, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock,

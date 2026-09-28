@@ -8,11 +8,13 @@
 //! [`TestKey::Ec`], ES256) let a test stand up two issuers whose keys differ.
 //!
 //! The keys were generated offline for tests only; nothing signed with them is
-//! trusted anywhere else. The token and device endpoints arrive with the flows
-//! that use them (S6 exchange, S12 CLI login).
+//! trusted anywhere else. [`FakeIssuer::start_device`] adds the Device
+//! Authorization Grant (RFC 8628) endpoints the CLI login (S12) drives, answering
+//! token polls from a [`DeviceScript`].
 
+use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
@@ -123,8 +125,37 @@ pub fn jwks(keys: &[(TestKey, &str)]) -> Value {
     json!({ "keys": keys.iter().map(|(k, kid)| k.jwk(kid)).collect::<Vec<_>>() })
 }
 
+/// How the device flow's token endpoint ends once polling stops being pending.
+#[derive(Clone, Debug)]
+pub enum DeviceOutcome {
+    /// The user approved: answer with an ID token signed over these claims (`iss`
+    /// is filled in with the issuer's URL when absent).
+    Grant(Value),
+    /// The user refused (`access_denied`).
+    Deny,
+    /// The device code lapsed (`expired_token`).
+    Expire,
+}
+
+/// A scripted device flow: how the token endpoint answers successive polls.
+#[derive(Clone, Debug)]
+pub struct DeviceScript {
+    /// The polling interval the device endpoint advertises, in seconds.
+    pub interval: u64,
+    /// Answer the first poll with `slow_down`.
+    pub slow_down: bool,
+    /// Then answer this many polls with `authorization_pending`.
+    pub pending: usize,
+    /// Then this, for every later poll.
+    pub outcome: DeviceOutcome,
+}
+
+/// The user code the device endpoint hands out.
+pub const USER_CODE: &str = "WDJB-MJHT";
+
 /// An OIDC issuer on `127.0.0.1:<ephemeral>` serving
-/// `/.well-known/openid-configuration` and `/jwks`. Stops when dropped.
+/// `/.well-known/openid-configuration` and `/jwks` (and, from
+/// [`FakeIssuer::start_device`], `/device` and `/token`). Stops when dropped.
 pub struct FakeIssuer {
     base: String,
     key: TestKey,
@@ -132,22 +163,30 @@ pub struct FakeIssuer {
     server: Arc<tiny_http::Server>,
     discovery_hits: Arc<AtomicUsize>,
     jwks_hits: Arc<AtomicUsize>,
+    token_requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeIssuer {
     /// Start an issuer signing with `key`; its discovery document names its own
     /// base URL as `issuer`, as a real IdP's does.
     pub fn start(key: TestKey) -> Self {
-        Self::start_with(key, None)
+        Self::start_with(key, None, None)
+    }
+
+    /// Start an issuer that also serves the device flow: discovery advertises
+    /// `device_authorization_endpoint` and `token_endpoint`, and token polls are
+    /// answered from `script`.
+    pub fn start_device(key: TestKey, script: DeviceScript) -> Self {
+        Self::start_with(key, None, Some(script))
     }
 
     /// Start an issuer whose discovery document claims `advertised` as its
     /// `issuer` — a misconfigured or hostile IdP, for the mismatch check.
     pub fn start_advertising(key: TestKey, advertised: &str) -> Self {
-        Self::start_with(key, Some(advertised.to_string()))
+        Self::start_with(key, Some(advertised.to_string()), None)
     }
 
-    fn start_with(key: TestKey, advertised: Option<String>) -> Self {
+    fn start_with(key: TestKey, advertised: Option<String>, device: Option<DeviceScript>) -> Self {
         let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind fake issuer"));
         let port = server
             .server_addr()
@@ -156,27 +195,47 @@ impl FakeIssuer {
             .port();
         let base = format!("http://127.0.0.1:{port}");
         let kid = format!("fake-{key:?}-{port}").to_lowercase();
-        let discovery = json!({
+        let mut discovery = json!({
             "issuer": advertised.unwrap_or_else(|| base.clone()),
             "jwks_uri": format!("{base}/jwks"),
             "id_token_signing_alg_values_supported": [format!("{:?}", key.alg())],
-        })
-        .to_string();
+        });
+        if device.is_some() {
+            discovery["device_authorization_endpoint"] = json!(format!("{base}/device"));
+            discovery["token_endpoint"] = json!(format!("{base}/token"));
+        }
+        let discovery = discovery.to_string();
         let keys = jwks(&[(key, &kid)]).to_string();
         let discovery_hits = Arc::new(AtomicUsize::new(0));
         let jwks_hits = Arc::new(AtomicUsize::new(0));
+        let token_requests = Arc::new(Mutex::new(Vec::new()));
         let (srv, d_hits, j_hits) = (server.clone(), discovery_hits.clone(), jwks_hits.clone());
+        let mut flow = device.map(|script| DeviceFlow {
+            script,
+            polls: 0,
+            base: base.clone(),
+            key,
+            kid: kid.clone(),
+            requests: token_requests.clone(),
+        });
         std::thread::spawn(move || {
-            for request in srv.incoming_requests() {
-                let (status, body) = match request.url() {
-                    "/.well-known/openid-configuration" => {
+            for mut request in srv.incoming_requests() {
+                let mut form = String::new();
+                let _ = request
+                    .as_reader()
+                    .take(64 * 1024)
+                    .read_to_string(&mut form);
+                let (status, body) = match (request.url(), flow.as_mut()) {
+                    ("/.well-known/openid-configuration", _) => {
                         d_hits.fetch_add(1, Ordering::SeqCst);
                         (200, discovery.clone())
                     }
-                    "/jwks" => {
+                    ("/jwks", _) => {
                         j_hits.fetch_add(1, Ordering::SeqCst);
                         (200, keys.clone())
                     }
+                    ("/device", Some(flow)) => flow.authorize(&form),
+                    ("/token", Some(flow)) => flow.poll(&form),
                     _ => (404, "{}".to_string()),
                 };
                 let content_type =
@@ -195,6 +254,7 @@ impl FakeIssuer {
             server,
             discovery_hits,
             jwks_hits,
+            token_requests,
         }
     }
 
@@ -232,6 +292,89 @@ impl FakeIssuer {
     /// How many times the JWK set was fetched.
     pub fn jwks_hits(&self) -> usize {
         self.jwks_hits.load(Ordering::SeqCst)
+    }
+
+    /// The form bodies of every `/device` and `/token` request, in order.
+    pub fn token_requests(&self) -> Vec<String> {
+        self.token_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// The device-flow state behind `/device` and `/token`.
+struct DeviceFlow {
+    script: DeviceScript,
+    polls: usize,
+    base: String,
+    key: TestKey,
+    kid: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl DeviceFlow {
+    const DEVICE_CODE: &'static str = "fake-device-code";
+
+    fn record(&self, form: &str) {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(form.to_string());
+    }
+
+    fn authorize(&self, form: &str) -> (u16, String) {
+        self.record(form);
+        if !form.split('&').any(|kv| kv.starts_with("client_id=")) {
+            return (400, json!({"error": "invalid_client"}).to_string());
+        }
+        let body = json!({
+            "device_code": Self::DEVICE_CODE,
+            "user_code": USER_CODE,
+            "verification_uri": format!("{}/verify", self.base),
+            "verification_uri_complete": format!("{}/verify?user_code={USER_CODE}", self.base),
+            "expires_in": 600,
+            "interval": self.script.interval,
+        });
+        (200, body.to_string())
+    }
+
+    fn poll(&mut self, form: &str) -> (u16, String) {
+        self.record(form);
+        let fields: Vec<&str> = form.split('&').collect();
+        let grant =
+            fields.contains(&"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code");
+        let code = fields.contains(&format!("device_code={}", Self::DEVICE_CODE).as_str());
+        if !grant || !code {
+            return (400, json!({"error": "invalid_grant"}).to_string());
+        }
+        let n = self.polls;
+        self.polls += 1;
+        let error = |e: &str| (400, json!({"error": e}).to_string());
+        let lead = usize::from(self.script.slow_down);
+        if n < lead {
+            return error("slow_down");
+        }
+        if n < lead + self.script.pending {
+            return error("authorization_pending");
+        }
+        match &self.script.outcome {
+            DeviceOutcome::Grant(claims) => {
+                let mut claims = claims.clone();
+                if claims.get("iss").is_none() {
+                    claims["iss"] = json!(self.base);
+                }
+                let body = json!({
+                    "access_token": "fake-idp-access-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "id_token": self.key.mint(&self.kid, &claims),
+                });
+                (200, body.to_string())
+            }
+            DeviceOutcome::Deny => error("access_denied"),
+            DeviceOutcome::Expire => error("expired_token"),
+        }
     }
 }
 
@@ -297,6 +440,119 @@ mod tests {
         ));
         let doc: Value = serde_json::from_str(&body).expect("json");
         assert_eq!(doc["issuer"], "https://elsewhere.example");
+    }
+
+    fn post(url: &str, form: &str) -> (u16, Value) {
+        let url = url.strip_prefix("http://").expect("http url");
+        let (host, path) = url.split_once('/').expect("path");
+        let mut stream = std::net::TcpStream::connect(host).expect("connect");
+        write!(
+            stream,
+            "POST /{path} HTTP/1.0\r\nHost: {host}\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\n\r\n{form}",
+            form.len()
+        )
+        .expect("write");
+        let mut out = String::new();
+        stream.read_to_string(&mut out).expect("read");
+        let status = out[9..12].parse().expect("status");
+        let body = out.split("\r\n\r\n").nth(1).unwrap_or_default();
+        (status, serde_json::from_str(body).expect("json"))
+    }
+
+    const POLL: &str = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code\
+                        &device_code=fake-device-code&client_id=c";
+
+    fn device(slow_down: bool, pending: usize, outcome: DeviceOutcome) -> FakeIssuer {
+        FakeIssuer::start_device(
+            TestKey::Ec,
+            DeviceScript {
+                interval: 3,
+                slow_down,
+                pending,
+                outcome,
+            },
+        )
+    }
+
+    #[test]
+    fn positive_device_discovery_and_code() {
+        let issuer = device(false, 0, DeviceOutcome::Deny);
+        let (_, body) = get(&format!(
+            "{}/.well-known/openid-configuration",
+            issuer.issuer()
+        ));
+        let doc: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            doc["device_authorization_endpoint"],
+            format!("{}/device", issuer.issuer())
+        );
+        assert_eq!(doc["token_endpoint"], format!("{}/token", issuer.issuer()));
+        let (status, code) = post(&format!("{}/device", issuer.issuer()), "client_id=c");
+        assert_eq!(status, 200);
+        assert_eq!(code["user_code"], USER_CODE);
+        assert_eq!(code["interval"], 3);
+        assert_eq!(issuer.token_requests(), vec!["client_id=c".to_string()]);
+    }
+
+    #[test]
+    fn corner_plain_issuer_has_no_device_flow() {
+        let issuer = FakeIssuer::start(TestKey::Rsa);
+        let (_, body) = get(&format!(
+            "{}/.well-known/openid-configuration",
+            issuer.issuer()
+        ));
+        let doc: Value = serde_json::from_str(&body).expect("json");
+        assert!(doc.get("device_authorization_endpoint").is_none());
+    }
+
+    #[rstest::rstest]
+    #[case::negative_device_without_client_id("/device", "scope=openid", "invalid_client")]
+    #[case::negative_poll_wrong_grant(
+        "/token",
+        "grant_type=password&device_code=fake-device-code",
+        "invalid_grant"
+    )]
+    #[case::adversarial_poll_wrong_code(
+        "/token",
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=guess",
+        "invalid_grant"
+    )]
+    fn device_rejections(#[case] path: &str, #[case] form: &str, #[case] error: &str) {
+        let issuer = device(false, 0, DeviceOutcome::Deny);
+        let (status, body) = post(&format!("{}{path}", issuer.issuer()), form);
+        assert_eq!((status, body["error"].as_str()), (400, Some(error)));
+    }
+
+    #[rstest::rstest]
+    #[case::positive_grant(true, 2, DeviceOutcome::Grant(json!({"sub": "u"})), None)]
+    #[case::negative_deny(false, 1, DeviceOutcome::Deny, Some("access_denied"))]
+    #[case::negative_expire(false, 0, DeviceOutcome::Expire, Some("expired_token"))]
+    fn device_script_runs_in_order(
+        #[case] slow_down: bool,
+        #[case] pending: usize,
+        #[case] outcome: DeviceOutcome,
+        #[case] end: Option<&str>,
+    ) {
+        let issuer = device(slow_down, pending, outcome);
+        let token = format!("{}/token", issuer.issuer());
+        if slow_down {
+            assert_eq!(post(&token, POLL).1["error"], "slow_down");
+        }
+        for _ in 0..pending {
+            assert_eq!(post(&token, POLL).1["error"], "authorization_pending");
+        }
+        let (status, body) = post(&token, POLL);
+        match end {
+            Some(error) => assert_eq!((status, body["error"].as_str()), (400, Some(error))),
+            None => {
+                assert_eq!(status, 200);
+                let id_token = body["id_token"].as_str().expect("id_token");
+                let header = jsonwebtoken::decode_header(id_token).expect("header");
+                assert_eq!(header.kid.as_deref(), Some(issuer.kid()));
+            }
+        }
     }
 
     #[rstest::rstest]
