@@ -59,6 +59,10 @@ mod dsn;
 // campaign store the `agent campaign …` verbs run against. Lazy by design.
 #[cfg(feature = "campaign")]
 pub mod campaign;
+// The `[campaign]` driver wiring (CP-05): config → `DriverConfig`, the tenant
+// selection rule, `build_driver` over the opened backend.
+#[cfg(feature = "campaign")]
+pub mod campaign_driver;
 #[cfg(any(
     feature = "auth-postgres",
     feature = "role-postgres",
