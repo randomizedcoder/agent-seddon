@@ -12,7 +12,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-01 | `CampaignStore` seam, path grammar, `allowed()`, rollup, policy, `MemCampaigns` | SI-11 | ✅ | #501 |
 | CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | ✅ | #508 |
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ✅ | #525 |
-| CP-04 | CLI `agent campaign …` | SI-11 | 🟡 | #531 |
+| CP-04 | CLI `agent campaign …` | SI-11 | ✅ | #531 |
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ⬜ | — |
 | CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ⬜ | — |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |
@@ -91,3 +91,44 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   pre-existing RustSec advisories on `main` (`rustls` 2026-0285, `rustls-pemfile` 2025-0134,
   `proc-macro-error2` 2026-0173): their own change. Gate: `nix flake check` green on the
   committed ref; `pg-integration` green (campaign pg suite 160/160).
+- **2026-09-28 — CP-04 (#531).** The first human-usable surface: `agent campaign add | plan
+  [<ref>] [--max N] | list [--needs-attention] | show | approve [--children] | answer (<text> | -)
+  | retry | replan | cancel | run --once` in `crates/agent-cli/src/campaign_cli.rs` (grammar,
+  refs, rendering, dispatch), wired in `main.rs` as `Mode::Campaign` — the bare word `campaign`
+  is the first non-option token only (after `--` it is a goal word), precedence `--check-config
+  > doctor > campaign > …` (S12's `login` / `logout` / `whoami` sit ahead of all three).
+  Store-only verbs run before metrics and the agent build like `doctor`; `plan` / `run --once`
+  build the agent for the planner's provider and run inside the session scope. Refs are ids
+  (`[1-9][0-9]{0,17}`) or letter paths (`A`, `B.2`, `AB.1.3`; ordinals `1..=8`, ≤ 6 deep)
+  minted from the **unfiltered** listing so `A` is the same campaign in every verb; scripts use
+  `#id`. Principal is `user:local`; `--tenant` only selects `with_tenant`. Every stored string
+  reaches the terminal through `agent_campaign::display::escape_terminal` (C0 / C1 / hidden
+  and bidi controls as `\u{..}`; `agent_core::is_hidden_control` made `pub`). `[campaign]`
+  config (`CampaignCfg`: `store`, `pool_max`, `planner_model`, `plan_per_tick`, `max_repairs`,
+  `repo_root`, `[campaign.repos]` slug → id until RK-02) validated at load;
+  `agent_runtime::campaign::open_campaign_store` opens `PgCampaigns` lazily over
+  `[config_store] dsn_ref` and migrates on the first real verb (`PgCampaigns::ensure_migrated`),
+  so `--check-config` never dials; features `campaign` (default) / `campaign-postgres` (in the
+  `postgres` umbrella); `Agent::campaign_planner_provider()` resolves `planner_model` through
+  `resolve_provider_ref`. Fixed on the way: a misplaced `#[cfg(feature = "grpc")]` in
+  `registry.rs` that gated `resolve_provider_ref` on `grpc`. Deviations from the design, all
+  amended in the docs: no `[campaign] dsn_ref` (reuses `[config_store]`); the CLI runs its own
+  tick loop over one `plannable` read so it can print a line per node (children a split creates
+  wait for the next tick); `--max` is ignored when a target is given;
+  `docs/components/campaigns.md` arrived here rather than in CP-08, which adds its
+  observability section. Tests: T16 8/8 (`positive_add`, `positive_show_letters`,
+  `negative_unknown_id`, `corner_answer_from_stdin`, `boundary_goal_file_4000`,
+  `adversarial_id_traversal`, `adversarial_repo_slug`, `adversarial_source_ref_injection`) plus
+  parser / ref / render rows, run-level verbs over `MemCampaigns`, the in-process `add → run
+  --once → plan → show` path over `ScriptedProvider`, `escape_terminal` rows, config bounds +
+  lazy-resolver rows (a 5 s timeout proves no dial), e2e help / `--` / disabled-store rows;
+  `cli-help` requires `campaign`, `config-roundtrip` fixture 10 prints `campaign  = postgres`.
+  Live smoke with Kimi-K3 against podman Postgres: `add` → `plan` split the root into three
+  children → `approve --children` → `plan` marked two leaves and refused one whose `touches`
+  named a file that does not exist yet. Deferred: touches for not-yet-existing files (node keys,
+  RK-08): CP-07; a gated level is approved twice, as a task and again as a leaf (UX): CP-05;
+  `agent-runtime --no-default-features` fails to build on `main` (pre-existing, 25 errors) and
+  two pre-existing flaky gate tests (`agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes`,
+  `agent-search` `tests/leak.rs`): their own changes. Gate: `pg-integration` green
+  (161/161); `nix flake check` green on the committed ref (third pass after the two flakes)
+  and again first pass on the merge of `main` (#524–#530) into the branch.
