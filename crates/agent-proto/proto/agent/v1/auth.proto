@@ -35,39 +35,95 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
+// REST mappings (docs/design/rest-openapi/), under /v1/auth/. Token-minting and
+// mutations → POST body:* (Exchange, Begin, Refresh, Logout, PutBinding); reads → GET
+// (Issuers, Jwks, WhoAmI, the list/get RPCs, with `tenant` as a query param);
+// session/binding removals → DELETE by id (the id is a path param, other scalars ride
+// as query params). Every field in these requests is untrusted — Envoy hands it to the
+// same gRPC handler behind the same AuthLayer, so REST bypasses none of the authz.
 service AuthService {
   // Trade an identity provider's ID token, a browser sign-in's authorization
   // code, or a service's client certificate for an agent token.
-  rpc Exchange(ExchangeRequest) returns (ExchangeResponse);
+  rpc Exchange(ExchangeRequest) returns (ExchangeResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/exchange"
+      body: "*"
+    };
+  }
   // The login issuers a browser can sign in with.
-  rpc Issuers(IssuersRequest) returns (IssuersResponse);
+  rpc Issuers(IssuersRequest) returns (IssuersResponse) {
+    option (google.api.http) = {get: "/v1/auth/issuers"};
+  }
   // Start a browser sign-in: where to send the user, and the `state` to expect back.
-  rpc Begin(BeginRequest) returns (BeginResponse);
+  rpc Begin(BeginRequest) returns (BeginResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/begin"
+      body: "*"
+    };
+  }
   // The public keys agent tokens are signed with, as a JWK Set.
-  rpc Jwks(JwksRequest) returns (JwksResponse);
+  rpc Jwks(JwksRequest) returns (JwksResponse) {
+    option (google.api.http) = {get: "/v1/auth/jwks"};
+  }
   // Who the caller's agent token says they are, and what it lets them do.
-  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse) {
+    option (google.api.http) = {get: "/v1/auth/whoami"};
+  }
   // Trade a refresh handle for a new agent token and a new handle.
-  rpc Refresh(RefreshRequest) returns (ExchangeResponse);
+  rpc Refresh(RefreshRequest) returns (ExchangeResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/refresh"
+      body: "*"
+    };
+  }
   // Revoke the caller's own session (the one its token names).
-  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/logout"
+      body: "*"
+    };
+  }
   // The caller's own sessions.
-  rpc ListMySessions(ListMySessionsRequest) returns (ListSessionsResponse);
+  rpc ListMySessions(ListMySessionsRequest) returns (ListSessionsResponse) {
+    option (google.api.http) = {get: "/v1/auth/my/sessions"};
+  }
   // Revoke one of the caller's own sessions.
-  rpc RevokeMySession(RevokeMySessionRequest) returns (RevokeSessionResponse);
+  rpc RevokeMySession(RevokeMySessionRequest) returns (RevokeSessionResponse) {
+    option (google.api.http) = {delete: "/v1/auth/my/sessions/{sid}"};
+  }
   // Every session in a tenant; needs `read:binding` there.
-  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option (google.api.http) = {get: "/v1/auth/sessions"};
+  }
   // Revoke any session in a tenant; needs `write:binding` there.
-  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse) {
+    option (google.api.http) = {delete: "/v1/auth/sessions/{sid}"};
+  }
   // Role bindings in a tenant; needs `read:binding` there.
-  rpc ListBindings(ListBindingsRequest) returns (ListBindingsResponse);
+  rpc ListBindings(ListBindingsRequest) returns (ListBindingsResponse) {
+    option (google.api.http) = {get: "/v1/auth/bindings"};
+  }
   // One role binding; needs `read:binding` there.
-  rpc GetBinding(GetBindingRequest) returns (GetBindingResponse);
+  rpc GetBinding(GetBindingRequest) returns (GetBindingResponse) {
+    option (google.api.http) = {get: "/v1/auth/bindings/{id}"};
+  }
   // Create or replace a role binding; needs `write:binding` there, and may grant
   // only permissions the caller holds, never to the caller itself.
-  rpc PutBinding(PutBindingRequest) returns (PutBindingResponse);
+  rpc PutBinding(PutBindingRequest) returns (PutBindingResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/bindings"
+      body: "*"
+    };
+  }
   // Remove a role binding; needs `delete:binding` there.
-  rpc DeleteBinding(DeleteBindingRequest) returns (DeleteBindingResponse);
+  rpc DeleteBinding(DeleteBindingRequest) returns (DeleteBindingResponse) {
+    option (google.api.http) = {delete: "/v1/auth/bindings/{id}"};
+  }
 }
 
 message ExchangeRequest {

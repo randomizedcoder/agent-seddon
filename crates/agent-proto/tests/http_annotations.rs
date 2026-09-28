@@ -164,12 +164,16 @@ fn methods() -> BTreeMap<String, MethodInfo> {
 }
 
 /// Expected `google.api.http` mapping for an RPC.
+///
+/// There is deliberately no "present but unmapped" expectation: the full-surface
+/// sweep (03a–03g4) annotated every RPC, and `adversarial_every_method_has_a_route`
+/// now asserts that end-state whole-set — a routeless method fails that invariant
+/// rather than being an expected per-row outcome. (If a future increment ever defers
+/// an RPC, reintroduce an `Unmapped` variant here and exempt it there.)
 #[derive(Debug)]
 enum Expect {
     /// Exactly these `(verb, path)` routes, in binding order.
     Routes(&'static [(&'static str, &'static str)]),
-    /// Present in the descriptor but carrying no `google.api.http` rule.
-    Unmapped,
     /// Not a real method — the lookup must fail closed (junk name).
     Absent,
 }
@@ -523,13 +527,53 @@ enum Expect {
     "Policy.Authorize",
     Expect::Routes(&[("POST", "/v1/policy/authorize")])
 )]
-// negative — the LAST not-yet-annotated RPC: AuthService is deferred to 03g4 (auth is
-// its own batch). This row flips to a positive `Routes` case when auth.proto is
-// annotated, and the completeness invariant lands with it.
-#[case::negative_auth_whoami_not_annotated_yet(
-    "AuthService.WhoAmI is not annotated yet (deferred to 03g4) -> no google.api.http rule",
+// --- 03g4: auth (AuthService) — the FINAL batch; the whole surface is now annotated -
+// positive — a paramless identity read maps to a bare GET. This was the `Unmapped`
+// sentinel until auth.proto was annotated here; with it, every RPC in the descriptor
+// carries a route (see `adversarial_every_method_has_a_route`).
+#[case::positive_auth_whoami_paramless_read_maps_to_get(
+    "AuthService.WhoAmI -> GET /v1/auth/whoami (paramless identity read)",
     "AuthService.WhoAmI",
-    Expect::Unmapped
+    Expect::Routes(&[("GET", "/v1/auth/whoami")])
+)]
+// positive — the token-mint endpoint (trade an ID token / client cert for an agent
+// token) is a credential-bearing action → POST body:*, like an OAuth token endpoint.
+#[case::positive_auth_exchange_token_mint_maps_to_post(
+    "AuthService.Exchange -> POST /v1/auth/exchange (token mint)",
+    "AuthService.Exchange",
+    Expect::Routes(&[("POST", "/v1/auth/exchange")])
+)]
+// corner — revoking one of the caller's OWN sessions is a removal by id nested under
+// the `/my/` sub-collection: DELETE with a `{sid}` path param (distinct from the
+// tenant-wide RevokeSession under /v1/auth/sessions/{sid}).
+#[case::corner_auth_revoke_my_session_nested_delete(
+    "AuthService.RevokeMySession -> DELETE /v1/auth/my/sessions/{sid}",
+    "AuthService.RevokeMySession",
+    Expect::Routes(&[("DELETE", "/v1/auth/my/sessions/{sid}")])
+)]
+// corner — a role binding's read/delete share `/v1/auth/bindings/{id}` (GET reads,
+// DELETE removes), while list/create share the `/v1/auth/bindings` collection — four
+// RPCs over two paths, each unique by `(verb, path)`. This locks the DELETE-by-id; the
+// `tenant`/`keep_sessions` scalars ride as query params (no body on a DELETE).
+#[case::corner_auth_delete_binding_by_id_maps_to_delete(
+    "AuthService.DeleteBinding -> DELETE /v1/auth/bindings/{id}",
+    "AuthService.DeleteBinding",
+    Expect::Routes(&[("DELETE", "/v1/auth/bindings/{id}")])
+)]
+// positive — browser sign-in (S13): listing the configured login issuers is a
+// bearer-less read → GET. It carries no request fields, so it maps to a bare path.
+#[case::positive_auth_issuers_read_maps_to_get(
+    "AuthService.Issuers -> GET /v1/auth/issuers (login-issuer list)",
+    "AuthService.Issuers",
+    Expect::Routes(&[("GET", "/v1/auth/issuers")])
+)]
+// positive — starting a browser sign-in mints single-use server-side `state` bound to
+// the issuer, redirect URI and PKCE challenge; that is a credential-adjacent action, so
+// it maps to POST body:* (the challenge/redirect ride in the JSON body, not the URL).
+#[case::positive_auth_begin_starts_flow_maps_to_post(
+    "AuthService.Begin -> POST /v1/auth/begin (start browser sign-in)",
+    "AuthService.Begin",
+    Expect::Routes(&[("POST", "/v1/auth/begin")])
 )]
 // negative — a junk method name must not resolve to any rule (fail closed).
 #[case::negative_junk_method_is_absent(
@@ -548,16 +592,6 @@ fn http_annotation_coverage(
             !map.contains_key(method),
             "expected `{method}` to be absent from the descriptor, but it is present"
         ),
-        Expect::Unmapped => {
-            let info = map
-                .get(method)
-                .unwrap_or_else(|| panic!("`{method}` not found in descriptor"));
-            assert!(
-                info.routes.is_empty(),
-                "expected `{method}` to carry no google.api.http rule, got {:?}",
-                info.routes
-            );
-        }
         Expect::Routes(expected) => {
             let info = map
                 .get(method)
@@ -660,5 +694,26 @@ fn boundary_surface_has_no_client_or_bidi_streaming_rpcs() {
     assert!(
         offenders.is_empty(),
         "client-streaming/bidi RPCs are not REST-transcodable; mark them gRPC-only: {offenders:?}"
+    );
+}
+
+// adversarial — the end-state of the full-surface sweep (03a–03g4): EVERY RPC in the
+// emitted descriptor carries at least one `google.api.http` route. Since the surface
+// has no client/bidi-streaming RPCs (the invariant above), none is legitimately
+// unmappable — so a routeless method means a new RPC was added without an annotation.
+// This fires as the reminder to annotate it (or, for a future client/bidi RPC, to mark
+// it gRPC-only in docs/design/rest-openapi/ and exempt it here).
+#[test]
+fn adversarial_every_method_has_a_route() {
+    let map = methods();
+    let unmapped: Vec<&String> = map
+        .iter()
+        .filter(|(_, i)| i.routes.is_empty())
+        .map(|(m, _)| m)
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "these RPCs carry no google.api.http route (annotate them, or mark gRPC-only \
+         and exempt): {unmapped:?}"
     );
 }
