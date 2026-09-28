@@ -50,8 +50,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ✅ merged (#520) |
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ✅ merged (#522) |
 | 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ✅ merged (#523) |
-| 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | 🟡 in flight |
-| 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | ⬜ |
+| 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | ✅ merged (#526) |
+| 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | 🟡 in flight |
 | 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | ⬜ |
 
 (Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR. The original
@@ -162,3 +162,18 @@ added, it fires as a reminder to list it here as gRPC-only.
   → GET (`*.Capabilities`/`Health`, `Tokenizer.Count`). Added 5 class-tagged coverage rows (last
   server-streaming → POST, nested complete → POST, content-payload EmbedDocs → POST vs single-query
   EmbedQuery → GET, repeated-nested CountMessages → POST); the whole-set invariants cover the rest.
+- **03g2 (cognition / memory: memory / context / dimension / mode / digest / reference).** Annotated the
+  three memory services (`Memory` `/v1/memory/`, `Episodic` `/v1/episodic/`, `Semantic` `/v1/semantic/`),
+  `ContextService` (`/v1/context/`), `DimensionService` (`/v1/dimensions/`), `ModeService` (`/v1/mode/`),
+  `DigestService` (`/v1/digests/`), and `ReferenceService` (`/v1/references/`). Nested-request reads and
+  content payloads → POST body:* (`Memory.Recall`/`Semantic.Recall` carry a `RecallQuery`;
+  `Context.Assemble`/`Compact`, `Dimension.Summarize`, `Mode.Classify` carry nested/history payloads;
+  `Reference.Resolve` carries a whole prompt — the **scalar** form of the content-payload refinement).
+  Scalar-only reads → GET (`Episodic.Recent`, `limit` as query). Two new addressing shapes: a read keyed
+  by a `safe_segment` **slug** captures it as a path param (`Dimension.Recall` → GET
+  `/v1/dimensions/{dimension}`), and a ledger read keyed by `session_id` keeps its repeated-scalar
+  `keywords_any` **filter** as query params (`Digest.Query` → GET `/v1/digests/{session_id}` — the filter
+  half of the content-payload-vs-filter rule). Writes/triggers → POST (`*.Append`, `Digest.Put`,
+  `Memory.Distill` even with an empty request). Added 6 class-tagged coverage rows (scalar-limit read →
+  GET, nested-body Recall → POST, slug path param, repeated-scalar filter stays GET, content-payload
+  Resolve → POST, empty-request action → POST); the whole-set invariants cover the rest.

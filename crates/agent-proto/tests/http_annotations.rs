@@ -430,6 +430,52 @@ enum Expect {
     "TokenizerService.CountMessages",
     Expect::Routes(&[("POST", "/v1/tokenizer/count-messages")])
 )]
+// --- 03g2: cognition / memory (memory / context / dimension / mode / digest /
+//          reference) -----------------------------------------------------------
+// positive — a bounded read whose only field is a scalar `limit` maps to GET (the
+// limit rides as a query param), in a fresh proto group.
+#[case::positive_episodic_recent_scalar_limit_read_maps_to_get(
+    "Episodic.Recent -> GET /v1/episodic/recent (scalar limit as query param)",
+    "Episodic.Recent",
+    Expect::Routes(&[("GET", "/v1/episodic/recent")])
+)]
+// corner — a read whose request is a nested `RecallQuery` maps to POST body:*
+// (nested-body-read convention) even though it is side-effect-free.
+#[case::corner_memory_recall_nested_body_read_maps_to_post(
+    "Memory.Recall -> POST /v1/memory/recall (nested RecallQuery in the request)",
+    "Memory.Recall",
+    Expect::Routes(&[("POST", "/v1/memory/recall")])
+)]
+// corner — a read keyed by a `safe_segment` slug captures it as a path param (the
+// first identifier-is-a-slug capture, contrast the query-param revision reads).
+#[case::corner_dimension_recall_slug_path_param(
+    "DimensionService.Recall -> GET /v1/dimensions/{dimension} (slug identifier as path param)",
+    "DimensionService.Recall",
+    Expect::Routes(&[("GET", "/v1/dimensions/{dimension}")])
+)]
+// corner — a ledger read keyed by `session_id` (path param) whose `keywords_any` is a
+// repeated-scalar FILTER stays GET (the keywords ride as repeated query params) — the
+// filter half of the content-payload-vs-filter refinement.
+#[case::corner_digest_query_repeated_scalar_filter_stays_get(
+    "DigestService.Query -> GET /v1/digests/{session_id} (repeated-scalar keyword filter)",
+    "DigestService.Query",
+    Expect::Routes(&[("GET", "/v1/digests/{session_id}")])
+)]
+// corner — resolving `@`-mentions carries a whole `prompt` CONTENT payload, so it is
+// POST body:* even though it never mutates state (content-payload refinement, scalar
+// form: a prompt is a payload, not a URL-friendly selector).
+#[case::corner_reference_resolve_content_payload_maps_to_post(
+    "ReferenceService.Resolve -> POST /v1/references/resolve (prompt content payload)",
+    "ReferenceService.Resolve",
+    Expect::Routes(&[("POST", "/v1/references/resolve")])
+)]
+// boundary — an action whose request is EMPTY still maps to POST body:* (a distiller
+// trigger has no query surface); contrast the empty-request GET reads (Preflight).
+#[case::boundary_memory_distill_empty_request_action_maps_to_post(
+    "Memory.Distill (empty request) -> POST /v1/memory/distill",
+    "Memory.Distill",
+    Expect::Routes(&[("POST", "/v1/memory/distill")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(

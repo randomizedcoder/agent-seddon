@@ -13,7 +13,14 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
+// REST mapping (docs/design/rest-openapi/), under /v1/references/. Resolve carries a
+// whole `prompt` (a content payload, not a URL-friendly selector) → POST body:* per
+// the content-payload refinement, even though it is side-effect-free.
 service ReferenceService {
   // Expand a prompt's `@`-mentions into context blocks, budget-bounded.
   //
@@ -21,7 +28,12 @@ service ReferenceService {
   // unresolved, denied, or errored reference becomes a warning, so one bad
   // mention can't fail the turn. `blocked` (over the hard budget) means the
   // prompt is left unmodified — it is not an error either.
-  rpc Resolve(RefResolveRequest) returns (RefResolution);
+  rpc Resolve(RefResolveRequest) returns (RefResolution) {
+    option (google.api.http) = {
+      post: "/v1/references/resolve"
+      body: "*"
+    };
+  }
 }
 
 message RefResolveRequest {

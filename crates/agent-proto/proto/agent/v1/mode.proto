@@ -6,6 +6,10 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 // `TaskMode` moved to common.proto (same package, wire/JSON-identical) so
 // `RouteHint` can carry it without an import cycle (model-router 02b).
@@ -33,6 +37,14 @@ message ClassifyRequest {
   repeated Message history = 2;
 }
 
+// REST mapping (docs/design/rest-openapi/), under /v1/mode/. Classify carries a
+// prompt + nested `history` (a content payload the server bounds/hashes) → POST
+// body:*, not a query read.
 service ModeService {
-  rpc Classify(ClassifyRequest) returns (ModeVerdict);
+  rpc Classify(ClassifyRequest) returns (ModeVerdict) {
+    option (google.api.http) = {
+      post: "/v1/mode/classify"
+      body: "*"
+    };
+  }
 }
