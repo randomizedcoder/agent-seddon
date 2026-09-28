@@ -36,9 +36,10 @@ mod session_events;
 pub mod session_store;
 pub mod skills;
 // The fail-closed `env:`/`file:` DSN-reference resolver, shared by every Postgres
-// tier (the config-store domains via `store_backend`, and the digest ledger via
-// the builder's `pg_digests`). One home for the secret-handling (never echo the
-// resolved DSN), so the two callers can't diverge.
+// tier (the config-store domains via `store_backend`, the digest ledger via
+// the builder's `pg_digests`, and the campaign store via `campaign`). One home
+// for the secret-handling (never echo the resolved DSN), so the callers can't
+// diverge.
 #[cfg(any(
     feature = "auth-postgres",
     feature = "registry-postgres",
@@ -47,9 +48,14 @@ pub mod skills;
     feature = "scheduler-postgres",
     feature = "forge-registry-postgres",
     feature = "transport-registry-postgres",
-    feature = "digest-postgres"
+    feature = "digest-postgres",
+    feature = "campaign-postgres"
 ))]
 mod dsn;
+// The `[campaign] store` resolver (docs/design/campaigns, CP-04): opens the
+// campaign store the `agent campaign …` verbs run against. Lazy by design.
+#[cfg(feature = "campaign")]
+pub mod campaign;
 #[cfg(any(
     feature = "auth-postgres",
     feature = "registry-postgres",

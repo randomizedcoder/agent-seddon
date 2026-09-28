@@ -280,6 +280,20 @@ async fn main() -> Result<()> {
     // the builder, so we can report them once the build proves every selector
     // resolves to a registered factory.
     let check_config = matches!(mode, Mode::CheckConfig);
+    if check_config {
+        // Dry-open the `[campaign] store` (docs/design/campaigns, CP-04): proves
+        // the selected arm is linked and its DSN reference resolves, LAZILY —
+        // no dial, no migration — so the check stays hermetic.
+        agent_runtime::campaign::open_campaign_store(
+            &config,
+            agent_runtime::campaign::CampaignOpen {
+                tenant: None,
+                apply_migrations: false,
+            },
+        )
+        .await
+        .context("[campaign] store")?;
+    }
     let selections = check_config.then(|| ConfigSelections {
         provider: config.agent.provider.clone(),
         context: config.agent.context.clone(),
@@ -288,6 +302,7 @@ async fn main() -> Result<()> {
         tokenizer: config.tokenizer.backend.clone(),
         search: config.search.backend_names().join(","),
         tools: config.tools.enabled.len(),
+        campaign: agent_runtime::campaign::backend_label(&config),
     });
 
     let agent = agent_runtime::build_agent(
@@ -311,6 +326,7 @@ async fn main() -> Result<()> {
         println!("  tokenizer = {}", s.tokenizer);
         println!("  search    = {}", s.search);
         println!("  tools     = {} enabled", s.tools);
+        println!("  campaign  = {}", s.campaign);
         return Ok(());
     }
 
@@ -673,6 +689,8 @@ struct ConfigSelections {
     tokenizer: String,
     search: String,
     tools: usize,
+    /// `[campaign] store` as `off` / `postgres` (docs/design/campaigns, CP-04).
+    campaign: &'static str,
 }
 
 /// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;

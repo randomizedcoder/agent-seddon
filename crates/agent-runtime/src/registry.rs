@@ -1255,9 +1255,6 @@ fn tantivy_search_from(
     })) as Arc<dyn agent_core::SearchBackend>)
 }
 
-/// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
-/// default on the seam's generated port. Set the config to `unix:/path` for UDS.
-#[cfg(feature = "grpc")]
 /// Resolve a provider *reference* the way composing factories do (the
 /// consensus gate's critic, the fork's branches/judge, the distiller's and
 /// objective call's role providers): a `[[route.upstreams]]` entry by name
@@ -1267,7 +1264,8 @@ fn tantivy_search_from(
     feature = "provider-consensus",
     feature = "graph",
     feature = "digest",
-    feature = "context-instant"
+    feature = "context-instant",
+    feature = "campaign"
 ))]
 pub(crate) fn resolve_provider_ref(
     name: &str,
@@ -1294,6 +1292,9 @@ pub(crate) fn resolve_provider_ref(
     Ok(crate::metered::provider(built, ctx.metrics.clone(), name))
 }
 
+/// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
+/// default on the seam's generated port. Set the config to `unix:/path` for UDS.
+#[cfg(feature = "grpc")]
 pub(crate) fn grpc_client_endpoint(
     configured: &str,
     default: agent_grpc::constants::SeamEndpoint,

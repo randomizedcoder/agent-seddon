@@ -296,13 +296,18 @@ pkgs.runCommand "agent-config-roundtrip"
     store = "postgres"
     [transport_registry]
     store = "postgres"
+    [campaign]
+    store = "postgres"
     TOML
     # A clean build with every domain on "postgres" IS the selection proof: each
     # resolver has a `#[cfg(not(feature = "…-postgres"))] "postgres" => bail!` arm, so
     # a feature-less binary or a typo'd selector would fail here, not fall back.
+    # `[campaign]` is dry-opened LAZILY on this path (no dial, no migration), so the
+    # dummy DSN above is never contacted; the printed selection pins the arm.
     expect_ok multi-tenant "$HOME/multi-tenant.toml" \
       "config: OK" \
-      "provider  = openai-compat"
+      "provider  = openai-compat" \
+      "campaign  = postgres"
 
     # 11) Adversarial: an INLINE Postgres DSN in the profile (a password on disk) must
     #     be rejected — `[config_store] dsn_ref` is a REFERENCE (`env:` / `file:`),

@@ -301,6 +301,21 @@ pub async fn build_agent_with(
         };
     #[cfg(not(feature = "digest"))]
     let distill_provider: Option<Arc<dyn agent_core::LlmProvider>> = None;
+    // Role routing (`[campaign] planner_model`, docs/design/campaigns 03): the
+    // planner's one-decision-per-node calls go to a dedicated provider. No
+    // `role_scoped` wrap — there is no planner `RouteRole`; the reference is a
+    // `[[route.upstreams]]` name or a registry provider type, resolved the same
+    // way as `[digest] provider`. Attached to the `Agent` further down.
+    #[cfg(feature = "campaign")]
+    let campaign_planner_provider: Option<Arc<dyn agent_core::LlmProvider>> =
+        if cfg.campaign.planner_model.is_empty() {
+            None
+        } else {
+            Some(
+                crate::registry::resolve_provider_ref(&cfg.campaign.planner_model, &base_ctx)
+                    .context("[campaign] planner_model (planner role routing)")?,
+            )
+        };
     // A graph fork owns the response path: the builder composes the
     // BranchingProvider chain (branches, judge, post-merge gate) directly.
     #[cfg(feature = "graph")]
@@ -1483,6 +1498,13 @@ pub async fn build_agent_with(
             let p = role_scoped(main_provider.clone(), agent_core::RouteRole::Summarize);
             agent.with_distill_provider(p)
         }
+    };
+    // No `[campaign] planner_model` pin: the getter falls back to the main
+    // provider, so nothing is attached.
+    #[cfg(feature = "campaign")]
+    let agent = match campaign_planner_provider {
+        Some(p) => agent.with_campaign_planner_provider(p),
+        None => agent,
     };
     let agent = match prompt_store_seam {
         Some(p) => agent.with_prompt_store(p),
