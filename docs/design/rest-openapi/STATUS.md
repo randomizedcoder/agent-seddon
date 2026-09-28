@@ -14,7 +14,9 @@ the as-built log) in the PR that lands the increment.
 | 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ✅ merged (#534) |
 | 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (`:8094`, in the `portal_envoy.py` renderer), filter after `cors`/before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | ✅ | — | ✅ complete |
 | 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ✅ complete |
-| 07 | `nix run .#rest-bench` (REST-vs-gRPC via `ghz` + HTTP load; descriptor/config-size note) | — | ✅ | ✅ | — | ✅ | ⬜ |
+| 07 | `nix run .#rest-bench` (REST-vs-gRPC via `ghz` + HTTP load; descriptor/config-size note) | — | ✅ | ✅ | — | ✅ | ✅ complete |
+
+**★ Track complete — all 7 increments merged (#510, #512, #515–#530, #534, #538, #539, PR-07).**
 
 Legend: ✅ built · 🟡 partial / in flight · ⬜ not started.
 
@@ -301,3 +303,20 @@ distinct control-plane group during the sweep and became its own final batch, 03
   config → that route would 501 (UNIMPLEMENTED, a 5xx) and muddy the "never 5xx" invariant; retargeted the
   traversal at the always-served config prefix, which 404s deterministically. Next: increment 07
   (`nix run .#rest-bench`).
+
+- **Increment 07 — `nix run .#rest-bench` (REST-vs-gRPC latency; the number behind "recommend gRPC").**
+  New `nix/rest-bench.nix`: a `writeShellApplication` that reuses `harness.serveWire` (`dial_for tcp` +
+  `start_serve_all tcp` boot `agent --serve-all` on `127.0.0.1:50100` + its health-wait + auto-clean
+  `$work`/EXIT trap), brings up the transcoder (`grpc-web-up`, REST at `:8094`), then measures the SAME
+  read two ways against the SAME gateway: the **gRPC leg** = `ghz --insecure --call
+  agent.v1.ConfigService.GetValues -d '{}' -c $CONC -n $REQS` (reflection); the **REST leg** = a
+  concurrent `seq $REQS | xargs -P $CONC … curl -w '%{time_total}'` loop at `GET /v1/config/values`.
+  Prints a side-by-side p50/p95 (+ gRPC rps/avg) table, the transcoding-overhead delta (REST − gRPC),
+  and an operational note (`agent_descriptor.pb` byte size + transcoded service count, from
+  `rest-descriptor.nix`). Env-overridable `REQS` (default 2000) / `CONC` (default 50). ghz percentiles
+  are ns→ms via `jq`; curl percentiles are nearest-rank over the sorted per-request `time_total` (s→ms)
+  via `awk`. Self-skips (exit 0) with no container runtime; asserts each leg produced data (`note_fail 1`
+  otherwise) — a bench measures, it never `note_fail 2`s. **App only** — registered in `nix/default.nix`
+  (`let` def + `mkApps`), deliberately **not** a `check` and **not** in `nix/integration.nix` (throughput
+  is machine-dependent and needs a live server + container). Gate green (flake-eval + shellcheck-build).
+  **Track complete.** A live l2 run (podman) will fill in the concrete delta number.

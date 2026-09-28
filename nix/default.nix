@@ -608,6 +608,21 @@ let
     inherit (nixLib) harness;
   };
 
+  # `rest-bench` — the opt-in REST-vs-gRPC latency artifact behind the "recommend
+  # gRPC" guidance (rest-openapi §4): ghz gRPC baseline vs a concurrent curl REST
+  # loop, p50/p95 + the transcoding-overhead delta. Machine-dependent + needs a
+  # live server + container, so an app only — never a check, never in integration.
+  rest-bench = import ./rest-bench.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (portal) grpc-web-up grpc-web-down;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#integration` — run the whole opt-in integration tier in one shot
   # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
   # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
@@ -732,6 +747,7 @@ in
         pg-integration
         ch-integration
         rest-integration
+        rest-bench
         vcr-record
         integration
         soak
