@@ -13,8 +13,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tokio_stream::StreamExt;
 use tonic::codegen::http;
 use tonic::transport::server::Router;
 use tonic::transport::{Channel, Endpoint as TonicEndpoint, Uri};
@@ -214,6 +215,23 @@ pub enum Bound {
     Uds(UnixListener, SocketGuard),
 }
 
+/// Disable Nagle on an accepted TCP connection before it is served.
+///
+/// tonic's `serve_with_incoming` does **not** apply `TCP_NODELAY` to a caller-provided
+/// stream (only its own `serve(addr)` path does). Without it, the final small gRPC
+/// TRAILERS frame of a large response is held by Nagle until the peer's delayed-ACK
+/// timer fires (~40ms), seen as a ~40ms time-to-first-byte on large reads through the
+/// REST/grpc-web transcoder (whose transcoder must buffer the whole unary reply before
+/// emitting a byte). A raw gRPC client that ACKs promptly hides it, so it only bites the
+/// proxied surface. Best-effort: a socket that rejects the option still serves — just
+/// with Nagle on. UDS has no Nagle, so its path needs nothing.
+fn enable_nodelay(conn: io::Result<TcpStream>) -> io::Result<TcpStream> {
+    if let Ok(stream) = &conn {
+        let _ = stream.set_nodelay(true);
+    }
+    conn
+}
+
 impl Bound {
     /// The endpoint a client should dial to reach this listener. For TCP this is
     /// the *resolved* local address (so an ephemeral `:0` bind yields its real
@@ -248,8 +266,9 @@ impl Bound {
     {
         match self {
             Bound::Tcp(l) => {
+                let incoming = TcpListenerStream::new(l).map(enable_nodelay);
                 router
-                    .serve_with_incoming_shutdown(TcpListenerStream::new(l), shutdown)
+                    .serve_with_incoming_shutdown(incoming, shutdown)
                     .await
             }
             Bound::Uds(l, _guard) => {
@@ -327,5 +346,25 @@ mod tests {
             expected,
             "`{input}` local={expected}"
         );
+    }
+
+    #[tokio::test]
+    async fn positive_enable_nodelay_disables_nagle_on_an_accepted_stream() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server, _) = l.accept().await.unwrap();
+        // A freshly accepted socket has Nagle on (nodelay=false) — the stall the fix removes.
+        assert!(!server.nodelay().unwrap(), "precondition: accept() leaves Nagle on");
+        let server = enable_nodelay(Ok(server)).unwrap();
+        assert!(server.nodelay().unwrap(), "enable_nodelay must set TCP_NODELAY");
+        let _client = client.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn boundary_enable_nodelay_passes_an_accept_error_through_untouched() {
+        // Best-effort: a failed accept must flow through so tonic sees the error, not panic.
+        let got = enable_nodelay(Err(io::Error::new(io::ErrorKind::ConnectionAborted, "boom")));
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
     }
 }
