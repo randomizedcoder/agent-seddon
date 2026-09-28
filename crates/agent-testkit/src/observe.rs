@@ -3,7 +3,7 @@
 //! `agent-runtime/src/metered.rs` and the gRPC span tree), so a feature test can
 //! prove its code path is observable, not just correct.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_metrics::Metrics;
 
@@ -65,15 +65,75 @@ fn sum_samples(text: &str, metric: &str, label: Option<&str>) -> f64 {
         .sum()
 }
 
+/// A no-op subscriber whose only job is to be **registered**: it answers
+/// `register_callsite` with [`tracing::subscriber::Interest::always`] and enables
+/// nothing, so it never records a span itself.
+///
+/// Why it exists: `tracing-core` caches per-callsite *interest*. While the process
+/// has at most one live dispatcher, that cache is rebuilt from **the calling
+/// thread's** default dispatcher only (`Rebuilder::JustOne`). A test that emits a
+/// span with no subscriber installed can therefore stamp `Interest::never` on a
+/// callsite from its own thread, *after* a concurrent [`captured_spans`] /
+/// [`captured_span_fields`] has installed its collector — and the collector sees
+/// nothing. Keeping a second, always-interested dispatcher alive for the whole
+/// process forces the `Read` path, which ANDs every live dispatcher's interest:
+/// `always ∧ anything` is never `never`, so a captured callsite is always dispatched
+/// and the capture subscriber's own `enabled()` decides. Subscriber-less emits go to
+/// `NoSubscriber`, which is a no-op, exactly as before.
+struct AlwaysInterested;
+
+impl tracing::Subscriber for AlwaysInterested {
+    fn register_callsite(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn event(&self, _event: &tracing::Event<'_>) {}
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// The process-wide pinned dispatcher (see [`AlwaysInterested`]). Never installed as
+/// a default; constructing the `Dispatch` is what registers it.
+static INTEREST_PIN: OnceLock<tracing::Dispatch> = OnceLock::new();
+
+/// Register the always-interested dispatcher once per process, then rebuild the
+/// interest cache so callsites already cached as `never` are re-evaluated. Idempotent
+/// and cheap after the first call.
+fn pin_interest() {
+    INTEREST_PIN.get_or_init(|| {
+        let d = tracing::Dispatch::new(AlwaysInterested);
+        tracing::callsite::rebuild_interest_cache();
+        d
+    });
+}
+
 /// Run `f` with a subscriber that records the **name of every span created**, and
 /// return those names in creation order. Lets a test assert a code path emitted an
 /// expected span (e.g. `skill.load`) without a live OTLP collector.
+///
+/// Safe to run in parallel with tests that emit the same span with no subscriber:
+/// see [`AlwaysInterested`]. Callers do not need their own
+/// `rebuild_interest_cache()`.
 pub fn captured_spans<F: FnOnce()>(f: F) -> Vec<String> {
     use tracing_subscriber::layer::SubscriberExt;
 
+    pin_interest();
     let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(SpanCollector(names.clone()));
-    tracing::subscriber::with_default(subscriber, f);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        f();
+    });
     let collected = names.lock().expect("span collector poisoned").clone();
     collected
 }
@@ -102,12 +162,19 @@ pub type SpanField = (String, String, String);
 /// `(span_name, field, value)` tuples. Lets a test assert an *attribute* landed
 /// on a span (e.g. `policy.authorize` recorded `decision = "deny"`), not just that
 /// the span exists.
+///
+/// Immune to the callsite-interest race like [`captured_spans`] (see
+/// [`AlwaysInterested`]); callers do not need their own `rebuild_interest_cache()`.
 pub fn captured_span_fields<F: FnOnce()>(f: F) -> Vec<SpanField> {
     use tracing_subscriber::layer::SubscriberExt;
 
+    pin_interest();
     let fields: Arc<Mutex<Vec<SpanField>>> = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(FieldCollector(fields.clone()));
-    tracing::subscriber::with_default(subscriber, f);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        f();
+    });
     let collected = fields.lock().expect("field collector poisoned").clone();
     collected
 }
@@ -242,6 +309,80 @@ mod tests {
                 .iter()
                 .any(|(sp, f, v)| sp == "observe.fieldtest" && f == "later" && v == "recorded"),
             "recorded field missing: {fields:?}"
+        );
+    }
+
+    // ---- callsite-interest race (the `progress::tests` flake) -------------
+
+    /// Emit one span at a callsite unique to this test. Called first from a thread
+    /// with **no** default subscriber, which is exactly what stamps `Interest::never`
+    /// on the callsite under `Rebuilder::JustOne`.
+    fn emit_race_span() {
+        let _s = tracing::info_span!("observe.race", k = 1);
+    }
+
+    // desc: the callsite is first registered from a subscriber-less thread while the
+    // capture subscriber is installed on ours; without the pin, the interest cache
+    // reads `never` and the capture sees `[]` (deterministic on the old code, because
+    // `with_default` is thread-local and the spawned thread has no default).
+    #[test]
+    fn positive_capture_survives_no_subscriber_first_registration() {
+        let fields = captured_span_fields(|| {
+            std::thread::spawn(emit_race_span)
+                .join()
+                .expect("emitter thread panicked");
+            emit_race_span();
+        });
+        assert!(
+            fields
+                .iter()
+                .any(|(sp, f, v)| sp == "observe.race" && f == "k" && v == "1"),
+            "span lost to the interest cache: {fields:?}"
+        );
+    }
+
+    // desc: two captures back to back both record — the pin registers once and stays
+    // registered; nothing about the second call depends on the first.
+    #[test]
+    fn corner_pin_is_idempotent() {
+        for i in 0..2 {
+            let spans = captured_spans(|| {
+                tracing::info_span!("observe.idem").in_scope(|| {});
+            });
+            assert!(
+                spans.contains(&"observe.idem".to_string()),
+                "capture {i} lost the span: {spans:?}"
+            );
+        }
+        assert!(INTEREST_PIN.get().is_some(), "pin not registered");
+    }
+
+    // desc: the pin must not force-enable spans. A capture subscriber whose filter
+    // rejects the target still yields nothing: `always ∧ never = sometimes`, so the
+    // installed subscriber's own `enabled()` decides.
+    #[test]
+    fn negative_filtered_span_not_captured() {
+        use tracing_subscriber::layer::{Layer, SubscriberExt};
+
+        pin_interest();
+        let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let filtered = SpanCollector(names.clone()).with_filter(
+            tracing_subscriber::filter::filter_fn(|meta| meta.target() != "observe_filtered"),
+        );
+        let subscriber = tracing_subscriber::registry().with(filtered);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            tracing::info_span!(target: "observe_filtered", "observe.rejected").in_scope(|| {});
+            tracing::info_span!("observe.accepted").in_scope(|| {});
+        });
+        let got = names.lock().expect("poisoned").clone();
+        assert!(
+            !got.contains(&"observe.rejected".to_string()),
+            "filtered span leaked through: {got:?}"
+        );
+        assert!(
+            got.contains(&"observe.accepted".to_string()),
+            "unfiltered span missing: {got:?}"
         );
     }
 }

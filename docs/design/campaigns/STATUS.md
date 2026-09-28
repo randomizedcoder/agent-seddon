@@ -128,7 +128,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   named a file that does not exist yet. Deferred: touches for not-yet-existing files (node keys,
   RK-08): CP-07; a gated level is approved twice, as a task and again as a leaf (UX): CP-05;
   `agent-runtime --no-default-features` fails to build on `main` (pre-existing, 25 errors) and
-  two pre-existing flaky gate tests (`agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes`,
-  `agent-search` `tests/leak.rs`): their own changes. Gate: `pg-integration` green
+  a pre-existing flaky gate test (`agent-search` `tests/leak.rs`): their own changes (the
+  `agent-runtime` `progress::tests` flake was fixed in #541). Gate: `pg-integration` green
   (161/161); `nix flake check` green on the committed ref (third pass after the two flakes)
   and again first pass on the merge of `main` (#524–#530) into the branch.

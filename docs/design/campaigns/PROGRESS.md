@@ -191,6 +191,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-28 | CP-04: full gate, second pass (@ `9f28c09`) | red in `test` only: `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes` — `no beat on fleet.progress: []`. Pre-existing flake from #317: the same `progress::tests` filter fails 3/10 on this branch and **4/20 on `main` at `ed03ff1`** (throwaway worktree); `progress.rs` / `observe.rs` / the telemetry layer are untouched here. `leak` green this pass. See Open questions |
 | 2026-09-28 | CP-04: full gate, third pass (@ `9f28c09`), after `checks.x86_64-linux.test` and `.leak` each rebuilt alone and green on the same ref | green, `all checks passed!` |
 | 2026-09-28 | Lane B end-to-end verification after #531 / #532 (plan items 1–3): `06-test-matrix.md` T9 / T10 / T16 row ids vs `cargo test -p agent-campaign -p agent-cli -p agent-runtime --all-features -- --list` (1945 tests; rstest rows match as `case_N_<id>`); relative links over `docs/design/campaigns/*.md` + `docs/components/campaigns.md`; the 40 `path:line` citations; PROGRESS items; STATUS PR numbers vs GitHub | T9 36/36 non-† (2 † for CP-07), T10 14/14, T16 8/8; 0 broken links; every citation the CP-03 / CP-04 docs amended resolves (`lib.rs:1135`, `security.rs:97`, `agent.rs:1184`); a handful of CP-00-era citations in `README.md` / `04-executor.md` have drifted with `main` (e.g. `agent-core/src/lib.rs:1055` / `:4000` / `:5284`, `config.rs:2939`, `store_backend.rs:26`) — cosmetic, for the next docs pass; every PROGRESS item ✅; STATUS #495 / #501 / #508 / #525 / #531 all `MERGED` |
+| 2026-09-28 | Hygiene PR 1 (`fix/progress-span-callsite-race` @ `b43e825`): `cargo test -p agent-testkit observe` (6, incl. the three new rows; the race row verified red with the pin commented out), `progress::tests` 20/20 consecutive at `--test-threads=8` + green at 32, `cargo fmt --check`, `clippy --workspace --all-targets --all-features -D warnings`, then `nix flake check` on the committed ref | green first pass, 56 checks, `all checks passed!` |
 | 2026-09-28 | #531 refused by GitHub (conflicts): `main` advanced by #524–#530 (S12 `agent login` / `logout` / `whoami`, S13a, rest-03g1–g4); `git merge origin/main` into `campaigns/cp-04` (`6503044`), five additive hunks in `crates/agent-cli/src/main.rs` resolved by keeping both sides; `cargo fmt --check`, `clippy -p agent-cli -D warnings`, `cargo test -p agent-cli` (223 bin + 22 e2e), then the full gate on the merged ref | green first pass, `all checks passed!` |
 
 ## Open questions / blockers
@@ -207,18 +208,22 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   `nix/checks/config-roundtrip.nix` omits `[role]`, so the gate never sees it. With `[role]` off
   the shipped file checks clean and prints `campaign  = postgres`. Not from this track; the role
   registry needs a lazy open like the other domains.
-- Two pre-existing flaky gate tests, both outside this track, both seen on the CP-04 gate:
-  `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes` (#317)
-  fails 4/20 on `main` with only the twelve `progress::tests` running — the `CALLSITE_LOCK`
-  serialises the two span-capturing tests, but the other `#[tokio::test]` rows in the module
-  emit `fleet.progress` spans with no subscriber installed, so the process-wide interest cache
-  can mark the callsite "never" between `captured_span_fields` installing its subscriber and
-  the `rebuild_interest_cache()` call; the fix is to take the lock (or `set_default`) in every
-  test that emits the span, or to move the emitting rows to their own binary. `agent-search`
-  `tests/leak.rs` `search_query_paths_do_not_leak` grew 28 live blocks against a `+16` budget
-  once under heavy host load (tantivy's searcher pool / executor allocate lazily); green in
-  isolation and on every other pass — the budget wants a margin for the pool. Both need their
-  own change on `main`.
+- ~~Flaky gate test `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes`
+  (#317), 4/20 red on `main` with only the twelve `progress::tests` running.~~ **Resolved in
+  #541.** Root cause (tracing-core 0.1.36 `callsite.rs`): with at most one live dispatcher the
+  interest cache is rebuilt from the *calling thread's* default only (`Rebuilder::JustOne`), so
+  a `#[tokio::test]` row emitting `fleet.progress` with no subscriber stamped the callsite
+  `never` from its own thread **after** `captured_span_fields` had installed its collector and
+  rebuilt; the module `CALLSITE_LOCK` could not help because the emitting rows never took it.
+  Fix: `agent_testkit::observe` pins a second, always-interested no-op `Dispatch` for the life
+  of the process (forces the `Read` path, which ANDs every dispatcher's interest), and rebuilds
+  inside `with_default`; the lock and the callers' `rebuild_interest_cache()` are gone.
+  Tripwire: `observe::tests::positive_capture_survives_no_subscriber_first_registration`
+  (fails deterministically without the pin).
+- Flaky gate test `agent-search` `tests/leak.rs` `search_query_paths_do_not_leak`: grew 28 live
+  blocks against a `+16` budget once under heavy host load (tantivy's searcher pool / executor
+  allocate lazily); green in isolation and on every other pass — the budget wants a margin for
+  the pool. Needs its own change on `main`.
 - A node left in `decomposing` by a crash between `plan_start` and the close (the best-effort
   close cannot run if the process dies) needs a reaper — CP-05's driver tick (`reap()` already
   handles leases; `decomposing` older than a bound is the analogous rule).

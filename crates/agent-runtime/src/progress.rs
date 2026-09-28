@@ -304,8 +304,9 @@ mod tests {
     }
 
     // ---- C19 observability: fleet.progress span + progress metrics --------
-
-    static CALLSITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // The two span-capturing rows below run alongside `#[tokio::test]` rows that emit
+    // `fleet.progress` with no subscriber; `captured_span_fields` pins the callsite
+    // interest cache process-wide, so no lock or rebuild is needed here.
 
     /// A feed that also hands back its `Metrics`, so a test can scrape the fleet families.
     fn feed_m(card: Option<TransportCard>) -> (TransportProgressFeed, Metrics) {
@@ -334,11 +335,7 @@ mod tests {
         // desc: an announce opens a `fleet.progress` span carrying beat/tenant/repo (the
         // tenant/repo are span *attributes*, threaded from the event). The empty-id no-op
         // path is enough — the attributes are recorded at span creation, before any post.
-        let _g = CALLSITE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fields = agent_testkit::observe::captured_span_fields(|| {
-            tracing::callsite::rebuild_interest_cache();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .unwrap();
@@ -364,11 +361,7 @@ mod tests {
     fn adversarial_hostile_repo_not_recorded() {
         // desc: a repo with a path separator fails safe_segment → it is NOT stamped on the
         // span (fail closed), even though the event carried it.
-        let _g = CALLSITE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fields = agent_testkit::observe::captured_span_fields(|| {
-            tracing::callsite::rebuild_interest_cache();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .unwrap();
