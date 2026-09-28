@@ -25,7 +25,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
 | S15a | auth-e2e gate (process wire) | testing | ✅ | #537 |
 | S15b | integration tiers (step-ca daemon, Postgres sessions, ClickHouse audit) | testing | ✅ | #543 |
-| S15c | `portal-auth-e2e`: browser sign-in through the hardened edge | testing | ✅ | #PRNUM |
+| S15c | `portal-auth-e2e`: browser sign-in through the hardened edge | testing | ✅ | #549 |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 
@@ -786,7 +786,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - Certificates come from the daemon's JWK provisioner (`step ca certificate`), not ACME. The
       agent consumes PEM files either way, and ACME would need an HTTP-01/TLS-ALPN responder the
       harness does not otherwise need.
-- **2026-09-28 — S15c (#PRNUM).** New `nix run .#portal-auth-e2e`, registered in the model-free tier
+- **2026-09-28 — S15c (#549).** New `nix run .#portal-auth-e2e`, registered in the model-free tier
   of `nix run .#integration`, and a gate check `portal-auth-e2e-tests` (four-class tables plus
   check-the-checks). The harness
   ([`test/portal-auth-e2e/portal_auth_e2e.py`](../../../test/portal-auth-e2e/portal_auth_e2e.py))
