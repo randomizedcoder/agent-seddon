@@ -204,11 +204,40 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // `agent campaign …`: the verbs run against the store before any metrics or
-    // seam machinery starts (the run path lands in the next step).
+    // `agent campaign …` (docs/design/campaigns, CP-04): the store-only verbs run
+    // here, before any metrics or seam machinery starts — like `doctor`. The store
+    // is opened lazily and migrated on this first use when `[config_store]
+    // migrate_on_start` allows it; `--tenant` only selects the tenant view. The
+    // verbs run as `user:local` under a fresh local session scope. `plan` and
+    // `run --once` need the planner, so they fall through to the built agent.
     if let Mode::Campaign(args) = &mode {
-        let _ = args;
-        anyhow::bail!("agent campaign: the verbs are not wired yet (CP-04 step 5)");
+        if !args.cmd.needs_planner() {
+            let store = agent_runtime::campaign::open_campaign_store(
+                &config,
+                agent_runtime::campaign::CampaignOpen {
+                    tenant: args.tenant.as_deref(),
+                    apply_migrations: true,
+                },
+            )
+            .await
+            .context("[campaign] store")?
+            .context(
+                "agent campaign: no campaign store is configured — set `[campaign] store = \
+                 \"postgres\"` (the DSN comes from `[config_store] dsn_ref`)",
+            )?;
+            let ctx = campaign_cli::CampaignCtx {
+                store,
+                repos: config.campaign.repos.clone(),
+            };
+            let identity = agent_core::SessionKey::local(uuid::Uuid::new_v4().to_string());
+            return agent_core::scope(identity, async {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                campaign_cli::run(&ctx, &args.cmd, &mut out).await
+            })
+            .await;
+        }
+        anyhow::bail!("agent campaign: `plan` and `run --once` are not wired yet (CP-04 step 6)");
     }
 
     // Metrics (opt-in). Instrumentation always runs into this registry; serving

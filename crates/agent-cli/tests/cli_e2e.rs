@@ -267,6 +267,22 @@ fn corner_help_lists_campaign() {
     );
 }
 
+/// With no `[campaign] store` configured, a store verb exits 1 with a hint that
+/// names the key — before any model or seam is touched (no LLM is started here).
+#[test]
+fn negative_campaign_list_disabled_bails_with_hint() {
+    let ws = TempWorkspace::new("campaign-disabled");
+    let cfg = write_config(&ws, "http://127.0.0.1:1", "");
+
+    let (code, out, err) = run_agent(&cfg, &ws, &["campaign", "list"]);
+    assert_eq!(code, 1, "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.is_empty(), "nothing on stdout, got:\n{out}");
+    assert!(
+        err.contains("[campaign] store"),
+        "stderr must name the config key, got:\n{err}"
+    );
+}
+
 /// `agent campaign --help` (and the bare `agent campaign`) print the verb usage
 /// and exit 0 with no config and no model — like `--help`.
 #[test]

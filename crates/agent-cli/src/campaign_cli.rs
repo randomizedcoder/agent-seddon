@@ -6,15 +6,22 @@
 //! a human types here is input to a **validator**, never to the store directly:
 //! every string is capped at the seam's own limit, control characters are
 //! refused where they can only be a mistake, the goal and source ref are
-//! screened, and every echo in an error is escaped and cut to 40 chars. The
-//! verbs themselves (`run`) and the terminal rendering follow in the next step.
+//! screened, and every echo in an error is escaped and cut to 40 chars.
+//!
+//! It also owns the store-only verbs (`run`) and their terminal rendering: every
+//! string the store hands back was written by a human or by the model, so it is
+//! passed through `escape_terminal` before it reaches stdout, and list titles are
+//! cut. Letters are minted from the **unfiltered** listing, so `A` names the same
+//! campaign in `list`, `list --needs-attention`, `show` and `add`.
 
-use std::io::Read;
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::sync::Arc;
 
-use agent_campaign::display::{escape_terminal, parse_letter};
+use agent_campaign::display::{escape_terminal, letters, parse_letter, Letters};
 use agent_core::campaign::{
-    check_len, screen, truncate_chars, Policy, TaskId, TaskPath, MAX_ANSWER, MAX_DETAIL_BYTES,
-    MAX_GOAL, MAX_SOURCE_REF, MAX_TITLE,
+    check_len, screen, truncate_chars, Actor, CampaignStore, ListFilter, NewCampaign, Policy, Task,
+    TaskId, TaskPath, TaskState, MAX_ANSWER, MAX_DETAIL_BYTES, MAX_GOAL, MAX_SOURCE_REF, MAX_TITLE,
 };
 use agent_core::safe_segment;
 use anyhow::{anyhow, bail, Context, Result};
@@ -104,6 +111,14 @@ pub enum CampaignCmd {
     Cancel(Ref),
     RunOnce,
     Help,
+}
+
+impl CampaignCmd {
+    /// `plan` and `run --once` need the planner (a provider, so the built agent);
+    /// every other verb needs only the store and runs before any seam starts.
+    pub fn needs_planner(&self) -> bool {
+        matches!(self, CampaignCmd::Plan { .. } | CampaignCmd::RunOnce)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +449,405 @@ fn parse_run(rest: &[String]) -> Result<CampaignCmd> {
         [] => bail!("run: only `run --once` is available (the resident driver lands in CP-05)"),
         [other, ..] => bail!("run: unknown argument `{}`", echo(other)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Running the store-only verbs
+// ---------------------------------------------------------------------------
+
+/// How many chars of a title a `list` line shows before `…`.
+const LIST_TITLE_CHARS: usize = 60;
+/// How many chars of a question / reason `list --needs-attention` shows.
+const ATTENTION_CHARS: usize = 600;
+
+/// What the verbs need besides their arguments: the store (bound to one tenant)
+/// and the `[campaign.repos]` slug → repo id map for `add --repo <slug>`.
+pub struct CampaignCtx {
+    pub store: Arc<dyn CampaignStore>,
+    pub repos: BTreeMap<String, i64>,
+}
+
+/// Run a store-only verb as the ambient identity (`Actor::from_scope`, i.e.
+/// `user:local` for the CLI), writing its report to `out`. Errors carry the seam's
+/// own text (`not found`, `invalid: …`, `conflict: …`); the caller maps them to
+/// exit 1. `plan` / `run --once` are refused here: they need the planner.
+pub async fn run(ctx: &CampaignCtx, cmd: &CampaignCmd, out: &mut dyn Write) -> Result<()> {
+    let actor = Actor::from_scope();
+    match cmd {
+        CampaignCmd::Add(a) => add(ctx, a, &actor, out).await,
+        CampaignCmd::List { needs_attention } => list(ctx, *needs_attention, out).await,
+        CampaignCmd::Show(r) => show(ctx, r, out).await,
+        CampaignCmd::Approve { target, children } => {
+            let t = resolve(ctx, target).await?;
+            if *children {
+                let done = ctx
+                    .store
+                    .approve_children(t.task_id, &actor)
+                    .await
+                    .map_err(seam)?;
+                writeln!(out, "approved {} children of #{}", done.len(), t.task_id)?;
+            } else {
+                let t = ctx
+                    .store
+                    .approve(t.task_id, t.version, &actor)
+                    .await
+                    .map_err(seam)?;
+                writeln!(out, "approved #{} ({})", t.task_id, t.state.as_str())?;
+            }
+            Ok(())
+        }
+        CampaignCmd::Answer { target, text } => {
+            let t = resolve(ctx, target).await?;
+            let t = ctx
+                .store
+                .answer(t.task_id, t.version, text.clone(), &actor)
+                .await
+                .map_err(seam)?;
+            writeln!(out, "answered #{} ({})", t.task_id, t.state.as_str())?;
+            Ok(())
+        }
+        CampaignCmd::Retry(r) => {
+            let t = resolve(ctx, r).await?;
+            let t = ctx.store.retry(t.task_id, &actor).await.map_err(seam)?;
+            writeln!(out, "retried #{} ({})", t.task_id, t.state.as_str())?;
+            Ok(())
+        }
+        CampaignCmd::Replan(r) => {
+            let t = resolve(ctx, r).await?;
+            let t = ctx.store.replan(t.task_id, &actor).await.map_err(seam)?;
+            writeln!(out, "replanned #{} ({})", t.task_id, t.state.as_str())?;
+            Ok(())
+        }
+        CampaignCmd::Cancel(r) => {
+            let t = resolve(ctx, r).await?;
+            let done = ctx.store.cancel(t.task_id, &actor).await.map_err(seam)?;
+            writeln!(out, "cancelled {} task(s) under #{}", done.len(), t.task_id)?;
+            Ok(())
+        }
+        CampaignCmd::Plan { .. } | CampaignCmd::RunOnce => {
+            bail!("this verb needs the planner and is not wired yet (CP-04 step 6)")
+        }
+        CampaignCmd::Help => {
+            writeln!(out, "{USAGE}")?;
+            Ok(())
+        }
+    }
+}
+
+/// The unfiltered listing with its letters: the one map every verb shares.
+struct Listing {
+    roots: Vec<Task>,
+    letters: Letters,
+}
+
+impl Listing {
+    async fn load(store: &dyn CampaignStore) -> Result<Self> {
+        let roots = store
+            .list_campaigns(ListFilter::default())
+            .await
+            .map_err(seam)?;
+        let mut letters = Letters::new();
+        for r in &roots {
+            // Past `Letters::MAX_ROOTS` a root has no letter; `label` falls back to
+            // the id, so the map never grows past the cap.
+            let _ = letters.letter(r.task_id);
+        }
+        Ok(Self { roots, letters })
+    }
+
+    /// `A` / `A.1.3` for a node whose campaign is in the listing (and under the
+    /// letter cap); `#id` otherwise, so the label is always usable as a ref.
+    fn label(&mut self, t: &Task) -> String {
+        let listed = self.roots.iter().any(|r| r.task_id == t.campaign_id);
+        listed
+            .then(|| self.letters.render(&t.path))
+            .flatten()
+            .unwrap_or_else(|| format!("#{}", t.task_id))
+    }
+}
+
+/// A ref as the user would type it, for messages.
+fn render_ref(r: &Ref) -> String {
+    match r {
+        Ref::Id(id) => format!("#{id}"),
+        Ref::Letter { idx, ordinals } => {
+            let mut s = letters(*idx);
+            for o in ordinals {
+                s.push('.');
+                s.push_str(&o.to_string());
+            }
+            s
+        }
+    }
+}
+
+/// An id is fetched directly; a letter path is looked up in the unfiltered listing,
+/// then walked down the campaign's subtree by path. Nothing is written until the
+/// node is known to exist.
+async fn resolve(ctx: &CampaignCtx, r: &Ref) -> Result<Task> {
+    match r {
+        Ref::Id(id) => ctx.store.get(*id).await.map_err(seam),
+        Ref::Letter { idx, ordinals } => {
+            let listing = Listing::load(&*ctx.store).await?;
+            let root = listing.roots.get(*idx).with_context(|| {
+                format!(
+                    "not found: no campaign `{}` in the listing (`agent campaign list`)",
+                    letters(*idx)
+                )
+            })?;
+            if ordinals.is_empty() {
+                return Ok(root.clone());
+            }
+            let mut path = root.path.clone();
+            for o in ordinals {
+                path = path
+                    .child_of(*o)
+                    .map_err(|e| anyhow!("`{}`: {e}", render_ref(r)))?;
+            }
+            let nodes = ctx.store.subtree(root.task_id).await.map_err(seam)?;
+            nodes
+                .into_iter()
+                .find(|t| t.path == path)
+                .with_context(|| format!("not found: `{}` is not in the listing", render_ref(r)))
+        }
+    }
+}
+
+async fn add(ctx: &CampaignCtx, a: &AddArgs, actor: &Actor, out: &mut dyn Write) -> Result<()> {
+    let repo_id = match &a.repo {
+        RepoRef::Id(id) => *id,
+        RepoRef::Slug(slug) => *ctx.repos.get(slug).with_context(|| {
+            format!(
+                "--repo `{}` is not in [campaign.repos] (give a repo id, or add the slug there)",
+                echo(slug)
+            )
+        })?,
+    };
+    let task = ctx
+        .store
+        .create(
+            NewCampaign {
+                repo_id,
+                title: a.title.clone(),
+                goal: a.goal.clone(),
+                source_ref: a.source_ref.clone(),
+                policy: a.policy.clone(),
+                draft: a.draft,
+            },
+            actor,
+        )
+        .await
+        .map_err(seam)?;
+    let mut listing = Listing::load(&*ctx.store).await?;
+    writeln!(
+        out,
+        "created {}  #{}  {}",
+        listing.label(&task),
+        task.task_id,
+        task.state.as_str()
+    )?;
+    Ok(())
+}
+
+/// The states a human has to look at (`ListFilter::needs_attention`).
+fn needs_attention(state: TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::AwaitingApproval | TaskState::Blocked | TaskState::Failed
+    )
+}
+
+/// One `list` line: `{letter:<4} #{id:<8} {state:<18} {title}` + ` !` when the
+/// campaign needs attention.
+fn list_line(label: &str, t: &Task) -> String {
+    let mut title = escape_terminal(&truncate_chars(&t.title, LIST_TITLE_CHARS));
+    if t.title.chars().count() > LIST_TITLE_CHARS {
+        title.push('…');
+    }
+    let bang = if needs_attention(t.state) { " !" } else { "" };
+    // `TaskId`'s `Display` ignores width, so pad the raw id.
+    format!(
+        "{label:<4} #{:<8} {:<18} {title}{bang}",
+        t.task_id.0,
+        t.state.as_str()
+    )
+}
+
+/// What the latest event of a node says about it, for the markers and the
+/// `question:` / `reason:` lines. Every string is model- or human-written.
+#[derive(Default)]
+struct Marks {
+    question: Option<String>,
+    reason: Option<String>,
+    low_confidence: bool,
+    injection: bool,
+}
+
+fn marks(detail: &serde_json::Value) -> Marks {
+    let s = |k: &str| detail.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let reason = s("reason").map(|r| {
+        // `reject` carries the model's message, `injection` the field, a dependency
+        // failure the leaf id, `attempts_exhausted` the count.
+        let extra = s("message")
+            .or_else(|| s("field"))
+            .or_else(|| detail.get("dependency").map(|v| format!("task {v}")))
+            .or_else(|| detail.get("attempts").map(|v| format!("{v} attempt(s)")));
+        match extra {
+            Some(x) => format!("{r}: {x}"),
+            None => r,
+        }
+    });
+    let reason = reason.or_else(|| s("cause").map(|c| format!("failed: {c}")));
+    Marks {
+        question: s("question"),
+        injection: detail.get("reason").and_then(|v| v.as_str()) == Some("injection"),
+        low_confidence: detail.get("low_confidence") == Some(&serde_json::Value::Bool(true)),
+        reason,
+    }
+}
+
+async fn latest_marks(store: &dyn CampaignStore, t: TaskId) -> Result<Marks> {
+    let events = store.events(t).await.map_err(seam)?;
+    Ok(events.last().map(|e| marks(&e.detail)).unwrap_or_default())
+}
+
+/// An escaped, capped one-line rendering of a question / reason.
+fn attention_text(s: &str) -> String {
+    let mut out = escape_terminal(&truncate_chars(s, ATTENTION_CHARS));
+    if s.chars().count() > ATTENTION_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+async fn list(ctx: &CampaignCtx, attention: bool, out: &mut dyn Write) -> Result<()> {
+    let mut listing = Listing::load(&*ctx.store).await?;
+    let roots: Vec<Task> = if attention {
+        ctx.store
+            .list_campaigns(ListFilter {
+                repo_id: None,
+                needs_attention: true,
+            })
+            .await
+            .map_err(seam)?
+    } else {
+        listing.roots.clone()
+    };
+    if roots.is_empty() {
+        writeln!(out, "no campaigns")?;
+        return Ok(());
+    }
+    for root in &roots {
+        let label = listing.label(root);
+        writeln!(out, "{}", list_line(&label, root))?;
+        if !attention {
+            continue;
+        }
+        // The nodes a human has to look at, with what the store recorded about
+        // each: the planner's question, or why the node is blocked / failed.
+        let nodes = ctx.store.subtree(root.task_id).await.map_err(seam)?;
+        for node in nodes.iter().filter(|n| needs_attention(n.state)) {
+            let m = latest_marks(&*ctx.store, node.task_id).await?;
+            if !node.is_root() {
+                let label = listing.label(node);
+                writeln!(
+                    out,
+                    "  {label:<12} {:<18} {}",
+                    node.state.as_str(),
+                    escape_terminal(&truncate_chars(&node.title, LIST_TITLE_CHARS))
+                )?;
+            }
+            if let Some(q) = &m.question {
+                writeln!(out, "    question: {}", attention_text(q))?;
+            }
+            if let Some(r) = &m.reason {
+                writeln!(out, "    reason: {}", attention_text(r))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn show(ctx: &CampaignCtx, r: &Ref, out: &mut dyn Write) -> Result<()> {
+    let t = resolve(ctx, r).await?;
+    let mut listing = Listing::load(&*ctx.store).await?;
+    writeln!(
+        out,
+        "#{}  {}  {}  {}  v{}  attempts {}",
+        t.task_id,
+        listing.label(&t),
+        t.kind.as_str(),
+        t.state.as_str(),
+        t.version,
+        t.attempts
+    )?;
+    writeln!(out, "title: {}", escape_terminal(&t.title))?;
+    writeln!(out, "goal:")?;
+    for line in t.goal.split('\n') {
+        writeln!(out, "  {}", escape_terminal(line))?;
+    }
+    if let Some(s) = &t.source_ref {
+        writeln!(out, "source_ref: {}", escape_terminal(s))?;
+    }
+    if let Some(p) = &t.policy {
+        writeln!(out, "policy: {}", escape_terminal(&p.to_json()))?;
+    }
+    for (i, a) in t.acceptance.iter().enumerate() {
+        writeln!(out, "acceptance[{i}]: {}", escape_terminal(a))?;
+    }
+    for (i, p) in t.touches.iter().enumerate() {
+        writeln!(out, "touches[{i}]: {}", escape_terminal(p))?;
+    }
+    if !t.depends_on.is_empty() {
+        let ids: Vec<String> = t.depends_on.iter().map(|d| format!("#{d}")).collect();
+        writeln!(out, "depends_on: {}", ids.join(" "))?;
+    }
+    if let Some(o) = &t.claimed_by {
+        writeln!(out, "claimed_by: {}", escape_terminal(o.as_str()))?;
+    }
+    if let Some(u) = &t.pr_url {
+        writeln!(out, "pr: {}", escape_terminal(u))?;
+    } else if let Some(n) = t.pr_number {
+        writeln!(out, "pr: #{n}")?;
+    }
+    if let Some(b) = &t.branch {
+        writeln!(out, "branch: {}", escape_terminal(b))?;
+    }
+    if let Some(s) = t.superseded_by {
+        writeln!(out, "superseded_by: #{s}")?;
+    }
+    writeln!(out, "tree:")?;
+    let nodes = ctx.store.subtree(t.task_id).await.map_err(seam)?;
+    for node in &nodes {
+        let m = latest_marks(&*ctx.store, node.task_id).await?;
+        let indent = "  ".repeat(usize::from(node.depth.saturating_sub(t.depth)));
+        let label = listing.label(node);
+        let est = node.est_size.map_or("-", |e| e.as_str());
+        let mut line = format!(
+            "{indent}{label:<12} {:<18} {:<9} {est:<2} a{} {}",
+            node.state.as_str(),
+            node.kind.as_str(),
+            node.attempts,
+            escape_terminal(&node.title)
+        );
+        if let Some(o) = &node.claimed_by {
+            line.push_str(&format!(" claimed_by={}", escape_terminal(o.as_str())));
+        }
+        if let Some(u) = &node.pr_url {
+            line.push_str(&format!(" pr={}", escape_terminal(u)));
+        }
+        if m.low_confidence {
+            line.push_str(" [low confidence]");
+        }
+        if m.question.is_some() {
+            line.push_str(" [?]");
+        }
+        if m.injection {
+            line.push_str(" [injection]");
+        }
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -963,5 +1377,467 @@ mod tests {
         ] {
             assert!(USAGE.contains(verb), "usage lacks `{verb}`");
         }
+    }
+
+    // ---- run: the store-only verbs over `MemCampaigns` ------------------------
+
+    use agent_core::campaign::{PlanClose, PlanCloseOutcome};
+    use agent_testkit::campaign::conformance::{attempt, split, started};
+    use agent_testkit::campaign::MemCampaigns;
+
+    fn fresh() -> CampaignCtx {
+        CampaignCtx {
+            store: Arc::new(MemCampaigns::new()),
+            repos: BTreeMap::from([("seddon".to_string(), 1_i64)]),
+        }
+    }
+
+    /// Parse `toks` and run the verb, returning stdout.
+    async fn go(ctx: &CampaignCtx, toks: &[&str]) -> Result<String> {
+        let args = parse_toks(toks)?;
+        let mut out = Vec::new();
+        run(ctx, &args.cmd, &mut out).await?;
+        Ok(String::from_utf8(out).expect("utf-8 output"))
+    }
+
+    async fn go_ok(ctx: &CampaignCtx, toks: &[&str]) -> String {
+        go(ctx, toks)
+            .await
+            .unwrap_or_else(|e| panic!("{toks:?}: {e:#}"))
+    }
+
+    /// `add` with a plain goal; returns the new root's id.
+    async fn add_one(ctx: &CampaignCtx, title: &str) -> TaskId {
+        let out = go_ok(
+            ctx,
+            &["add", "--repo", "1", "--title", title, "--goal", "do it"],
+        )
+        .await;
+        let id = out
+            .split("  #")
+            .nth(1)
+            .and_then(|s| s.split("  ").next())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or_else(|| panic!("no id in `{out}`"));
+        TaskId(id)
+    }
+
+    /// Plant a `needs_info` question on `node` (root under the default policy is
+    /// `ready`, so `plan_start` succeeds).
+    async fn ask_question(store: &dyn CampaignStore, node: TaskId, question: &str) {
+        let (_, expected_version) = started(store, node).await;
+        store
+            .plan_close(PlanClose {
+                task: node,
+                expected_version,
+                attempt: attempt(77),
+                outcome: PlanCloseOutcome::NeedsInfo {
+                    question: question.into(),
+                },
+            })
+            .await
+            .expect("plan_close needs_info");
+    }
+
+    fn assert_terminal_safe(out: &str) {
+        assert!(
+            !out.chars().any(|c| c.is_control() && c != '\n'),
+            "output carries a raw control char: {out:?}"
+        );
+    }
+
+    // T16 positive_add: the report line names the letter, the id and the state.
+    #[tokio::test]
+    async fn positive_add_reports_letter_id_state() {
+        let ctx = fresh();
+        let out = go_ok(
+            &ctx,
+            &["add", "--repo", "seddon", "--title", "first", "--goal", "g"],
+        )
+        .await;
+        assert!(
+            out.starts_with("created A  #") && out.trim_end().ends_with("  ready"),
+            "{out:?}"
+        );
+        let out = go_ok(
+            &ctx,
+            &[
+                "add", "--repo", "1", "--title", "second", "--goal", "g", "--draft",
+            ],
+        )
+        .await;
+        assert!(
+            out.starts_with("created B  #") && out.trim_end().ends_with("  draft"),
+            "{out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_add_unknown_slug_writes_nothing() {
+        let ctx = fresh();
+        let err = go(
+            &ctx,
+            &["add", "--repo", "nope", "--title", "t", "--goal", "g"],
+        )
+        .await
+        .expect_err("unknown slug");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--repo `nope`") && msg.contains("[campaign.repos]"),
+            "{msg}"
+        );
+        assert_eq!(go_ok(&ctx, &["list"]).await, "no campaigns\n");
+    }
+
+    // The slug map resolves to the configured repo id.
+    #[tokio::test]
+    async fn positive_add_slug_resolves_repo_id() {
+        let ctx = fresh();
+        let id = add_one(&ctx, "t").await;
+        let t = ctx.store.get(id).await.unwrap();
+        assert_eq!(t.repo_id, 1);
+    }
+
+    #[tokio::test]
+    async fn corner_list_empty() {
+        let ctx = fresh();
+        assert_eq!(go_ok(&ctx, &["list"]).await, "no campaigns\n");
+        assert_eq!(
+            go_ok(&ctx, &["list", "--needs-attention"]).await,
+            "no campaigns\n"
+        );
+    }
+
+    // T16 positive_show_letters: `show B` is the second campaign, `show A.1` the
+    // first child of the first one.
+    #[tokio::test]
+    async fn positive_show_letters() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let b = add_one(&ctx, "beta").await;
+        let d = split(&*ctx.store, a, 2).await;
+
+        let out = go_ok(&ctx, &["show", "B"]).await;
+        assert!(
+            out.starts_with(&format!("#{b}  B  objective  ready  v")),
+            "{out}"
+        );
+        assert!(out.contains("title: beta\n"), "{out}");
+
+        let out = go_ok(&ctx, &["show", "A.1"]).await;
+        let child = &d.children[0];
+        assert!(
+            out.starts_with(&format!(
+                "#{}  A.1  task  awaiting_approval  v",
+                child.task_id
+            )),
+            "{out}"
+        );
+        assert!(out.contains("title: child 1\n"), "{out}");
+        // The id form names the same node.
+        let by_id = go_ok(&ctx, &["show", &child.task_id.to_string()]).await;
+        assert_eq!(out, by_id);
+    }
+
+    // T16 negative_unknown_id: `not found`, nothing written.
+    #[tokio::test]
+    async fn negative_unknown_id() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "t").await;
+        for verb in ["show", "approve", "retry", "replan", "cancel"] {
+            let args = parse_toks(&[verb, "999999"]).unwrap();
+            let mut out = Vec::new();
+            let err = run(&ctx, &args.cmd, &mut out)
+                .await
+                .expect_err("unknown id");
+            assert_eq!(format!("{err:#}"), "not found", "{verb}");
+            assert!(out.is_empty(), "{verb}: wrote {out:?}");
+        }
+        let t = ctx.store.get(a).await.unwrap();
+        assert_eq!(
+            (t.state, t.version),
+            (TaskState::Ready, 1),
+            "the store is untouched"
+        );
+    }
+
+    #[rstest]
+    #[case::letter_past_listing("C", "no campaign `C` in the listing")]
+    #[case::child_missing("A.3", "`A.3` is not in the listing")]
+    #[case::grandchild_missing("A.1.1", "`A.1.1` is not in the listing")]
+    #[tokio::test]
+    async fn negative_letter_refs_not_found(#[case] r: &str, #[case] want: &str) {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        add_one(&ctx, "beta").await;
+        split(&*ctx.store, a, 2).await;
+        let err = go(&ctx, &["show", r]).await.expect_err(r);
+        let msg = format!("{err:#}");
+        assert!(msg.starts_with("not found") && msg.contains(want), "{msg}");
+        assert_bounded(&msg);
+    }
+
+    // T16 positive_letters_stable: the filtered listing keeps the unfiltered letters.
+    #[tokio::test]
+    async fn positive_letters_stable_between_list_and_needs_attention() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let b = add_one(&ctx, "beta").await;
+        ask_question(&*ctx.store, b, "which branch?").await;
+
+        let all = go_ok(&ctx, &["list"]).await;
+        let lines: Vec<&str> = all.lines().collect();
+        assert_eq!(lines.len(), 2, "{all}");
+        assert!(
+            lines[0].starts_with(&format!("A    #{:<8} ready", a.0)),
+            "{all}"
+        );
+        assert!(
+            lines[1].starts_with(&format!("B    #{:<8} awaiting_approval", b.0))
+                && lines[1].ends_with(" !"),
+            "{all}"
+        );
+
+        let att = go_ok(&ctx, &["list", "--needs-attention"]).await;
+        assert!(att.starts_with("B    #"), "{att}");
+        assert!(!att.contains("\nA    "), "{att}");
+        // `show B` names the same campaign the listing lettered `B`.
+        let shown = go_ok(&ctx, &["show", "B"]).await;
+        assert!(shown.starts_with(&format!("#{b}  B  ")), "{shown}");
+    }
+
+    // T16 corner_list_needs_attention_shows_question.
+    #[tokio::test]
+    async fn corner_list_needs_attention_shows_question() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        ask_question(&*ctx.store, a, "monorepo or split?").await;
+        let att = go_ok(&ctx, &["list", "--needs-attention"]).await;
+        assert!(att.contains("    question: monorepo or split?\n"), "{att}");
+        // The root's own line is not repeated under itself.
+        assert_eq!(att.matches("alpha").count(), 1, "{att}");
+    }
+
+    // A blocked child shows its reason and the `[injection]` marker in `show`.
+    #[tokio::test]
+    async fn corner_blocked_child_shows_reason_and_marker() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let d = split(&*ctx.store, a, 2).await;
+        go_ok(&ctx, &["approve", "A", "--children"]).await;
+        let c1 = d.children[0].task_id;
+        let (_, v) = started(&*ctx.store, c1).await;
+        ctx.store
+            .plan_close(PlanClose {
+                task: c1,
+                expected_version: v,
+                attempt: attempt(78),
+                outcome: PlanCloseOutcome::Injection {
+                    field: "goal".into(),
+                },
+            })
+            .await
+            .unwrap();
+        let att = go_ok(&ctx, &["list", "--needs-attention"]).await;
+        assert!(att.contains("  A.1          blocked"), "{att}");
+        assert!(att.contains("    reason: injection: goal\n"), "{att}");
+        let shown = go_ok(&ctx, &["show", "A"]).await;
+        assert!(
+            shown
+                .lines()
+                .any(|l| l.contains("A.1") && l.ends_with(" [injection]")),
+            "{shown}"
+        );
+    }
+
+    // T16 positive_tree_order_indented: depth-first by path, two spaces per level.
+    #[tokio::test]
+    async fn positive_tree_order_indented() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let d = split(&*ctx.store, a, 2).await;
+        go_ok(&ctx, &["approve", "A", "--children"]).await;
+        split(&*ctx.store, d.children[1].task_id, 2).await;
+
+        let out = go_ok(&ctx, &["show", "A"]).await;
+        let tree: Vec<&str> = out.lines().skip_while(|l| *l != "tree:").skip(1).collect();
+        let labels: Vec<String> = tree
+            .iter()
+            .map(|l| l.split_whitespace().next().unwrap().to_string())
+            .collect();
+        assert_eq!(labels, ["A", "A.1", "A.2", "A.2.1", "A.2.2"], "{out}");
+        let indents: Vec<usize> = tree
+            .iter()
+            .map(|l| l.len() - l.trim_start().len())
+            .collect();
+        assert_eq!(indents, [0, 2, 2, 4, 4], "{out}");
+        // `show A.2` re-roots the indentation at that node.
+        let out = go_ok(&ctx, &["show", "A.2"]).await;
+        let tree: Vec<&str> = out.lines().skip_while(|l| *l != "tree:").skip(1).collect();
+        let indents: Vec<usize> = tree
+            .iter()
+            .map(|l| l.len() - l.trim_start().len())
+            .collect();
+        assert_eq!(indents, [0, 2, 2], "{out}");
+    }
+
+    // T16 positive_approve_children: the gate at level 1 opens in one call.
+    #[tokio::test]
+    async fn positive_approve_children() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let d = split(&*ctx.store, a, 3).await;
+        let out = go_ok(&ctx, &["approve", "A", "--children"]).await;
+        assert_eq!(out, format!("approved 3 children of #{a}\n"));
+        for c in &d.children {
+            assert_eq!(
+                ctx.store.get(c.task_id).await.unwrap().state,
+                TaskState::Ready
+            );
+        }
+        // A single approve on one child, by letter, after a fresh gate.
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let d = split(&*ctx.store, a, 2).await;
+        let out = go_ok(&ctx, &["approve", "A.2"]).await;
+        assert_eq!(
+            out,
+            format!("approved #{} (ready)\n", d.children[1].task_id)
+        );
+        assert_eq!(
+            ctx.store.get(d.children[0].task_id).await.unwrap().state,
+            TaskState::AwaitingApproval
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_answer_appends_clarification() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        ask_question(&*ctx.store, a, "which?").await;
+        let out = go_ok(&ctx, &["answer", "A", "the second one"]).await;
+        assert_eq!(out, format!("answered #{a} (ready)\n"));
+        let goal = ctx.store.get(a).await.unwrap().goal;
+        assert!(goal.ends_with("the second one"), "{goal}");
+        let shown = go_ok(&ctx, &["show", "A"]).await;
+        assert!(shown.contains("  ## Clarification\n"), "{shown}");
+    }
+
+    // T16 positive_cancel_counts: every live node under the ref, counted.
+    #[tokio::test]
+    async fn positive_cancel_counts() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        split(&*ctx.store, a, 3).await;
+        let out = go_ok(&ctx, &["cancel", "A"]).await;
+        assert_eq!(out, format!("cancelled 4 task(s) under #{a}\n"));
+        let all = go_ok(&ctx, &["list"]).await;
+        assert!(all.contains(" cancelled "), "{all}");
+        // A terminal node cannot be cancelled again: the seam's conflict, verbatim.
+        let err = go(&ctx, &["cancel", "A"])
+            .await
+            .expect_err("cancelled twice");
+        assert!(format!("{err:#}").starts_with("conflict: "), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn positive_retry_and_replan() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "alpha").await;
+        let d = split(&*ctx.store, a, 2).await;
+        go_ok(&ctx, &["approve", "A", "--children"]).await;
+        let c1 = d.children[0].task_id;
+        let (_, v) = started(&*ctx.store, c1).await;
+        ctx.store
+            .plan_close(PlanClose {
+                task: c1,
+                expected_version: v,
+                attempt: attempt(79),
+                outcome: PlanCloseOutcome::Reject {
+                    reason: "out of scope".into(),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            go_ok(&ctx, &["retry", "A.1"]).await,
+            format!("retried #{c1} (ready)\n")
+        );
+        assert_eq!(
+            go_ok(&ctx, &["replan", "A"]).await,
+            format!("replanned #{a} (decomposing)\n")
+        );
+        let shown = go_ok(&ctx, &["show", "A"]).await;
+        assert!(shown.contains(" superseded "), "{shown}");
+    }
+
+    // `plan` / `run --once` are refused by the store-only runner (step 6 wires them).
+    #[rstest]
+    #[case::plan(&["plan"])]
+    #[case::run_once(&["run", "--once"])]
+    #[tokio::test]
+    async fn negative_planner_verbs_refused_here(#[case] toks: &[&str]) {
+        let ctx = fresh();
+        let err = go(&ctx, toks).await.expect_err("needs the planner");
+        assert!(format!("{err:#}").contains("planner"), "{err:#}");
+    }
+
+    // T16 adversarial_render_control_chars_escaped: a title carrying ANSI / CR /
+    // BEL reaches stdout escaped, never raw (T7 rendering rule).
+    #[tokio::test]
+    async fn adversarial_render_control_chars_escaped() {
+        let ctx = fresh();
+        let hostile = "red\u{1b}[31m\rbell\u{7}end";
+        ctx.store
+            .create(
+                NewCampaign {
+                    repo_id: 1,
+                    title: hostile.into(),
+                    goal: "line1\n\u{1b}]0;evil\u{7}line2".into(),
+                    source_ref: Some("ref\u{1b}[0m".into()),
+                    policy: None,
+                    draft: false,
+                },
+                &Actor::from_scope(),
+            )
+            .await
+            .expect("the store caps and screens but does not refuse C0 controls");
+        for toks in [
+            &["list"][..],
+            &["show", "A"][..],
+            &["list", "--needs-attention"][..],
+        ] {
+            let out = go_ok(&ctx, toks).await;
+            assert_terminal_safe(&out);
+        }
+        let out = go_ok(&ctx, &["show", "A"]).await;
+        assert!(
+            out.contains("title: red\\u{1b}[31m\\u{d}bell\\u{7}end\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  line1\n  \\u{1b}]0;evil\\u{7}line2\n"),
+            "{out}"
+        );
+        assert!(out.contains("source_ref: ref\\u{1b}[0m\n"), "{out}");
+    }
+
+    // A long title is cut in `list` (with an ellipsis) and complete in `show`.
+    #[tokio::test]
+    async fn boundary_list_title_cut_at_60() {
+        let ctx = fresh();
+        let long = "x".repeat(MAX_TITLE);
+        add_one(&ctx, &long).await;
+        let exact = "y".repeat(LIST_TITLE_CHARS);
+        add_one(&ctx, &exact).await;
+        let all = go_ok(&ctx, &["list"]).await;
+        let lines: Vec<&str> = all.lines().collect();
+        assert!(lines[0].ends_with(&format!("{}…", "x".repeat(60))), "{all}");
+        assert!(
+            lines[1].ends_with(&exact) && !lines[1].ends_with('…'),
+            "{all}"
+        );
+        let shown = go_ok(&ctx, &["show", "A"]).await;
+        assert!(shown.contains(&format!("title: {long}\n")), "{shown}");
     }
 }
