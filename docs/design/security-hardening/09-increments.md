@@ -22,7 +22,7 @@ tables. Tracker: [`STATUS.md`](STATUS.md).
 | S14 | Envoy hardening: loopback bind, exact-origin CORS, `authorization`, `jwt_authn` against the agent JWKS, `PORTAL_AUTH=off`, `--mode validate` check, portal-e2e under auth, optional TLS / mTLS contexts | P0-4 | S5, S13 |
 | S15a | `nix flake check` **auth-e2e**: fake OIDC issuer + dev PKI + real `--serve-all` whose memory is a `= "grpc"` client of `--serve-memory`, mTLS, two tenants; `nix run .#auth-e2e` runs the same | testing | S9, S10, S11 |
 | S15b | `nix run .#auth-integration` (in `nix run .#integration`): `step-ca` daemon + `step ca renew`, Postgres session store across restarts, ClickHouse `agent_auth_events` rows + RLS | testing | S15a |
-| S15c | `portal-e2e` under auth (moved from S14, then from S15b): the browser sign-in against the S15a fake issuer through the hardened Envoy | testing | S14, S15a |
+| S15c | `nix run .#portal-auth-e2e` (in `nix run .#integration`; moved from S14, then from S15b): headless Chromium signs in to the real portal build against a fake OIDC IdP (code + PKCE) through the hardened Envoy, then uses a scoped page, reloads, and signs out; replayed / forged callbacks and IdP refusals are refused | testing | S14, S15a |
 | S16 | ClickHouse lockdown: passwords from files, `users_without_row_policies_can_read_rows = false`, writer / reader split, per-query tenant setting, HyperDX wiring, RLS harness | P0-6 | — (S11 adds its table) |
 | S17 | Secret-reference confinement: `SecretScope`, `[secrets]`, inline refusal under `per_tenant` | P0-7 | — |
 

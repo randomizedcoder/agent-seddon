@@ -31,7 +31,10 @@ the portal hardcodes its identity.
   expiry; an expiry banner when refresh fails; sign-out calls `Logout`.
 - **`AuthInterceptor implements ClientInterceptor`** adds `authorization: Bearer …` on every unary
   and streaming call, for both channel implementations; the hardcoded `'portal'` user is replaced by
-  the verified tenant (now advisory only, [05](05-identity-and-tenancy.md)).
+  the verified tenant (now advisory only, [05](05-identity-and-tenancy.md)). Since S15c it also
+  adds `x-agent-session-id` = the auth session id (`sid`): a call with a token carries a principal,
+  so the agent refuses scoped services that name no session. A header the call sets itself (the
+  Agent page's session) is kept.
 - **Capability-aware UI:** Approve, Fleet edit forms, Router edits and the Roles page render only
   when `permissions` contains the matching pair ([03](03-rbac.md)); the server still enforces.
 - `--dart-define`: `PORTAL_AUTH_ISSUER` (issuer *name*), `PORTAL_AUTH=off` for loopback dev; both
@@ -140,8 +143,11 @@ string), and `grpc-web-up` is a shim that runs it and starts the container.
   `AuthService` and a server interceptor that asserts `authorization` on every non-auth call
   (`RecordedCall` grows `metadata`); "not signed in", "expired", "refresh failed" states;
   capability-hidden controls per role.
-- **Layer B (`nix run .#portal-e2e`):** runs under the testkit fake issuer with `PORTAL_AUTH=on`;
-  asserts the login round trip and one authorized read.
+- **Layer B under auth (`nix run .#portal-auth-e2e`, S15c):** headless Chromium over WebDriver
+  against the real web build, a fake IdP with the code flow, the hardened bridge and an mTLS
+  agent; asserts the login round trip, a scoped page loading, resume, callback replay / forgery
+  and IdP refusal, and sign-out revoking the session. `flutter drive` cannot follow the IdP
+  redirect (it would end the test), so `portal-e2e` stays the anonymous Layer B.
 - **Gate:** `envoy --mode validate` on the rendered YAML for both `PORTAL_AUTH` values.
 
 | Class | Case | Expect |

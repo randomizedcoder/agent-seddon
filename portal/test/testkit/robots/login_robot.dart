@@ -67,7 +67,9 @@ class LoginRobot extends Robot {
   final List<ScheduledRefresh> scheduled = [];
   late final AuthState auth;
   late final clients =
-      gw.clients(interceptors: [AuthInterceptor(() => auth.token)]);
+      gw.clients(interceptors: [
+        AuthInterceptor(() => auth.token, identity: () => auth.identityHeaders),
+      ]);
 
   RecordingLog get log => gw.log;
 

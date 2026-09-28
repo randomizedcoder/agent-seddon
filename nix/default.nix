@@ -628,6 +628,11 @@ let
   # `agent_auth_events` + RLS (security-hardening S15b). Aggregated by `integration`.
   auth-integration = import ./auth-integration.nix { inherit pkgs versions agent; };
 
+  # `portal-auth-e2e` — browser sign-in through the hardened edge: headless Chromium
+  # drives the real portal web build against a fake OIDC IdP, the S14 Envoy bridge
+  # and an mTLS `--serve-all` (security-hardening S15c). Aggregated by `integration`.
+  portal-auth-e2e = import ./portal-auth-e2e.nix { inherit pkgs versions agent; };
+
   # `nix run .#integration` — run the whole opt-in integration tier in one shot
   # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
   # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
@@ -643,6 +648,7 @@ let
       ch-integration
       rest-integration
       auth-integration
+      portal-auth-e2e
       e2e-live
       e2e-expect
       e2e-multi
@@ -755,6 +761,7 @@ in
         rest-integration
         rest-bench
         auth-integration
+        portal-auth-e2e
         vcr-record
         integration
         soak

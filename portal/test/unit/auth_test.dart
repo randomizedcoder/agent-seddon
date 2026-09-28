@@ -1,12 +1,15 @@
 import 'dart:math';
 
+import 'package:agent_portal/src/auth/auth_interceptor.dart';
 import 'package:agent_portal/src/auth/auth_state.dart';
 import 'package:agent_portal/src/auth/capabilities.dart';
 import 'package:agent_portal/src/auth/pkce.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:grpc/service_api.dart';
 
 /// L0 tests for the sign-in helpers (security-hardening S13b): PKCE, the
-/// capability set, the refresh delay and the `PORTAL_AUTH` parser.
+/// capability set, the refresh delay, the `PORTAL_AUTH` parser and the
+/// credentials every call carries.
 void main() {
   final unreserved = RegExp(r'^[A-Za-z0-9\-._~]+$');
 
@@ -65,6 +68,45 @@ void main() {
     ]) {
       test(name, () => expect(refreshDelaySecs(expiresAt, now), want));
     }
+  });
+
+  group('withCredentials', () {
+    const id = {'x-agent-user-id': 'acme', 'x-agent-session-id': 'sid-1'};
+
+    test('positive_bearer_and_identity_added', () {
+      final o = withCredentials(CallOptions(), 'tok', id);
+      expect(o.metadata, {
+        'authorization': 'Bearer tok',
+        'x-agent-user-id': 'acme',
+        'x-agent-session-id': 'sid-1',
+      });
+    });
+
+    test('negative_signed_out_adds_nothing', () {
+      final given = CallOptions(metadata: {'k': 'v'});
+      expect(identical(withCredentials(given, null, const {}), given), isTrue);
+      expect(identical(withCredentials(given, '', null), given), isTrue);
+    });
+
+    test('corner_call_scoped_session_kept', () {
+      // The Agent page names the session it opened; that one wins.
+      final o = withCredentials(
+          CallOptions(metadata: {'x-agent-session-id': 'registry-7'}), 'tok', id);
+      expect(o.metadata['x-agent-session-id'], 'registry-7');
+      expect(o.metadata['x-agent-user-id'], 'acme');
+    });
+
+    test('boundary_empty_identity_values_not_sent', () {
+      final o = withCredentials(
+          CallOptions(), 'tok', {'x-agent-user-id': '', 'x-agent-session-id': ''});
+      expect(o.metadata.keys, ['authorization']);
+    });
+
+    test('adversarial_call_cannot_override_the_bearer', () {
+      final o = withCredentials(
+          CallOptions(metadata: {'authorization': 'Bearer forged'}), 'tok', id);
+      expect(o.metadata['authorization'], 'Bearer tok');
+    });
   });
 
   group('parseAuthMode', () {
