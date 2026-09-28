@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import socket
@@ -266,10 +267,18 @@ def spiffe(service: str) -> str:
     return f"spiffe://agent.{DEPLOYMENT}/svc/{service}"
 
 
-def render_config(lay: Layout, server: str) -> str:
+def render_config(
+    lay: Layout,
+    server: str,
+    *,
+    sessions: Sequence[str] | None = None,
+    extra: Sequence[str] = (),
+) -> str:
     """`agent.toml` for server `a` (serve-all, memory = grpc → B) or `b`
     (serve-memory, file store). Both verify the same agent tokens: one cluster,
-    one token signer."""
+    one token signer. `sessions` replaces the `[auth.token]` session-store lines
+    (default: a file store in the server's state dir); `extra` is appended as
+    whole sections (the integration tiers add `[config_store]` / `[telemetry]`)."""
     if server not in ("a", "b"):
         raise ValueError(f"unknown server {server!r}")
     own_cert, own_key = lay.leaf("agent" if server == "a" else "memory")
@@ -342,8 +351,11 @@ def render_config(lay: Layout, server: str) -> str:
         f"audience = {toml_str(TOKEN_AUDIENCE)}",
         "ttl_secs = 300",
         f"signing_key = {toml_str(lay.pki / 'token-signer' / 'key.pem')}",
-        'session_store = "file"',
-        f"session_path = {toml_str(state / 'auth-sessions')}",
+        *(
+            sessions
+            if sessions is not None
+            else ('session_store = "file"', f"session_path = {toml_str(state / 'auth-sessions')}")
+        ),
         "",
         "[[auth.mtls.bindings]]",
         f"san = {toml_str(spiffe('fleet'))}",
@@ -351,6 +363,7 @@ def render_config(lay: Layout, server: str) -> str:
         f"tenant = {toml_str(TENANT_A)}",
         'roles = ["svc_fleet"]',
         "",
+        *extra,
     ]
     return "\n".join(lines)
 
@@ -386,10 +399,22 @@ class Server:
                 self.proc.wait()
 
 
-def start_server(agent: str, lay: Layout, name: str, flags: Sequence[str], health: Client, addr: str) -> Server:
-    """Boot one agent and wait (≤ 30 s) for `grpc.health.v1` SERVING over mTLS."""
+def start_server(
+    agent: str,
+    lay: Layout,
+    name: str,
+    flags: Sequence[str],
+    health: Client,
+    addr: str,
+    *,
+    config: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Server:
+    """Boot one agent and wait (≤ 30 s) for `grpc.health.v1` SERVING over mTLS.
+    `config` overrides the rendered `agent.toml`; `env` is added to the
+    inherited environment (a DSN reference resolves from it)."""
     cfg = lay.work / f"agent.{name}.toml"
-    cfg.write_text(render_config(lay, name))
+    cfg.write_text(config if config is not None else render_config(lay, name))
     state = lay.work / name
     state.mkdir(exist_ok=True)
     log = lay.work / f"server.{name}.log"
@@ -399,6 +424,7 @@ def start_server(agent: str, lay: Layout, name: str, flags: Sequence[str], healt
             stdout=out,
             stderr=subprocess.STDOUT,
             cwd=state,  # each server indexes its own directory
+            env={**os.environ, **(env or {})},
         )
     srv = Server(name, proc, log)
     deadline = time.monotonic() + 30

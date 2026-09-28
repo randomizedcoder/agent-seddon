@@ -24,7 +24,7 @@ config-store-sqlite = ["dep:rusqlite"]
 # timing-sidechannel advisory (RUSTSEC-2023-0071) that `cargo audit` rejects. We
 # never speak MySQL, so we run our own tiny versioned migration runner over the
 # embedded `migrations/` set (see `postgres.rs`) instead of the `migrate!` macro.
-config-store-postgres = ["dep:sqlx"]
+config-store-postgres = ["dep:sqlx", "dep:tokio"]
 
 [dependencies]
 # The shared error/result vocabulary + the audited `safe_segment` id gate. The
@@ -37,9 +37,13 @@ serde = { workspace = true }
 serde_json.workspace = true
 rusqlite = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
+# The lazy-schema barrier (`PgBackend::migrate_lazily`): a `OnceCell`. Already in
+# the graph through sqlx's runtime.
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit.workspace = true
+rstest.workspace = true
 tokio.workspace = true
 
 [lints]

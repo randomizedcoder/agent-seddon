@@ -312,6 +312,11 @@ in
   clickhouseRlsTestContainerName = "agent-seddon-clickhouse-rls-test";
   clickhouseRlsTestHttpPort = 18123;
   clickhouseRlsTestNativePort = 19000;
+  # `nix run .#auth-integration` (security-hardening S15b): a throwaway ClickHouse the
+  # real agent writes its `agent_auth_events` rows into — again its own name and ports.
+  clickhouseAuthTestContainerName = "agent-seddon-clickhouse-auth-test";
+  clickhouseAuthTestHttpPort = 18124;
+  clickhouseAuthTestNativePort = 19001;
 
   # ── Postgres container settings ────────────────────────────────────────────
   # The transactional config-store (`agent-config-store` postgres tier, config
@@ -320,6 +325,13 @@ in
   # check`. Pin the server image so an upstream bump is an explicit change here.
   postgresImage = "postgres:16";
   postgresContainerName = "agent-seddon-postgres";
+  # `nix run .#auth-integration` (security-hardening S15b): a throwaway, volume-less
+  # Postgres for the sign-in session store, on its own name and port so it never
+  # touches the dev/`pg-integration` server above. The password is generated per run.
+  postgresAuthTestContainerName = "agent-seddon-postgres-auth-test";
+  postgresAuthTestPort = 15433;
+  # The `step-ca` daemon `auth-integration` runs (native binary, no container).
+  stepCaAuthTestPort = 19443;
   postgresPort = 5432;
   postgresDatabase = "agent_config";
   postgresUser = "agent";

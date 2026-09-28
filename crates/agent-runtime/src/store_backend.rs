@@ -48,8 +48,11 @@ pub(crate) fn pg_backend(
     metrics: &agent_metrics::Metrics,
 ) -> anyhow::Result<Arc<dyn Backend>> {
     let dsn = crate::dsn::resolve_dsn_ref(&cfg.dsn_ref)?;
+    // `migrate_on_start` applies the schema on first use: there is no connection
+    // yet, and a fresh database has no `cards` table (S15b).
     let backend = agent_config_store::PgBackend::connect_lazy(&dsn, cfg.pool_max)
-        .map_err(|e| anyhow::anyhow!("[config_store] postgres backend: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("[config_store] postgres backend: {e}"))?
+        .migrate_lazily(cfg.migrate_on_start);
     Ok(crate::metered::config_store(
         Arc::new(backend),
         metrics.clone(),

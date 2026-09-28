@@ -623,6 +623,11 @@ let
     inherit (nixLib) harness;
   };
 
+  # `auth-integration` — the sign-in stack over real infrastructure: a `step-ca` daemon
+  # (issue, renew, foreign CA), Postgres sessions across restarts, ClickHouse
+  # `agent_auth_events` + RLS (security-hardening S15b). Aggregated by `integration`.
+  auth-integration = import ./auth-integration.nix { inherit pkgs versions agent; };
+
   # `nix run .#integration` — run the whole opt-in integration tier in one shot
   # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
   # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
@@ -637,6 +642,7 @@ let
       pg-integration
       ch-integration
       rest-integration
+      auth-integration
       e2e-live
       e2e-expect
       e2e-multi
@@ -748,6 +754,7 @@ in
         ch-integration
         rest-integration
         rest-bench
+        auth-integration
         vcr-record
         integration
         soak
