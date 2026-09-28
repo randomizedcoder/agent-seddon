@@ -210,7 +210,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   registry needs a lazy open like the other domains.
 - ~~Flaky gate test `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes`
   (#317), 4/20 red on `main` with only the twelve `progress::tests` running.~~ **Resolved in
-  #PR1.** Root cause (tracing-core 0.1.36 `callsite.rs`): with at most one live dispatcher the
+  #541.** Root cause (tracing-core 0.1.36 `callsite.rs`): with at most one live dispatcher the
   interest cache is rebuilt from the *calling thread's* default only (`Rebuilder::JustOne`), so
   a `#[tokio::test]` row emitting `fleet.progress` with no subscriber stamped the callsite
   `never` from its own thread **after** `captured_span_fields` had installed its collector and
