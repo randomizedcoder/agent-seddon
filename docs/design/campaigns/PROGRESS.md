@@ -187,6 +187,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | CP-03: `nix flake check "git+file://…?ref=refs/heads/campaigns/cp-03"` (@ `609e9aa`) | green, `all checks passed!` — the first client was reaped for host memory pressure (an unrelated `nix eval` held ~105 GB) after 63 of 65 checks had built; the remaining two (`fleet-store`, `review-toolbox`) were built with `nix build` and the full check rerun from cache |
 | 2026-09-28 | CP-04 step 7: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test -p agent-cli` / `-p agent-runtime -p agent-campaign` / `-p agent-core campaign`, `cargo machete`, `cargo check` feature variants | green: fmt clean, clippy clean, 214 + 22 e2e / 287 + 1023 / 290, machete clean; `config-schema` and `agent-cli --no-default-features` pass; the `agent-runtime --no-default-features` variants fail on `main` already (see item 7) |
 | 2026-09-28 | CP-04 step 7: `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green first run (`PASS: …`); campaign pg suite 161/161, 128 s |
+| 2026-09-28 | CP-04: `nix flake check "git+file://…?ref=refs/heads/campaigns/cp-04"` (@ `9f28c09`), first pass | red in `leak` only: `agent-search` `search_query_paths_do_not_leak` — `tantivy corpus: live blocks grew (leak?): 818 -> 846` against a `+16` budget, 11.8 s under the full parallel build (another session's `nix build` shared the host). Not from this branch (`agent-search` untouched; `Cargo.lock` differs from `main` only by the `agent-campaign` / `agent-testkit` workspace edges): the same test passes 3/3 locally in 1–3 s and `checks.x86_64-linux.leak` rebuilt alone on the same ref is green. Timing-dependent tantivy pool allocation; see Open questions |
+| 2026-09-28 | CP-04: full gate, second pass (@ `9f28c09`) | red in `test` only: `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes` — `no beat on fleet.progress: []`. Pre-existing flake from #317: the same `progress::tests` filter fails 3/10 on this branch and **4/20 on `main` at `ed03ff1`** (throwaway worktree); `progress.rs` / `observe.rs` / the telemetry layer are untouched here. `leak` green this pass. See Open questions |
+| 2026-09-28 | CP-04: full gate, third pass (@ `9f28c09`), after `checks.x86_64-linux.test` and `.leak` each rebuilt alone and green on the same ref | green, `all checks passed!` |
 
 ## Open questions / blockers
 
@@ -202,6 +205,18 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   `nix/checks/config-roundtrip.nix` omits `[role]`, so the gate never sees it. With `[role]` off
   the shipped file checks clean and prints `campaign  = postgres`. Not from this track; the role
   registry needs a lazy open like the other domains.
+- Two pre-existing flaky gate tests, both outside this track, both seen on the CP-04 gate:
+  `agent-runtime` `progress::tests::positive_span_carries_tenant_and_repo_attributes` (#317)
+  fails 4/20 on `main` with only the twelve `progress::tests` running — the `CALLSITE_LOCK`
+  serialises the two span-capturing tests, but the other `#[tokio::test]` rows in the module
+  emit `fleet.progress` spans with no subscriber installed, so the process-wide interest cache
+  can mark the callsite "never" between `captured_span_fields` installing its subscriber and
+  the `rebuild_interest_cache()` call; the fix is to take the lock (or `set_default`) in every
+  test that emits the span, or to move the emitting rows to their own binary. `agent-search`
+  `tests/leak.rs` `search_query_paths_do_not_leak` grew 28 live blocks against a `+16` budget
+  once under heavy host load (tantivy's searcher pool / executor allocate lazily); green in
+  isolation and on every other pass — the budget wants a margin for the pool. Both need their
+  own change on `main`.
 - A node left in `decomposing` by a crash between `plan_start` and the close (the best-effort
   close cannot run if the process dies) needs a reaper — CP-05's driver tick (`reap()` already
   handles leases; `decomposing` older than a bound is the analogous rule).
