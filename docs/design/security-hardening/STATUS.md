@@ -20,7 +20,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
 | S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
-| S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
+| S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | 🟡 | — |
+| S13b | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
@@ -602,3 +603,43 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - Config load tables; CLI parse table.
   - Deferred: the loopback-redirect code flow (see 01's as-built note), and a keyring backend
     (parity 50).
+- **2026-09-27 — S13a.** Browser sign-in, server side. S13 is split: the portal (S13b) needs
+  RPCs that did not exist.
+  - Design change: `Begin` / `Exchange{code}` are new `AuthService` RPCs and fields (additive,
+    no `buf` baseline move). `06-portal-and-edge.md` assumed them.
+  - `CodeFlow` in `server/auth/code_flow.rs`:
+    - `Begin` checks the issuer, the exact redirect URI and the S256 challenge shape before
+      touching the network, then discovers the issuer's endpoints (cached) and stores a random
+      single-use `state` (10 min, ≤ 1024 in flight) with a `nonce`.
+    - `Exchange{code, state, code_verifier}` spends the `state` first, checks the verifier
+      against the challenge (so the IdP is never asked with a wrong one), and redeems the code
+      with the redirect URI, the verifier and the `client_secret`. IdP answers are capped at
+      64 KiB, with a 10 s timeout.
+    - The ID token then goes through the normal login verifier. It must name the issuer `Begin`
+      chose and carry the `nonce`.
+    - One credential per `Exchange`: ID token, code or client certificate.
+  - `Issuers` / `Begin` are public, alongside `Exchange` / `Jwks` / `Refresh`: `is_exempt`,
+    `gate_of`, `test/mt-audit/authz.toml`.
+  - Config:
+    - `[auth] redirect_uris`: `https`, or `http` to a loopback IP; no fragment, no surrounding
+      whitespace, ≤ 16; needs `[auth.token]`. Checked at load and again by the layer.
+    - `[[auth.issuers]] client_secret` is resolved by the serve path only when browser sign-in
+      is on (`serving_issuer_params`). A failed resolution refuses to start.
+    - `IssuerParams.client_secret` is a `ClientSecret` whose `Debug` redacts the value.
+  - Testkit `FakeIssuer::start_code`:
+    - `/authorize` answers `302` to `redirect_uri?code&state`.
+    - `/token` redeems each code once, checking the client, the secret, the redirect URI and
+      PKCE S256.
+    - A script can forge `nonce` / `iss` / `aud`.
+  - Tests:
+    - `code_flow` tables: challenge / verifier shapes (42/43/128/129), the S256 value
+      cross-checked against Python hashlib, redirect-URI rules (`javascript:`, `data:`,
+      userinfo, fragment, LAN `http`), parameter encoding, `state` expiry / single use / cap,
+      nonce and issuer checks, and `Begin` / redeem refusals made before any network call.
+    - `tests/browser_login.rs` over a real tonic server: `Issuers` → `Begin` → IdP redirect →
+      `Exchange` → `WhoAmI`, and the secret and verifier reach the IdP. Refused: a spent
+      `state`, a wrong verifier (the IdP gets no request), a code swapped between two sign-ins,
+      a forged `nonce`, a wrong client secret, a redirect URI off the list, an unknown issuer,
+      an ID token and a code together, and sign-in with no `redirect_uris`.
+    - Found by the tests: `with_code_flow(None)` dropped the whole `AuthService`; fixed before
+      commit.

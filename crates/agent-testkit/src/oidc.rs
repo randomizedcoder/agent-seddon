@@ -12,6 +12,7 @@
 //! Authorization Grant (RFC 8628) endpoints the CLI login (S12) drives, answering
 //! token polls from a [`DeviceScript`].
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -150,12 +151,26 @@ pub struct DeviceScript {
     pub outcome: DeviceOutcome,
 }
 
+/// A scripted browser sign-in (authorization code + PKCE): the OAuth client the
+/// token endpoint expects and the claims it vouches for.
+#[derive(Clone, Debug)]
+pub struct CodeScript {
+    pub client_id: String,
+    /// `Some` ⇒ the token endpoint demands this `client_secret` (a confidential
+    /// client, as Google treats every web client).
+    pub client_secret: Option<String>,
+    /// Signed into the ID token. `iss`, `aud` (the client id) and `nonce` (from the
+    /// authorization request) are filled in when absent, so a test can forge them.
+    pub claims: Value,
+}
+
 /// The user code the device endpoint hands out.
 pub const USER_CODE: &str = "WDJB-MJHT";
 
 /// An OIDC issuer on `127.0.0.1:<ephemeral>` serving
 /// `/.well-known/openid-configuration` and `/jwks` (and, from
-/// [`FakeIssuer::start_device`], `/device` and `/token`). Stops when dropped.
+/// [`FakeIssuer::start_device`], `/device` and `/token`; from
+/// [`FakeIssuer::start_code`], `/authorize` and `/token`). Stops when dropped.
 pub struct FakeIssuer {
     base: String,
     key: TestKey,
@@ -170,23 +185,37 @@ impl FakeIssuer {
     /// Start an issuer signing with `key`; its discovery document names its own
     /// base URL as `issuer`, as a real IdP's does.
     pub fn start(key: TestKey) -> Self {
-        Self::start_with(key, None, None)
+        Self::start_with(key, None, None, None)
+    }
+
+    /// Start an issuer that also serves browser sign-in: discovery advertises
+    /// `authorization_endpoint` and `token_endpoint`. `/authorize` approves at
+    /// once, answering `302` to `redirect_uri?code&state` as a consenting user's
+    /// browser would see; `/token` redeems each code once, checking the client,
+    /// the redirect URI and the PKCE verifier.
+    pub fn start_code(key: TestKey, script: CodeScript) -> Self {
+        Self::start_with(key, None, None, Some(script))
     }
 
     /// Start an issuer that also serves the device flow: discovery advertises
     /// `device_authorization_endpoint` and `token_endpoint`, and token polls are
     /// answered from `script`.
     pub fn start_device(key: TestKey, script: DeviceScript) -> Self {
-        Self::start_with(key, None, Some(script))
+        Self::start_with(key, None, Some(script), None)
     }
 
     /// Start an issuer whose discovery document claims `advertised` as its
     /// `issuer` — a misconfigured or hostile IdP, for the mismatch check.
     pub fn start_advertising(key: TestKey, advertised: &str) -> Self {
-        Self::start_with(key, Some(advertised.to_string()), None)
+        Self::start_with(key, Some(advertised.to_string()), None, None)
     }
 
-    fn start_with(key: TestKey, advertised: Option<String>, device: Option<DeviceScript>) -> Self {
+    fn start_with(
+        key: TestKey,
+        advertised: Option<String>,
+        device: Option<DeviceScript>,
+        code: Option<CodeScript>,
+    ) -> Self {
         let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind fake issuer"));
         let port = server
             .server_addr()
@@ -204,6 +233,10 @@ impl FakeIssuer {
             discovery["device_authorization_endpoint"] = json!(format!("{base}/device"));
             discovery["token_endpoint"] = json!(format!("{base}/token"));
         }
+        if code.is_some() {
+            discovery["authorization_endpoint"] = json!(format!("{base}/authorize"));
+            discovery["token_endpoint"] = json!(format!("{base}/token"));
+        }
         let discovery = discovery.to_string();
         let keys = jwks(&[(key, &kid)]).to_string();
         let discovery_hits = Arc::new(AtomicUsize::new(0));
@@ -218,6 +251,15 @@ impl FakeIssuer {
             kid: kid.clone(),
             requests: token_requests.clone(),
         });
+        let mut codes = code.map(|script| CodeFlow {
+            script,
+            issued: HashMap::new(),
+            next: 0,
+            base: base.clone(),
+            key,
+            kid: kid.clone(),
+            requests: token_requests.clone(),
+        });
         std::thread::spawn(move || {
             for mut request in srv.incoming_requests() {
                 let mut form = String::new();
@@ -225,7 +267,28 @@ impl FakeIssuer {
                     .as_reader()
                     .take(64 * 1024)
                     .read_to_string(&mut form);
-                let (status, body) = match (request.url(), flow.as_mut()) {
+                let url = request.url().to_string();
+                let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+                if let Some(codes) = codes.as_mut() {
+                    let answer = match path {
+                        "/authorize" => Some(codes.authorize(query)),
+                        "/token" => Some(codes.redeem(&form)),
+                        _ => None,
+                    };
+                    if let Some((status, body, location)) = answer {
+                        let mut response =
+                            tiny_http::Response::from_string(body).with_status_code(status);
+                        if let Some(location) = location {
+                            response = response.with_header(
+                                tiny_http::Header::from_bytes(&b"Location"[..], location)
+                                    .expect("valid header"),
+                            );
+                        }
+                        let _ = request.respond(response);
+                        continue;
+                    }
+                }
+                let (status, body) = match (path, flow.as_mut()) {
                     ("/.well-known/openid-configuration", _) => {
                         d_hits.fetch_add(1, Ordering::SeqCst);
                         (200, discovery.clone())
@@ -294,7 +357,8 @@ impl FakeIssuer {
         self.jwks_hits.load(Ordering::SeqCst)
     }
 
-    /// The form bodies of every `/device` and `/token` request, in order.
+    /// The form bodies of every `/device` and `/token` request, and the query of
+    /// every `/authorize` request, in order.
     pub fn token_requests(&self) -> Vec<String> {
         self.token_requests
             .lock()
@@ -376,6 +440,132 @@ impl DeviceFlow {
             DeviceOutcome::Expire => error("expired_token"),
         }
     }
+}
+
+/// One code `/authorize` handed out, waiting for `/token`.
+struct IssuedCode {
+    challenge: String,
+    redirect_uri: String,
+    nonce: Option<String>,
+}
+
+/// The authorization-code state behind `/authorize` and `/token`.
+struct CodeFlow {
+    script: CodeScript,
+    issued: HashMap<String, IssuedCode>,
+    next: usize,
+    base: String,
+    key: TestKey,
+    kid: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl CodeFlow {
+    fn record(&self, entry: &str) {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(entry.to_string());
+    }
+
+    /// The consent screen, approving at once: `302` back to the client.
+    fn authorize(&mut self, query: &str) -> (u16, String, Option<String>) {
+        self.record(query);
+        let q = decode_form(query);
+        let get = |k: &str| q.get(k).cloned().unwrap_or_default();
+        let bad = |e: &str| (400, json!({"error": e}).to_string(), None);
+        if get("response_type") != "code" {
+            return bad("unsupported_response_type");
+        }
+        if get("client_id") != self.script.client_id {
+            return bad("invalid_client");
+        }
+        if get("code_challenge_method") != "S256" || get("code_challenge").is_empty() {
+            return bad("invalid_request");
+        }
+        let redirect_uri = get("redirect_uri");
+        if redirect_uri.is_empty() {
+            return bad("invalid_request");
+        }
+        self.next += 1;
+        let code = format!("fake-code-{}", self.next);
+        self.issued.insert(
+            code.clone(),
+            IssuedCode {
+                challenge: get("code_challenge"),
+                redirect_uri: redirect_uri.clone(),
+                nonce: q.get("nonce").cloned(),
+            },
+        );
+        let location = url::Url::parse_with_params(
+            &redirect_uri,
+            &[("code", code.as_str()), ("state", get("state").as_str())],
+        )
+        .map(String::from)
+        .unwrap_or_default();
+        (302, String::new(), Some(location))
+    }
+
+    /// The token endpoint: each code once, for the client, redirect URI and PKCE
+    /// verifier it was issued against.
+    fn redeem(&mut self, form: &str) -> (u16, String, Option<String>) {
+        self.record(form);
+        let f = decode_form(form);
+        let get = |k: &str| f.get(k).cloned().unwrap_or_default();
+        let bad = |e: &str| (400, json!({"error": e}).to_string(), None);
+        if get("grant_type") != "authorization_code" {
+            return bad("unsupported_grant_type");
+        }
+        if get("client_id") != self.script.client_id {
+            return bad("invalid_client");
+        }
+        if let Some(secret) = &self.script.client_secret {
+            if f.get("client_secret") != Some(secret) {
+                return bad("invalid_client");
+            }
+        }
+        let Some(issued) = self.issued.remove(&get("code")) else {
+            return bad("invalid_grant");
+        };
+        if issued.redirect_uri != get("redirect_uri")
+            || s256(&get("code_verifier")) != issued.challenge
+        {
+            return bad("invalid_grant");
+        }
+        let mut claims = self.script.claims.clone();
+        if claims.get("iss").is_none() {
+            claims["iss"] = json!(self.base);
+        }
+        if claims.get("aud").is_none() {
+            claims["aud"] = json!(self.script.client_id);
+        }
+        if let (None, Some(nonce)) = (claims.get("nonce"), issued.nonce) {
+            claims["nonce"] = json!(nonce);
+        }
+        let body = json!({
+            "access_token": "fake-idp-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "id_token": self.key.mint(&self.kid, &claims),
+        });
+        (200, body.to_string(), None)
+    }
+}
+
+/// An `application/x-www-form-urlencoded` body or query as a map (last key wins).
+fn decode_form(raw: &str) -> HashMap<String, String> {
+    url::form_urlencoded::parse(raw.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+/// The PKCE S256 challenge for `verifier` (RFC 7636 §4.2), as an IdP computes it.
+pub fn s256(verifier: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ring::digest::digest(
+        &ring::digest::SHA256,
+        verifier.as_bytes(),
+    ))
 }
 
 impl Drop for FakeIssuer {
@@ -563,5 +753,174 @@ mod tests {
         let header = jsonwebtoken::decode_header(&token).expect("header");
         assert_eq!(header.kid.as_deref(), Some("k1"));
         assert_eq!(header.alg, key.alg());
+    }
+
+    /// A verifier and its S256 challenge, cross-checked against Python's hashlib.
+    const VERIFIER: &str = "dBjftJeZ4CVP-mJ92K9mSf3VVh8lK5xbWf0KX5gRRLQ";
+    const CHALLENGE: &str = "hdKE8aDCdMC36lG0aDk4DcPbPWvL8u4gnuo2Zywds7Y";
+    const REDIRECT: &str = "http%3A%2F%2F127.0.0.1%3A8092%2F";
+
+    fn code_issuer(secret: Option<&str>) -> FakeIssuer {
+        FakeIssuer::start_code(
+            TestKey::Ec,
+            CodeScript {
+                client_id: "web".into(),
+                client_secret: secret.map(str::to_string),
+                claims: json!({"sub": "alice", "org": "example.com", "exp": 4_000_000_000u64}),
+            },
+        )
+    }
+
+    /// GET and return the status and the `Location` header, if any.
+    fn get_location(url: &str) -> (u16, Option<String>) {
+        let url = url.strip_prefix("http://").expect("http url");
+        let (host, path) = url.split_once('/').expect("path");
+        let mut stream = std::net::TcpStream::connect(host).expect("connect");
+        write!(stream, "GET /{path} HTTP/1.0\r\nHost: {host}\r\n\r\n").expect("write");
+        let mut out = String::new();
+        stream.read_to_string(&mut out).expect("read");
+        let status = out[9..12].parse().expect("status");
+        let location = out
+            .lines()
+            .find_map(|l| l.strip_prefix("Location: "))
+            .map(str::to_string);
+        (status, location)
+    }
+
+    fn authorize_query(overrides: &[(&str, &str)]) -> String {
+        let mut q = vec![
+            ("response_type", "code"),
+            ("client_id", "web"),
+            ("redirect_uri", REDIRECT),
+            ("state", "st"),
+            ("nonce", "n1"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+        ];
+        for (k, v) in overrides {
+            q.retain(|(key, _)| key != k);
+            if !v.is_empty() {
+                q.push((k, v));
+            }
+        }
+        q.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    fn payload(token: &str) -> Value {
+        use base64::Engine as _;
+        let part = token.split('.').nth(1).expect("payload");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(part)
+            .expect("base64url");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[test]
+    fn positive_s256_matches_hashlib() {
+        assert_eq!(s256(VERIFIER), CHALLENGE);
+    }
+
+    #[test]
+    fn positive_code_round_trip_and_single_use() {
+        let idp = code_issuer(Some("s3"));
+        let (_, body) = get(&format!(
+            "{}/.well-known/openid-configuration",
+            idp.issuer()
+        ));
+        let doc: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            doc["authorization_endpoint"],
+            format!("{}/authorize", idp.issuer())
+        );
+        assert_eq!(doc["token_endpoint"], format!("{}/token", idp.issuer()));
+        let (status, location) = get_location(&format!(
+            "{}/authorize?{}",
+            idp.issuer(),
+            authorize_query(&[])
+        ));
+        assert_eq!(status, 302);
+        assert_eq!(
+            location.as_deref(),
+            Some("http://127.0.0.1:8092/?code=fake-code-1&state=st")
+        );
+        let form = format!(
+            "grant_type=authorization_code&code=fake-code-1&client_id=web&client_secret=s3\
+             &redirect_uri={REDIRECT}&code_verifier={VERIFIER}"
+        );
+        let (status, body) = post(&format!("{}/token", idp.issuer()), &form);
+        assert_eq!(status, 200);
+        let claims = payload(body["id_token"].as_str().expect("id_token"));
+        assert_eq!(claims["nonce"], "n1");
+        assert_eq!(claims["aud"], "web");
+        assert_eq!(claims["iss"], idp.issuer());
+        // A code is spent by its first redemption.
+        let (status, body) = post(&format!("{}/token", idp.issuer()), &form);
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (400, Some("invalid_grant"))
+        );
+        assert_eq!(idp.token_requests().len(), 3);
+    }
+
+    #[rstest::rstest]
+    #[case::negative_implicit_flow(&[("response_type", "token")], "unsupported_response_type")]
+    #[case::negative_other_client(&[("client_id", "evil")], "invalid_client")]
+    #[case::adversarial_plain_pkce(&[("code_challenge_method", "plain")], "invalid_request")]
+    #[case::negative_no_challenge(&[("code_challenge", "")], "invalid_request")]
+    #[case::corner_no_redirect(&[("redirect_uri", "")], "invalid_request")]
+    fn authorize_rejections(#[case] overrides: &[(&str, &str)], #[case] want: &str) {
+        let idp = code_issuer(None);
+        let (status, body) = get(&format!(
+            "{}/authorize?{}",
+            idp.issuer(),
+            authorize_query(overrides)
+        ));
+        assert_eq!(status, 400);
+        let body: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(body["error"], want);
+    }
+
+    #[rstest::rstest]
+    #[case::adversarial_wrong_verifier("code_verifier", "x".repeat(43), "invalid_grant")]
+    #[case::adversarial_wrong_secret("client_secret", "guess".into(), "invalid_client")]
+    #[case::negative_no_secret("client_secret", String::new(), "invalid_client")]
+    #[case::adversarial_other_redirect(
+        "redirect_uri",
+        "http%3A%2F%2Fevil.example%2F".into(),
+        "invalid_grant"
+    )]
+    #[case::negative_wrong_grant("grant_type", "password".into(), "unsupported_grant_type")]
+    #[case::negative_unknown_code("code", "fake-code-9".into(), "invalid_grant")]
+    #[case::boundary_empty_verifier("code_verifier", String::new(), "invalid_grant")]
+    fn redeem_rejections(#[case] field: &str, #[case] value: String, #[case] want: &str) {
+        let idp = code_issuer(Some("s3"));
+        let (status, _) = get_location(&format!(
+            "{}/authorize?{}",
+            idp.issuer(),
+            authorize_query(&[])
+        ));
+        assert_eq!(status, 302);
+        let mut form = vec![
+            ("grant_type", "authorization_code".to_string()),
+            ("code", "fake-code-1".into()),
+            ("client_id", "web".into()),
+            ("client_secret", "s3".into()),
+            ("redirect_uri", REDIRECT.into()),
+            ("code_verifier", VERIFIER.into()),
+        ];
+        form.retain(|(k, _)| *k != field);
+        if !value.is_empty() {
+            form.push((field, value));
+        }
+        let form = form
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let (status, body) = post(&format!("{}/token", idp.issuer()), &form);
+        assert_eq!((status, body["error"].as_str()), (400, Some(want)));
     }
 }

@@ -130,6 +130,9 @@ pub struct AuthParams {
     /// `[auth.mtls] bindings`: client-certificate SANs that are services (S10).
     /// Needs `token`.
     pub mtls: Vec<MtlsBindingParams>,
+    /// `[auth] redirect_uris`: where an IdP may send a browser back after sign-in
+    /// (S13). Non-empty turns on `AuthService.Begin`; needs `token`.
+    pub redirect_uris: Vec<String>,
 }
 
 /// One `[[auth.mtls.bindings]]` entry, codec-free.
@@ -231,6 +234,30 @@ pub struct IssuerParams {
     pub allowed_tenants: Vec<String>,
     /// Tenant for tokens without one (a single-organization deployment).
     pub default_tenant: String,
+    /// The OAuth client secret, already resolved from its reference. The agent
+    /// sends it when it redeems a browser sign-in's code (S13); `None` ⇒ a public
+    /// client (PKCE only).
+    pub client_secret: Option<ClientSecret>,
+}
+
+/// A resolved OAuth client secret. `Debug` never prints it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ClientSecret(String);
+
+impl ClientSecret {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ClientSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClientSecret(..)")
+    }
 }
 
 /// Called once per token-verification attempt with the bounded outcome (`ok`|`error`),
@@ -321,6 +348,19 @@ impl AuthLayer {
         layer
     }
 
+    /// Turn on browser sign-in (`AuthService.Issuers` / `Begin` and code
+    /// exchanges, S13) for this layer's `AuthService`. `None` leaves it off.
+    #[cfg(feature = "auth")]
+    pub fn with_code_flow(mut self, code: Option<code_flow::CodeFlow>) -> Self {
+        if let Some(code) = code {
+            self.auth_service = self
+                .auth_service
+                .take()
+                .map(|svc| svc.with_code_flow(Arc::new(code)));
+        }
+        self
+    }
+
     /// Add `AuthService` to `router` when this layer has a token service; otherwise
     /// return it unchanged.
     pub fn serve_auth_service(&self, router: super::ServeRouter) -> super::ServeRouter {
@@ -374,6 +414,11 @@ impl AuthLayer {
                  certificate for an agent token)"
                     .into(),
             ),
+            _ if !params.redirect_uris.is_empty() && params.token.is_none() => Err(
+                "`[auth] redirect_uris` needs `[auth.token]` (a browser sign-in ends in an \
+                 agent token)"
+                    .into(),
+            ),
             "" | "none" => Ok(Self::disabled()),
             "oidc" => {
                 #[cfg(feature = "auth")]
@@ -407,6 +452,11 @@ impl AuthLayer {
                     };
                     let operators = binding::OperatorSubjects::parse(&params.operator_subjects)?;
                     let services = mtls::MtlsBindings::parse(&params.mtls)?;
+                    let code = code_flow::CodeFlow::new(
+                        &params.issuer_list(),
+                        &params.redirect_uris,
+                        Arc::new(jwt::SystemClock),
+                    )?;
                     let bindings =
                         binding::BindingStore::new(backend.clone(), Arc::new(jwt::SystemClock));
                     let sessions = session::SessionStore::new(
@@ -422,7 +472,8 @@ impl AuthLayer {
                         Arc::new(bindings),
                         operators,
                         services,
-                    ))
+                    )
+                    .with_code_flow(code))
                 }
                 #[cfg(not(feature = "auth"))]
                 {
@@ -563,13 +614,16 @@ pub(crate) fn current_sid() -> String {
 /// orchestrator/`grpcurl` can probe liveness and introspect without a token; and
 /// the `AuthService` calls a caller makes without an agent token (`Exchange`
 /// verifies its own login token; `Jwks` is public key material; `Refresh` carries
-/// the refresh handle, verified by the session store).
+/// the refresh handle, verified by the session store; `Issuers` and `Begin` start
+/// a browser sign-in, S13).
 fn is_exempt(path: &str) -> bool {
     path.starts_with("/grpc.health.")
         || path.starts_with("/grpc.reflection.")
         || path == "/agent.v1.AuthService/Exchange"
         || path == "/agent.v1.AuthService/Jwks"
         || path == "/agent.v1.AuthService/Refresh"
+        || path == "/agent.v1.AuthService/Issuers"
+        || path == "/agent.v1.AuthService/Begin"
 }
 
 /// The bearer token from an `authorization: Bearer <token>` header, if well-formed.
@@ -811,6 +865,9 @@ mod issuer;
 /// `jsonwebtoken` + `reqwest`). The [`AuthLayer`] above compiles without it.
 #[cfg(feature = "auth")]
 mod jwt;
+// Browser sign-in: authorization code + PKCE, redeemed by the agent (S13).
+#[cfg(feature = "auth")]
+mod code_flow;
 
 /// The agent token service: signing keys, mint, verify, key set.
 #[cfg(feature = "auth")]
@@ -842,6 +899,12 @@ mod service;
 pub use binding::{
     resolve_roles, BindingStore, Granter, OperatorSubjects, RoleBinding, SubjectKind, Who,
     MAX_BINDINGS_PER_TENANT, MAX_OPERATOR_SUBJECTS, MAX_ROLES_PER_BINDING,
+};
+#[cfg(feature = "auth")]
+pub use code_flow::{
+    authorize_url, check_redirect_uri, discover_code, is_challenge, is_verifier, s256,
+    BrowserIssuer, CodeEndpoints, CodeFlow, CodeRefusal, MAX_CODE_BYTES, MAX_PENDING,
+    STATE_TTL_SECS,
 };
 #[cfg(feature = "auth")]
 pub use issuer::{check_fetch_url, ClaimRejection, KeySource, Profile, ResolvedIssuer};

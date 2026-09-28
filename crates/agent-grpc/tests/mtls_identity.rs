@@ -219,6 +219,7 @@ async fn exchange(
             id_token,
             client_kind: "service".into(),
             use_client_cert,
+            ..pb::ExchangeRequest::default()
         })
         .await
         .map(tonic::Response::into_inner)
