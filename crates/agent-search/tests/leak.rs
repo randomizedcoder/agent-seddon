@@ -6,10 +6,55 @@
 //! test brackets whichever backends are compiled in — the vector (semantic) path
 //! and the tantivy `DocumentSource`-corpus path (the seam cross-session recall
 //! reuses, parity spec 20).
+//!
+//! Flatness is asserted over **two consecutive windows** (the `agent-tools` leak
+//! pattern), not as one absolute delta: `query` runs on `spawn_blocking`, so tokio
+//! may add a blocking-pool thread (and its permanent buffers) on demand, and under
+//! the gate's parallel build that first fire landed inside a single measured window
+//! and read as a leak (`818 -> 846` against `+16`). A real leak grows *every*
+//! window; one-time init only shows in the first, so window 1 is absorbed and window
+//! 2 must be flat.
 #![cfg(feature = "dhat-heap")]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// Run `body` over two consecutive windows of `ITERS` runs each (after a warm-up):
+/// window 1 (`base -> mid`) absorbs one-time lazy init, window 2 (`mid -> after`)
+/// must stay flat within `window_slack` live blocks, and the cumulative allocation
+/// rate over both windows must stay under `max_blocks_per_run`.
+async fn assert_flat<F, Fut>(label: &str, window_slack: usize, max_blocks_per_run: u64, mut body: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    const ITERS: u64 = 50;
+
+    body().await; // warm up
+    let base = dhat::HeapStats::get();
+    for _ in 0..ITERS {
+        body().await;
+    }
+    let mid = dhat::HeapStats::get();
+    for _ in 0..ITERS {
+        body().await;
+    }
+    let after = dhat::HeapStats::get();
+
+    let window2_growth = after.curr_blocks.saturating_sub(mid.curr_blocks);
+    dhat::assert!(
+        window2_growth <= window_slack,
+        "{label}: live blocks still growing in window 2 (leak?): base {} -> mid {} -> after {}",
+        base.curr_blocks,
+        mid.curr_blocks,
+        after.curr_blocks
+    );
+    let per_iter = (after.total_blocks - base.total_blocks) / (2 * ITERS);
+    dhat::assert!(
+        per_iter < max_blocks_per_run,
+        "{label}: allocated {per_iter} blocks/run (> {max_blocks_per_run})"
+    );
+}
 
 #[tokio::test]
 async fn search_query_paths_do_not_leak() {
@@ -56,24 +101,11 @@ async fn vector_path() {
     let b = VectorBackend::new(root.clone(), idx.clone(), Arc::new(LocalEmbedder::new(128)));
     b.reindex(&|_| {}).await.unwrap();
 
-    let _ = b.query(&sem("retry backoff")).await.unwrap(); // warm up
-    let base = dhat::HeapStats::get();
-
-    const ITERS: u64 = 100;
-    for _ in 0..ITERS {
+    assert_flat("vector", 8, 256, || async {
         let hits = b.query(&sem("retry backoff")).await.unwrap();
         assert!(!hits.is_empty());
-    }
-    let after = dhat::HeapStats::get();
-
-    dhat::assert!(
-        after.curr_blocks <= base.curr_blocks + 8,
-        "vector: live blocks grew (leak?): {} -> {}",
-        base.curr_blocks,
-        after.curr_blocks
-    );
-    let per_iter = (after.total_blocks - base.total_blocks) / ITERS;
-    dhat::assert!(per_iter < 256, "vector: allocated {per_iter} blocks/run");
+    })
+    .await;
 }
 
 /// Tantivy query path over a **`DocumentSource` corpus** — the seam cross-session
@@ -158,25 +190,11 @@ async fn tantivy_corpus_path() {
         TantivyBackend::open_with_source(Arc::new(MemCorpus { docs }), idx.join("idx")).unwrap();
     backend.reindex(&|_| {}).await.unwrap();
 
-    let _ = backend.query(&lit("retry backoff")).await.unwrap(); // warm up
-    let base = dhat::HeapStats::get();
-
-    const ITERS: u64 = 100;
-    for _ in 0..ITERS {
+    // `16`, not `8`: tokio's blocking pool may still add one thread inside window 2
+    // (each `query` is a `spawn_blocking`); a real leak grows every window regardless.
+    assert_flat("tantivy corpus", 16, 2048, || async {
         let hits = backend.query(&lit("retry backoff")).await.unwrap();
         assert!(!hits.is_empty());
-    }
-    let after = dhat::HeapStats::get();
-
-    dhat::assert!(
-        after.curr_blocks <= base.curr_blocks + 16,
-        "tantivy corpus: live blocks grew (leak?): {} -> {}",
-        base.curr_blocks,
-        after.curr_blocks
-    );
-    let per_iter = (after.total_blocks - base.total_blocks) / ITERS;
-    dhat::assert!(
-        per_iter < 2048,
-        "tantivy corpus: allocated {per_iter} blocks/run"
-    );
+    })
+    .await;
 }

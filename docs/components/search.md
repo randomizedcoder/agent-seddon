@@ -68,7 +68,10 @@ walking up for `.git`). Override the parent with `[search] index_dir`.
 - **On start** the runtime spawns a detached task (`auto_index = true`) that
   reindexes each stale/missing backend in the background. Queries never block on
   it — they **serve stale**: tantivy runs against the last committed segment
-  snapshot while the single `IndexWriter` builds the new one, then `reload`s.
+  snapshot while the single `IndexWriter` builds the new one, then `reload`s
+  explicitly (`ReloadPolicy::Manual`: no `meta.json` watcher or callback thread; the
+  one commit site owns the reload, and `positive_reindex_reloads_reader_after_commit`
+  pins it).
 - **Reindex is incremental** where supported (tantivy: delete-by-path + re-add the
   changed files, one commit); a full rebuild only when the index is missing.
 - **Parallel file reads.** Tantivy's `IndexWriter` already parallelises the actual

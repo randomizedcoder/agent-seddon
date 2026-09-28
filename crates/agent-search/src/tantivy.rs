@@ -99,9 +99,14 @@ impl TantivyBackend {
             content: schema.get_field("content").map_err(se)?,
             lang: schema.get_field("lang").map_err(se)?,
         };
+        // `Manual`: the only commit site is `reindex_inner`, which `reload`s the reader
+        // explicitly right after its single commit. `OnCommitWithDelay` would also
+        // spawn a `meta.json` watcher thread and a `watch-callbacks` thread that
+        // reload in the background; those perturbed the dhat leak gate
+        // (`tests/leak.rs`) and buy nothing here since one writer owns the index.
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(se)?;
         let writer = index.writer(WRITER_HEAP_BYTES).map_err(se)?;
@@ -283,6 +288,8 @@ impl TantivyBackend {
         }
         writer.commit().map_err(se)?;
         drop(writer);
+        // The reader's policy is `Manual` (see `open_with_source`): this reload is the
+        // only thing that makes the commit visible to queries. Keep it.
         self.reader.reload().map_err(se)?;
 
         current.save(&self.manifest_path())?;
@@ -783,6 +790,76 @@ mod tests {
         assert!(
             !hits.iter().any(|h| h.path.to_string_lossy() == "s_other"),
             "the non-matching session must not appear"
+        );
+    }
+
+    // A corpus that can grow between reindexes; `compare` reports `Stale` when the
+    // stored manifest no longer matches, so the second reindex takes the incremental
+    // path and commits again.
+    struct GrowingSource {
+        docs: std::sync::Mutex<Vec<(String, String)>>,
+    }
+    impl GrowingSource {
+        fn snapshot(&self) -> MemSource {
+            MemSource {
+                docs: self.docs.lock().unwrap().clone(),
+            }
+        }
+    }
+    impl DocumentSource for GrowingSource {
+        fn scan(&self) -> Manifest {
+            self.snapshot().scan()
+        }
+        fn compare(&self, stored: Option<&Manifest>) -> IndexState {
+            match stored {
+                None => IndexState::Missing,
+                Some(m) if m.entries == self.scan().entries => IndexState::Fresh,
+                Some(_) => IndexState::Stale,
+            }
+        }
+        fn load(&self, id: &std::path::Path) -> Option<crate::source::SourceDoc> {
+            self.snapshot().load(id)
+        }
+    }
+
+    // desc: the reader is built with `ReloadPolicy::Manual`, so a commit is visible
+    // to queries only through the explicit `reload()` in `reindex_inner`. Two
+    // reindexes (two commits) must each surface their documents; if the reload is
+    // ever dropped or a second commit site appears without one, the second query
+    // still sees the pre-commit snapshot and this fails.
+    #[tokio::test]
+    async fn positive_reindex_reloads_reader_after_commit() {
+        let dir = tempdir();
+        let src = Arc::new(GrowingSource {
+            docs: std::sync::Mutex::new(vec![("d1".into(), "alpha firstcommit".into())]),
+        });
+        let backend = TantivyBackend::open_with_source(src.clone(), dir.join("idx")).unwrap();
+
+        backend.reindex(&|_p| {}).await.unwrap();
+        let hits = backend
+            .query(&query("firstcommit", SearchMode::Literal))
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.path.to_string_lossy() == "d1"),
+            "first commit not visible after reindex: {:?}",
+            hits.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+        );
+
+        src.docs
+            .lock()
+            .unwrap()
+            .push(("d2".into(), "alpha secondcommit".into()));
+        assert_eq!(backend.status().await.unwrap().state, IndexState::Stale);
+        backend.reindex(&|_p| {}).await.unwrap();
+        let hits = backend
+            .query(&query("secondcommit", SearchMode::Literal))
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.path.to_string_lossy() == "d2"),
+            "second commit not visible after reindex (reader not reloaded?): {:?}",
+            hits.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
         );
     }
 
