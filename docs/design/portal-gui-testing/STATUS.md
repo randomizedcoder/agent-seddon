@@ -134,9 +134,15 @@ stack (a lesson carried from the portal + code-review tracks).
 - **Two more real-loopback gotchas (inc 04, every page robot must handle):**
   1. **grpc-dart's `channel.shutdown()` wedges indefinitely on an in-flight RPC.** A page that
      issues an RPC whose response is still arriving at teardown (e.g. Settings' trailing
-     `Status`, a `Validate`/`Put` reply) hangs the test. Fix: a `quiesce()` that advances a few
-     **real-time** windows (`runAsync` + `pump`) so every fired call's response lands and the
-     channel is idle before shutdown — end RPC-firing tests with it.
+     `Status`, a `Validate`/`Put` reply) hangs the test. First fix: a `quiesce()` that advances a
+     few **real-time** windows (`runAsync` + `pump`) so every fired call's response lands before
+     shutdown. That is timing-based and did not cover a call still in flight when a test ends
+     early (the Agent page's pollers and `Subscribe`): the hang recurred in most gate runs by
+     2026-09-28 — one page file hung for its 10-minute timeout, then every later test in the
+     file failed with "Reentrant call to runAsync". **Real fix:** robots tear down with
+     `PortalClients.terminate()` (`ClientChannel.terminate` cancels in-flight calls) instead of
+     `shutdown()`; `fake_gateway_test.dart` pins both behaviours. `quiesce()` stays, so replies
+     land (and `setState` runs) while the page is mounted.
   2. **initState `Timer.periodic` pollers are REAL timers** (initState runs inside `runAsync`),
      so `tester.pump(Duration)` does NOT fire them — advance with real `Future.delayed`. And the
      teardown must **unmount the page** (`pumpWidget(SizedBox())`) so `dispose` cancels the

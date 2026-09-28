@@ -67,9 +67,19 @@ class PortalClients {
         sessionsChannel = createSessionsChannel(cfg),
         fleetChannel = createFleetChannel(cfg);
 
+  /// Graceful close: waits for every in-flight call to finish first.
   Future<void> shutdown() async {
     await gatewayChannel.shutdown();
     await sessionsChannel.shutdown();
     await fleetChannel.shutdown();
+  }
+
+  /// Immediate close: cancels every in-flight call, then closes. For teardown,
+  /// where [shutdown] can wait forever on a call that never finishes (an open
+  /// server stream, or a reply still on the wire when the page unmounts).
+  Future<void> terminate() async {
+    await gatewayChannel.terminate();
+    await sessionsChannel.terminate();
+    await fleetChannel.terminate();
   }
 }

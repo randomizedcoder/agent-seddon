@@ -66,7 +66,7 @@ class AgentRobot extends Robot {
       await tester.pumpWidget(const SizedBox());
       await tester.runAsync(() async {
         await session.disposeControllers();
-        await robot.clients.shutdown();
+        await robot.clients.terminate();
         await gw.shutdown();
       });
     });

@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:agent_portal/src/clients.dart';
+import 'package:agent_portal/src/gen/agent/v1/agent_session.pb.dart';
 import 'package:agent_portal/src/gen/agent/v1/prompt.pb.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:grpc/grpc.dart';
 
 import 'builders.dart';
 import 'fake_gateway.dart';
+import 'fakes/agent_session_service.dart';
 import 'fakes/prompt_service.dart';
 
 /// Self-test of the testkit's key feasibility claim: a page's `PortalClients`,
@@ -65,5 +70,63 @@ void main() {
     final ok = await clients.prompts.list(PromptListRequest());
     expect(ok.entries, isEmpty);
     await clients.shutdown();
+  });
+
+  // Teardown with a call still in flight (the robots' `clients.terminate()`).
+  // `shutdown()` waits for the call, so an open server stream wedges it — that
+  // hung whole page files in the gate for their 10-minute timeout, cascading
+  // "Reentrant call to runAsync" into the tests after. `terminate()` cancels it.
+  group('teardown with a call in flight', () {
+    late FakeGateway sgw;
+    late FakeAgentSessionService session;
+
+    setUp(() async {
+      sgw = await FakeGateway.start((log) {
+        session = FakeAgentSessionService(log);
+        return [session];
+      });
+    });
+    tearDown(() async {
+      await session.disposeControllers();
+      await sgw.shutdown();
+    });
+
+    /// Open a `Subscribe` and wait until the server holds its stream open.
+    Future<Completer<Object?>> openStream(PortalClients clients) async {
+      final ended = Completer<Object?>();
+      clients.session.subscribe(SubscribeRequest()).listen((_) {},
+          onError: (Object e) {
+        if (!ended.isCompleted) ended.complete(e);
+      }, onDone: () {
+        if (!ended.isCompleted) ended.complete(null);
+      });
+      while (session.lastSubscribe?.hasListener != true) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      return ended;
+    }
+
+    test('corner_shutdown_waits_on_an_open_stream', () async {
+      final clients = sgw.clients();
+      await openStream(clients);
+      var closed = false;
+      unawaited(clients.shutdown().then((_) => closed = true));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(closed, isFalse, reason: 'shutdown() waits for the open stream');
+      await clients.terminate();
+    });
+
+    test('positive_terminate_cancels_an_open_stream', () async {
+      final clients = sgw.clients();
+      final ended = await openStream(clients);
+      await clients.terminate().timeout(const Duration(seconds: 5));
+      final e = await ended.future.timeout(const Duration(seconds: 5));
+      expect(e, isA<GrpcError>());
+    });
+
+    test('boundary_terminate_with_nothing_in_flight', () async {
+      final clients = sgw.clients();
+      await clients.terminate().timeout(const Duration(seconds: 5));
+    });
   });
 }

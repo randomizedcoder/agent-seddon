@@ -30,7 +30,7 @@ class PromptsRobot extends Robot {
     });
     final robot = PromptsRobot._(tester, gw, prompts);
     addTearDown(() => tester.runAsync(() async {
-          await robot.clients.shutdown();
+          await robot.clients.terminate();
           await gw.shutdown();
         }));
     return robot;
