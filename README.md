@@ -310,9 +310,11 @@ landing increment by increment. Design of record and status:
   unclassified metric family, or a removed span/log mechanism fails the gate. The same
   entrypoint backs the human report and the gate, so they cannot disagree. See
   [`docs/components/mt-audit.md`](docs/components/mt-audit.md).
-- **One gate.** `nix flake check` runs ten checks: clippy (`-D warnings`), rustfmt,
-  tests, `cargo-audit`, nix-fmt, generated-constant drift, buf lint, buf
-  wire-compatibility, the multi-tenancy coverage audit, and the bench and leak suites.
+- **One gate.** `nix flake check` runs every check (70-odd): clippy (`-D warnings`),
+  rustfmt, tests, coverage, `cargo-audit`/`cargo-deny`, nix-fmt, generated-constant
+  drift, buf lint and wire-compatibility, the OpenAPI drift check, the multi-tenancy
+  coverage audit, the bench and leak suites, the auth and portal end-to-end tests,
+  and the review-analysis suites.
 
 The security model assumes the model is prompt-injectable: every tool argument and
 every provider-supplied value is treated as attacker-controlled. The rules are in
