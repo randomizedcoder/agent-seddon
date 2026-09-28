@@ -8,6 +8,10 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 // One dimension's summary of a step. `dimension` is a `safe_segment`'d slug;
 // `summary` is bounded + injection-screened before it is persisted.
@@ -37,7 +41,18 @@ message DimensionRecallResponse {
   repeated MemoryItem items = 1;
 }
 
+// REST mappings (docs/design/rest-openapi/), under /v1/dimensions/. Summarize
+// carries a repeated nested episodic window → POST body:*. Recall is a bounded read
+// keyed by the `dimension` slug (a `safe_segment` identifier) → GET with the slug as
+// a `{dimension}` path param and `limit` as a query param.
 service DimensionService {
-  rpc Summarize(SummarizeRequest) returns (DimensionStep);
-  rpc Recall(DimensionRecallRequest) returns (DimensionRecallResponse);
+  rpc Summarize(SummarizeRequest) returns (DimensionStep) {
+    option (google.api.http) = {
+      post: "/v1/dimensions/summarize"
+      body: "*"
+    };
+  }
+  rpc Recall(DimensionRecallRequest) returns (DimensionRecallResponse) {
+    option (google.api.http) = {get: "/v1/dimensions/{dimension}"};
+  }
 }

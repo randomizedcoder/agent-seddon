@@ -6,6 +6,10 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 message AssembleResponse {
   repeated Message messages = 1;
@@ -38,7 +42,21 @@ message CompactResponse {
 
 // Named `ContextService` (not `Context`) to avoid colliding with
 // `std::task::Context` in tonic's generated Tower `Service` impls.
+//
+// REST mappings (docs/design/rest-openapi/), under /v1/context/. Both RPCs carry a
+// nested request (a `ContextInput` / a `WorkingSet`+budget) → POST body:*; Compact
+// also mutates the working set.
 service ContextService {
-  rpc Assemble(ContextInput) returns (AssembleResponse);
-  rpc Compact(CompactRequest) returns (CompactResponse);
+  rpc Assemble(ContextInput) returns (AssembleResponse) {
+    option (google.api.http) = {
+      post: "/v1/context/assemble"
+      body: "*"
+    };
+  }
+  rpc Compact(CompactRequest) returns (CompactResponse) {
+    option (google.api.http) = {
+      post: "/v1/context/compact"
+      body: "*"
+    };
+  }
 }

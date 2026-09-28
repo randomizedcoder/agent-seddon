@@ -7,6 +7,10 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 message RecallResponse {
   repeated MemoryItem items = 1;
@@ -35,20 +39,62 @@ message SemanticDistillRequest {
 }
 
 // The whole-store facade (agent-core `MemoryStore`).
+//
+// REST mappings (docs/design/rest-openapi/), under /v1/memory/. Recall carries a
+// nested `RecallQuery` → POST body:* (nested-body-read convention); Append is a
+// write and Distill an action → POST body:*.
 service Memory {
-  rpc Recall(RecallQuery) returns (RecallResponse);
-  rpc Append(MemoryEvent) returns (AppendResponse);
-  rpc Distill(DistillRequest) returns (DistillResponse);
+  rpc Recall(RecallQuery) returns (RecallResponse) {
+    option (google.api.http) = {
+      post: "/v1/memory/recall"
+      body: "*"
+    };
+  }
+  rpc Append(MemoryEvent) returns (AppendResponse) {
+    option (google.api.http) = {
+      post: "/v1/memory/append"
+      body: "*"
+    };
+  }
+  rpc Distill(DistillRequest) returns (DistillResponse) {
+    option (google.api.http) = {
+      post: "/v1/memory/distill"
+      body: "*"
+    };
+  }
 }
 
 // The append-only "what happened" layer (agent-core `EpisodicStore`).
+//
+// REST mappings under /v1/episodic/. Append is a write → POST body:*; Recent is a
+// bounded read whose only field is a scalar `limit` → GET (rides as a query param).
 service Episodic {
-  rpc Append(MemoryEvent) returns (AppendResponse);
-  rpc Recent(RecentRequest) returns (RecentResponse);
+  rpc Append(MemoryEvent) returns (AppendResponse) {
+    option (google.api.http) = {
+      post: "/v1/episodic/append"
+      body: "*"
+    };
+  }
+  rpc Recent(RecentRequest) returns (RecentResponse) {
+    option (google.api.http) = {get: "/v1/episodic/recent"};
+  }
 }
 
 // The "what is true" layer (agent-core `SemanticStore`).
+//
+// REST mappings under /v1/semantic/. Recall carries a nested `RecallQuery` and
+// Distill a repeated nested episodic window → both POST body:*.
 service Semantic {
-  rpc Recall(RecallQuery) returns (RecallResponse);
-  rpc Distill(SemanticDistillRequest) returns (DistillResponse);
+  rpc Recall(RecallQuery) returns (RecallResponse) {
+    option (google.api.http) = {
+      post: "/v1/semantic/recall"
+      body: "*"
+    };
+  }
+  rpc Distill(SemanticDistillRequest) returns (DistillResponse) {
+    option (google.api.http) = {
+      post: "/v1/semantic/distill"
+      body: "*"
+    };
+  }
 }
