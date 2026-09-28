@@ -23,7 +23,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
 | S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
-| S15a | auth-e2e gate (process wire) | testing | 🟡 | — |
+| S15a | auth-e2e gate (process wire) | testing | ✅ | #537 |
 | S15b | integration tiers (step-ca, Postgres, ClickHouse audit, portal-e2e under auth) | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
@@ -691,7 +691,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Verified live on l2 with podman on side ports (CORS, missing / garbage / valid / wrong-`iss`
     tokens, bypass paths, TLS).
   - Moved to S15: `portal-e2e` under auth (needs S15's fake-issuer agent).
-- **2026-09-27 — S15a.** S15 is split in two: the in-gate process test (here) and the
+- **2026-09-27 — S15a (#537).** S15 is split in two: the in-gate process test (here) and the
   `nix run .#integration` tiers (S15b). New `auth-e2e` check and `nix run .#auth-e2e`, both
   running [`test/auth-e2e/auth_e2e.py`](../../../test/auth-e2e/auth_e2e.py) on loopback:
   - Set-up: a fake OIDC issuer (discovery + JWKS over http, ES256 ID tokens from a key made at
