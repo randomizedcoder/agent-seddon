@@ -19,7 +19,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S10 | mTLS service identity | D6 | ✅ | #516 |
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
-| S12 | CLI `agent login/logout/whoami` | D6 | 🟡 | — |
+| S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
@@ -559,7 +559,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       loopback fake OIDC issuer. This covers discovery naming another issuer and URL
       credentials never echoed.
     - `der_time` / `validity` tables, including every truncation of a real leaf.
-- **2026-09-27 — S12.** `agent login` / `logout` / `whoami`, and `[grpc.client] bearer`.
+- **2026-09-27 — S12 (#524).** `agent login` / `logout` / `whoami`, and `[grpc.client] bearer`.
   - Device flow (RFC 8628) in `agent_grpc::client::login`:
     - Discovery must name the issuer, and every endpoint and shown URL passes `check_fetch_url`.
     - IdP answers are capped at 64 KiB. `interval` is clamped to 1–60 s (a `slow_down` adds 5 s)
