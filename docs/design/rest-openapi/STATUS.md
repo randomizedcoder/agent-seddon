@@ -10,7 +10,7 @@ the as-built log) in the PR that lands the increment.
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | [Design directory](README.md) (design-of-record + STATUS + index) | — | — | — | — | — | ✅ merged (#510) |
 | 02 | Groundwork: vendor `google/api/{annotations,http}.proto`, wire `tonic-build` + buf-lint exemption, annotate one RPC, coverage-test skeleton | ✅ | — | — | ✅ | — | ✅ merged (#512) |
-| 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | 🟡 | — | — | 🟡 | — | 🟡 in flight |
+| 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | ✅ | — | — | ✅ | — | ✅ complete (03a–03g4) |
 | 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ⬜ |
 | 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (port via `nix/constants.nix`), filter before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | — | — | ⬜ |
 | 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ⬜ |
@@ -52,8 +52,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ✅ merged (#523) |
 | 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | ✅ merged (#526) |
 | 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | ✅ merged (#527) |
-| 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | 🟡 in flight |
-| 03g4 | `auth.proto` (AuthService, 13 RPCs — OIDC/JWT/RBAC/sessions/bindings) | ⬜ |
+| 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | ✅ merged (#529) |
+| 03g4 | `auth.proto` (AuthService, 15 RPCs — OIDC/JWT/RBAC/sessions/bindings + S13 browser sign-in `Issuers`/`Begin`) — **final batch; whole surface now annotated** | 🟡 in flight |
 
 (Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR. The original
 16-proto `03g` was split into reviewable sub-batches — smaller PRs; `auth.proto` surfaced as a
@@ -195,3 +195,21 @@ distinct control-plane group during the sweep and became its own final batch, 03
   slashy selector as query param, the Policy.Authorize flip). **Completeness:** a sweep of `proto/agent/v1/`
   found `auth.proto` (`AuthService`, 13 RPCs) as the sole remaining unannotated service — carved out as
   the final batch **03g4**; the `Unmapped` sentinel now points at `AuthService.WhoAmI` until then.
+- **03g4 (auth: AuthService) — FINAL batch; increment 03 complete.** Annotated all 15 RPCs under
+  `/v1/auth/`: token-mint/rotate/mutations → POST body:* (`Exchange`, `Begin`, `Refresh`, `Logout`,
+  `PutBinding`), reads → GET (`Issuers`, `Jwks`, `WhoAmI`, `ListMySessions` `/my/sessions`, `ListSessions`
+  + `ListBindings` with `tenant` as a query param, `GetBinding` `/bindings/{id}`), and session/binding
+  removals → DELETE by id (`RevokeMySession` `/my/sessions/{sid}`, `RevokeSession` `/sessions/{sid}`,
+  `DeleteBinding` `/bindings/{id}` — the `tenant`/`keep_sessions` scalars ride as query params, no body on
+  a DELETE). `bindings` (GET list / POST create) and `bindings/{id}` (GET get / DELETE remove) each pair
+  two verbs on one path. The S13 browser sign-in RPCs (`Issuers` → GET `/v1/auth/issuers`, `Begin` → POST
+  `/v1/auth/begin` — it mints single-use server-side `state`, so its PKCE challenge/redirect ride in the
+  body, not the URL) landed on `main` (#528) after this batch was cut and were folded in on rebase.
+  **Flipped** the `AuthService.WhoAmI` `Unmapped` sentinel to a positive GET row and added a new end-state
+  invariant — `adversarial_every_method_has_a_route` — asserting EVERY RPC in the descriptor now carries
+  ≥1 route (a routeless method = a new RPC added without an annotation; this is what caught `Issuers`/`Begin`
+  on rebase). Added 6 class-tagged rows (paramless WhoAmI → GET, Exchange token-mint → POST, RevokeMySession
+  nested DELETE, DeleteBinding DELETE-by-id, Issuers read → GET, Begin start-flow → POST); now 55 rows + 5
+  invariants = 60 tests. With this, **the whole surface is annotated** and increment 03 (03a–03g4) is
+  complete — REST bypasses no authz (transcoded calls hit the same gRPC handler behind the same
+  `AuthLayer`). Next: increment 04 (OpenAPI doc + drift gate).
