@@ -252,6 +252,60 @@ fn corner_help_exits_zero_on_stdout() {
     );
 }
 
+/// `--help` documents the `campaign` subcommand (docs/design/campaigns, CP-04).
+#[test]
+fn corner_help_lists_campaign() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agent"))
+        .arg("--help")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("campaign <verb>"),
+        "usage must document the campaign subcommand, got:\n{stdout}"
+    );
+}
+
+/// `agent campaign --help` (and the bare `agent campaign`) print the verb usage
+/// and exit 0 with no config and no model — like `--help`.
+#[test]
+fn corner_campaign_help_exits_zero() {
+    for argv in [&["campaign", "--help"][..], &["campaign"][..]] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_agent"))
+            .args(argv)
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{argv:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("usage: agent") && stdout.contains("add --repo"),
+            "{argv:?}: campaign usage must list the verbs, got:\n{stdout}"
+        );
+    }
+}
+
+/// After `--`, `campaign` is a goal word, never the subcommand: the model sees
+/// the whole phrase and the process runs a one-shot turn.
+#[test]
+fn adversarial_campaign_after_double_dash_is_a_goal() {
+    let ws = TempWorkspace::new("campaign-goal");
+    let llm = FakeLlm::start(vec![text("ok")]);
+    let cfg = write_config(&ws, llm.base_url(), "");
+
+    let (code, _out, err) = run_agent(&cfg, &ws, &["--", "campaign", "cancel", "A"]);
+    assert_eq!(code, 0, "stderr:\n{err}");
+
+    let reqs = llm.requests();
+    assert!(
+        reqs[0]["messages"]
+            .to_string()
+            .contains("campaign cancel A"),
+        "the words must reach the model as a goal, got:\n{}",
+        reqs[0]["messages"]
+    );
+}
+
 /// A goal is positional and joined with spaces, so an unquoted multi-word goal
 /// behaves the same as a quoted one.
 #[test]

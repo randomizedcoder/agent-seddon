@@ -41,6 +41,8 @@ pkgs.runCommand "agent-cli-help"
     require "--serve-all"
     require "--serve-sessions"
     require "--serve-<seam>"
+    # The campaign subcommand (docs/design/campaigns, CP-04).
+    require "campaign"
 
     # A representative slice of the per-seam gRPC surface (`<seam> = a|b|c|...`).
     # Not the full 28 — enough to catch a gross `flag_names()` regression without

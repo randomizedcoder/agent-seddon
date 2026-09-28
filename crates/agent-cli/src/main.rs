@@ -7,6 +7,7 @@
 //! multi-turn REPL (see `repl.rs`). `--continue` resumes the most recent saved
 //! session; `--resume ID` resumes a specific one.
 
+mod campaign_cli;
 mod grpc_server;
 mod mcp_server;
 mod metrics_server;
@@ -201,6 +202,13 @@ async fn main() -> Result<()> {
             anyhow::bail!("doctor: one or more probes failed");
         }
         return Ok(());
+    }
+
+    // `agent campaign …`: the verbs run against the store before any metrics or
+    // seam machinery starts (the run path lands in the next step).
+    if let Mode::Campaign(args) = &mode {
+        let _ = args;
+        anyhow::bail!("agent campaign: the verbs are not wired yet (CP-04 step 5)");
     }
 
     // Metrics (opt-in). Instrumentation always runs into this registry; serving
@@ -513,6 +521,7 @@ async fn main() -> Result<()> {
             // already returned.
             Mode::CheckConfig => unreachable!("--check-config returns before the run"),
             Mode::Doctor => unreachable!("doctor returns before the run"),
+            Mode::Campaign(_) => unreachable!("campaign verbs return before the run"),
         }
     })
     .await;
@@ -677,6 +686,12 @@ enum Mode {
     /// resolvability — and exits non-zero iff a required probe failed. On-demand,
     /// unlike `--check-config` it *does* dial the network. See docs/design/doctor/.
     Doctor,
+    /// `agent campaign <verb> …` (docs/design/campaigns, CP-04): the human-facing
+    /// verbs over the campaign store. Store-only verbs run before metrics and the
+    /// agent build, like `doctor`; `plan` / `run --once` build the agent for the
+    /// planner's provider. The bare word `campaign` selects this only as the first
+    /// non-option token — after `--` it is a goal word like any other.
+    Campaign(campaign_cli::CampaignArgs),
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the
@@ -757,6 +772,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut detect_mode_prompt: Option<String> = None;
     let mut check_config = false;
     let mut doctor = false;
+    let mut campaign: Option<campaign_cli::CampaignArgs> = None;
     let mut cognition_graph: Option<String> = None;
     let mut model_router_config: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
@@ -793,6 +809,19 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             // Bare `doctor` subcommand (or `--doctor`); the bare word must be an
             // explicit arm so the `_` catch-all below doesn't swallow it as a goal.
             "doctor" | "--doctor" => doctor = true,
+            // Bare `campaign` subcommand: everything after the word belongs to the
+            // verb parser (so `--title` is never swallowed as a goal word). Unreachable
+            // after `--` — the `end_of_opts` branch above runs first — so a
+            // scheduled-job goal can never turn a child into a campaign verb.
+            "campaign" => {
+                let parsed = campaign_cli::parse(&mut args)?;
+                if parsed.cmd == campaign_cli::CampaignCmd::Help {
+                    println!("{}", campaign_cli::USAGE);
+                    std::process::exit(0);
+                }
+                campaign = Some(parsed);
+                break;
+            }
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
             "--serve-sessions" => serve_sessions = true,
@@ -847,6 +876,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                      --detect-mode P     classify prompt P's task mode and print the verdict\n  \
                      --check-config      load + validate the config, print the selected impls, and exit\n  \
                      doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
+                     campaign <verb> …   manage campaigns — add / plan / list / show / approve / answer … (`agent campaign --help`)\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -868,6 +898,19 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
         Mode::CheckConfig
     } else if doctor {
         Mode::Doctor
+    } else if let Some(mut c) = campaign {
+        // `--tenant` before the `campaign` word binds the same as after it; the
+        // verb parser validated its own, this one is validated here.
+        if let (None, Some(t)) = (&c.tenant, tenant) {
+            if !agent_core::safe_segment(&t) {
+                anyhow::bail!("--tenant `{}` is not a path-safe segment", {
+                    let cut: String = t.chars().take(40).collect();
+                    agent_campaign::display::escape_terminal(&cut)
+                });
+            }
+            c.tenant = Some(t);
+        }
+        Mode::Campaign(c)
     } else if scheduler_mode {
         Mode::Scheduler
     } else if run_scheduled_job {
@@ -943,6 +986,64 @@ mod tests {
             Mode::OneShot(goal) => assert_eq!(goal, "summarise --the logs"),
             _ => panic!("expected OneShot"),
         }
+    }
+
+    // desc: the bare word `campaign` as the first non-option token selects the
+    // campaign mode and hands every later token to the verb parser — including
+    // flag-looking ones the goal catch-all would otherwise swallow.
+    #[test]
+    fn positive_campaign_word_selects_campaign_mode() {
+        let args = parse(&[
+            "--config", "x.toml", "campaign", "add", "--repo", "1", "--title", "t", "--goal", "g",
+        ])
+        .unwrap();
+        assert_eq!(args.config_path, PathBuf::from("x.toml"));
+        match args.mode {
+            Mode::Campaign(c) => match c.cmd {
+                campaign_cli::CampaignCmd::Add(add) => assert_eq!(add.title, "t"),
+                other => panic!("expected add, got {other:?}"),
+            },
+            _ => panic!("expected Campaign"),
+        }
+    }
+
+    // desc: `--tenant` before the `campaign` word binds like `--tenant` after it.
+    #[test]
+    fn corner_tenant_before_campaign_word_binds() {
+        let args = parse(&["--tenant", "acme", "campaign", "list"]).unwrap();
+        match args.mode {
+            Mode::Campaign(c) => assert_eq!(c.tenant.as_deref(), Some("acme")),
+            _ => panic!("expected Campaign"),
+        }
+    }
+
+    // desc (adversarial): an unsafe `--tenant` before the word is refused, same as
+    // the verb parser refuses one after it.
+    #[test]
+    fn adversarial_tenant_before_campaign_word_is_validated() {
+        let err = parse(&["--tenant", "../x", "campaign", "list"])
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("not a path-safe segment"), "{err}");
+    }
+
+    // desc (adversarial): after `--` the word `campaign` is a goal word, never a
+    // mode — a scheduled-job goal cannot reach the campaign verbs.
+    #[test]
+    fn adversarial_campaign_after_double_dash_is_a_goal() {
+        let args = parse(&["--", "campaign", "cancel", "A"]).unwrap();
+        match args.mode {
+            Mode::OneShot(goal) => assert_eq!(goal, "campaign cancel A"),
+            _ => panic!("expected OneShot"),
+        }
+    }
+
+    // desc (negative): `--check-config` outranks the campaign word, as it does
+    // every other mode.
+    #[test]
+    fn corner_check_config_outranks_campaign() {
+        let args = parse(&["--check-config", "campaign", "list"]).unwrap();
+        assert!(matches!(args.mode, Mode::CheckConfig));
     }
 
     // desc (negative): --run-scheduled-job without --tenant is refused (fail-closed —
