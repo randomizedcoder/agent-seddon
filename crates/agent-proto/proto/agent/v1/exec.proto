@@ -19,19 +19,63 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+// NOTE the SECURITY header above: transcoding does not widen the grant — a REST
+// `Exec`/`Open` hits the same unauthenticated seam as gRPC, so the same loopback/UDS
+// confinement applies. REST is not a reason to expose these any more broadly.
+import "google/api/annotations.proto";
+
 service SandboxService {
-  rpc Exec(ExecRequest) returns (ExecResult);
-  rpc Capabilities(ExecCapabilitiesRequest) returns (ExecCapabilities);
+  // Exec runs a command to completion (a materially large grant) → POST body:*;
+  // Capabilities is a read → GET. Under /v1/sandbox/.
+  rpc Exec(ExecRequest) returns (ExecResult) {
+    option (google.api.http) = {
+      post: "/v1/sandbox/exec"
+      body: "*"
+    };
+  }
+  rpc Capabilities(ExecCapabilitiesRequest) returns (ExecCapabilities) {
+    option (google.api.http) = {get: "/v1/sandbox/capabilities"};
+  }
 }
 
 service PtyService {
-  rpc Open(PtyOpenRequest) returns (PtySessionRef);
-  rpc Write(PtyWriteRequest) returns (PtyWriteResponse);
-  rpc Read(PtyReadRequest) returns (PtyReadResponse);
-  rpc Resize(PtyResizeRequest) returns (PtyResizeResponse);
-  rpc Close(PtySessionRef) returns (PtyCloseResponse);
-  rpc List(PtyListRequest) returns (PtySessionList);
-  rpc Get(PtySessionRef) returns (PtySessionInfo);
+  // Under /v1/pty/. `sessions` is the collection — Open (POST) spawns one, List
+  // (GET) / Get (GET /{id}) read, Close (DELETE /{id}) terminates. Write/Resize are
+  // item actions → POST /{id}/…; Read is a cursor read → GET /{id}/read (the cursor
+  // rides as a query param). A pty session id is a path-safe server-minted segment.
+  rpc Open(PtyOpenRequest) returns (PtySessionRef) {
+    option (google.api.http) = {
+      post: "/v1/pty/sessions"
+      body: "*"
+    };
+  }
+  rpc Write(PtyWriteRequest) returns (PtyWriteResponse) {
+    option (google.api.http) = {
+      post: "/v1/pty/sessions/{id}/write"
+      body: "*"
+    };
+  }
+  rpc Read(PtyReadRequest) returns (PtyReadResponse) {
+    option (google.api.http) = {get: "/v1/pty/sessions/{id}/read"};
+  }
+  rpc Resize(PtyResizeRequest) returns (PtyResizeResponse) {
+    option (google.api.http) = {
+      post: "/v1/pty/sessions/{id}/resize"
+      body: "*"
+    };
+  }
+  rpc Close(PtySessionRef) returns (PtyCloseResponse) {
+    option (google.api.http) = {delete: "/v1/pty/sessions/{id}"};
+  }
+  rpc List(PtyListRequest) returns (PtySessionList) {
+    option (google.api.http) = {get: "/v1/pty/sessions"};
+  }
+  rpc Get(PtySessionRef) returns (PtySessionInfo) {
+    option (google.api.http) = {get: "/v1/pty/sessions/{id}"};
+  }
 }
 
 enum ExecNetworkPolicy {

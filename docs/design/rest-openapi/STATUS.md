@@ -48,8 +48,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | ✅ merged (#517) |
 | 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ✅ merged (#519) |
 | 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ✅ merged (#520) |
-| 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | 🟡 in flight |
-| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ⬜ |
+| 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ✅ merged (#522) |
+| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | 🟡 in flight |
 | 03g | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto`, `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `graph.proto`, `digest.proto`, `reference.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (remaining seams) | ⬜ |
 
 (Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR.)
@@ -130,3 +130,20 @@ added, it fires as a reminder to list it here as gRPC-only.
   `SchedulerService` maps `Cancel` → DELETE `/jobs/{id}` and `History` → GET `/jobs/{id}/runs`. Added 5
   class-tagged coverage rows (composite-key nested DELETE, server-streaming read → GET, drive → POST,
   Cancel-as-DELETE, sub-resource read); the whole-set invariants cover the rest.
+- **03f (tools / exec / web / forge).** Annotated the seven capability seams: `ToolService`
+  (`/v1/tools/`), `SandboxService` + `PtyService` (`/v1/sandbox/`, `/v1/pty/`), `WebService` +
+  `WebSearchService` (`/v1/web/`, `/v1/web-search/`), and `ForgeService` + `TaskService` (`/v1/forge/`,
+  `/v1/tasks/`). New shapes: (1) **a name/key captured in the path with a nested body** —
+  `ToolService.Execute` → POST `/v1/tools/{name}/execute` (arguments/context in the body). (2) **the
+  first numeric path param** — a PR is addressed by `uint64 number`, bound to `{number}` exactly like a
+  string id (`ForgeService.GetPr` → GET `/v1/forge/prs/{number}`; Comment/ReviewPr write under it). (3) **a
+  collection-level DELETE with no path param** — `TaskService.Clear` → DELETE `/v1/tasks`, on the same
+  `/v1/tasks` path that also carries POST Write + GET List (three verbs, one path). Reads that only
+  *retrieve* (WebService.Fetch, WebSearch.*, Pty.Read cursor read) stay GET even when they touch the
+  network or advance a cursor; the large-grant actions (`Sandbox.Exec`, `Pty.Open`/`Write`/`Resize`,
+  every `Forge` write) → POST body:*. `Update` (patch a todo matched by free-text `content`, not a
+  path-safe id) stays POST `/v1/tasks/update` per the no-PATCH convention. The two dangerous protos carry
+  a note that transcoding does NOT widen the (unauthenticated-by-design) grant — a REST call hits the
+  same seam, same loopback/UDS confinement. Added 6 class-tagged coverage rows (name-in-path + body,
+  exec action, pty cursor read → GET, numeric path param, collection-level DELETE, write under a numeric
+  parent); the whole-set invariants cover the rest.

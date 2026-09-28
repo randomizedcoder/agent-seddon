@@ -20,21 +20,74 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+// NOTE the SECURITY header: `ForgeService` performs authenticated writes on behalf of
+// whoever reaches it, and the transport is unauthenticated by design — REST does not
+// change that (a transcoded call hits the same seam), so the same confinement applies.
+import "google/api/annotations.proto";
+
 service ForgeService {
-  rpc GetPr(ForgeNumber) returns (ForgePullRequest);
-  rpc ListPrs(ForgePage) returns (ForgePrPage);
-  rpc ListIssues(ForgePage) returns (ForgeIssuePage);
-  rpc ImportIssue(ForgeNumber) returns (ForgeIssue);
-  rpc CreatePr(ForgeCreatePrRequest) returns (ForgePullRequest);
-  rpc Comment(ForgeCommentRequest) returns (ForgeComment);
-  rpc ReviewPr(ForgeReviewRequest) returns (ForgeComment);
+  // Under /v1/forge/. Reads → GET (a PR/issue is addressed by its numeric `{number}`;
+  // list pages by `?page=`); writes to the outside world → POST body:* (CreatePr on
+  // the `prs` collection; Comment/ReviewPr as sub-resources of a PR number).
+  rpc GetPr(ForgeNumber) returns (ForgePullRequest) {
+    option (google.api.http) = {get: "/v1/forge/prs/{number}"};
+  }
+  rpc ListPrs(ForgePage) returns (ForgePrPage) {
+    option (google.api.http) = {get: "/v1/forge/prs"};
+  }
+  rpc ListIssues(ForgePage) returns (ForgeIssuePage) {
+    option (google.api.http) = {get: "/v1/forge/issues"};
+  }
+  rpc ImportIssue(ForgeNumber) returns (ForgeIssue) {
+    option (google.api.http) = {get: "/v1/forge/issues/{number}"};
+  }
+  rpc CreatePr(ForgeCreatePrRequest) returns (ForgePullRequest) {
+    option (google.api.http) = {
+      post: "/v1/forge/prs"
+      body: "*"
+    };
+  }
+  rpc Comment(ForgeCommentRequest) returns (ForgeComment) {
+    option (google.api.http) = {
+      post: "/v1/forge/prs/{number}/comments"
+      body: "*"
+    };
+  }
+  rpc ReviewPr(ForgeReviewRequest) returns (ForgeComment) {
+    option (google.api.http) = {
+      post: "/v1/forge/prs/{number}/reviews"
+      body: "*"
+    };
+  }
 }
 
 service TaskService {
-  rpc Write(TaskWriteRequest) returns (TaskList);
-  rpc Update(TaskUpdateRequest) returns (TaskList);
-  rpc List(TaskListRequest) returns (TaskList);
-  rpc Clear(TaskClearRequest) returns (TaskClearResponse);
+  // Under /v1/tasks/. The `/v1/tasks` collection carries THREE verbs: POST replaces
+  // the list (Write), GET lists (List), DELETE clears it (Clear — a collection-level
+  // delete with no path param). Update patches one todo matched by its free-text
+  // `content` (not a path-safe id), so — per the convention (no PATCH; content can't
+  // be a path segment) — it is POST `/v1/tasks/update` with the match in the body.
+  rpc Write(TaskWriteRequest) returns (TaskList) {
+    option (google.api.http) = {
+      post: "/v1/tasks"
+      body: "*"
+    };
+  }
+  rpc Update(TaskUpdateRequest) returns (TaskList) {
+    option (google.api.http) = {
+      post: "/v1/tasks/update"
+      body: "*"
+    };
+  }
+  rpc List(TaskListRequest) returns (TaskList) {
+    option (google.api.http) = {get: "/v1/tasks"};
+  }
+  rpc Clear(TaskClearRequest) returns (TaskClearResponse) {
+    option (google.api.http) = {delete: "/v1/tasks"};
+  }
 }
 
 message ForgeNumber {

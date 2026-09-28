@@ -13,16 +13,35 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 service WebService {
-  rpc Fetch(WebFetchRequest) returns (WebFetchResponse);
+  // Fetch retrieves the content at a URL: a side-effect-free read of external
+  // content (no server resource mutated), all-scalar request → GET with query
+  // params (`?url=…`), under /v1/web/.
+  rpc Fetch(WebFetchRequest) returns (WebFetchResponse) {
+    option (google.api.http) = {get: "/v1/web/fetch"};
+  }
 }
 
 service WebSearchService {
-  rpc Search(WebSearchRequest) returns (WebSearchResponse);
+  // All three are reads with scalar requests → GET (query params), under
+  // /v1/web-search/. Search and Status share the request shape but map to distinct
+  // paths (results vs cache-status), so their routes stay unique.
+  rpc Search(WebSearchRequest) returns (WebSearchResponse) {
+    option (google.api.http) = {get: "/v1/web-search/results"};
+  }
   // Whether a query is cached, and how fresh — so a caller can report a cache
   // hit without paying for the search.
-  rpc Status(WebSearchRequest) returns (WebCacheStatus);
-  rpc Capabilities(WebSearchCapabilitiesRequest) returns (WebSearchCapabilities);
+  rpc Status(WebSearchRequest) returns (WebCacheStatus) {
+    option (google.api.http) = {get: "/v1/web-search/status"};
+  }
+  rpc Capabilities(WebSearchCapabilitiesRequest) returns (WebSearchCapabilities) {
+    option (google.api.http) = {get: "/v1/web-search/capabilities"};
+  }
 }
 
 enum WebFormat {
