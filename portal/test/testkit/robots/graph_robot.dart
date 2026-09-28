@@ -66,7 +66,7 @@ class GraphRobot extends Robot {
     ));
     final robot = GraphRobot._(tester, log, graph, clients);
     addTearDown(() => tester.runAsync(() async {
-          await clients.shutdown();
+          await clients.terminate();
           await server.shutdown();
         }));
     return robot;

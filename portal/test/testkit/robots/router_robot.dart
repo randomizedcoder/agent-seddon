@@ -50,7 +50,7 @@ class RouterRobot extends Robot {
     final clients = PortalClients(cfg);
     final robot = RouterRobot._(tester, log, providers, clients);
     addTearDown(() => tester.runAsync(() async {
-          await clients.shutdown();
+          await clients.terminate();
           await server.shutdown();
         }));
     return robot;

@@ -52,7 +52,7 @@ class FleetRobot extends Robot {
     });
     final robot = FleetRobot._(tester, gw, fleet, gw.log);
     addTearDown(() => tester.runAsync(() async {
-          await robot.clients.shutdown();
+          await robot.clients.terminate();
           await gw.shutdown();
         }));
     return robot;

@@ -55,7 +55,7 @@ class SettingsRobot extends Robot {
     });
     final robot = SettingsRobot._(tester, log, config, clients);
     addTearDown(() => tester.runAsync(() async {
-          await clients.shutdown();
+          await clients.terminate();
           await server.shutdown();
         }));
     return robot;
@@ -117,14 +117,12 @@ class SettingsRobot extends Robot {
     }
   }
 
-  /// Drain the in-flight RPC tail before teardown. grpc-dart's
-  /// `channel.shutdown()` **wedges** on any still-in-flight call, so a test that
-  /// leaves an RPC's response mid-flight (e.g. the `Status` a load/reload issues
-  /// last, or a `Validate`/`Put` whose reply is still arriving) hangs at teardown.
-  /// The caller has already waited for its terminal RPC to *fire*; a few real-time
-  /// windows let every fired call's response land (and its `setState` run) so the
-  /// channel is idle when it is shut down. Cheap and unconditional — end every
-  /// test with it.
+  /// Drain the in-flight RPC tail before teardown, so every fired call's
+  /// response lands (and its `setState` runs) while the page is still mounted
+  /// (e.g. the `Status` a load/reload issues last, or a `Validate`/`Put` whose
+  /// reply is still arriving). Teardown `terminate()`s the channels, so a call
+  /// still in flight is cancelled rather than wedging `channel.shutdown()` as it
+  /// used to. Cheap and unconditional — end every test with it.
   Future<void> quiesce() async {
     for (var i = 0; i < 4; i++) {
       await real(() => Future<void>.delayed(const Duration(milliseconds: 60)));

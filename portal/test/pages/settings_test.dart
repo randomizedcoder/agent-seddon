@@ -99,8 +99,7 @@ void main() {
           expect(robot.showsSpinner, isTrue);
           expect(robot.isLoaded, isFalse);
           // Let the delayed load resolve to the editor; the trailing Status must
-          // fire before the shared `quiesce()` (below) drains its response — an
-          // in-flight call wedges `channel.shutdown()` at teardown.
+          // fire before the shared `quiesce()` (below) drains its response.
           await robot.pumpUntil(
               () =>
                   robot.isLoaded &&
