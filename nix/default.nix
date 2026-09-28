@@ -593,6 +593,21 @@ let
   # throwaway server (security-hardening S16). Aggregated by `integration` below.
   ch-integration = import ./ch-integration.nix { inherit pkgs versions; };
 
+  # `rest-integration` — the opt-in live proof that the REST/JSON compat surface
+  # (rest-openapi §4) round-trips to gRPC: boot `agent --serve-all` + the Envoy
+  # `grpc_json_transcoder` listener → curl REST + adversarial cases → teardown.
+  # Skips with a notice when no container runtime. Aggregated by `integration` below.
+  rest-integration = import ./rest-integration.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (portal) grpc-web-up grpc-web-down;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#integration` — run the whole opt-in integration tier in one shot
   # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
   # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
@@ -606,6 +621,7 @@ let
       serve-smoke
       pg-integration
       ch-integration
+      rest-integration
       e2e-live
       e2e-expect
       e2e-multi
@@ -715,6 +731,7 @@ in
         serve-smoke
         pg-integration
         ch-integration
+        rest-integration
         vcr-record
         integration
         soak
