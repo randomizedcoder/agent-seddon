@@ -44,6 +44,7 @@ pub mod skills;
 // diverge.
 #[cfg(any(
     feature = "auth-postgres",
+    feature = "role-postgres",
     feature = "registry-postgres",
     feature = "fleet-postgres",
     feature = "prompt-postgres",
@@ -60,6 +61,7 @@ mod dsn;
 pub mod campaign;
 #[cfg(any(
     feature = "auth-postgres",
+    feature = "role-postgres",
     feature = "registry-postgres",
     feature = "fleet-postgres",
     feature = "prompt-postgres",

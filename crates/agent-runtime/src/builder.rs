@@ -2164,10 +2164,6 @@ fn build_inline_pool_member(
     })
 }
 
-/// Build one `[[route.upstreams]]` inline endpoint into an OpenAI-compatible provider
-/// (model-router increment 02). `pub(crate)` so the registry's task-router factory
-/// builds upstreams the same secret-safe way the pool builds members.
-#[cfg(feature = "provider-router")]
 /// The 02b role-slot wrapper: stamp `role` onto any request that carries **no**
 /// hint, then delegate. An explicit per-call hint always survives untouched, a
 /// non-routing inner provider simply ignores the stamp, and a named-reference
@@ -2327,6 +2323,12 @@ mod role_scoped_tests {
     }
 }
 
+/// Build one `[[route.upstreams]]` inline endpoint into an OpenAI-compatible provider
+/// (model-router increment 02). `pub(crate)` so the registry's task-router factory
+/// builds upstreams the same secret-safe way the pool builds members. Router-gated
+/// (every caller is), and `provider-router` implies `provider-openai-compat` for the
+/// return type.
+#[cfg(feature = "provider-router")]
 pub(crate) fn build_route_upstream(
     u: &crate::config::RouteUpstreamCfg,
     global_context_window: u32,
@@ -3968,13 +3970,8 @@ fn compose_fork_provider(
     }
 }
 
-#[cfg(any(
-    feature = "provider-openai-compat",
-    feature = "provider-anthropic",
-    feature = "provider-pool",
-    feature = "digest",
-    feature = "graph"
-))]
+/// Expand a leading `~/` to `$HOME/`. A plain path helper with ungated callers
+/// (`config`, `doctor`, `secrets`), so it is deliberately **not** feature-gated.
 pub(crate) fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
