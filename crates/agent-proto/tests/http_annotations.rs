@@ -395,6 +395,41 @@ enum Expect {
     "ForgeService.ReviewPr",
     Expect::Routes(&[("POST", "/v1/forge/prs/{number}/reviews")])
 )]
+// --- 03g1: LLM plane (provider / llm_pool / embed / tokenizer) --------------
+// positive — the LAST of the five server-streaming RPCs: streaming completion is a
+// side-effecting action → POST body:*. With this the streaming set is complete.
+#[case::positive_provider_stream_last_server_streaming(
+    "Provider.Stream (server-streaming) -> POST /v1/provider/stream",
+    "Provider.Stream",
+    Expect::Routes(&[("POST", "/v1/provider/stream")])
+)]
+// positive — a nested `CompletionRequest` maps to POST body:* (the buffered path).
+#[case::positive_provider_complete_nested_maps_to_post(
+    "Provider.Complete -> POST /v1/provider/complete",
+    "Provider.Complete",
+    Expect::Routes(&[("POST", "/v1/provider/complete")])
+)]
+// corner — a repeated-scalar CONTENT payload (document bodies to embed) maps to POST,
+// NOT GET: query strings carry selectors, not payloads (content-payload refinement).
+#[case::corner_embed_docs_content_payload_maps_to_post(
+    "EmbedService.EmbedDocs -> POST /v1/embed/docs (repeated content payload)",
+    "EmbedService.EmbedDocs",
+    Expect::Routes(&[("POST", "/v1/embed/docs")])
+)]
+// corner — the single-query counterpart stays GET: one short query scalar is a
+// selector, so it rides as a query param (the direct contrast to EmbedDocs).
+#[case::corner_embed_query_single_scalar_maps_to_get(
+    "EmbedService.EmbedQuery -> GET /v1/embed/query (single query scalar)",
+    "EmbedService.EmbedQuery",
+    Expect::Routes(&[("GET", "/v1/embed/query")])
+)]
+// corner — counting messages carries a repeated NESTED `Message`, so → POST body:*
+// (nested-body rule), while the scalar-text `Count` stays GET.
+#[case::corner_tokenizer_count_messages_nested_repeated_maps_to_post(
+    "TokenizerService.CountMessages -> POST /v1/tokenizer/count-messages",
+    "TokenizerService.CountMessages",
+    Expect::Routes(&[("POST", "/v1/tokenizer/count-messages")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(

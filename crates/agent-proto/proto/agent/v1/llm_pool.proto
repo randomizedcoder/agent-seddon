@@ -9,12 +9,26 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 service LlmPoolService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/llm-pool/. Health is a read
+  // → GET; the fan-out completion carries a nested request → POST body:*.
+  //
   // Current liveness of every pool member (from the active probe).
-  rpc Health(PoolHealthRequest) returns (PoolHealthReport);
+  rpc Health(PoolHealthRequest) returns (PoolHealthReport) {
+    option (google.api.http) = {get: "/v1/llm-pool/health"};
+  }
   // Fan out one request to up to `fanout` healthy members at/above `tier`.
-  rpc Complete(PoolCompleteRequest) returns (PoolCompleteResponse);
+  rpc Complete(PoolCompleteRequest) returns (PoolCompleteResponse) {
+    option (google.api.http) = {
+      post: "/v1/llm-pool/complete"
+      body: "*"
+    };
+  }
 }
 
 // `PoolTier` moved to common.proto (same package, wire/JSON-identical) so

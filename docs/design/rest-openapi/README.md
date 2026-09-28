@@ -114,6 +114,12 @@ Two refinements the sweep applies (both first exercised by the `03b` control pla
   **nested message** (or a free-text field that would need brittle dotted query expansion) uses
   `post: … body:"*"` instead — still side-effect-free, but the filter travels as a JSON body
   (e.g. `PromptService.PreviewAssembled`, `ConfigService.Validate`).
+- **Content payload vs filter** (first exercised by `03g`) — the repeated-scalar-stays-`get:` rule
+  above is for *filters* (bounded selectors: tags, globs, ids). A repeated-scalar field that is a
+  **content payload** — document bodies to embed, not a selector over stored state — uses
+  `post: … body:"*"` even though it is scalar and side-effect-free: a query string carries selectors,
+  not payloads (e.g. `EmbedService.EmbedDocs` → `POST /v1/embed/docs`, while the single-query
+  `EmbedService.EmbedQuery` stays `GET /v1/embed/query`).
 
 Paths are versioned under `/v1/` and grouped by area (`/v1/fleet/…`, `/v1/session/…`, …). URL
 templates and field paths must be unique across the whole surface (enforced by a unit test, below).

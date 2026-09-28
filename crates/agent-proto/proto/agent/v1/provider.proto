@@ -5,14 +5,35 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 message CapabilitiesRequest {}
 
 service Provider {
+  // REST mappings (docs/design/rest-openapi/), under /v1/provider/. Capabilities is a
+  // read → GET; both completion paths carry a nested `CompletionRequest` → POST body:*.
+  // `Stream` is the last of the five server-streaming RPCs (the transcoder emits a
+  // chunked JSON stream) — the streaming set is now complete.
+  //
   // Provider + model capabilities (tool support, context window).
-  rpc Capabilities(CapabilitiesRequest) returns (ModelCapabilities);
+  rpc Capabilities(CapabilitiesRequest) returns (ModelCapabilities) {
+    option (google.api.http) = {get: "/v1/provider/capabilities"};
+  }
   // Buffered completion.
-  rpc Complete(CompletionRequest) returns (CompletionResponse);
+  rpc Complete(CompletionRequest) returns (CompletionResponse) {
+    option (google.api.http) = {
+      post: "/v1/provider/complete"
+      body: "*"
+    };
+  }
   // Streaming completion — one CompletionChunk per increment.
-  rpc Stream(CompletionRequest) returns (stream CompletionChunk);
+  rpc Stream(CompletionRequest) returns (stream CompletionChunk) {
+    option (google.api.http) = {
+      post: "/v1/provider/stream"
+      body: "*"
+    };
+  }
 }
