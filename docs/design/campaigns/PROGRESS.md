@@ -220,10 +220,15 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   inside `with_default`; the lock and the callers' `rebuild_interest_cache()` are gone.
   Tripwire: `observe::tests::positive_capture_survives_no_subscriber_first_registration`
   (fails deterministically without the pin).
-- Flaky gate test `agent-search` `tests/leak.rs` `search_query_paths_do_not_leak`: grew 28 live
-  blocks against a `+16` budget once under heavy host load (tantivy's searcher pool / executor
-  allocate lazily); green in isolation and on every other pass — the budget wants a margin for
-  the pool. Needs its own change on `main`.
+- ~~Flaky gate test `agent-search` `tests/leak.rs` `search_query_paths_do_not_leak`: grew 28 live
+  blocks against a `+16` budget once under heavy host load.~~ **Resolved in #PR2.** Two causes:
+  the reader was built with `ReloadPolicy::OnCommitWithDelay`, which spawns a `meta.json`
+  watcher thread and a `watch-callbacks` reload thread that allocate in the background, and
+  each `query` runs on `spawn_blocking`, so tokio can add a blocking-pool thread inside the
+  single measured window. Fix: `ReloadPolicy::Manual` (the only commit site, `reindex_inner`,
+  already reloads explicitly; `positive_reindex_reloads_reader_after_commit` pins it) and the
+  `agent-tools` two-window flatness pattern in `tests/leak.rs` (window 1 absorbs one-time init,
+  window 2 must be flat; a real leak grows every window).
 - A node left in `decomposing` by a crash between `plan_start` and the close (the best-effort
   close cannot run if the process dies) needs a reaper — CP-05's driver tick (`reap()` already
   handles leases; `decomposing` older than a bound is the analogous rule).
