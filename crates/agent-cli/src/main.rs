@@ -209,26 +209,28 @@ async fn main() -> Result<()> {
     // is opened lazily and migrated on this first use when `[config_store]
     // migrate_on_start` allows it; `--tenant` only selects the tenant view. The
     // verbs run as `user:local` under a fresh local session scope. `plan` and
-    // `run --once` need the planner, so they fall through to the built agent.
+    // `run --once` need the planner (a provider), so they keep the opened store
+    // and fall through to the built agent's `scope` arm below.
+    let mut campaign_run: Option<CampaignRun> = None;
     if let Mode::Campaign(args) = &mode {
+        let store = agent_runtime::campaign::open_campaign_store(
+            &config,
+            agent_runtime::campaign::CampaignOpen {
+                tenant: args.tenant.as_deref(),
+                apply_migrations: true,
+            },
+        )
+        .await
+        .context("[campaign] store")?
+        .context(
+            "agent campaign: no campaign store is configured — set `[campaign] store = \
+             \"postgres\"` (the DSN comes from `[config_store] dsn_ref`)",
+        )?;
+        let ctx = campaign_cli::CampaignCtx {
+            store,
+            repos: config.campaign.repos.clone(),
+        };
         if !args.cmd.needs_planner() {
-            let store = agent_runtime::campaign::open_campaign_store(
-                &config,
-                agent_runtime::campaign::CampaignOpen {
-                    tenant: args.tenant.as_deref(),
-                    apply_migrations: true,
-                },
-            )
-            .await
-            .context("[campaign] store")?
-            .context(
-                "agent campaign: no campaign store is configured — set `[campaign] store = \
-                 \"postgres\"` (the DSN comes from `[config_store] dsn_ref`)",
-            )?;
-            let ctx = campaign_cli::CampaignCtx {
-                store,
-                repos: config.campaign.repos.clone(),
-            };
             let identity = agent_core::SessionKey::local(uuid::Uuid::new_v4().to_string());
             return agent_core::scope(identity, async {
                 let stdout = std::io::stdout();
@@ -237,7 +239,18 @@ async fn main() -> Result<()> {
             })
             .await;
         }
-        anyhow::bail!("agent campaign: `plan` and `run --once` are not wired yet (CP-04 step 6)");
+        // `config` moves into the builder below; keep what the planner needs.
+        let working_dir = if config.agent.working_dir.is_empty() {
+            std::env::current_dir().context("resolving the working directory")?
+        } else {
+            PathBuf::from(&config.agent.working_dir)
+        };
+        campaign_run = Some(CampaignRun {
+            ctx,
+            cfg: config.campaign.clone(),
+            repo_root: config.campaign.repo_root_or(&working_dir),
+            main_model: config.provider.model.clone(),
+        });
     }
 
     // Metrics (opt-in). Instrumentation always runs into this registry; serving
@@ -550,7 +563,31 @@ async fn main() -> Result<()> {
             // already returned.
             Mode::CheckConfig => unreachable!("--check-config returns before the run"),
             Mode::Doctor => unreachable!("doctor returns before the run"),
-            Mode::Campaign(_) => unreachable!("campaign verbs return before the run"),
+            // `plan` / `run --once`: the planner over the store opened above and the
+            // agent's planner provider (`[campaign] planner_model`, else the main
+            // one), with the worktree brief and touch resolver rooted at
+            // `[campaign] repo_root` (else `[agent] working_dir`).
+            Mode::Campaign(args) => {
+                let CampaignRun {
+                    ctx,
+                    cfg,
+                    repo_root,
+                    main_model,
+                } = campaign_run.expect("the campaign store is opened before the build");
+                let planner = agent_campaign::Planner::draft07(
+                    ctx.store.clone(),
+                    agent.campaign_planner_provider(),
+                    std::sync::Arc::new(agent_campaign::FallbackBrief::new(&repo_root)),
+                    std::sync::Arc::new(agent_campaign::WorktreeTouches::new(&repo_root)),
+                    cfg.planner_label(&main_model),
+                )
+                .with_max_repairs(cfg.max_repairs);
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                campaign_cli::run_plan(&ctx, &planner, cfg.plan_per_tick, &args.cmd, &mut out)
+                    .await
+                    .map(|()| None)
+            }
         }
     })
     .await;
@@ -721,6 +758,15 @@ enum Mode {
     /// planner's provider. The bare word `campaign` selects this only as the first
     /// non-option token — after `--` it is a goal word like any other.
     Campaign(campaign_cli::CampaignArgs),
+}
+
+/// What a planner verb (`plan`, `run --once`) carries from the config load to the
+/// `scope` arm, since `config` is consumed by the builder in between.
+struct CampaignRun {
+    ctx: campaign_cli::CampaignCtx,
+    cfg: agent_runtime::CampaignCfg,
+    repo_root: PathBuf,
+    main_model: String,
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the

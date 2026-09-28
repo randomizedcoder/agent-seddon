@@ -19,6 +19,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use agent_campaign::display::{escape_terminal, letters, parse_letter, Letters};
+use agent_campaign::{PlanOutcome, Planned, Planner};
 use agent_core::campaign::{
     check_len, screen, truncate_chars, Actor, CampaignStore, ListFilter, NewCampaign, Policy, Task,
     TaskId, TaskPath, TaskState, MAX_ANSWER, MAX_DETAIL_BYTES, MAX_GOAL, MAX_SOURCE_REF, MAX_TITLE,
@@ -525,13 +526,144 @@ pub async fn run(ctx: &CampaignCtx, cmd: &CampaignCmd, out: &mut dyn Write) -> R
             Ok(())
         }
         CampaignCmd::Plan { .. } | CampaignCmd::RunOnce => {
-            bail!("this verb needs the planner and is not wired yet (CP-04 step 6)")
+            bail!("this verb needs the planner (`run_plan`), not the store-only runner")
         }
         CampaignCmd::Help => {
             writeln!(out, "{USAGE}")?;
             Ok(())
         }
     }
+}
+
+/// How many chars of a planner error one `plan` line shows.
+const PLAN_ERROR_CHARS: usize = 200;
+
+/// Run a planner verb: `plan [<ref>] [--max N]` (one node, or one tick over up to
+/// `N` / `plan_per_tick` plannable nodes) or `run --once` (`reap()` first, then one
+/// tick). One line per node, then a `plan:` summary line. A node the store refuses
+/// (`NotFound` / `Backend`) is reported on its line and counted as a failure, like
+/// `Planner::tick`; only a single explicit `<ref>` propagates its error.
+pub async fn run_plan(
+    ctx: &CampaignCtx,
+    planner: &Planner,
+    plan_per_tick: usize,
+    cmd: &CampaignCmd,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let limit = match cmd {
+        CampaignCmd::Plan {
+            target: Some(r), ..
+        } => {
+            let t = resolve(ctx, r).await?;
+            let planned = planner.plan_node(t.task_id).await.map_err(seam)?;
+            let mut listing = Listing::load(&*ctx.store).await?;
+            writeln!(out, "{}", plan_line(&mut listing, &t, &planned))?;
+            plan_summary(out, &[planned], 0)?;
+            return Ok(());
+        }
+        CampaignCmd::Plan { target: None, max } => max.unwrap_or(plan_per_tick),
+        CampaignCmd::RunOnce => {
+            let reaped = ctx.store.reap().await.map_err(seam)?;
+            writeln!(out, "reaped {}", reaped.len())?;
+            plan_per_tick
+        }
+        other => bail!("`{}` is a store verb, not a planner verb", verb_name(other)),
+    };
+    // The tick loop itself (`Planner::tick` only returns counts; a human wants a
+    // line per node). `plannable` is read once, so nodes a split creates during
+    // this tick wait for the next one.
+    let queue = ctx.store.plannable(limit).await.map_err(seam)?;
+    let mut listing = Listing::load(&*ctx.store).await?;
+    let mut planned = Vec::with_capacity(queue.len());
+    let mut failures = 0usize;
+    for t in &queue {
+        match planner.plan_node(t.task_id).await {
+            Ok(p) => {
+                writeln!(out, "{}", plan_line(&mut listing, t, &p))?;
+                planned.push(p);
+            }
+            Err(e) => {
+                failures += 1;
+                writeln!(
+                    out,
+                    "#{}  {:<12} → failed: {}",
+                    t.task_id,
+                    listing.label(t),
+                    escape_terminal(&truncate_chars(&e.to_string(), PLAN_ERROR_CHARS))
+                )?;
+            }
+        }
+    }
+    plan_summary(out, &planned, failures)
+}
+
+fn verb_name(cmd: &CampaignCmd) -> &'static str {
+    match cmd {
+        CampaignCmd::Add(_) => "add",
+        CampaignCmd::Plan { .. } => "plan",
+        CampaignCmd::List { .. } => "list",
+        CampaignCmd::Show(_) => "show",
+        CampaignCmd::Approve { .. } => "approve",
+        CampaignCmd::Answer { .. } => "answer",
+        CampaignCmd::Retry(_) => "retry",
+        CampaignCmd::Replan(_) => "replan",
+        CampaignCmd::Cancel(_) => "cancel",
+        CampaignCmd::RunOnce => "run --once",
+        CampaignCmd::Help => "help",
+    }
+}
+
+/// `#id  A.1          → split (3 children)` — the outcome word is the planner's
+/// fixed label; only an `error` carries model-influenced text (escaped, cut).
+fn plan_line(listing: &mut Listing, t: &Task, p: &Planned) -> String {
+    let outcome = match &p.outcome {
+        PlanOutcome::Executed { low_confidence, .. } => {
+            format!("execute{}", low_mark(*low_confidence))
+        }
+        PlanOutcome::Split {
+            children,
+            low_confidence,
+            ..
+        } => format!("split ({children} children){}", low_mark(*low_confidence)),
+        PlanOutcome::Blocked { reason, .. } => format!("blocked ({})", reason.as_str()),
+        PlanOutcome::Errored { task, error } => format!(
+            "error ({}): {}",
+            task.state.as_str(),
+            escape_terminal(&truncate_chars(error, PLAN_ERROR_CHARS))
+        ),
+        other => other.label().to_string(),
+    };
+    format!("#{}  {:<12} → {outcome}", t.task_id, listing.label(t))
+}
+
+fn low_mark(low: bool) -> &'static str {
+    if low {
+        " [low confidence]"
+    } else {
+        ""
+    }
+}
+
+fn plan_summary(out: &mut dyn Write, planned: &[Planned], failures: usize) -> Result<()> {
+    let calls: usize = planned.iter().map(|p| p.calls).sum();
+    let repairs: usize = planned.iter().map(|p| p.repairs).sum();
+    let (tokens_in, tokens_out) = planned.iter().fold((0i64, 0i64), |(i, o), p| {
+        (
+            i.saturating_add(p.tokens.tokens_in),
+            o.saturating_add(p.tokens.tokens_out),
+        )
+    });
+    let failed = if failures > 0 {
+        format!(", {failures} failed")
+    } else {
+        String::new()
+    };
+    writeln!(
+        out,
+        "plan: {} node(s){failed}; calls {calls}, repairs {repairs}, tokens in {tokens_in} out {tokens_out}",
+        planned.len()
+    )?;
+    Ok(())
 }
 
 /// The unfiltered listing with its letters: the one map every verb shares.
@@ -1413,6 +1545,11 @@ mod tests {
             &["add", "--repo", "1", "--title", title, "--goal", "do it"],
         )
         .await;
+        add_id(&out)
+    }
+
+    /// The `#id` out of a `created …` line.
+    fn add_id(out: &str) -> TaskId {
         let id = out
             .split("  #")
             .nth(1)
@@ -1839,5 +1976,263 @@ mod tests {
         );
         let shown = go_ok(&ctx, &["show", "A"]).await;
         assert!(shown.contains(&format!("title: {long}\n")), "{shown}");
+    }
+
+    // ---- run_plan: the planner verbs over `MemCampaigns` + a scripted provider ---
+
+    use agent_campaign::{FallbackBrief, WorktreeTouches};
+    use agent_core::ModelCapabilities;
+    use agent_testkit::{final_turn, tempdir, ScriptedProvider};
+    use serde_json::json;
+
+    /// A worktree the touches resolve against plus a brief source.
+    fn worktree() -> std::path::PathBuf {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            root.join("docs/architecture.md"),
+            "# Architecture\n\none crate, one binary.\n",
+        )
+        .unwrap();
+        root
+    }
+
+    /// A planner over `ctx.store` scripted with `answers` (the last one repeats).
+    fn planner(ctx: &CampaignCtx, answers: Vec<serde_json::Value>) -> Planner {
+        let script = answers
+            .into_iter()
+            .map(|v| final_turn(v.to_string()))
+            .collect();
+        let provider = ScriptedProvider::new(script).with_capabilities(ModelCapabilities {
+            supports_response_format: true,
+            ..ModelCapabilities::default()
+        });
+        let root = worktree();
+        Planner::draft07(
+            ctx.store.clone(),
+            Arc::new(provider),
+            Arc::new(FallbackBrief::new(&root)),
+            Arc::new(WorktreeTouches::new(&root)),
+            "test-planner",
+        )
+    }
+
+    fn split_two() -> serde_json::Value {
+        json!({
+            "decision": "split",
+            "reason": "too big for one PR",
+            "confidence": 0.8,
+            "children": [
+                { "title": "child 1", "goal": "do part 1", "est_size": "s" },
+                { "title": "child 2", "goal": "do part 2", "est_size": "s" },
+            ],
+        })
+    }
+
+    fn execute_small() -> serde_json::Value {
+        json!({
+            "decision": "execute",
+            "reason": "fits one pull request",
+            "confidence": 0.9,
+            "acceptance": ["it works"],
+            "touches": ["src/lib.rs"],
+            "est_size": "s",
+        })
+    }
+
+    /// Parse `toks` and run the planner verb, returning stdout.
+    async fn go_plan(ctx: &CampaignCtx, planner: &Planner, toks: &[&str]) -> Result<String> {
+        let args = parse_toks(toks)?;
+        let mut out = Vec::new();
+        run_plan(ctx, planner, 4, &args.cmd, &mut out).await?;
+        Ok(String::from_utf8(out).expect("utf-8 output"))
+    }
+
+    // The in-process end-to-end path: `add` → `run --once` (the root splits) →
+    // `plan` (both children execute) → `show A` renders the planned tree.
+    #[tokio::test]
+    async fn positive_run_once_add_plan_show() {
+        let ctx = fresh();
+        // `approve_levels: []` so the children are `ready` rather than gated.
+        let out = go_ok(
+            &ctx,
+            &[
+                "add",
+                "--repo",
+                "1",
+                "--title",
+                "first",
+                "--goal",
+                "build it",
+                "--policy",
+                r#"{"approve_levels": []}"#,
+            ],
+        )
+        .await;
+        assert!(out.starts_with("created A  #"), "{out}");
+        let root = add_id(&out);
+
+        let planner = planner(&ctx, vec![split_two(), execute_small()]);
+        let once = go_plan(&ctx, &planner, &["run", "--once"]).await.unwrap();
+        assert_terminal_safe(&once);
+        let lines: Vec<&str> = once.lines().collect();
+        assert_eq!(lines[0], "reaped 0", "{once}");
+        assert_eq!(
+            lines[1],
+            format!("#{}  {:<12} → split (2 children)", root.0, "A"),
+            "{once}"
+        );
+        assert!(
+            lines[2].starts_with("plan: 1 node(s); calls 1, repairs 0, tokens in "),
+            "{once}"
+        );
+
+        // The children were created by the split during the previous tick, so
+        // they wait for this one; both execute (the last scripted answer repeats).
+        let tick = go_plan(&ctx, &planner, &["plan"]).await.unwrap();
+        let lines: Vec<&str> = tick.lines().collect();
+        assert_eq!(lines.len(), 3, "{tick}");
+        for (line, label) in lines[..2].iter().zip(["A.1", "A.2"]) {
+            assert!(
+                line.starts_with('#') && line.ends_with(&format!("{label:<12} → execute")),
+                "{tick}"
+            );
+        }
+        assert!(
+            lines[2].starts_with("plan: 2 node(s); calls 2, repairs 0, tokens in "),
+            "{tick}"
+        );
+
+        let shown = go_ok(&ctx, &["show", "A"]).await;
+        assert!(
+            shown.contains(&format!(
+                "\n{:<12} {:<18} {:<9} {:<2} a0 first\n",
+                "A", "decomposed", "objective", "-"
+            )),
+            "{shown}"
+        );
+        for (label, title) in [("A.1", "child 1"), ("A.2", "child 2")] {
+            assert!(
+                shown.contains(&format!(
+                    "\n  {label:<12} {:<18} {:<9} {:<2} a0 {title}\n",
+                    "ready", "leaf", "s"
+                )),
+                "{shown}"
+            );
+        }
+
+        // Nothing is left to plan: an empty tick reports zero nodes.
+        let idle = go_plan(&ctx, &planner, &["plan"]).await.unwrap();
+        assert_eq!(
+            idle,
+            "plan: 0 node(s); calls 0, repairs 0, tokens in 0 out 0\n"
+        );
+    }
+
+    // `plan <ref>` plans that node alone and reports it on one line, even when
+    // other nodes are plannable.
+    #[tokio::test]
+    async fn positive_plan_targets_one_node() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "first").await;
+        let _b = add_one(&ctx, "second").await;
+        let planner = planner(&ctx, vec![split_two()]);
+        let out = go_plan(&ctx, &planner, &["plan", "B"]).await.unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "#2  {:<12} → split (2 children)\nplan: 1 node(s); calls 1, repairs 0, tokens in 0 out 0\n",
+                "B"
+            )
+        );
+        // `A` was not touched.
+        let a_now = ctx.store.get(a).await.unwrap();
+        assert_eq!(a_now.state, TaskState::Ready);
+    }
+
+    // `--max N` bounds the tick even when more nodes are plannable.
+    #[tokio::test]
+    async fn boundary_plan_max_bounds_the_tick() {
+        let ctx = fresh();
+        for t in ["one", "two", "three"] {
+            add_one(&ctx, t).await;
+        }
+        let planner = planner(&ctx, vec![split_two()]);
+        let out = go_plan(&ctx, &planner, &["plan", "--max", "2"])
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert!(lines[2].starts_with("plan: 2 node(s); calls 2,"), "{out}");
+        assert!(lines[0].contains(&format!(" {:<12} → split", "A")), "{out}");
+        assert!(lines[1].contains(&format!(" {:<12} → split", "B")), "{out}");
+    }
+
+    // A model answer that fails the schema is an `error` line naming the node's
+    // state, and the tick continues; the text on the line is escaped.
+    #[tokio::test]
+    async fn negative_schema_error_is_reported_per_node() {
+        let ctx = fresh();
+        add_one(&ctx, "first").await;
+        let planner = planner(
+            &ctx,
+            vec![json!({ "decision": "dance\u{1b}[31m", "reason": "x", "confidence": 0.5 })],
+        )
+        .with_max_repairs(0);
+        let out = go_plan(&ctx, &planner, &["run", "--once"]).await.unwrap();
+        assert_terminal_safe(&out);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "reaped 0", "{out}");
+        assert!(
+            lines[1].starts_with(&format!("#1  {:<12} → error (ready): ", "A")),
+            "{out}"
+        );
+        assert!(
+            lines[2].starts_with("plan: 1 node(s); calls 1, repairs 0,"),
+            "{out}"
+        );
+    }
+
+    // `plan <ref>` on a node that is not plannable is a skip, not an error.
+    #[tokio::test]
+    async fn corner_plan_target_not_ready_is_skipped() {
+        let ctx = fresh();
+        let a = add_one(&ctx, "first").await;
+        ctx.store.cancel(a, &Actor::from_scope()).await.unwrap();
+        let planner = planner(&ctx, vec![split_two()]);
+        let out = go_plan(&ctx, &planner, &["plan", "A"]).await.unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "#1  {:<12} → not_ready\nplan: 1 node(s); calls 0, repairs 0, tokens in 0 out 0\n",
+                "A"
+            )
+        );
+    }
+
+    // `plan 999999` is `not found` before any provider call.
+    #[tokio::test]
+    async fn negative_plan_unknown_target() {
+        let ctx = fresh();
+        let planner = planner(&ctx, vec![split_two()]);
+        let err = go_plan(&ctx, &planner, &["plan", "999999"])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err:#}");
+    }
+
+    // The store-only verbs are refused by the planner runner (and vice versa).
+    #[rstest]
+    #[case::list(&["list"][..])]
+    #[case::show(&["show", "A"][..])]
+    #[case::add(&["add", "--repo", "1", "--title", "t", "--goal", "g"][..])]
+    #[tokio::test]
+    async fn negative_store_verbs_refused_by_run_plan(#[case] toks: &[&str]) {
+        let ctx = fresh();
+        let planner = planner(&ctx, vec![split_two()]);
+        let err = go_plan(&ctx, &planner, toks).await.unwrap_err();
+        assert!(err.to_string().contains("store verb"), "{err:#}");
     }
 }
