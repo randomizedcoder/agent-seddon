@@ -33,6 +33,9 @@ auth = ["agent-runtime/auth"]
 [dependencies]
 agent-core.workspace = true
 agent-runtime.workspace = true
+# `agent campaign …` (docs/design/campaigns, CP-04): display letters, terminal
+# escaping and the planner behind the campaign verbs.
+agent-campaign.workspace = true
 # C23-3c agent-process egress allow-list — the loopback CONNECT filtering proxy.
 agent-egress.workspace = true
 # Grounded-fact rendering for `agent --review` (docs/design/code-review/).
@@ -63,6 +66,8 @@ async-trait.workspace = true
 agent-mcp.workspace = true
 # Table-driven tests (the seam table's completeness + flag parsing).
 rstest.workspace = true
+# `tempdir()` for the campaign parser's `--goal-file` rows.
+agent-testkit.workspace = true
 
 # Pty-driven CLI tests (tests/repl_pty.rs). Unix-only: it spawns the binary on a
 # real terminal to reach the REPL's line editor and the policy guard's operator

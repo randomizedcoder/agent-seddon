@@ -337,6 +337,10 @@ pub struct Agent {
     /// provider the distiller uses. `None` = the main provider — distillation
     /// is background cache work, so a cheap/local model fits here.
     pub(crate) distill_provider: Option<Arc<dyn LlmProvider>>,
+    /// Role routing for the campaign planner (`[campaign] planner_model`,
+    /// docs/design/campaigns 03): the provider `agent campaign plan` asks for a
+    /// node's decision. `None` = the main provider. Not consumed by the loop.
+    campaign_planner_provider: Option<Arc<dyn LlmProvider>>,
     /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
     /// graph-less built-in behavior.
     graph: Option<Arc<dyn agent_core::GraphStore>>,
@@ -1023,6 +1027,7 @@ impl Agent {
             distill_tokens: (512, 256),
             distill_kinds: (true, true),
             distill_provider: None,
+            campaign_planner_provider: None,
             graph: None,
             fleet_review_factory: None,
         }
@@ -1070,6 +1075,22 @@ impl Agent {
     pub fn with_distill_provider(mut self, p: Arc<dyn LlmProvider>) -> Self {
         self.distill_provider = Some(p);
         self
+    }
+
+    /// Route the campaign planner's decision calls to a dedicated provider
+    /// (`[campaign] planner_model` — role routing, docs/design/campaigns 03).
+    pub fn with_campaign_planner_provider(mut self, p: Arc<dyn LlmProvider>) -> Self {
+        self.campaign_planner_provider = Some(p);
+        self
+    }
+
+    /// The provider the campaign planner asks: the `[campaign] planner_model`
+    /// override when one is pinned, else the main provider (same metrics
+    /// decorator, same route hints as the loop).
+    pub fn campaign_planner_provider(&self) -> Arc<dyn LlmProvider> {
+        self.campaign_planner_provider
+            .clone()
+            .unwrap_or_else(|| self.provider.clone())
     }
 
     /// Attach the in-memory scheduler (Tier-0, parity spec 28).

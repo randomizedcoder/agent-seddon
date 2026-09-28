@@ -55,6 +55,7 @@ default = [
     "scheduler-store",
     "forge-registry-store",
     "transport-registry-store",
+    "campaign",
     "metrics-proxy",
     "session-export",
     "skill-write",
@@ -95,6 +96,20 @@ digest-postgres = [
     "digest",
     "agent-digest/digest-postgres",
 ]
+# Campaigns (docs/design/campaigns, CP-04): the `[campaign]` store resolver
+# (`crate::campaign::open_campaign_store`) and the planner provider on `Agent`.
+# `agent-campaign` carries the display helpers and the planner (always built);
+# the store arm itself is `campaign-postgres` below, so this alone links no sqlx.
+campaign = ["dep:agent-campaign"]
+# The Postgres arm of the campaign store (`[campaign] store = "postgres"`): the
+# ONLY v1 backing tier (no sqlite/file arm — campaigns are a multi-writer
+# ledger). The DSN is the shared `[config_store] dsn_ref` via `crate::dsn`, the
+# pool is bounded by `[campaign] pool_max`, opened LAZILY (no dial until the first
+# verb) so `--check-config` on `config/multi-tenant.toml` stays hermetic, and
+# migrated on the first verb when `[config_store] migrate_on_start`. Off by
+# default; NOT hermetic (needs a live server) — its suite runs under
+# `nix run .#pg-integration`.
+campaign-postgres = ["campaign", "agent-campaign/campaign-postgres"]
 # Cognition-graph document (cognition-graph 04/05): the declarative node graph
 # + node-type schema registry (`[graph] store`, `--serve-graph`), plus the fork
 # executor — the builder composes branch chains from `provider-branching` and
@@ -389,6 +404,7 @@ postgres = [
   "forge-registry-postgres",
   "transport-registry-postgres",
   "digest-postgres",
+  "campaign-postgres",
   "auth-postgres",
 ]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
@@ -449,6 +465,7 @@ agent-role = { workspace = true, optional = true }
 # the `registry-store`/`registry-postgres` features (and later A3b/A3c).
 agent-config-store = { workspace = true, optional = true }
 agent-digest = { workspace = true, optional = true }
+agent-campaign = { workspace = true, optional = true }
 agent-graph = { workspace = true, optional = true }
 agent-metrics-proxy = { workspace = true, optional = true }
 agent-tokenizer = { workspace = true, optional = true }
