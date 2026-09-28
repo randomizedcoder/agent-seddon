@@ -25,7 +25,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
 | S15a | auth-e2e gate (process wire) | testing | ✅ | #537 |
 | S15b | integration tiers (step-ca daemon, Postgres sessions, ClickHouse audit) | testing | ✅ | #543 |
-| S15c | `portal-e2e` under auth | testing | ⬜ | — |
+| S15c | `portal-auth-e2e`: browser sign-in through the hardened edge | testing | ✅ | #549 |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 
@@ -786,3 +786,59 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - Certificates come from the daemon's JWK provisioner (`step ca certificate`), not ACME. The
       agent consumes PEM files either way, and ACME would need an HTTP-01/TLS-ALPN responder the
       harness does not otherwise need.
+- **2026-09-28 — S15c (#549).** New `nix run .#portal-auth-e2e`, registered in the model-free tier
+  of `nix run .#integration`, and a gate check `portal-auth-e2e-tests` (four-class tables plus
+  check-the-checks). The harness
+  ([`test/portal-auth-e2e/portal_auth_e2e.py`](../../../test/portal-auth-e2e/portal_auth_e2e.py))
+  signs in the way a person does. A real headless Chromium, driven over W3C WebDriver by
+  chromedriver, loads the real portal web build (`flutter build web`, `PORTAL_AUTH=on`). It uses
+  the portal's accessibility tree (`flt-semantics`) to read the page and press buttons. On loopback
+  it stands up:
+  - a fake OIDC IdP with the authorization-code flow: the S15a issuer plus `/authorize` (consents
+    at once, `302` back) and `/token` (client secret, exact redirect URI, PKCE `S256`, each code
+    once);
+  - the dev PKI, and `agent --serve-all` over mTLS with `[auth] redirect_uris` set to the portal's
+    origin;
+  - the S14 bridge from `portal_envoy.py up`: `jwt_authn` against the agent's JWKS, exact-origin
+    CORS, loopback bind, upstream mTLS;
+  - the bundle behind `static-web-server`.
+
+  Ports and the container name are its own (`portalAuthTest*` in `nix/versions.nix`), so the
+  long-lived bridge and gateways are never touched. Nine steps pass live on l2 (podman):
+  - the edge refuses a gated call with no bearer or a forged one;
+  - the sign-in page offers the issuer;
+  - one click signs in through the IdP: a PKCE `S256` request for the portal's own redirect URI,
+    the code redeemed once with the client secret, WhoAmI says tenant A, `?code&state` gone from
+    the address bar and the verifier gone from tab storage;
+  - the token passes the edge;
+  - the signed-in Prompts page lists;
+  - a reload resumes without the IdP;
+  - a replayed and a forged callback are refused without reaching the IdP;
+  - an IdP `access_denied` is shown and nothing is redeemed;
+  - sign-out makes the session's refresh handle fail.
+  - Bug found and fixed: **the signed-in portal could not use any scoped page.** The S13b
+    `AuthInterceptor` added only the bearer. A call with a token carries a principal, and the S2
+    identity policy then requires a session on scoped services (Prompts, Router, Graph, Settings,
+    memory). So every such page showed "Not connected to the gateway" (`UNAUTHENTICATED`). The
+    hermetic widget tests missed it because the fake gateway has no identity policy.
+    - The fix: `AuthState.identityHeaders` gives the verified tenant and the auth session id
+      (`sid` from `WhoAmI`/`Exchange`), and the interceptor adds them as `x-agent-user-id` and
+      `x-agent-session-id`. A header the call sets itself is kept (the Agent page names the session
+      it opened); the bearer always replaces one the call set.
+    - Tests: `withCredentials` tables in `test/unit/auth_test.dart`, and the login round-trip row
+      now asserts both headers.
+    - Check-the-check, live: with the interceptor change reverted, the "signed-in pages load" step
+      fails on the error panel.
+  - Harness bug found and fixed on the way: `XDG_RUNTIME_DIR` pointed at the work directory for
+    the bridge bring-up put podman's crun state there. Once the directory was deleted, no podman
+    could stop the container. The environment is now left alone, the teardown reports a failed
+    removal and deletes the rendered config, and an adversarial table row pins it.
+  - Differences from the design:
+    - A new app instead of `portal-e2e` under `PORTAL_AUTH=on`. Sign-in leaves the page for the
+      IdP, which would end a `flutter drive` test, so this needs a browser driven from outside the
+      app. `portal-e2e` stays the anonymous Layer B.
+    - Chromium comes from the binary-cached nixpkgs registry at run time, as for `portal-e2e`.
+  - Noted, not changed: the `gRPC seam server ready` log line prints the listener as
+    `tls: false` even when it serves mTLS. The line comes from `Bound::dial_endpoint`, which
+    rebuilds a bare `host:port`; the earlier `gRPC listener transport` line shows `mtls`
+    correctly.

@@ -119,6 +119,20 @@ class AuthState extends ChangeNotifier {
   /// The verified tenant, for the advisory `x-agent-user-id` header.
   String? get tenant => session?.principal.tenant;
 
+  /// The identity headers of a signed-in portal: the verified tenant (advisory;
+  /// the agent takes the token's) and the auth session id as the session key.
+  /// A signed-in call carries a principal, so the agent refuses a scoped service
+  /// (prompts, providers, graphs, config) that names no session (S2, found by
+  /// the S15c browser run). Empty when signed out or sign-in is off.
+  Map<String, String> get identityHeaders {
+    final p = session?.principal;
+    if (p == null) return const {};
+    return {
+      if (p.tenant.isNotEmpty) 'x-agent-user-id': p.tenant,
+      if (p.sid.isNotEmpty) 'x-agent-session-id': p.sid,
+    };
+  }
+
   /// What the UI may offer. Everything when sign-in is off or the permission
   /// list was not embedded (`perms_ref`); the server decides either way.
   Capabilities get capabilities {

@@ -34,7 +34,9 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
   static const _config = PortalConfig();
   late final PortalClients _clients = PortalClients(
     _config,
-    interceptors: [AuthInterceptor(() => _auth.token)],
+    interceptors: [
+      AuthInterceptor(() => _auth.token, identity: () => _auth.identityHeaders),
+    ],
   );
   late final AuthState _auth = AuthState(
     client: _clients.auth,

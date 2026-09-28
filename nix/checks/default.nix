@@ -326,6 +326,10 @@ in
   # go red against a fake that breaks it (security-hardening S15b). The live tiers
   # (step-ca daemon, Postgres sessions, ClickHouse audit) run in `.#integration`.
   auth-integration-tests = import ./auth-integration-tests.nix { inherit pkgs; };
+  # The portal-auth-e2e harness's tables + check-the-checks: every contract step must
+  # go red against a fake portal/agent/edge that breaks it (security-hardening S15c).
+  # The live run (headless Chromium, the Envoy bridge container) is in `.#integration`.
+  portal-auth-e2e-tests = import ./portal-auth-e2e-tests.nix { inherit pkgs; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.

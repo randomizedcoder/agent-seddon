@@ -332,6 +332,14 @@ in
   postgresAuthTestPort = 15433;
   # The `step-ca` daemon `auth-integration` runs (native binary, no container).
   stepCaAuthTestPort = 19443;
+  # `nix run .#portal-auth-e2e` (security-hardening S15c): its own hardened Envoy
+  # bridge container, and the ports the browser reaches it and the portal bundle on,
+  # so the long-lived `agent-grpc-web` bridge (:8090-8094) and portal (:8092) are never
+  # touched. Both ports are baked into the web build (`--dart-define`) and the
+  # agent's `redirect_uris`, so they are fixed rather than picked per run.
+  portalAuthTestEnvoyContainerName = "agent-seddon-envoy-auth-test";
+  portalAuthTestEdgePort = 18090;
+  portalAuthTestWebPort = 18092;
   postgresPort = 5432;
   postgresDatabase = "agent_config";
   postgresUser = "agent";

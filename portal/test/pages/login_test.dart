@@ -27,6 +27,7 @@ void main() {
         subject: 'user:google/1',
         email: 'ada@example.com',
         permissions: ['read:review', 'read:fleet'],
+        sid: 'sid-1',
       );
 
   ExchangeResponse signedIn(String token, {int ttl = 900}) => ExchangeResponse(
@@ -88,6 +89,19 @@ void main() {
           expect(robot.log.authorizationFor('/${LoginRobot.exchange}'), [null]);
           expect(robot.log.authorizationFor('/${LoginRobot.listReviews}'),
               everyElement('Bearer tok-1'));
+          // ...and name the verified tenant and the auth session, which a scoped
+          // service needs once a token is present (found by the S15c browser run).
+          final app = robot.log.headers
+              .where((h) => h.path == '/${LoginRobot.listReviews}')
+              .toList();
+          expect(app, isNotEmpty);
+          for (final h in app) {
+            expect(h.metadata['x-agent-user-id'], 'example.com');
+            expect(h.metadata['x-agent-session-id'], 'sid-1');
+          }
+          expect(robot.log.headers
+              .where((h) => h.path == '/${LoginRobot.exchange}')
+              .map((h) => h.metadata['x-agent-session-id']), [null]);
           // The code and state are gone from the address bar; the pending
           // sign-in is spent; the session is kept for a reload.
           expect(robot.platform.currentUri.hasQuery, isFalse);
