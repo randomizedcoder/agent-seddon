@@ -22,7 +22,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
 | S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
 | S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
-| S14 | Envoy hardening + `jwt_authn` | P0-4 | 🟡 | — |
+| S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
@@ -675,7 +675,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     reload's reply, not just the recorded call; `portal-widget` runs `flutter test
     --concurrency=4`.
   - Deferred: native desktop sign-in (read the CLI's stored login), a Roles / bindings page.
-- **2026-09-27 — S14.** Envoy hardening. The grpc-web bridge config moved from a nix heredoc to a
+- **2026-09-27 — S14 (#536).** Envoy hardening. The grpc-web bridge config moved from a nix heredoc to a
   tested renderer ([`test/portal-envoy/portal_envoy.py`](../../../test/portal-envoy/portal_envoy.py))
   over a listener spec ([`nix/portal/envoy-spec.nix`](../../../nix/portal/envoy-spec.nix));
   `grpc-web-up` is its shim. Details: [06, "As built (S14)"](06-portal-and-edge.md#envoy-hardening).
