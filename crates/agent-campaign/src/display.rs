@@ -5,6 +5,7 @@
 //! one listing that minted it.
 
 use agent_core::campaign::{TaskId, TaskPath};
+use agent_core::is_hidden_control;
 
 /// A listing's root → letter assignment. Roots are lettered in first-seen order
 /// (`A`…`Z`, then `AA`, `AB`, … bijective base 26), so the same root is the same
@@ -91,6 +92,28 @@ pub fn parse_letter(s: &str) -> Option<usize> {
     Some(idx - 1)
 }
 
+/// Render an untrusted string (a model- or user-written title, goal, question, reason,
+/// PR URL, error text) for a terminal: every C0 / C1 control, `DEL`, and every
+/// character [`is_hidden_control`] names (zero-width, bidi overrides and isolates, the
+/// tag block) becomes its `\u{..}` escape, so the text can neither move the cursor,
+/// recolour the line, set the window title, nor hide or reorder what the reader sees.
+/// Printable Unicode, including tabs' neighbours and every other script, passes through
+/// unchanged. Output is at most ten bytes per input char, so callers that cap the input
+/// (every seam string is capped) cap the output.
+pub fn escape_terminal(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() || is_hidden_control(c) {
+            // `write!` to a `String` cannot fail.
+            let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +121,47 @@ mod tests {
 
     fn path(s: &str) -> TaskPath {
         TaskPath::parse(s).unwrap()
+    }
+
+    // `escape_terminal`: every untrusted string reaches the terminal through it, so the
+    // adversarial rows pin the escapes that would otherwise recolour a line (ANSI SGR),
+    // set the window title (OSC + BEL), overwrite the line (CR), forge a column (C1
+    // CSI), or hide / reorder text (bidi override, zero-width, tag block).
+    #[rstest]
+    #[case::positive_plain("ship the thing", "ship the thing")]
+    #[case::positive_unicode_text_untouched("naïve — 日本語 🚀", "naïve — 日本語 🚀")]
+    #[case::positive_empty("", "")]
+    #[case::adversarial_ansi("\u{1b}[31mred\u{1b}[0m", "\\u{1b}[31mred\\u{1b}[0m")]
+    #[case::adversarial_osc_bell("\u{1b}]0;pwned\u{7}", "\\u{1b}]0;pwned\\u{7}")]
+    #[case::adversarial_crlf("ok\r\ndone", "ok\\u{d}\\u{a}done")]
+    #[case::adversarial_bidi_override("abc\u{202e}fdp.exe", "abc\\u{202e}fdp.exe")]
+    #[case::adversarial_bidi_isolate("a\u{2066}b\u{2069}", "a\\u{2066}b\\u{2069}")]
+    #[case::adversarial_zero_width("pass\u{200b}word", "pass\\u{200b}word")]
+    #[case::adversarial_c1("x\u{9b}31my", "x\\u{9b}31my")]
+    #[case::adversarial_tag_block("hi\u{e0041}", "hi\\u{e0041}")]
+    #[case::adversarial_nul("a\0b", "a\\u{0}b")]
+    #[case::adversarial_bom_inside("a\u{feff}b", "a\\u{feff}b")]
+    #[case::boundary_del("a\u{7f}b", "a\\u{7f}b")]
+    #[case::boundary_last_c0("a\u{1f}b", "a\\u{1f}b")]
+    #[case::boundary_first_printable("a b", "a b")]
+    #[case::corner_tab("a\tb", "a\\u{9}b")]
+    #[case::corner_already_escaped_text_untouched("\\u{1b}", "\\u{1b}")]
+    fn escape_terminal_rows(#[case] input: &str, #[case] want: &str) {
+        let got = escape_terminal(input);
+        assert_eq!(got, want);
+        assert!(
+            !got.chars().any(|c| c.is_control() || is_hidden_control(c)),
+            "escaped output still carries a control: {got:?}"
+        );
+    }
+
+    #[test]
+    fn boundary_escape_terminal_output_bounded() {
+        // Worst case: every char is a 6-digit tag-block code point → `\u{e007f}` = 9 bytes.
+        let input: String = std::iter::repeat_n('\u{e007f}', 4000).collect();
+        let got = escape_terminal(&input);
+        assert!(got.len() <= 10 * 4000, "{} bytes", got.len());
+        assert_eq!(got.len(), 9 * 4000);
     }
 
     // T1 `positive_display`: root 1042 rendered in a listing → `A`, `A.1.3`; the same

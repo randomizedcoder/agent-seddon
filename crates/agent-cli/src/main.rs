@@ -7,6 +7,7 @@
 //! multi-turn REPL (see `repl.rs`). `--continue` resumes the most recent saved
 //! session; `--resume ID` resumes a specific one.
 
+mod campaign_cli;
 mod grpc_server;
 mod mcp_server;
 mod metrics_server;
@@ -227,6 +228,55 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `agent campaign …` (docs/design/campaigns, CP-04): the store-only verbs run
+    // here, before any metrics or seam machinery starts — like `doctor`. The store
+    // is opened lazily and migrated on this first use when `[config_store]
+    // migrate_on_start` allows it; `--tenant` only selects the tenant view. The
+    // verbs run as `user:local` under a fresh local session scope. `plan` and
+    // `run --once` need the planner (a provider), so they keep the opened store
+    // and fall through to the built agent's `scope` arm below.
+    let mut campaign_run: Option<CampaignRun> = None;
+    if let Mode::Campaign(args) = &mode {
+        let store = agent_runtime::campaign::open_campaign_store(
+            &config,
+            agent_runtime::campaign::CampaignOpen {
+                tenant: args.tenant.as_deref(),
+                apply_migrations: true,
+            },
+        )
+        .await
+        .context("[campaign] store")?
+        .context(
+            "agent campaign: no campaign store is configured — set `[campaign] store = \
+             \"postgres\"` (the DSN comes from `[config_store] dsn_ref`)",
+        )?;
+        let ctx = campaign_cli::CampaignCtx {
+            store,
+            repos: config.campaign.repos.clone(),
+        };
+        if !args.cmd.needs_planner() {
+            let identity = agent_core::SessionKey::local(uuid::Uuid::new_v4().to_string());
+            return agent_core::scope(identity, async {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                campaign_cli::run(&ctx, &args.cmd, &mut out).await
+            })
+            .await;
+        }
+        // `config` moves into the builder below; keep what the planner needs.
+        let working_dir = if config.agent.working_dir.is_empty() {
+            std::env::current_dir().context("resolving the working directory")?
+        } else {
+            PathBuf::from(&config.agent.working_dir)
+        };
+        campaign_run = Some(CampaignRun {
+            ctx,
+            cfg: config.campaign.clone(),
+            repo_root: config.campaign.repo_root_or(&working_dir),
+            main_model: config.provider.model.clone(),
+        });
+    }
+
     // Metrics (opt-in). Instrumentation always runs into this registry; serving
     // the /metrics endpoint and pushing are gated by config.
     let metrics = Metrics::new();
@@ -304,6 +354,20 @@ async fn main() -> Result<()> {
     // the builder, so we can report them once the build proves every selector
     // resolves to a registered factory.
     let check_config = matches!(mode, Mode::CheckConfig);
+    if check_config {
+        // Dry-open the `[campaign] store` (docs/design/campaigns, CP-04): proves
+        // the selected arm is linked and its DSN reference resolves, LAZILY —
+        // no dial, no migration — so the check stays hermetic.
+        agent_runtime::campaign::open_campaign_store(
+            &config,
+            agent_runtime::campaign::CampaignOpen {
+                tenant: None,
+                apply_migrations: false,
+            },
+        )
+        .await
+        .context("[campaign] store")?;
+    }
     let selections = check_config.then(|| ConfigSelections {
         provider: config.agent.provider.clone(),
         context: config.agent.context.clone(),
@@ -312,6 +376,7 @@ async fn main() -> Result<()> {
         tokenizer: config.tokenizer.backend.clone(),
         search: config.search.backend_names().join(","),
         tools: config.tools.enabled.len(),
+        campaign: agent_runtime::campaign::backend_label(&config),
     });
 
     let agent = agent_runtime::build_agent(
@@ -335,6 +400,7 @@ async fn main() -> Result<()> {
         println!("  tokenizer = {}", s.tokenizer);
         println!("  search    = {}", s.search);
         println!("  tools     = {} enabled", s.tools);
+        println!("  campaign  = {}", s.campaign);
         return Ok(());
     }
 
@@ -521,6 +587,31 @@ async fn main() -> Result<()> {
             // already returned.
             Mode::CheckConfig => unreachable!("--check-config returns before the run"),
             Mode::Doctor => unreachable!("doctor returns before the run"),
+            // `plan` / `run --once`: the planner over the store opened above and the
+            // agent's planner provider (`[campaign] planner_model`, else the main
+            // one), with the worktree brief and touch resolver rooted at
+            // `[campaign] repo_root` (else `[agent] working_dir`).
+            Mode::Campaign(args) => {
+                let CampaignRun {
+                    ctx,
+                    cfg,
+                    repo_root,
+                    main_model,
+                } = campaign_run.expect("the campaign store is opened before the build");
+                let planner = agent_campaign::Planner::draft07(
+                    ctx.store.clone(),
+                    agent.campaign_planner_provider(),
+                    std::sync::Arc::new(agent_campaign::FallbackBrief::new(&repo_root)),
+                    std::sync::Arc::new(agent_campaign::WorktreeTouches::new(&repo_root)),
+                    cfg.planner_label(&main_model),
+                )
+                .with_max_repairs(cfg.max_repairs);
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                campaign_cli::run_plan(&ctx, &planner, cfg.plan_per_tick, &args.cmd, &mut out)
+                    .await
+                    .map(|()| None)
+            }
             Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } => {
                 unreachable!("login/logout/whoami return before the run")
             }
@@ -688,6 +779,12 @@ enum Mode {
     /// resolvability — and exits non-zero iff a required probe failed. On-demand,
     /// unlike `--check-config` it *does* dial the network. See docs/design/doctor/.
     Doctor,
+    /// `agent campaign <verb> …` (docs/design/campaigns, CP-04): the human-facing
+    /// verbs over the campaign store. Store-only verbs run before metrics and the
+    /// agent build, like `doctor`; `plan` / `run --once` build the agent for the
+    /// planner's provider. The bare word `campaign` selects this only as the first
+    /// non-option token — after `--` it is a goal word like any other.
+    Campaign(campaign_cli::CampaignArgs),
     /// Sign in (`agent login [--issuer NAME] [--endpoint ADDR]`): the device flow at
     /// the login issuer, then an agent token kept in
     /// `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json`
@@ -709,6 +806,15 @@ enum Mode {
     },
 }
 
+/// What a planner verb (`plan`, `run --once`) carries from the config load to the
+/// `scope` arm, since `config` is consumed by the builder in between.
+struct CampaignRun {
+    ctx: campaign_cli::CampaignCtx,
+    cfg: agent_runtime::CampaignCfg,
+    repo_root: PathBuf,
+    main_model: String,
+}
+
 /// The seam impls a config selects — captured before `Config` is consumed by the
 /// builder, then printed by `--check-config` once the build proves they resolve.
 struct ConfigSelections {
@@ -719,6 +825,8 @@ struct ConfigSelections {
     tokenizer: String,
     search: String,
     tools: usize,
+    /// `[campaign] store` as `off` / `postgres` (docs/design/campaigns, CP-04).
+    campaign: &'static str,
 }
 
 /// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;
@@ -785,6 +893,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut detect_mode_prompt: Option<String> = None;
     let mut check_config = false;
     let mut doctor = false;
+    let mut campaign: Option<campaign_cli::CampaignArgs> = None;
     let mut login = false;
     let mut logout = false;
     let mut whoami = false;
@@ -826,6 +935,19 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             // Bare `doctor` subcommand (or `--doctor`); the bare word must be an
             // explicit arm so the `_` catch-all below doesn't swallow it as a goal.
             "doctor" | "--doctor" => doctor = true,
+            // Bare `campaign` subcommand: everything after the word belongs to the
+            // verb parser (so `--title` is never swallowed as a goal word). Unreachable
+            // after `--` — the `end_of_opts` branch above runs first — so a
+            // scheduled-job goal can never turn a child into a campaign verb.
+            "campaign" => {
+                let parsed = campaign_cli::parse(&mut args)?;
+                if parsed.cmd == campaign_cli::CampaignCmd::Help {
+                    println!("{}", campaign_cli::USAGE);
+                    std::process::exit(0);
+                }
+                campaign = Some(parsed);
+                break;
+            }
             // `agent login` / `logout` / `whoami`: bare words, like `doctor`.
             "login" => login = true,
             "logout" => logout = true,
@@ -890,7 +1012,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                      --detect-mode P     classify prompt P's task mode and print the verdict\n  \
                      --check-config      load + validate the config, print the selected impls, and exit\n  \
                      doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
-                     login               sign in at the login issuer (device code) and keep an agent token [--issuer NAME] [--endpoint ADDR]\n  \
+                     campaign <verb> …   manage campaigns — add / plan / list / show / approve / answer … (`agent campaign --help`)\n  \
+                     login              sign in at the login issuer (device code) and keep an agent token [--issuer NAME] [--endpoint ADDR]\n  \
                      logout              revoke the stored login's session and forget it [--issuer NAME]\n  \
                      whoami              print the stored login's tenant, roles and permissions [--issuer NAME]\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
@@ -932,6 +1055,19 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
         Mode::CheckConfig
     } else if doctor {
         Mode::Doctor
+    } else if let Some(mut c) = campaign {
+        // `--tenant` before the `campaign` word binds the same as after it; the
+        // verb parser validated its own, this one is validated here.
+        if let (None, Some(t)) = (&c.tenant, tenant) {
+            if !agent_core::safe_segment(&t) {
+                anyhow::bail!("--tenant `{}` is not a path-safe segment", {
+                    let cut: String = t.chars().take(40).collect();
+                    agent_campaign::display::escape_terminal(&cut)
+                });
+            }
+            c.tenant = Some(t);
+        }
+        Mode::Campaign(c)
     } else if scheduler_mode {
         Mode::Scheduler
     } else if run_scheduled_job {
@@ -1007,6 +1143,64 @@ mod tests {
             Mode::OneShot(goal) => assert_eq!(goal, "summarise --the logs"),
             _ => panic!("expected OneShot"),
         }
+    }
+
+    // desc: the bare word `campaign` as the first non-option token selects the
+    // campaign mode and hands every later token to the verb parser — including
+    // flag-looking ones the goal catch-all would otherwise swallow.
+    #[test]
+    fn positive_campaign_word_selects_campaign_mode() {
+        let args = parse(&[
+            "--config", "x.toml", "campaign", "add", "--repo", "1", "--title", "t", "--goal", "g",
+        ])
+        .unwrap();
+        assert_eq!(args.config_path, PathBuf::from("x.toml"));
+        match args.mode {
+            Mode::Campaign(c) => match c.cmd {
+                campaign_cli::CampaignCmd::Add(add) => assert_eq!(add.title, "t"),
+                other => panic!("expected add, got {other:?}"),
+            },
+            _ => panic!("expected Campaign"),
+        }
+    }
+
+    // desc: `--tenant` before the `campaign` word binds like `--tenant` after it.
+    #[test]
+    fn corner_tenant_before_campaign_word_binds() {
+        let args = parse(&["--tenant", "acme", "campaign", "list"]).unwrap();
+        match args.mode {
+            Mode::Campaign(c) => assert_eq!(c.tenant.as_deref(), Some("acme")),
+            _ => panic!("expected Campaign"),
+        }
+    }
+
+    // desc (adversarial): an unsafe `--tenant` before the word is refused, same as
+    // the verb parser refuses one after it.
+    #[test]
+    fn adversarial_tenant_before_campaign_word_is_validated() {
+        let err = parse(&["--tenant", "../x", "campaign", "list"])
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("not a path-safe segment"), "{err}");
+    }
+
+    // desc (adversarial): after `--` the word `campaign` is a goal word, never a
+    // mode — a scheduled-job goal cannot reach the campaign verbs.
+    #[test]
+    fn adversarial_campaign_after_double_dash_is_a_goal() {
+        let args = parse(&["--", "campaign", "cancel", "A"]).unwrap();
+        match args.mode {
+            Mode::OneShot(goal) => assert_eq!(goal, "campaign cancel A"),
+            _ => panic!("expected OneShot"),
+        }
+    }
+
+    // desc (negative): `--check-config` outranks the campaign word, as it does
+    // every other mode.
+    #[test]
+    fn corner_check_config_outranks_campaign() {
+        let args = parse(&["--check-config", "campaign", "list"]).unwrap();
+        assert!(matches!(args.mode, Mode::CheckConfig));
     }
 
     // desc (negative): --run-scheduled-job without --tenant is refused (fail-closed —

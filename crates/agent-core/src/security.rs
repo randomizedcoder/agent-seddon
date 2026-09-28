@@ -122,8 +122,9 @@ pub fn scan_for_injection(content: &str) -> Option<&'static str> {
 /// otherwise innocuous-looking text: zero-width joiners, directional marks and
 /// overrides, the **bidi isolates** behind Trojan-Source (CVE-2021-42574), the soft
 /// hyphen, and the deprecated Unicode tag block. A legitimate *leading* BOM is
-/// stripped by the caller before this runs.
-fn is_hidden_control(c: char) -> bool {
+/// stripped by the caller before this runs. Public so a terminal renderer can escape
+/// the same set (`agent_campaign::display::escape_terminal`) rather than keep a copy.
+pub fn is_hidden_control(c: char) -> bool {
     matches!(c,
         '\u{00AD}'                  // soft hyphen
         | '\u{061C}'                // Arabic letter mark

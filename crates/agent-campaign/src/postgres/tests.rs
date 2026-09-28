@@ -618,6 +618,27 @@ async fn positive_migrate_is_idempotent_on_reconnect() {
     assert_eq!(n, 1, "one ledger row per version");
 }
 
+/// The CLI's open path: a lazy pool (no dial at construction), then
+/// `ensure_migrated` on the first verb — twice, since every verb calls it — and the
+/// store is usable under a tenant afterwards.
+#[tokio::test]
+#[ignore = "requires a live Postgres (AGENT_CAMPAIGN_TEST_DSN); run via nix run .#pg-integration"]
+async fn positive_ensure_migrated_on_lazy_store() {
+    let pool = test_pool().await;
+    reset(&pool).await;
+    let lazy = PgCampaigns::connect_lazy(&dsn(), 2).expect("lazy pool");
+    lazy.ensure_migrated().await.expect("first ensure");
+    lazy.ensure_migrated().await.expect("second ensure no-ops");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM _campaign_migrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "ensure_migrated never re-applies a version");
+    let store = lazy.with_tenant("ta").unwrap();
+    let root = campaign(&store, "after ensure").await;
+    assert_eq!(store.get(root.task_id).await.unwrap().title, "after ensure");
+}
+
 #[tokio::test]
 #[ignore = "requires a live Postgres (AGENT_CAMPAIGN_TEST_DSN); run via nix run .#pg-integration"]
 async fn positive_reconnect_reads_persisted() {

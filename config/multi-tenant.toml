@@ -115,3 +115,10 @@ store = "postgres"
 # Message-transport cards (config C37 / D2): Slack/etc. registry on Postgres.
 [transport_registry]
 store = "postgres"
+
+# Campaigns (docs/design/campaigns, CP-04): the `agent campaign …` task tree on
+# Postgres. Opened lazily (no dial until the first verb) over the same
+# `[config_store] dsn_ref`; the schema is applied on the first verb under
+# `migrate_on_start`. Postgres is the only backing tier.
+[campaign]
+store = "postgres"

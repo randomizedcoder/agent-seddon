@@ -115,6 +115,8 @@ pub struct Config {
     pub forge_registry: ForgeRegistryCfg,
     #[serde(default)]
     pub transport_registry: TransportRegistryCfg,
+    #[serde(default)]
+    pub campaign: CampaignCfg,
     /// Path the config was read from, set by the CLI after parse (never a TOML
     /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
     /// write edits back to the same file. `None` for embedded/test callers that
@@ -505,6 +507,169 @@ fn default_job_timeout_secs() -> u64 {
 }
 fn default_claim_ttl_secs() -> u64 {
     900
+}
+
+/// Campaigns (`[campaign]`, design track `docs/design/campaigns/`): the planner and
+/// the `agent campaign …` CLI (CP-04). Empty `store` = off, and every `agent campaign`
+/// verb refuses with a hint. `"postgres"` reuses `[config_store] dsn_ref` for its DSN,
+/// like the scheduler and digest tiers — there is deliberately no `dsn_ref` here
+/// (`04-executor.md`). The driver's tick / worker keys land in CP-05. Validated at
+/// config load, so the CLI, `doctor` and `--check-config` all refuse a bad block.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct CampaignCfg {
+    /// `""` (off) | `"postgres"` (feature `campaign-postgres`): the pool opens lazily
+    /// (a config check never dials) and the schema is applied on the first real verb
+    /// when `[config_store] migrate_on_start`.
+    #[serde(default)]
+    pub store: String,
+    /// Connection-pool ceiling for the campaign store's own pool (`postgres` only),
+    /// [`CampaignCfg::POOL_MAX`].
+    #[serde(default = "default_campaign_pool_max")]
+    pub pool_max: u32,
+    /// Role routing: the provider the planner's decomposition calls use — a
+    /// `[[route.upstreams]]` name or a registry provider type; `""` = the main
+    /// provider. Also the `model` label recorded on every planner attempt.
+    #[serde(default)]
+    pub planner_model: String,
+    /// Nodes one `agent campaign plan` / `run --once` tick decomposes,
+    /// [`CampaignCfg::PLAN_PER_TICK`]; `0` plans nothing (a `run --once` then only
+    /// reaps).
+    #[serde(default = "default_campaign_plan_per_tick")]
+    pub plan_per_tick: usize,
+    /// Schema-repair round trips the planner allows per decision,
+    /// [`CampaignCfg::MAX_REPAIRS`].
+    #[serde(default = "default_campaign_max_repairs")]
+    pub max_repairs: usize,
+    /// Repository root the planner's fallback brief reads and `touches` resolve
+    /// against; `""` = `[agent] working_dir`.
+    #[serde(default)]
+    pub repo_root: String,
+    /// `--repo <slug>` → `repo_id` until RK-02 gives the store a `repos` table: keys
+    /// are path-safe segments, values ≥ 1.
+    #[serde(default)]
+    pub repos: std::collections::BTreeMap<String, i64>,
+}
+
+impl CampaignCfg {
+    /// Accepted `pool_max`.
+    pub const POOL_MAX: std::ops::RangeInclusive<u32> = 1..=64;
+    /// Accepted `plan_per_tick` (also the ceiling of the CLI's `plan --max`).
+    pub const PLAN_PER_TICK: std::ops::RangeInclusive<usize> = 0..=32;
+    /// Accepted `max_repairs`.
+    pub const MAX_REPAIRS: std::ops::RangeInclusive<usize> = 0..=5;
+
+    /// Load-time shape checks. Values are operator input, but a hostile config must
+    /// still fail closed rather than reach a `safe_segment`-less path or an unbounded
+    /// pool.
+    pub fn validate(&self) -> Result<(), String> {
+        match self.store.trim() {
+            "" | "postgres" => {}
+            other => {
+                return Err(format!(
+                    "`[campaign] store` = {:?} is not one of \"\", \"postgres\"",
+                    agent_core::campaign::truncate_chars(other, 40)
+                ))
+            }
+        }
+        if !Self::POOL_MAX.contains(&self.pool_max) {
+            return Err(format!(
+                "`[campaign] pool_max` = {} is outside {}..={}",
+                self.pool_max,
+                Self::POOL_MAX.start(),
+                Self::POOL_MAX.end()
+            ));
+        }
+        if !Self::PLAN_PER_TICK.contains(&self.plan_per_tick) {
+            return Err(format!(
+                "`[campaign] plan_per_tick` = {} is outside {}..={}",
+                self.plan_per_tick,
+                Self::PLAN_PER_TICK.start(),
+                Self::PLAN_PER_TICK.end()
+            ));
+        }
+        if !Self::MAX_REPAIRS.contains(&self.max_repairs) {
+            return Err(format!(
+                "`[campaign] max_repairs` = {} is outside {}..={}",
+                self.max_repairs,
+                Self::MAX_REPAIRS.start(),
+                Self::MAX_REPAIRS.end()
+            ));
+        }
+        if self.planner_model.chars().count() > agent_core::campaign::MAX_MODEL
+            || self.planner_model.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "`[campaign] planner_model` must be at most {} chars with no control characters",
+                agent_core::campaign::MAX_MODEL
+            ));
+        }
+        if self.repo_root.chars().any(char::is_control) {
+            return Err("`[campaign] repo_root` contains control characters".into());
+        }
+        for (slug, id) in &self.repos {
+            if !agent_core::safe_segment(slug) {
+                return Err(format!(
+                    "`[campaign.repos]` key {:?} is not a path-safe segment",
+                    agent_core::campaign::truncate_chars(slug, 40)
+                ));
+            }
+            if *id < 1 {
+                return Err(format!(
+                    "`[campaign.repos] {slug}` = {id} must be at least 1"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The repository root: `repo_root` when set, else `working_dir`.
+    pub fn repo_root_or(&self, working_dir: &std::path::Path) -> std::path::PathBuf {
+        let root = self.repo_root.trim();
+        if root.is_empty() {
+            working_dir.to_path_buf()
+        } else {
+            std::path::PathBuf::from(root)
+        }
+    }
+
+    /// The model label the planner records: `planner_model` when set, else the main
+    /// provider's model.
+    pub fn planner_label<'a>(&'a self, main_model: &'a str) -> &'a str {
+        let label = self.planner_model.trim();
+        if label.is_empty() {
+            main_model
+        } else {
+            label
+        }
+    }
+}
+
+impl Default for CampaignCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            pool_max: default_campaign_pool_max(),
+            planner_model: String::new(),
+            plan_per_tick: default_campaign_plan_per_tick(),
+            max_repairs: default_campaign_max_repairs(),
+            repo_root: String::new(),
+            repos: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+fn default_campaign_pool_max() -> u32 {
+    4
+}
+fn default_campaign_plan_per_tick() -> usize {
+    4
+}
+fn default_campaign_max_repairs() -> usize {
+    2
 }
 
 /// Remote code-collaboration platform (the `Forge` seam, parity spec 27).
@@ -4214,6 +4379,7 @@ impl Config {
             role: RoleCfg::default(),
             forge_registry: ForgeRegistryCfg::default(),
             transport_registry: TransportRegistryCfg::default(),
+            campaign: CampaignCfg::default(),
             auth: AuthCfg::default(),
             tenancy: TenancyCfg::default(),
             secrets: SecretsCfg::default(),
@@ -4241,6 +4407,156 @@ mod tests {
         assert_eq!(cfg.members[0].name(), "glm");
         assert!(matches!(cfg.members[1], PoolMemberEntry::Name(_)));
         assert_eq!(cfg.policy, "least-loaded");
+    }
+
+    /// `[campaign]` (campaigns CP-04): the shape checks that run at config load.
+    /// Config is operator input, but the values feed a pool size, a per-tick planner
+    /// budget, a model label stored on every attempt and path segments, so each one
+    /// is bounded and the `adversarial_` rows pin the rejections.
+    #[rstest::rstest]
+    #[case::positive_defaults("", Ok(()))]
+    #[case::positive_postgres_with_repos(
+        r#"
+        store = "postgres"
+        pool_max = 8
+        planner_model = "cheap"
+        plan_per_tick = 8
+        max_repairs = 1
+        repo_root = "/srv/repo"
+        [repos]
+        agent-seddon = 1
+        other_repo = 42
+        "#,
+        Ok(())
+    )]
+    #[case::boundary_pool_max_1("pool_max = 1", Ok(()))]
+    #[case::boundary_pool_max_64("pool_max = 64", Ok(()))]
+    #[case::negative_pool_max_0("pool_max = 0", Err("pool_max"))]
+    #[case::negative_pool_max_65("pool_max = 65", Err("pool_max"))]
+    #[case::boundary_plan_per_tick_0("plan_per_tick = 0", Ok(()))]
+    #[case::boundary_plan_per_tick_32("plan_per_tick = 32", Ok(()))]
+    #[case::negative_plan_per_tick_33("plan_per_tick = 33", Err("plan_per_tick"))]
+    #[case::boundary_max_repairs_5("max_repairs = 5", Ok(()))]
+    #[case::negative_max_repairs_6("max_repairs = 6", Err("max_repairs"))]
+    #[case::negative_unknown_store(r#"store = "sqlite""#, Err("store"))]
+    #[case::corner_store_padded(r#"store = " postgres ""#, Ok(()))]
+    #[case::adversarial_store_huge_is_truncated_in_the_error(
+        r#"store = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx""#,
+        Err("store")
+    )]
+    #[case::adversarial_planner_model_control_chars(
+        "planner_model = \"cheap\\u001b[31m\"",
+        Err("planner_model")
+    )]
+    #[case::adversarial_repo_root_control_chars("repo_root = \"/srv\\u0000/x\"", Err("repo_root"))]
+    #[case::adversarial_repo_slug_traversal(
+        r#"
+        [repos]
+        "../x" = 1
+        "#,
+        Err("[campaign.repos]")
+    )]
+    #[case::adversarial_repo_slug_leading_dash(
+        r#"
+        [repos]
+        "-x" = 1
+        "#,
+        Err("[campaign.repos]")
+    )]
+    #[case::adversarial_repo_slug_space(
+        r#"
+        [repos]
+        "a b" = 1
+        "#,
+        Err("[campaign.repos]")
+    )]
+    #[case::negative_repo_id_zero(
+        "
+        [repos]
+        ok = 0
+        ",
+        Err("at least 1")
+    )]
+    #[case::adversarial_repo_id_negative(
+        "
+        [repos]
+        ok = -5
+        ",
+        Err("at least 1")
+    )]
+    fn campaign_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
+        let cfg: CampaignCfg = toml::from_str(toml_src).expect("parses");
+        let got = cfg.validate();
+        match want {
+            Ok(()) => assert_eq!(got, Ok(()), "{toml_src}"),
+            Err(needle) => {
+                let err = got.expect_err(toml_src);
+                assert!(err.contains(needle), "{err:?} should name `{needle}`");
+                assert!(err.len() < 200, "error echoes too much: {err:?}");
+            }
+        }
+    }
+
+    /// `planner_model` is stored on every planner attempt under the seam's
+    /// `MAX_MODEL` cap, so the config refuses what the store would truncate.
+    #[rstest::rstest]
+    #[case::boundary_planner_model_128(128, true)]
+    #[case::adversarial_planner_model_129(129, false)]
+    #[case::adversarial_planner_model_huge(100_000, false)]
+    fn campaign_planner_model_length_rows(#[case] chars: usize, #[case] ok: bool) {
+        // Both fillers: the cap counts chars, not bytes, so a multibyte label of 128
+        // chars (256 bytes) is still accepted and 129 still refused.
+        for filler in ["m", "é"] {
+            let cfg = CampaignCfg {
+                planner_model: filler.repeat(chars),
+                ..CampaignCfg::default()
+            };
+            let got = cfg.validate();
+            assert_eq!(got.is_ok(), ok, "{chars} × {filler:?}: {got:?}");
+            if let Err(e) = got {
+                assert!(e.contains("planner_model"), "{e}");
+            }
+        }
+    }
+
+    #[test]
+    fn positive_campaign_defaults_match_the_shipped_reference() {
+        let cfg = CampaignCfg::default();
+        assert_eq!(cfg.store, "");
+        assert_eq!(cfg.pool_max, 4);
+        assert_eq!(cfg.planner_model, "");
+        assert_eq!(cfg.plan_per_tick, 4);
+        assert_eq!(cfg.max_repairs, 2);
+        assert_eq!(cfg.repo_root, "");
+        assert!(cfg.repos.is_empty());
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[rstest::rstest]
+    #[case::positive_repo_root_set("/srv/repo", "/wd", "/srv/repo")]
+    #[case::corner_repo_root_empty_falls_back("", "/wd", "/wd")]
+    #[case::corner_repo_root_blank_falls_back("   ", "/wd", "/wd")]
+    fn campaign_repo_root_or_rows(#[case] root: &str, #[case] wd: &str, #[case] want: &str) {
+        let cfg = CampaignCfg {
+            repo_root: root.to_string(),
+            ..CampaignCfg::default()
+        };
+        assert_eq!(
+            cfg.repo_root_or(std::path::Path::new(wd)),
+            std::path::PathBuf::from(want)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::positive_planner_model_set("cheap", "main", "cheap")]
+    #[case::corner_planner_model_empty_falls_back("", "main", "main")]
+    #[case::corner_planner_model_blank_falls_back("  ", "main", "main")]
+    fn campaign_planner_label_rows(#[case] model: &str, #[case] main: &str, #[case] want: &str) {
+        let cfg = CampaignCfg {
+            planner_model: model.to_string(),
+            ..CampaignCfg::default()
+        };
+        assert_eq!(cfg.planner_label(main), want);
     }
 
     /// desc: `TelemetryCfg::reader_credentials` (multi-tenancy C27) resolves the reader
