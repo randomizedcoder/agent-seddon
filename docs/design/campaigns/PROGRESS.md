@@ -230,6 +230,19 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   already reloads explicitly; `positive_reindex_reloads_reader_after_commit` pins it) and the
   `agent-tools` two-window flatness pattern in `tests/leak.rs` (window 1 absorbs one-time init,
   window 2 must be flat; a real leak grows every window).
+- ~~`agent-runtime --no-default-features` (bare, `campaign`, `campaign-postgres`) fails to build
+  on `main` (CP-04 item 7: 21 errors in `metered.rs` / `builder.rs` / the web-search and
+  context-bench paths); no gate compiles a lean build, so it regressed silently.~~ **Resolved in
+  #PR3.** Five gating mistakes, fixed by one rule (widen the gate on the *definition* for a
+  generic helper, gate the *caller* for a feature-specific item): `expand_tilde` ungated; the
+  `provider-router` cfg + doc comment that had drifted onto `struct RoleScoped` moved back onto
+  `build_route_upstream`, `record_route_event` router-gated, `provider-router` implies
+  `provider-openai-compat`; the `websearch-brave` cfg moved back onto the brave factory line and
+  `resolve_ws_key` gated on every caller (the planned `websearch-brave → web-search` implication
+  would be a feature cycle); `estimate_tokens` / `bench_estimate_tokens` always compiled;
+  `role-postgres` added to the `mod dsn` / `mod store_backend` / `pg_backend` gates (with
+  `auth-postgres`). New `feature-matrix` check (`nix/checks/feature-matrix.nix`): seven
+  `cargo check` rows over lean / single-feature builds of `agent-runtime` + `agent-cli`.
 - A node left in `decomposing` by a crash between `plan_start` and the close (the best-effort
   close cannot run if the process dies) needs a reaper — CP-05's driver tick (`reap()` already
   handles leases; `decomposing` older than a bound is the analogous rule).
