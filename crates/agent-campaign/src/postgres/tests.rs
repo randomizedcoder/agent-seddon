@@ -58,12 +58,14 @@ async fn pg_base() -> (Arc<AtomicU64>, PgCampaigns) {
 /// shared pool, reading the harness clock.
 async fn pg_harness() -> Harness {
     let (clock, base) = pg_base().await;
+    let backend: Arc<dyn CampaignBackend> = Arc::new(base.clone());
     Harness::from_factory(
         clock,
         Arc::new(move |tenant| {
             base.with_tenant(tenant)
                 .map(|s| Arc::new(s) as Arc<dyn CampaignStore>)
         }),
+        backend,
     )
 }
 

@@ -4,9 +4,11 @@
 
 use super::*;
 use agent_core::campaign::{
-    AttemptKind, AttemptOutcome, CampaignError, TaskAttempt, LEASE_MAX_SECS, LEASE_MIN_SECS,
+    AttemptKind, AttemptOutcome, CampaignError, TaskAttempt, TaskKind, DECOMPOSING_MAX_SECS,
+    LEASE_MAX_SECS, LEASE_MIN_SECS,
 };
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 async fn claim(
     store: &dyn CampaignStore,
@@ -461,4 +463,191 @@ pub async fn adversarial_owner_empty(h: &Harness) {
         );
     }
     assert_eq!(s.get(leaves[0].task_id).await.unwrap(), leaves[0]);
+}
+
+// -- `reap_decomposing` and `CampaignBackend::tenants` (CP-05) ---------------------
+
+/// A root the planner started (`ready → decomposing`) and left there, as a crashed
+/// planner would; returns it with its version after the start.
+async fn wedged(store: &dyn CampaignStore, title: &str) -> (Task, u64) {
+    let root = campaign(store, title).await;
+    started(store, root.task_id).await
+}
+
+/// A node `decomposing` for longer than the bound → `ready` by `reaper` with
+/// `detail.reason = plan_stale`; `attempts` unchanged; no attempt row touched; the
+/// node is plannable again and a second reap finds nothing.
+pub async fn positive_reap_decomposing_stale(h: &Harness) {
+    let s = h.a();
+    let (root, v) = wedged(&*s, "stale").await;
+    let attempts_before = s.attempts(root.task_id).await.unwrap();
+    h.advance_secs(u64::try_from(DECOMPOSING_MAX_SECS).unwrap() + 1);
+    let released = s.reap_decomposing(DECOMPOSING_MAX_SECS).await.unwrap();
+    assert_eq!(released, vec![root.task_id]);
+    let t = s.get(root.task_id).await.unwrap();
+    assert_eq!(t.state, TaskState::Ready);
+    assert_eq!(t.kind, TaskKind::Objective);
+    assert_eq!(t.version, v + 1);
+    assert_eq!(t.attempts, 0);
+    assert_eq!(t.updated_at_ms, h.now_ms());
+    let ev = events_by(&*s, root.task_id, "reaper").await;
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].from_state, Some(TaskState::Decomposing));
+    assert_eq!(ev[0].to_state, TaskState::Ready);
+    assert_eq!(ev[0].detail["reason"], json!("plan_stale"));
+    assert_eq!(ev[0].version, t.version);
+    assert_eq!(s.attempts(root.task_id).await.unwrap(), attempts_before);
+    // Plannable again — and freshly `decomposing`, so a second reap leaves it.
+    assert!(matches!(
+        s.plan_start(root.task_id).await.unwrap(),
+        PlanStart::Started { .. }
+    ));
+    assert!(s
+        .reap_decomposing(DECOMPOSING_MAX_SECS)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// A node `decomposing` for less than the bound is left alone: no rows, no event,
+/// same version.
+pub async fn corner_reap_decomposing_fresh_untouched(h: &Harness) {
+    let s = h.a();
+    let (root, v) = wedged(&*s, "fresh").await;
+    let before = events(&*s, root.task_id).await;
+    h.advance_secs(u64::try_from(DECOMPOSING_MAX_SECS).unwrap() - 1);
+    assert!(s
+        .reap_decomposing(DECOMPOSING_MAX_SECS)
+        .await
+        .unwrap()
+        .is_empty());
+    let t = s.get(root.task_id).await.unwrap();
+    assert_eq!(t.state, TaskState::Decomposing);
+    assert_eq!(t.version, v);
+    assert_eq!(events(&*s, root.task_id).await, before);
+}
+
+/// At exactly the bound the node holds (like a lease at `lease_until == now`); one
+/// millisecond past it, it is released.
+pub async fn boundary_reap_decomposing_at_bound(h: &Harness) {
+    let s = h.a();
+    let (root, _) = wedged(&*s, "bound").await;
+    h.advance_secs(u64::try_from(DECOMPOSING_MAX_SECS).unwrap());
+    assert!(s
+        .reap_decomposing(DECOMPOSING_MAX_SECS)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(state(&*s, root.task_id).await, TaskState::Decomposing);
+    h.clock.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(
+        s.reap_decomposing(DECOMPOSING_MAX_SECS).await.unwrap(),
+        vec![root.task_id]
+    );
+    assert_eq!(state(&*s, root.task_id).await, TaskState::Ready);
+}
+
+/// The plan reaper touches no lease and no attempt: a leaf whose lease has also
+/// expired keeps its `claimed` state and `pending` work attempt until `reap()` runs,
+/// and the released node closes nothing (a planner that died wrote no attempt row).
+pub async fn corner_reap_decomposing_no_attempt_closed(h: &Harness) {
+    let s = h.a();
+    let (_, leaves) = ready_leaves(&*s, 1).await;
+    let w = owner("w1");
+    let c = claim_one(&*s, &w).await;
+    let (root, _) = wedged(&*s, "wedge").await;
+    h.advance_secs(u64::try_from(DECOMPOSING_MAX_SECS).unwrap() + 1);
+    assert_eq!(
+        s.reap_decomposing(DECOMPOSING_MAX_SECS).await.unwrap(),
+        vec![root.task_id]
+    );
+    let l = s.get(leaves[0].task_id).await.unwrap();
+    assert_eq!(l, c.task, "the leased leaf is untouched");
+    let attempts = work_attempts(&*s, l.task_id).await;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].outcome, AttemptOutcome::Pending);
+    assert!(s.attempts(root.task_id).await.unwrap().is_empty());
+    // The lease reaper is the one that releases the leaf.
+    let reaped = s.reap().await.unwrap();
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].task_id, l.task_id);
+}
+
+/// A hostile bound is clamped like a lease: `0` and `-5` become the 60 s floor
+/// (a 61 s old node is released), `10^9` the 86400 s ceiling (86399 s holds,
+/// 86401 s releases).
+pub async fn adversarial_reap_decomposing_bound_clamped(h: &Harness) {
+    let s = h.a();
+    for (bound, title) in [(0_i64, "zero"), (-5, "negative")] {
+        let (root, _) = wedged(&*s, title).await;
+        h.advance_secs(61);
+        assert_eq!(
+            s.reap_decomposing(bound).await.unwrap(),
+            vec![root.task_id],
+            "bound {bound}"
+        );
+        assert_eq!(state(&*s, root.task_id).await, TaskState::Ready);
+    }
+    let (root, _) = wedged(&*s, "huge").await;
+    h.advance_secs(u64::from(LEASE_MAX_SECS) - 1);
+    assert!(s.reap_decomposing(1_000_000_000).await.unwrap().is_empty());
+    assert_eq!(state(&*s, root.task_id).await, TaskState::Decomposing);
+    h.advance_secs(2);
+    assert_eq!(
+        s.reap_decomposing(1_000_000_000).await.unwrap(),
+        vec![root.task_id]
+    );
+    assert_eq!(state(&*s, root.task_id).await, TaskState::Ready);
+}
+
+/// Only tenants with a node in a live state are listed: a `ready` root counts, a
+/// cancelled root, a draft root and a gated split (`decomposed` parent over
+/// `awaiting_approval` children) do not.
+pub async fn positive_tenants_live_only(h: &Harness) {
+    let a = h.a();
+    campaign(&*a, "live").await;
+    let b = h.b();
+    let rb = campaign(&*b, "over").await;
+    b.cancel(rb.task_id, &dave()).await.unwrap();
+    let c = h.store("tc");
+    c.create(
+        NewCampaign {
+            draft: true,
+            ..new_campaign("draft")
+        },
+        &dave(),
+    )
+    .await
+    .unwrap();
+    let d = h.store("td");
+    let rd = campaign_with(&*d, Policy::default()).await;
+    split(&*d, rd.task_id, 2).await;
+    assert_eq!(state(&*d, rd.task_id).await, TaskState::Decomposed);
+    assert_eq!(h.backend.tenants().await.unwrap(), vec!["ta".to_string()]);
+}
+
+/// No live node anywhere → no tenants, no error.
+pub async fn corner_tenants_none(h: &Harness) {
+    assert!(h.backend.tenants().await.unwrap().is_empty());
+    // A backend handle opens the same tenant view the harness does.
+    let via_backend = h.backend.with_tenant("ta").unwrap();
+    assert_eq!(via_backend.tenant(), "ta");
+    assert!(via_backend
+        .list_campaigns(ListFilter::default())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// Several live nodes per tenant, created out of order → each tenant once, sorted.
+pub async fn boundary_tenants_sorted_distinct(h: &Harness) {
+    for tenant in ["tb", "ta", "tc"] {
+        let s = h.store(tenant);
+        campaign(&*s, "one").await;
+        ready_leaves(&*s, 2).await;
+    }
+    assert_eq!(
+        h.backend.tenants().await.unwrap(),
+        vec!["ta".to_string(), "tb".to_string(), "tc".to_string()]
+    );
 }

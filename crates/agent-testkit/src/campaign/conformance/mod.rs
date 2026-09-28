@@ -10,9 +10,10 @@
 
 use crate::campaign::MemCampaigns;
 use agent_core::campaign::{
-    Actor, CampaignResult, CampaignStore, ChildSpec, ClaimRequest, Claimed, Complete, Decomposed,
-    Decomposition, EstSize, IdemKey, MarkLeaf, NewCampaign, Owner, PlanAttempt, PlanStart, Policy,
-    PrRef, ReviewOutcome, Task, TaskEvent, TaskId, TaskState, TokenUsage,
+    Actor, CampaignBackend, CampaignResult, CampaignStore, ChildSpec, ClaimRequest, Claimed,
+    Complete, Decomposed, Decomposition, EstSize, IdemKey, ListFilter, MarkLeaf, NewCampaign,
+    Owner, PlanAttempt, PlanStart, Policy, PrRef, ReviewOutcome, Task, TaskEvent, TaskId,
+    TaskState, TokenUsage,
 };
 use agent_core::UserId;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,11 +28,13 @@ pub mod t8;
 
 type Open = dyn Fn(&str) -> CampaignResult<Arc<dyn CampaignStore>> + Send + Sync;
 
-/// One tier under test: a clock the rows can advance and a factory that opens the
-/// backend under a tenant.
+/// One tier under test: a clock the rows can advance, a factory that opens the
+/// backend under a tenant, and the tier's [`CampaignBackend`] (the tenant
+/// enumeration the driver tick uses; CP-05 rows).
 pub struct Harness {
     pub clock: Arc<AtomicU64>,
     open: Arc<Open>,
+    pub backend: Arc<dyn CampaignBackend>,
 }
 
 impl Harness {
@@ -40,19 +43,29 @@ impl Harness {
         let clock = Arc::new(AtomicU64::new(1_700_000_000_000));
         let c = Arc::clone(&clock);
         let base = MemCampaigns::new().with_clock(Arc::new(move || c.load(Ordering::SeqCst)));
+        let backend: Arc<dyn CampaignBackend> = Arc::new(base.clone());
         Harness::from_factory(
             clock,
             Arc::new(move |tenant| {
                 base.with_tenant(tenant)
                     .map(|s| Arc::new(s) as Arc<dyn CampaignStore>)
             }),
+            backend,
         )
     }
 
     /// Any tier: `open(tenant)` must return a store bound to `tenant` that reads
-    /// `clock` for its time.
-    pub fn from_factory(clock: Arc<AtomicU64>, open: Arc<Open>) -> Harness {
-        Harness { clock, open }
+    /// `clock` for its time; `backend` is the same tier's multi-tenant handle.
+    pub fn from_factory(
+        clock: Arc<AtomicU64>,
+        open: Arc<Open>,
+        backend: Arc<dyn CampaignBackend>,
+    ) -> Harness {
+        Harness {
+            clock,
+            open,
+            backend,
+        }
     }
 
     /// The store under `tenant`; a tenant the tier refuses is a test failure.
@@ -481,6 +494,14 @@ macro_rules! campaign_conformance_suite {
                 adversarial_owner_forged,
                 adversarial_lease_negative,
                 adversarial_owner_empty,
+                positive_reap_decomposing_stale,
+                corner_reap_decomposing_fresh_untouched,
+                boundary_reap_decomposing_at_bound,
+                corner_reap_decomposing_no_attempt_closed,
+                adversarial_reap_decomposing_bound_clamped,
+                positive_tenants_live_only,
+                corner_tenants_none,
+                boundary_tenants_sorted_distinct,
             ]);
             $crate::__campaign_table!(t7, $make, $after, $ig, [
                 positive_in_review,
