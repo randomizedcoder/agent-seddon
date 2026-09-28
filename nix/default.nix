@@ -73,6 +73,11 @@ let
         # `deny.toml` (cargo-deny config) is not a cargo source file, so the default
         # filter would drop it — keep it for the `cargo-deny` check.
         || (lib.hasSuffix "/deny.toml" path)
+        # `agent-proto`'s OpenAPI-parity test embeds the committed contract via
+        # `include_str!("../openapi/agent.swagger.json")` (rest-openapi Inc 04), so
+        # the .json must survive the filter or that test won't compile. (Scoped to
+        # that dir so unrelated JSON can't sweep in and rebuild deps.)
+        || (lib.hasInfix "/agent-proto/openapi/" path)
         || (lib.hasInfix "/tests/fixtures/" path)
         || (craneLib.filterCargoSources path type)
       );
@@ -207,6 +212,25 @@ let
     text = ''
       dest="''${1:-crates/agent-grpc/src/constants.rs}"
       cp -f ${constantsRs} "$dest"
+      chmod u+w "$dest"
+      echo "wrote $dest"
+    '';
+  };
+
+  # The generated OpenAPI (Swagger 2.0) contract, rendered from the .proto
+  # `(google.api.http)` annotations (gap-analysis §4, docs/design/rest-openapi/). One
+  # derivation, shared by the `gen-openapi` app and the `openapi-sync` check so they
+  # can never disagree — the constants.rs / gen-constants / constants-sync pattern
+  # applied to the REST contract.
+  openapiDoc = import ./gen-openapi.nix { inherit pkgs versions; };
+
+  # Copies the generated OpenAPI document into the repo. Run after changing an RPC's
+  # `(google.api.http)` route (or adding/removing an annotated RPC).
+  gen-openapi = pkgs.writeShellApplication {
+    name = "gen-openapi";
+    text = ''
+      dest="''${1:-crates/agent-proto/openapi/agent.swagger.json}"
+      cp -f ${openapiDoc} "$dest"
       chmod u+w "$dest"
       echo "wrote $dest"
     '';
@@ -458,6 +482,7 @@ let
       advisory-db
       versions
       constantsRs
+      openapiDoc
       agent
       go-ast
       go-graph
@@ -658,6 +683,7 @@ in
         coverage
         clean
         gen-constants
+        gen-openapi
         buf-image
         e2e-live
         e2e-expect

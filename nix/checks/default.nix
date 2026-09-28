@@ -14,6 +14,7 @@
   advisory-db,
   versions,
   constantsRs,
+  openapiDoc,
   agent,
   go-ast,
   go-graph,
@@ -171,6 +172,12 @@ in
   constants-sync = import ./constants-sync.nix {
     inherit pkgs constantsRs;
     src = commonArgs.src;
+  };
+  # The committed OpenAPI contract must match what `nix/gen-openapi.nix` renders from
+  # the .proto `(google.api.http)` annotations (see gen-openapi). The constants-sync
+  # twin for the REST contract. docs/design/rest-openapi/.
+  openapi-sync = import ./openapi-sync.nix {
+    inherit pkgs openapiDoc;
   };
   # Reproducible Go coverage for the review flow: reconstruct a flake-pinned
   # xtcp2 change and assert `agent --review` detects Go + the changed files. The

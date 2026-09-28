@@ -1,0 +1,36 @@
+# buf generate template for the OpenAPI (Swagger 2.0) contract (gap-analysis §4,
+# docs/design/rest-openapi/). SEPARATE from the repo-root buf.gen.yaml (Dart codegen)
+# so the OpenAPI generator never couples to the portal's Dart plugin. Driven by
+# `nix/gen-openapi.nix` (the shared derivation behind `nix run .#gen-openapi` and the
+# `openapi-sync` flake check); protoc-gen-openapiv2 comes from the pinned grpc-gateway.
+#
+# The generator reads the `(google.api.http)` annotations on every RPC and emits one
+# path per route. `allow_merge` folds every service's document into a single
+# `agent.swagger.json`. Rust codegen stays on tonic-build; this only produces the
+# published REST contract.
+version: v2
+# protoc-gen-openapiv2 refuses to run without a Go import path per file (it uses it
+# only to group output files — irrelevant here since we merge). Managed mode injects a
+# throwaway `go_package` for our files and leaves the vendored googleapis protos (which
+# ship their own) alone, so we avoid hand-maintaining a per-proto `M…=` mapping list.
+managed:
+  enabled: true
+  disable:
+    - file_option: go_package
+      module: buf.build/googleapis/googleapis
+  override:
+    - file_option: go_package_prefix
+      value: example.com/agentseddon/gen
+plugins:
+  - local: protoc-gen-openapiv2
+    out: gen-openapi
+    opt:
+      # Merge every service into one document (agent.swagger.json).
+      - allow_merge=true
+      - merge_file_name=agent
+      # JSON bodies use the camelCase JSON names (the transcoder's default I/O shape).
+      - json_names_for_fields=true
+      # Fully-qualified definition names (agent.v1.Foo) — stable, collision-free.
+      - openapi_naming_strategy=fqn
+      # Deterministic path ordering (required: the committed doc is diff-gated).
+      - preserve_rpc_order=true

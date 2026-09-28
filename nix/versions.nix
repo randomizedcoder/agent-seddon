@@ -136,6 +136,14 @@ in
   # .#gen-dart`) — see buf.yaml and docs/design/portal.
   buf = pkgs.buf;
 
+  # `grpc-gateway` bundles `protoc-gen-openapiv2`, which renders the OpenAPI
+  # (Swagger 2.0) contract from the `.proto` `(google.api.http)` annotations
+  # (gap-analysis §4, docs/design/rest-openapi/). Referenced only by
+  # `nix/gen-openapi.nix` (the derivation behind `nix run .#gen-openapi` + the
+  # `openapi-sync` check); a cached binary, so the gate never source-builds it. Rust
+  # codegen stays on `tonic-build`; this only produces the published REST contract.
+  grpc-gateway = pkgs.grpc-gateway;
+
   # Agent Portal (docs/design/portal): a Flutter/gRPC-only client. `protoc-gen-dart`
   # (a small, cached plugin) generates the Dart stubs via `nix run .#gen-dart`;
   # `flutter` + `dart` build the app (`nix run .#portal`, increment 06). These are
