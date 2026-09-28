@@ -99,7 +99,9 @@ mod scheduler_driver;
 
 pub use agent::{Agent, GrpcTlsSettings, OpenError, Session, SessionManager, Settings};
 pub use agent_metrics::Metrics;
-pub use builder::{build_agent, build_agent_with};
+pub use builder::{
+    build_agent, build_agent_mode, build_agent_with, build_agent_with_mode, BuildMode,
+};
 /// C29 config-ownership annotation: the (currently empty) set of tenant-writable
 /// `agent.toml` sections — every section is operator-global. See the fn's docs.
 pub use config::tenant_writable_config_sections;

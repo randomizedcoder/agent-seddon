@@ -104,7 +104,10 @@ than its loop:
   binary via **`agent --check-config`** (a dry run that resolves every selected seam
   impl, prints the selections, and exits before any model call), and a malformed /
   unknown-backend config must fail closed. Catches config-schema drift no in-process
-  test sees.
+  test sees. The dry run builds in `BuildMode::CheckConfig`: store opens are lazy in
+  every mode, and the one eager startup read (the `[role]` RBAC catalog) is deferred,
+  so the Postgres-profile fixture (mirroring `config/multi-tenant.toml`, `[role]`
+  included) validates against an unroutable dummy DSN without opening a socket.
 
 A third offline gate, **`feature-matrix`**
 ([`nix/checks/feature-matrix.nix`](../../nix/checks/feature-matrix.nix)), covers the

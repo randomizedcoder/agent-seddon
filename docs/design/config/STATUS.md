@@ -202,9 +202,11 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   `config-roundtrip` gate check gains a Postgres-profile fixture that mirrors it and must resolve every
   domain's `store = "postgres"` through the real factory chain (`pg_backend` connects lazily, so
   `--check-config` stays hermetic — no server dialed), plus an adversarial twin proving an INLINE DSN in
-  the profile is rejected at build. `[role]` is omitted from the hermetic fixture because its RBAC catalog
-  loads eagerly (needs a live server); the full profile including role is validated by
-  `nix run .#integration`. Fail-closed-without-feature is a compile-time property (each resolver keeps its
+  the profile is rejected at build. `[role]` was at first omitted from the hermetic fixture because its
+  RBAC catalog loads eagerly (needs a live server); since the `--check-config` build mode
+  (`BuildMode::CheckConfig`, campaigns hygiene PR 5) defers that one read, the fixture carries
+  `[role] store = "postgres"` too and pins `role = postgres (catalog not loaded: --check-config)`; the
+  live catalog load is validated by `nix run .#integration`. Fail-closed-without-feature is a compile-time property (each resolver keeps its
   `#[cfg(not(feature = "…-postgres"))] "postgres" => bail!` arm), reachable via a `--no-default-features`
   build, outside the default-feature hermetic gate.
 

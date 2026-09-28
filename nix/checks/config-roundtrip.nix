@@ -250,10 +250,13 @@ pkgs.runCommand "agent-config-roundtrip"
     #     keeps only cargo sources + the embedded fixtures, not `config/*.toml`), so
     #     the shape is guarded here rather than by reading that file.
     #
-    #     `[role]` is deliberately OMITTED: the RBAC catalog loads EAGERLY at build
-    #     (the control-plane gate needs it immediately), so `role.store = "postgres"`
-    #     forces a real connection and cannot be exercised without a server. The full
-    #     profile including role is validated end to end by `nix run .#integration`.
+    #     `[role]` is INCLUDED: the role store OPEN is lazy like every other domain,
+    #     and the one eager startup read (the RBAC catalog, which the control-plane
+    #     gate needs installed before it authorizes anything) is deferred under
+    #     `--check-config` (`BuildMode::CheckConfig`) because the dry run never
+    #     authorizes a request. The printed `role = postgres (catalog not loaded:
+    #     --check-config)` pins both the arm and the deferral; the live catalog load
+    #     is validated end to end by `nix run .#integration`.
     export AGENT_CONFIG_STORE_DSN='postgres://agent:unused@127.0.0.1:1/agent'
     cat > "$HOME/multi-tenant.toml" <<TOML
     [agent]
@@ -298,16 +301,20 @@ pkgs.runCommand "agent-config-roundtrip"
     store = "postgres"
     [campaign]
     store = "postgres"
+    [role]
+    store = "postgres"
     TOML
     # A clean build with every domain on "postgres" IS the selection proof: each
     # resolver has a `#[cfg(not(feature = "…-postgres"))] "postgres" => bail!` arm, so
     # a feature-less binary or a typo'd selector would fail here, not fall back.
-    # `[campaign]` is dry-opened LAZILY on this path (no dial, no migration), so the
-    # dummy DSN above is never contacted; the printed selection pins the arm.
+    # `[campaign]` is dry-opened LAZILY on this path (no dial, no migration), and the
+    # `[role]` catalog read is deferred, so the dummy DSN above is never contacted;
+    # the printed selections pin the arms.
     expect_ok multi-tenant "$HOME/multi-tenant.toml" \
       "config: OK" \
       "provider  = openai-compat" \
-      "campaign  = postgres"
+      "campaign  = postgres" \
+      "role      = postgres (catalog not loaded: --check-config)"
 
     # 11) Adversarial: an INLINE Postgres DSN in the profile (a password on disk) must
     #     be rejected — `[config_store] dsn_ref` is a REFERENCE (`env:` / `file:`),

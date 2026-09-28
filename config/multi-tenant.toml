@@ -13,8 +13,10 @@
 # `services.agentPostgres.enable = true`) or, for a quick spin, the container
 # module (`nix run .#postgres-up`). `nix flake check` never dials it: every
 # Postgres suite is `#[ignore]`-gated, and this profile is exercised only by
-# `agent --check-config` (which builds every seam but opens no socket) and by the
-# opt-in `nix run .#integration` harness.
+# `agent --check-config` (which builds every seam but opens no socket: store
+# opens are lazy and the one eager startup read, the `[role]` RBAC catalog, is
+# deferred under `--check-config`) and by the opt-in `nix run .#integration`
+# harness, which exercises the catalog load live.
 #
 #     export AGENT_CONFIG_STORE_DSN='postgres://agent:...@127.0.0.1:5432/agent'
 #     export AGENT_PROVIDER_API_KEY='sk-...'
