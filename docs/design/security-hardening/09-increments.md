@@ -26,6 +26,20 @@ tables. Tracker: [`STATUS.md`](STATUS.md).
 | S16 | ClickHouse lockdown: passwords from files, `users_without_row_policies_can_read_rows = false`, writer / reader split, per-query tenant setting, HyperDX wiring, RLS harness | P0-6 | — (S11 adds its table) |
 | S17 | Secret-reference confinement: `SecretScope`, `[secrets]`, inline refusal under `per_tenant` | P0-7 | — |
 
+Follow-ups, from the deferrals recorded in [`STATUS.md`](STATUS.md) once S1–S17 had merged:
+
+| # | Increment | Closes | Depends |
+|---|---|---|---|
+| S18 | Live verification of S16 on l2: recreate the ClickHouse / HyperDX / Grafana stack with the S16 logins (backup → recreate → restore), restart the fleet with writer / reader password files, run the login + row-policy + dashboard matrix; fix what it finds | S16 verification | S16 |
+| S19 | Attribute a queued `ReviewNow` (and `Approve`) to the requester: `FleetTrigger.requested_by`, merged on coalesce, `requested_by` / `approved_by` on the draft, an audit row when the job starts | S9–S11 deferral | S11a |
+| S20 | Hot reload of TLS material and the token-signing key on `SIGHUP` (reloadable rustls resolver + client-cert verifier, `ArcSwap` key set), paired with `step ca renew --exec` | S4 / S5 deferral | S15b |
+| S21 | CLI loopback-redirect login (`agent login --browser`): RFC 8252 loopback-port matching for `redirect_uris`, a one-shot loopback listener, `Begin` / `Exchange` | S12 deferral | S13a |
+| S22 | Portal Access page: role bindings (create / edit / delete), the role catalog, sessions (list / revoke); navigation hides pages the principal cannot use | S13b deferral | S8, S13b |
+| S23 | Native desktop sign-in: `agent token --json` prints a fresh access token from the CLI login (refresh under the CLI's lock); the native portal runs it | S13b deferral | S12 |
+
+The keyring backend for the CLI token file stays with parity spec
+[50](../../parity/50-secret-store.md)'s `SecretStore`.
+
 ## Lanes
 
 ```

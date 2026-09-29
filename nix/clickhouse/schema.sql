@@ -395,18 +395,22 @@ GRANT SELECT ON default.* TO agent_viewer;
 -- the tenant the reader binds; the single-quoted value can never inject because the setter
 -- (`set_tenant_stmt`) screens it with `safe_segment` first. portal_gui_perf has no tenant
 -- column (host-level perf trend data, not tenant-owned) so it carries no policy.
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_events        ON agent.agent_events              USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_logs          ON agent.agent_logs                USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_usage         ON agent.agent_usage               USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_verifications ON agent.agent_verifications       USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_reviews       ON agent.agent_reviews             USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_collectors    ON agent.agent_review_collectors   USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_tools         ON agent.agent_review_tools        USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_drafts        ON agent.agent_review_drafts       USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_feedback      ON agent.agent_review_feedback     USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_dimensions    ON agent.agent_dimension_summaries USING user = getSetting('SQL_tenant_id')     TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_digests       ON agent.agent_turn_digests        USING user_id = getSetting('SQL_tenant_id')  TO agent_reader;
-CREATE ROW POLICY IF NOT EXISTS tenant_iso_auth_events   ON agent.agent_auth_events         USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+-- Every policy also excludes the empty tenant: rows written outside a request scope
+-- (process logs, unproven auth refusals) carry `user = ''`, and agent_reader's default
+-- `SQL_tenant_id` is '' — without the guard a reader that never binds a tenant would read
+-- them (found live on l2, S18). `OR REPLACE` so a re-applied schema updates old policies.
+CREATE ROW POLICY OR REPLACE tenant_iso_events        ON agent.agent_events              USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_logs          ON agent.agent_logs                USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_usage         ON agent.agent_usage               USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_verifications ON agent.agent_verifications       USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_reviews       ON agent.agent_reviews             USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_collectors    ON agent.agent_review_collectors   USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_tools         ON agent.agent_review_tools        USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_drafts        ON agent.agent_review_drafts       USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_feedback      ON agent.agent_review_feedback     USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_dimensions    ON agent.agent_dimension_summaries USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_digests       ON agent.agent_turn_digests        USING user_id = getSetting('SQL_tenant_id') AND user_id != '' TO agent_reader;
+CREATE ROW POLICY OR REPLACE tenant_iso_auth_events   ON agent.agent_auth_events         USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
 
 -- The operator's cross-tenant view: the writer (which also reads back at Tier 0 and for
 -- the digest store), the dashboards, and the admin see every row.

@@ -355,16 +355,25 @@ mod tests {
         let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
         let (server, _) = l.accept().await.unwrap();
         // A freshly accepted socket has Nagle on (nodelay=false) — the stall the fix removes.
-        assert!(!server.nodelay().unwrap(), "precondition: accept() leaves Nagle on");
+        assert!(
+            !server.nodelay().unwrap(),
+            "precondition: accept() leaves Nagle on"
+        );
         let server = enable_nodelay(Ok(server)).unwrap();
-        assert!(server.nodelay().unwrap(), "enable_nodelay must set TCP_NODELAY");
+        assert!(
+            server.nodelay().unwrap(),
+            "enable_nodelay must set TCP_NODELAY"
+        );
         let _client = client.await.unwrap();
     }
 
     #[tokio::test]
     async fn boundary_enable_nodelay_passes_an_accept_error_through_untouched() {
         // Best-effort: a failed accept must flow through so tonic sees the error, not panic.
-        let got = enable_nodelay(Err(io::Error::new(io::ErrorKind::ConnectionAborted, "boom")));
+        let got = enable_nodelay(Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "boom",
+        )));
         assert_eq!(got.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
     }
 }

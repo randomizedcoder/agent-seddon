@@ -18,6 +18,7 @@ pkgs.runCommand "ch-creds-tests"
     cp -r ${../../test/clickhouse} clickhouse
     chmod -R u+w clickhouse
     cd clickhouse
+    export CH_SCHEMA=${../../nix/clickhouse/schema.sql}
     echo "ch-creds-tests: credential tables + harness check-the-checks ..."
     python3 -m unittest test_ch_creds -v
     touch "$out"

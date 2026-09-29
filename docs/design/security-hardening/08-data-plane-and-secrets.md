@@ -5,7 +5,7 @@ and P0-7 (`env:` / `file:` credential references resolve unconfined).
 
 ## ClickHouse
 
-### Today
+### Before S16 (design-time snapshot)
 
 - `default` user: no password, `access_management = 1`, networks `::/0`
   ([`users.xml`](../../../nix/clickhouse/users.xml):29-36);
@@ -46,7 +46,7 @@ writer both, a no-password login fails, and auth events are isolated.
 | Logins | Four, each with a generated password: `default` (admin: schema, access management, the OTel collector's otel_* DDL), `agent_writer` (INSERT + SELECT on `agent.*`; the agent's writer, digest store and Tier-0 reader), `agent_reader` (tenant-scoped, SELECT on `agent.*` only), `agent_viewer` (read-only `agent.*` + `default.*`, for HyperDX and Grafana). The three SQL users are created `HOST NONE`, so [`schema.sql`](../../../nix/clickhouse/schema.sql) alone leaves no open login. |
 | Password files | [`test/clickhouse/ch_creds.py`](../../../test/clickhouse/ch_creds.py) (`nix run .#clickhouse-creds`): one 0600 file per login in a 0700 directory, `~/.local/state/agent-seddon/clickhouse/` by default (persistent, not tmpfs: the container keeps the admin hash across restarts). It never overwrites a password, refuses group/world-readable files and malformed contents, and emits `ALTER USER … IDENTIFIED WITH sha256_hash … HOST ANY`, so only hashes reach the server. The admin's hash rides a rendered `users.d` override. |
 | Server settings | New [`config.xml`](../../../nix/clickhouse/config.xml) mounted into `config.d`: `users_without_row_policies_can_read_rows = false` and the `SQL_` prefix. The C27 `users.xml` had put both in `users.d`, where ClickHouse ignores server settings, so the row-policy default was never pinned (the stock config happens to declare `SQL_`). The live harness found this. |
-| Policies | The `tenant_iso_*` set, unchanged, plus `operator_all_*` (`USING 1 TO agent_writer, agent_viewer, default`) on every tenant-bearing table. Any other login is tenant-blind. |
+| Policies | The `tenant_iso_*` set (each also excludes the empty tenant since S18), plus `operator_all_*` (`USING 1 TO agent_writer, agent_viewer, default`) on every tenant-bearing table. Any other login is tenant-blind. |
 | Shared-connection fix | [`ch.rs`](../../../crates/agent-telemetry/src/ch.rs) binds `SQL_tenant_id` before **every** tenant-data read, under the reader's connection lock, instead of once per connection. A scoped read with no valid verified tenant is refused (an error, not an empty or stale scope). The ping and the doctor's `system.tables` check are tenant-agnostic and bind nothing. klickhouse 0.13 has no per-query settings API, so the bind is a `SET` issued back to back with the query on the same connection, not a query-level `SETTINGS` clause. |
 | Config | `[telemetry] password_file`, `reader_password_file` (read when the connection is built, `~` expanded, ≤ 4 KiB, trailing whitespace trimmed, never empty). `user` now defaults to `agent_writer`. Load-time validation: inline and file forms are exclusive, a reader password needs `reader_user`, and with telemetry on a `reader_user` needs a password. `telemetry.reader_password` joins the config service's masked paths (it was missing). `agent doctor` reports an unreadable password file as a failed probe. The design's `writer_user` / `writer_password` rename was not needed: `user` / `password` already are the writer. |
 | Apps | `clickhouse-up` / `-migrate` / `-client` run SQL as the admin with the password passed through the environment, never argv. They refuse a container created before S16: it has no admin password, and recreating it discards its telemetry, so that is the operator's call. `hyperdx-up` gives the app the viewer login and the collector the admin. `grafana-up` provisions the ClickHouse datasource as the viewer. `portal-e2e` reads spans as the viewer and inserts perf rows as the writer. `fleet-measure` and `graph-arena` take a password file. |
@@ -56,6 +56,37 @@ Not done here:
 - `default`'s networks stay `::/0`. Host connections arrive through the runtime's port forward, not loopback, so a loopback-only admin could not be reached from the host tools. The ports are published on `127.0.0.1` and the password gates the login.
 - The reader keeps `readonly = 2`, so it can still `SET` any tenant. The trusted Rust setter is the boundary; per-tenant users with a `CONST` setting remain the Tier-2 follow-up (P1).
 - `agent_auth_events` and its policy pair arrive with S11.
+
+### Live verification (S18)
+
+Verified on l2 on 2026-09-28 against the real HyperDX and Grafana: 46 checks covering every login,
+the closed row-policy default, per-tenant reads in five tables, the dashboards' `agent_viewer`
+login, and the restarted fleet's writes. It found one hole, now fixed: a reader that binds no
+tenant could read the rows written outside a request scope (`user = ''`). Details are in
+[`STATUS.md`](STATUS.md) (S18).
+
+### Upgrading a live stack
+
+A container created before S16 is refused by `clickhouse-up`; recreating it discards whatever is in
+its writable layer. On l2 (`CONTAINER_RUNTIME=podman`):
+
+1. Stop writers (the fleet, any `--serve-*`) by PID.
+2. Export each non-empty table while the old container still answers without a password:
+   `SELECT * FROM <db>.<table> FORMAT Native` into a 0700 backup directory, plus
+   `SHOW CREATE TABLE` for reference.
+3. `nix run .#clickhouse-down`, `nix run .#hyperdx-down -- --volumes` (a fresh Mongo re-seeds
+   HyperDX's connection as `agent_viewer`; an old one keeps `default`), and `grafana-down`.
+4. `nix run .#clickhouse-up` (generates the four password files, applies the schema and the
+   password hashes). Restore `agent.*` as the admin with `INSERT INTO <table> FORMAT Native`.
+5. `nix run .#hyperdx-up`, register the first user (this seeds the sources and starts the
+   collector's pipeline), copy the team's new ingestion key into each agent's
+   `[telemetry] otlp_headers`. Restore `default.otel_*` once the collector has created them.
+6. `nix run .#grafana-up` (`GRAFANA_PORT=…` when a host Grafana holds :3000).
+7. Point each agent at `user = "agent_writer"` + `password_file`, and `reader_user =
+   "agent_reader"` + `reader_password_file` (paths from `nix run .#clickhouse-creds -- path
+   writer|reader`); `agent doctor` checks the ClickHouse login before a restart.
+8. After a schema change (such as S18's policy fix), `nix run .#clickhouse-migrate` re-applies it
+   to the running container.
 
 ## Secret references
 
