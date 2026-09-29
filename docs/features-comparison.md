@@ -331,7 +331,8 @@ including an end-to-end test that runs the loop with four seams remote at once â
 while **container images, orchestration manifests and any multi-host deployment
 are not built**. Everything runs over loopback or a unix socket today. Calling it
 a "k8s-style topology" (as an earlier draft of this document did) promised more
-than the code delivers.
+than the code delivers. Kubernetes deployment (k3s and full k8s, alongside native) is
+designed in [`design/k8s/`](design/k8s/README.md), not yet built.
 
 ### MCP â€” client and server
 `crates/agent-mcp` is an MCP **client** (stdio subprocess + streamable HTTP behind
