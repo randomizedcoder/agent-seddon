@@ -35,7 +35,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
 | S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
-| S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | 🔄 | — |
+| S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
 
 ## As-built log
 
@@ -1119,7 +1119,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
         stored login file had rotated in that time, so the CLI did the refresh under its lock.
       - Still manual: `agent login --browser` against real Google.
 
-- **2026-09-29 — S24: native desktop TLS.**
+- **2026-09-29 — S24 (#573): native desktop TLS.**
   - Found by the S21/S23 live check: the native portal only dialled plaintext, so it could not
     reach an agent that serves TLS.
   - [`native_tls.dart`](../../../portal/lib/src/transport/native_tls.dart) builds the native
