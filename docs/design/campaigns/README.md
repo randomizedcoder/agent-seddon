@@ -1,10 +1,14 @@
 # Campaigns: objectives → a hierarchical, ACID task tree → workers → PRs (design of record)
 
-> **Status:** design / pre-implementation, opened 2026-09-26 from the
-> [self-improvement gap analysis](../../gap-analysis/self-improvement.md) (SI-11). Nothing in
-> this track is built yet; [`STATUS.md`](STATUS.md) is the tracker and
-> [`05-increments.md`](05-increments.md) the build sequence. Every claim about existing code
-> carries a `path:line` against `main` `5ddcda7`.
+> **Status:** design of record, opened 2026-09-26 from the
+> [self-improvement gap analysis](../../gap-analysis/self-improvement.md) (SI-11); CP-01–CP-06
+> are built and merged (the seam, both stores, the planner, the CLI, the driver, the PR poller
+> and the worker — the first autonomous PR path, gated by `campaign-e2e`). [`STATUS.md`](STATUS.md)
+> is the tracker with the per-increment as-built log, [`05-increments.md`](05-increments.md) the
+> build sequence, and each design page carries "As built in CP-nn" notes where the code
+> deviates. Every claim about pre-existing code carries a `path:line` against `main` `5ddcda7`
+> as of the opening; the shipped component is described in
+> [`docs/components/campaigns.md`](../../components/campaigns.md).
 
 ## Why this exists
 
