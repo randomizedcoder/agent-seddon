@@ -1,12 +1,12 @@
 # Campaigns (`[campaign]`)
 
 An **objective** (a gap id, an issue, a feature) as a hierarchical task tree the
-agent plans one node at a time and — from CP-06 on — farms out to workers and pull
-requests. Design track: [`docs/design/campaigns/`](../design/campaigns/README.md)
-(status in [`STATUS.md`](../design/campaigns/STATUS.md)). This doc covers what is
-**shipped** (CP-01–CP-05): the seam, the stores, the planner, the `agent campaign …`
-CLI and the driver tick. The worker body, the PR poller, metrics and the gRPC
-service are later increments.
+agent plans one node at a time and farms out to workers and pull requests. Design
+track: [`docs/design/campaigns/`](../design/campaigns/README.md) (status in
+[`STATUS.md`](../design/campaigns/STATUS.md)). This doc covers what is **shipped**
+(CP-01–CP-06): the seam, the stores, the planner, the `agent campaign …` CLI, the
+driver tick, the PR poller and the worker (`agent --run-task`: worktree → Implement
+session → push → draft PR). Metrics and the gRPC service are later increments.
 
 ## Shape
 
@@ -58,13 +58,18 @@ enabled        = false        # the resident driver (`run`); true needs a store
 tick_secs      = 30           # 5..=3600 between resident ticks
 per_tenant_workers = 2        # 1..=32 concurrent workers per tenant
 global_workers = 8            # 1..=256 across every tenant
-sandbox        = "subprocess" # "subprocess" | "in_process" (dispatched in CP-06b)
+sandbox        = "subprocess" # "subprocess" (a child `agent --run-task` through the
+                              # [sandbox] backend; refused at start without one) |
+                              # "in_process" (the same worker in this process)
 worker_timeout_secs = 3600    # 60..=86400 wall clock per worker
 poll_batch     = 20           # 1..=200 leaves in review the forge poller checks per
                               # tenant per tick (one [forge] get_pr each)
 pool_max       = 4            # 1..=64
 planner_model  = ""           # "" = the main provider; else a [[route.upstreams]]
                               # name or a registry provider type (role routing)
+worker_model   = ""           # same, for the worker's Implement session
+target_branch  = "main"       # the branch every worker worktree starts from and
+                              # the PR's target; path-safe `/`-segments, <= 128 chars
 plan_per_tick  = 4            # 0..=32 nodes per tenant per `plan` / `run` tick
 max_repairs    = 2            # 0..=5 schema-repair round trips per decision
 repo_root      = ""           # "" = [agent] working_dir
@@ -106,7 +111,8 @@ agent [--config PATH] campaign [--tenant SEG] <verb> …
 - **`run`.** `run --once` is one driver tick plus a drain over the `--tenant` (or
   `local`) tenant, printing `reaped n  released n`, `polled n  merged n  closed n
   awaiting n  poll_errors n`, the per-node plan lines and `plan:` summary, then
-  `claimed n  dispatched n  failed n  (workers: CP-06)`. Bare `run` is the resident
+  `claimed n  dispatched n  failed n` (the claimed leaves run to completion in the
+  drain, through the configured `[campaign] sandbox`). Bare `run` is the resident
   driver: refused unless `[campaign] enabled` (naming the key, before any store
   opens), then one `tick: tenants n  reaped n  released n  polled n  merged n
   closed n  planned n  claimed n  dispatched n  failed n  errors n` line every
@@ -189,11 +195,45 @@ errors, times out (`worker_timeout_secs`) or panics is settled by the driver as 
 
 The tenants are `--tenant T`, else every tenant with live work under `[tenancy]
 per_tenant` (`CampaignBackend::tenants`, from the `tasks` table), else `local`. The
-owner is a random 32-hex token per process. **No worker ships yet**, so the claim
-phase is off (`claimed 0  dispatched 0`); CP-06b adds the `--run-task` subprocess
-(today a stub: exit 3 `lease lost` without `AGENT_CAMPAIGN_OWNER`, exit 4 `not
-implemented` with it, before any config is read), the in-process exec and the
-`worker_model` key.
+owner is a random 32-hex token per process. Each claimed leaf is dispatched through
+the exec `[campaign] sandbox` selects: `"subprocess"` spawns `agent --config <same
+path> --run-task --tenant T --task <id>` through the process `[sandbox]` backend
+with the owner token in the child's `AGENT_CAMPAIGN_OWNER` (never an argument) and
+a wall clock of `worker_timeout_secs` + 30 s grace, mapping exit 0 to success, 1 to
+"the worker failed the leaf" (the child wrote `failed` itself), 3 to "lease lost",
+a timeout and any other code to a bounded error with the last 512 chars of stderr;
+`"in_process"` runs the same worker function in this process under the tenant's
+session scope. A `"subprocess"` sandbox with no `[sandbox] backend`, or a process
+whose binary or `--config` path is unknown, refuses to start the driver naming
+what is missing — there is no silent in-process fallback.
+
+**The worker** (`agent_runtime::campaign_worker::run_leaf`, the body of `agent
+--run-task`) runs one leaf: it requires the leaf `claimed` by its own token (else
+exit 3 with nothing written), moves it to `running`, heartbeats every third of the
+campaign policy's `lease_secs` (a lost lease cancels the session before anything
+is pushed), and fails fast — before a token is spent — when there is no `[git]`
+backend, no `[forge]` backend, `[forge] dry_run = true` or `[git] push_policy =
+"never"`. It then adds a fresh worktree at `[campaign] target_branch` (a stale one
+from a crashed run is removed first), runs an Implement-mode session in it with the
+`forge` tool withdrawn and the token cap `policy.max_worker_tokens_per_leaf` (a
+`Spend` counter on the loop; over the cap ⇒ `failed "budget: …"`, no push) under
+`worker_timeout_secs`, commits the result as a checkpoint (a clean tree ⇒ `failed
+"no changes committed"`), pushes `campaign/<campaign id>-<path with dots as
+dashes>` (each `/`-segment `safe_segment`-checked), asks the `[policy]` for the
+`create_pr` write, opens the PR on the process `[forge]` backend (`draft =
+policy.draft_prs`, title `<campaign> / <path>: <leaf>`, body = acceptance
+checklist + touches + the `campaign:<id> task:<path>` trailer, ≤ 8 KiB) and
+completes the leaf into `in_review` with the PR fields and the token spend. Every
+failure is `fail(...)` with a bounded error and the worktree is removed on every
+path. Exit codes: `0` completed, `1` failed, `3` lease lost. The goal the session
+sees is a fixed template (work only in this worktree, run the gate, conventional
+commits, never push — the worker pushes and opens the PR) with the campaign title,
+parent titles, the leaf, acceptance and touches, and the model-written goal inside
+a random-tag `<untrusted-…>` fence labelled as data. `worker_model` routes the
+session's turns to a dedicated provider, like `planner_model` for the planner.
+`agent --run-task` needs a `[campaign] store` (exit 1 naming it otherwise) and the
+owner in `AGENT_CAMPAIGN_OWNER` (exit 3 `lease lost (owner missing)` before any
+config is read); it never prints the token.
 
 **The poller** (`ForgePoller`, CP-06a) resolves leaves in review against the
 process's `[forge]` backend (`Agent::forge()`; no backend ⇒ a no-op poller and one
@@ -225,8 +265,20 @@ The model, the operator's typed text and every stored value are untrusted:
   the offending token and never the DSN.
 - **The driver** opens only tenants that are `safe_segment`s (a fixed unsafe one is
   skipped, a stored one dropped), holds the owner token in memory and hands it to a
-  worker through the environment, never an argument; a worker's error text is cut
-  to 2000 chars before it is stored.
+  worker through the environment (`ExecSpec.env_set`, one variable, validated
+  before spawn), never an argument; a worker's error text and stderr tail are cut
+  (2000 / 512 chars, NUL dropped) before they are stored.
+- **The worker** treats the leaf's text as data: the model-written goal sits in a
+  random-uuid fence the model cannot forge (the closing tag is stripped from the
+  goal), the `forge` tool is withdrawn from the session so the only PR is the one
+  the protocol opens after the push, that write still goes through the `[policy]`
+  gate, and the branch is built from the campaign id and the path only (digits and
+  dashes, each `/`-segment `safe_segment`-checked). The forge's `create_pr` answer
+  is validated (`PrRef`: number ≥ 1, an `https://` url ≤ 512 chars) before it is
+  stored. Bindings fail closed: no `[git]` / `[forge]` backend, `[forge] dry_run`,
+  `[git] push_policy = "never"` and a `"subprocess"` sandbox without a `[sandbox]`
+  backend are errors, never a quieter path. `--run-task` never echoes the owner
+  token, and exits 3 before reading any config when it is missing or unsafe.
 - **The forge's answers** are untrusted: the poller matches the PR `state` string
   exactly and moves nothing on anything unknown, refuses a PR whose number differs
   from the row's, bounds each call by a timeout, and stores a forge error message
@@ -240,21 +292,36 @@ T6 includes the CP-05 `reap_decomposing` and `tenants` rows), T9–T10 (planner
 decisions and prompt assembly, `agent-campaign`), T11 (the driver tick over
 `MemCampaigns` with a recording store, a counting planner and closure execs,
 `agent-campaign`; the config bounds as `agent-runtime` rows, the owner-token row
-as an e2e), T13 (the forge poller over `MemCampaigns` and a scripted forge that
+as an e2e), T12 (the worker over `MemCampaigns`, a recording repo double, a
+scripted forge and a bare agent over a scripted provider, `agent-runtime`; the
+heartbeat, timeout and lease-lost rows on tokio's paused clock; the subprocess exec
+over stub scripts through `LocalSandbox`; the `env_set` rows in `agent-sandbox` and
+`agent-grpc`; the `--run-task` owner and store rows in `agent-cli`), T13 (the forge
+poller over `MemCampaigns` and a scripted forge that
 answers a PR, an error or a hang per number, `agent-campaign`; the `review_note`
 seam has T7 conformance rows on both tiers), T14–T15 (Postgres protocols and
 invariants, live), T16 (CLI arguments,
 `agent-cli`), plus run-level CLI tests over `MemCampaigns` and an in-process `add →
-run --once → plan → show` path with a scripted provider through the driver. Gate
-checks: `cli-help` requires `campaign` in `agent --help`; `config-roundtrip`
-fixture 10 (`config/multi-tenant.toml`) prints `campaign  = postgres` without
-dialing.
+run --once → plan → show` path with a scripted provider through the driver. **End
+to end**: `crates/agent-runtime/tests/campaign_e2e.rs` runs the shipped driver,
+planner, poller and in-process worker over a real `git` checkout with a bare origin
+in a tempdir, a scripted model and a fake forge — create → split → execute → claim
+→ worktree → session → checkpoint → push → draft PR → approve → merged → done —
+plus the unapproved-merge wait, the no-changes failure and the `push_policy =
+"never"` refusal. Gate checks: `campaign-e2e` runs that file on its own so the
+gate names the increment; `cli-help` requires `campaign` in `agent --help`;
+`config-roundtrip` fixture 10 (`config/multi-tenant.toml`) prints `campaign  =
+postgres` without dialing.
 
 ## Deferred
 
-CP-06b the worker body (`--run-task`: worktree, heartbeat, Implement session, push,
-PR), the subprocess / in-process execs and the `worker_model` key; per-repo forge
-bindings (the poller uses the one process `[forge]` backend until RK-02's `repos`
-table carries a forge card); CP-07 the repo-knowledge brief and `node_key` touches; CP-08
+Scoped git credentials for the worker's push (it uses the process's ambient git
+config / credential helper today; the smoke keeps `push_policy = "never"`); the
+duplicate PR a leaf can open when `complete` loses its lease after `create_pr`
+(CP-10's merge webhook closes the window); a "changes requested" re-run on the same
+branch (CP-10); per-repo forge and git bindings (the worker and the poller use the
+one process `[forge]` / `[git]` backend, and the git root is the process cwd, until
+RK-02's `repos` table carries the cards); CP-07 the repo-knowledge brief and
+`node_key` touches; CP-08
 metrics and the observability section of this doc; CP-09 the gRPC
 `CampaignService`; RK-02 the `repos` table (replacing `[campaign.repos]`).
