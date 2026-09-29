@@ -326,6 +326,42 @@ Metrics: `agent_campaign_nodes_total{tenant,kind,state}`, `agent_campaign_attemp
 with `kind = 'campaign'`. Hostile token counts from a provider are clamped to `≥ 0` before
 `inc_by`.
 
+**As built in CP-08.** Two seams, no new dependency between crates:
+
+- **The event mirror is the store's.** `agent_core::campaign::EventSink { emit(tenant,
+  campaign, &TaskEvent) }`; `MemCampaigns::with_sink` / `PgCampaigns::with_sink` (shared by
+  every tenant view) buffer each transaction's rows and emit them **after the commit**, in
+  write order — the memory tier after its clone-mutate-swap with the lock released, the
+  Postgres tier in `Tx::commit` after `COMMIT` — so a rolled-back write mirrors nothing. The
+  row's `campaign_id` rides along (the two reap statements return it beside the task; every
+  other writer has the row); `INSERT_EVENT … RETURNING event_id` gives the mirrored row its
+  real id. `agent_telemetry::TelemetryHandle` implements the sink: `session_id =
+  campaign-<id>`, `user` = tenant, `role` = the actor **class** (`actor_class`: the lease
+  token after `worker:` / `driver:` is never written), `content` = the event as JSON through
+  the shared redaction, `detail` bounded at 8 KiB and the row at 16 KiB. The CLI installs the
+  process's handle at every store open (verbs, the driver's backend, the `--run-task` child),
+  so whichever process performs a write mirrors its own rows; `--check-config` opens with no
+  sink.
+- **Metrics are the driver's.** `agent_campaign::TickObserver { on_tick(&TickReport,
+  elapsed), on_drain(&DrainReport) }` (`Driver::with_observer`; never called for a disabled
+  driver) keeps `agent-campaign` free of `agent-metrics`, the scheduler's `RunObserver`
+  pattern; `agent_runtime::campaign_metrics::MetricsObserver` walks the report. Because a
+  `subprocess` worker's registry dies with the child, `Settled` now carries the `tokens` and
+  `model` of the leaf's latest `work` attempt, read back from the store when the driver
+  settles the leaf, and `PlanReport` carries the planner's `model` — so `attempts_total`
+  gained a `model` label (the parked "failed leaves per planner model" question is a PromQL
+  ratio), `tokens_total` a `direction` label, and three families the report makes free were
+  added: `agent_campaign_plans_released_total{tenant}`, `agent_campaign_polls_total{tenant,
+  outcome}`, `agent_campaign_tick_errors_total`. `nodes_total{tenant,kind,state}` counts what
+  the **plan phase** hands back (the node each outcome left behind; a split's children as
+  `kind="task", state="created"`) — an exact per-transition count would need the store funnel,
+  which the child owns. The `tenant` label is `safe_segment`-validated at the recorder and
+  admitted into the shared tenant LRU (`TenantSeries::Campaign`); `model` folds to `other`
+  unless short and plain, `unknown` when unread; tick seconds are clamped finite / ≥ 0; a zero
+  add mints no series. Bench ceilings moved for the nine families (`new_registry` ~1.547M Ir,
+  `record_and_encode` ~2.50M). Component doc:
+  [`docs/components/campaigns.md` §Observability](../../components/campaigns.md#observability).
+
 ## Interaction with the review fleet
 
 None in v1. A campaign PR is a PR; if the fleet watches the repo it reviews it. CP-10 adds an

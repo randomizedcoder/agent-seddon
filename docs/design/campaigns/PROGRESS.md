@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Now:** CP-06 is merged — #561 (`a5b585a2`, the poller) and #569 (`d294d108`, the worker, `SubprocessExec` / `InProcessExec`, the `campaign-e2e` check) — closed out by #571; the first autonomous PR path is proven end to end (in-process e2e) and the subprocess path over the real binary (smoke). Lane C's next item is **CP-08** (metrics, ClickHouse `agent_events` rows, the observability section of the component doc). CP-07 stays blocked on RK-12; CP-10 (merge webhook, "changes requested" re-run, fleet auto-review) is the natural follow-on for the worker. Before the next real campaign the open questions below deserve a look: scoped git credentials for the push, the worker's `search` root, the scheduler child's tantivy lock, the level-1 double approval. CP-05 merged as #553 (`a0ec5b3`), closed out by #554. CP-07 (RK-08 / RK-12 wiring, lane B) stays blocked on RK-12. The five hygiene follow-ups from the CP-04 gate are all on `main` (#541, #545, #546, #547, #550; see Open questions); two small observations from the CP-05 gate remain there (the `negative_bearer_beside_service_token` feature gap, the double-approval UX). Lane B to first value is done — CP-04 merged as #531 (`513447a`); CP-03 #525; lane A CP-01 #501 (`71d4abf`) and CP-02 #508 (`630098a`).
+- **Now:** **CP-08** (metrics, ClickHouse `agent_events` rows, the observability section of the component doc) is in PR #NNN (`campaigns/cp-08` off `main` at `5569c108`): the `EventSink` mirror on both stores, `TelemetryHandle` as the sink, the driver's `TickObserver` → nine `agent_campaign_*` families, T17. CP-06 is merged — #561 (`a5b585a2`, the poller) and #569 (`d294d108`, the worker, `SubprocessExec` / `InProcessExec`, the `campaign-e2e` check) — closed out by #571; the first autonomous PR path is proven end to end (in-process e2e) and the subprocess path over the real binary (smoke). CP-07 stays blocked on RK-12; CP-10 (merge webhook, "changes requested" re-run, fleet auto-review) is the natural follow-on for the worker. Before the next real campaign the open questions below deserve a look: scoped git credentials for the push, the worker's `search` root, the scheduler child's tantivy lock, the level-1 double approval. CP-05 merged as #553 (`a0ec5b3`), closed out by #554. CP-07 (RK-08 / RK-12 wiring, lane B) stays blocked on RK-12. The five hygiene follow-ups from the CP-04 gate are all on `main` (#541, #545, #546, #547, #550; see Open questions); two small observations from the CP-05 gate remain there (the `negative_bearer_beside_service_token` feature gap, the double-approval UX). Lane B to first value is done — CP-04 merged as #531 (`513447a`); CP-03 #525; lane A CP-01 #501 (`71d4abf`) and CP-02 #508 (`630098a`).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
@@ -112,7 +112,20 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 5. CLI: `agent --run-task` body (`run_task_owner` → config → `build_agent_mode` → `open_campaign_store` → `run_leaf` under the tenant scope → `exit(code)`); `run` / `run --once` pass `WorkerDeps`; renderers drop `(workers: CP-06)`; `EXIT_NO_WORKER` retired | ✅ | `daf8233c`. Rows `run_task_owner_rows` (8), `positive_exit_lease_lost_matches_the_worker`, e2e `corner_run_task_owner_present_reads_config` / `negative_run_task_no_store`. `cargo test -p agent-cli` 271 bin + 29 e2e |
 | 6. `crates/agent-runtime/tests/campaign_e2e.rs` (`required-features = ["campaign", "git", "forge"]`) + `nix/checks/campaign-e2e.nix` registered after `test` | ✅ | `cfacc634`. Real `build_agent_with`, shipped `Driver` + `FactoryPlanner` + `ForgePoller` + `InProcessExec`, a real `agent_git::CliBackend` on a tempdir checkout with a bare origin (registered as the `"e2e"` repo backend because `git_paths` roots the shipped backend on the process cwd), a scripted model, a fake forge. 4 rows: `positive_first_autonomous_pr`, `negative_unapproved_merge_waits`, `corner_no_changes_fails_leaf`, `negative_push_policy_never` — green on the first run (0.34 s) |
 | 7. docs (04 dispatch + worker as-built + config, 02 worker writes, 05 row, 06 T12 + e2e notes, component doc, extending gate list), STATUS 🟡 `#561, #569`, PROGRESS; gate; PR | ✅ | Merged as #569 (`d294d108`, merge commit). `498947c1` docs. The manual smoke over the real binary then found the subprocess worker could never build (`982b02d0`, below: the driver's tantivy writer lock; exit-1 stderr kept). Verification and the gate: Gate status |
-| 8. Close-out docs PR: STATUS ✅ + as-built entry (both PR numbers), PROGRESS "Now", `docs/README.md` stage label, design README banner | 🟡 | #571 (`docs/cp-06-closeout` off `main` at `d294d108`), docs only |
+| 8. Close-out docs PR: STATUS ✅ + as-built entry (both PR numbers), PROGRESS "Now", `docs/README.md` stage label, design README banner | ✅ | #571 (`5569c108`, `docs/cp-06-closeout` off `main` at `d294d108`), docs only |
+
+## CP-08 — metrics, ClickHouse `agent_events` mirror, the observability section, T17 — 🟡 #NNN (`campaigns/cp-08` off `main` at `5569c108`)
+
+| Item | State | Notes |
+|---|---|---|
+| 1. `agent_core::campaign::EventSink` + `actor_class` | ✅ | `e69d6c8b`. Synchronous, after-commit, never fails; `actor_class` folds a rendered actor to its class word (the lease token after `worker:` / `driver:` is never returned; garbage / case variants / control chars → `other`). Rows `actor_class_rows` (16), `adversarial_actor_class_token_not_returned` |
+| 2. Stores: `MemCampaigns::with_sink` / `PgCampaigns::with_sink`, after-commit emit with `campaign_id`; `INSERT_EVENT … RETURNING event_id`; `REAP` / `REAP_DECOMPOSING` return `cid`; pg `Tx::event(campaign, ..)`; `Harness.sink` (`RecordingSink`) + `t17` conformance rows on both tiers | ✅ | `022c7617`. mem emits after the clone-mutate-swap with the lock released; pg in `Tx::commit` after `COMMIT` (no change at the 23 commit sites). Rows: `positive_sink_every_write`, `positive_sink_after_commit_only`, `positive_sink_reap_carries_campaign`, `positive_sink_event_ids_match`, `positive_sink_multi_task_write_in_order`, `adversarial_sink_cross_tenant_isolated`. `cargo test -p agent-testkit campaign` 168; `pg-integration` 252 (pg::t17 6/6) |
+| 3. `agent-telemetry`: `EventRow::from_campaign`, `TelemetryHandle::record_campaign_event`, `impl EventSink for TelemetryHandle`; schema comment | ✅ | `60bf170a`. `session_id = campaign-<id>`, `user` = tenant, `role` = class, `content` = JSON through `apply_redactions`, `detail` > 8 KiB → `{truncated, head}`, row ≤ 16 KiB, `tool_call_id` = task. 9 rows (shape, worker / driver token, AWS key in detail, 100 KiB detail, unknown actor, seq, overflow) |
+| 4. `agent-campaign` driver: `TickObserver` + `Driver::with_observer` (timed `tick`, `drain`); `Settled { tokens, model }` from the latest `work` attempt (`latest_work_attempt`); `PlanReport.model` | ✅ | `cf98be70`. T11 +4: `positive_observer_sees_tick_and_elapsed`, `corner_observer_silent_when_disabled`, `positive_settled_carries_work_attempt`, `corner_settled_without_attempt_zero`; `adversarial_worker_panics` asserts the read-back. 48 driver tests |
+| 5. `agent-metrics`: nine `agent_campaign_*` families, `TenantSeries::Campaign` + eviction arm, `fold_model_label`, seven recorders; bench ceilings | ✅ | `47bc3691`. Funnel: tenant `safe_segment`, model folded (`other` / `unknown`), tick seconds clamped, zero add mints nothing. 8 rows. `nix run .#bench -- -p agent-metrics`: `new_registry` 1,546,520 Ir (ceiling 1.65M → 1.75M), `record_and_encode` 2,502,348 (2.66M → 2.83M) |
+| 6. `agent_runtime::campaign_metrics::MetricsObserver` (the bridge) wired in `build_driver`; `CampaignOpen.sink` / `open_campaign_backend(.., sink)`; CLI installs the telemetry handle at the verbs, the driver backend and the `--run-task` open (`--check-config`: none) | ✅ | Rows: `positive_tick_claims_and_seconds`, `corner_disabled_tick_records_nothing`, `positive_plan_outcomes_nodes_and_attempts`, `positive_work_settled_tokens_and_model`, `positive_reap_and_polls`, `positive_drain_settled_recorded`, `boundary_tick_errors_counter`, `adversarial_tokens_negative_clamped`, `adversarial_tenant_unsafe_no_series`, `adversarial_model_label_folded`; `positive_build_driver_wires_metrics_observer`. `cargo test -p agent-runtime --all-features campaign` 193; `-p agent-cli` 287 bin + 29 e2e |
+| 7. Docs (component doc §Observability, 04 as-built, 02 sink paragraph, 05 row, 06 T17, metric census §G, schema comment), STATUS 🟡, PROGRESS; smoke; gate; PR | 🟡 | this section |
+| 8. Close-out docs PR: STATUS ✅ + as-built entry, PROGRESS "Now" → the next unblocked item, `docs/README.md` stage label | ⬜ | |
 
 ## Decisions log (append-only)
 
@@ -307,6 +320,29 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   race is real for the agent, not only for the tests: a tool writes a script while a child
   starts, and the driver dispatches workers in parallel. A file still open for writing keeps
   failing and the error surfaces after the last retry (`negative_spawn_etxtbsy_bounded`).
+- 2026-09-29 — CP-08: the ClickHouse mirror is a **store seam** (`EventSink`, emitted after
+  the commit), not a decorator or a driver-side walk: only the store funnel sees every
+  `task_events` row, a rolled-back write must not leak a row, and a `subprocess` worker's
+  writes happen in the child — which has its own `TelemetryHandle` from the same config, so
+  each process mirrors what it wrote. The sink call is synchronous on the write path and must
+  never block (the handle's `try_send` drops on a full channel).
+- 2026-09-29 — CP-08: metrics are recorded by the **driver** from its tick report through a
+  `TickObserver` (the scheduler's `RunObserver` pattern; `agent-campaign` stays free of
+  `agent-metrics`), because a subprocess worker's Prometheus registry dies with the child.
+  The driver reads the leaf's latest `work` attempt back when it settles it (`Settled.tokens` /
+  `model`, one read per finished leaf, bounded by `global_workers` per tick) — the attempt row
+  is where a child's spend and model label survive.
+- 2026-09-29 — CP-08: `attempts_total` gains a `model` label (bounded by `fold_model_label`:
+  ≤ 64 chars of `[A-Za-z0-9._:/-]`, else `other`; `unknown` when unread) so the parked
+  "failed leaves per planner model" question is a PromQL ratio; `tokens_total` gains
+  `direction`; `plans_released_total`, `polls_total{outcome}`, `tick_errors_total` are added
+  because the report makes them free. `nodes_total{tenant,kind,state}` counts the plan phase's
+  outcomes only (exact per-transition counts need the store funnel the child owns). A
+  `MeteredCampaigns` store-op decorator is deferred until the pg tier raises a latency question.
+- 2026-09-29 — CP-08: the mirrored row carries the actor **class**, never the rendered
+  `worker:<owner>` / `driver:<owner>` text — `task_events.actor` holds the lease token today
+  (a store-internal fact), and `agent_events` is read by recall and HyperDX; `actor_class`
+  lives in `agent_core::campaign` so every consumer folds the same way.
 
 ## Gate status
 

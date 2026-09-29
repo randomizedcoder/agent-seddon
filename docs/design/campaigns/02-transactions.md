@@ -395,6 +395,14 @@ second); `PollError(text)` writes `{"poll_error": <text>}` every time, `text` cu
 chars with NUL dropped. Any state but `in_review` is `Conflict`; a foreign tenant's id is
 `NotFound`.
 
+Every `task_events` row a protocol commits is also handed to the store's `EventSink` (CP-08,
+`with_sink`) **after** the commit — the memory tier after its swap with the lock released, the
+Postgres tier in `Tx::commit` after `COMMIT` — in write order and with the row's `campaign_id`,
+so a rolled-back transaction mirrors nothing and a multi-row protocol ((d)'s dependents and
+rollup) mirrors every row of the one commit. `INSERT_EVENT` returns the generated `event_id`
+for that purpose; the two reap statements return `campaign_id` beside the task. The protocols
+themselves are unchanged (T2 count 84).
+
 The worker's writes (CP-06b) are the protocol (c)/(d) verbs unchanged: `start` right after the
 owner check, `heartbeat` every `lease / 3` with the **campaign policy's** `lease_secs` (the claim
 itself used the policy default, so the first beat re-leases), then exactly one of `complete`
