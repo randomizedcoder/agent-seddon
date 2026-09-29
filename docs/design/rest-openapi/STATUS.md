@@ -340,3 +340,15 @@ distinct control-plane group during the sweep and became its own final batch, 03
     benchmarks `ConfigService.Status` (~116 B) as the headline small-read overhead and keeps `GetValues`
     (~34 KB) as a large-read keep-alive witness. Corrected takeaway: transcoding ≈ 1–2ms/call — still
     "prefer gRPC for hot paths", but the honest number is ~1–2ms, not +12ms.
+
+- **Follow-up: compact transcoder JSON (`add_whitespace: false`).** Re-measuring on l2/podman with the
+  now-fair bench + a payload-size probe found pretty-printing nearly **doubles** a config read on the wire:
+  `GET /v1/config/values` = 35,078 B pretty → 17,878 B compact (**49% saved**). Flipped
+  `grpc_json_transcoder` `print_options.add_whitespace` → `false` in `test/portal-envoy/portal_envoy.py`
+  (`always_print_primitive_fields` kept `true` — an API-shape contract, not formatting), guarded by a new
+  `RestTranscoder.test_positive_transcoder_emits_compact_json`. Envoy-config file is S14-owned
+  (coordinated with the security-hardening session; no conflict). Latency was already healthy post-#555
+  (REST large-read p50 ~15ms, no ~40ms stall; small-read overhead ~1.15ms) — this is a payload/CPU win,
+  not a latency one. Considered-and-deferred (marginal on this loopback bridge): tonic/Envoy HTTP/2 window
+  tuning (wrong flow-control side + payloads under one 64 KB window), STATIC vs LOGICAL_DNS, circuit
+  breakers, connection-balance, trace sampling.
