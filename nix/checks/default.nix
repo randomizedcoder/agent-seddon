@@ -33,6 +33,12 @@ in
   clippy = craneCheck ./clippy.nix { inherit cargoArtifacts; };
   rustfmt = craneCheck ./rustfmt.nix { };
   test = craneCheck ./test.nix { inherit pkgs cargoArtifacts; };
+  # The campaign track's first-autonomous-PR path end to end (CP-06b): the shipped
+  # driver + planner + poller and the in-process worker over a real git checkout
+  # with a bare origin, a scripted model and a fake forge (agent-runtime's
+  # `campaign_e2e` test). Redundant with `test` by design so the gate names the
+  # increment. docs/design/campaigns/05-increments.md.
+  campaign-e2e = craneCheck ./campaign-e2e.nix { inherit pkgs cargoArtifacts; };
   cargo-audit = craneCheck ./cargo-audit.nix { inherit advisory-db; };
   # `cargo deny check licenses bans sources` — supply-chain/licensing static
   # analysis over the dep graph (config in deny.toml at the repo root). Offline;
