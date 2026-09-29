@@ -523,6 +523,9 @@ agent-testkit = { workspace = true, features = ["oidc", "pki"] }
 rstest.workspace = true
 # The distiller tests drive a real (in-memory) ledger.
 agent-digest = { workspace = true, features = ["digest-sqlite"] }
+# `test-util` enables `start_paused` — the campaign worker's heartbeat / timeout /
+# lease-lost rows (T12) run the session's wall clock on tokio's virtual time.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

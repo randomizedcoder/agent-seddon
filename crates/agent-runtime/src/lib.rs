@@ -63,6 +63,10 @@ pub mod campaign;
 // selection rule, `build_driver` over the opened backend.
 #[cfg(feature = "campaign")]
 pub mod campaign_driver;
+// The campaign worker (docs/design/campaigns/04-executor.md "Worker protocol",
+// CP-06b): `run_leaf` behind `agent --run-task` and the in-process exec.
+#[cfg(feature = "campaign")]
+pub mod campaign_worker;
 #[cfg(any(
     feature = "auth-postgres",
     feature = "role-postgres",
