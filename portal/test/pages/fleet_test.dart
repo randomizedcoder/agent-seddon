@@ -211,6 +211,43 @@ void main() {
           await robot.settle();
 
         // ── detail pane ──────────────────────────────────────────────────────────
+        case 'positive_attribution_shown':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'r1')
+              ..requestedBy.addAll(['example.com/user:google/alice'])
+              ..approvedBy = 'example.com/user:google/bob'
+          ]);
+          fake.getReviewResponse = body('# Draft body');
+          await robot.load();
+          await robot.selectReview('r1');
+          expect(robot.exists('fleet.detail.attribution'), isTrue);
+          expect(
+              robot.textShown('requested by example.com/user:google/alice · '
+                  'approved by example.com/user:google/bob'),
+              isTrue);
+          await robot.settle();
+
+        case 'corner_poller_review_has_no_attribution':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.getReviewResponse = body('# Draft body');
+          await robot.load();
+          await robot.selectReview('r1');
+          expect(robot.detailLoaded, isTrue);
+          expect(robot.exists('fleet.detail.attribution'), isFalse);
+          await robot.settle();
+
+        case 'adversarial_eight_long_requesters_clipped':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'r1')
+              ..requestedBy.addAll([for (var i = 0; i < 8; i++) 't/${'x' * 298}$i'])
+          ]);
+          fake.getReviewResponse = body('# Draft body');
+          await robot.load();
+          await robot.selectReview('r1');
+          expect(robot.exists('fleet.detail.attribution'), isTrue);
+          expect(tester.takeException(), isNull);
+          await robot.settle();
+
         case 'positive_select_loads_detail':
           fake.listReviewsResponse = reviews([summary(id: 'r1')]);
           fake.getReviewResponse = body('# Draft body');

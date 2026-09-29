@@ -33,7 +33,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
 | S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
 | S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
-| S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
+| S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
 | S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
 
 ## As-built log
@@ -936,7 +936,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - No new `AuthEventKind::FleetTriggered` audit row. `ReviewNow` and `Approve` are
       already audited as `authz_allow` with the caller and `trace_id`.
     - The portal Fleet tab does not show the new fields yet. That needs a Dart proto regen,
-      so it is left for S22's portal work.
+      so it is left for S22's portal work. (Done in S22.)
     - A `ReviewNow` that arrives while the same review is already running is refused by the
       orchestrator's in-flight duplicate guard, so it is not recorded as a requester.
 
@@ -1048,6 +1048,31 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - There is no config-load check for the portless form, because the existing
       `check_redirect_uri` already accepts it.
     - The keyring stays deferred to parity 50.
+
+- **2026-09-29 — S22 (#567): the portal Access tab.**
+  - A new Access tab in the portal has three views: role bindings (add, edit, delete, with
+    expiry and "keep their sessions"), the role catalog (built-ins plus role cards, edited
+    with `write:role`), and tenant sessions (list, revoke). It uses only the existing
+    `AuthService` and `RoleService` RPCs, so there is no wire change.
+  - Navigation hides Access without `read:binding`, from one filtered list so the rail and the
+    pages stay index-aligned. Other tabs keep their per-control gating.
+  - Refusal wording: the last-admin `FailedPrecondition` shows the server's text. The opaque
+    `PermissionDenied` lists its usual causes. Input is checked before sending (id, subject
+    length and control characters, role count, expiry).
+  - The Fleet review detail now shows S19's `requested_by` and `approved_by`.
+  - Only the `role.*` and `review_fleet.*` Dart stubs were regenerated.
+  - Tests:
+    - `access_test.dart`: 53 spec rows (the completeness critic now tables `access`);
+    - `access_model_test.dart`: tables for ids, drafts, expiry, the permission text, and
+      error wording;
+    - three Fleet attribution rows.
+    - The contract guard registers `FakeRoleService`. The full portal suite passes: 370 tests
+      before the Fleet rows.
+  - Deviations from the plan:
+    - Destinations other than Access are not hidden: their pages already gate each control,
+      and hiding a whole tab needs one permission that stands for it.
+    - `auth-integration` and `portal-auth-e2e` are unchanged; the hermetic widget suite
+      covers the page.
 
 ## Cross-track note (not an S-increment)
 

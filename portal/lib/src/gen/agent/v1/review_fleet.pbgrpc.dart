@@ -35,6 +35,8 @@ class ReviewFleetServiceClient extends $grpc.Client {
 
   ReviewFleetServiceClient(super.channel, {super.options, super.interceptors});
 
+  /// REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  /// every other mutation/action → POST with `body: "*"`. Paths live under /v1/fleet/.
   $grpc.ResponseFuture<$0.FleetSessionList> list(
     $0.FleetListRequest request, {
     $grpc.CallOptions? options,
@@ -49,6 +51,7 @@ class ReviewFleetServiceClient extends $grpc.Client {
     return $createUnaryCall(_$get, request, options: options);
   }
 
+  /// upsert = create + update
   $grpc.ResponseFuture<$0.FleetSession> put(
     $0.FleetSession request, {
     $grpc.CallOptions? options,
@@ -63,6 +66,7 @@ class ReviewFleetServiceClient extends $grpc.Client {
     return $createUnaryCall(_$delete, request, options: options);
   }
 
+  /// toggle without a full Put
   $grpc.ResponseFuture<$0.FleetSession> setEnabled(
     $0.FleetSetEnabledRequest request, {
     $grpc.CallOptions? options,

@@ -196,6 +196,8 @@ const ReviewSummary$json = {
     {'1': 'additions', '3': 9, '4': 1, '5': 13, '10': 'additions'},
     {'1': 'deletions', '3': 10, '4': 1, '5': 13, '10': 'deletions'},
     {'1': 'status', '3': 11, '4': 1, '5': 9, '10': 'status'},
+    {'1': 'requested_by', '3': 12, '4': 3, '5': 9, '10': 'requestedBy'},
+    {'1': 'approved_by', '3': 13, '4': 1, '5': 9, '10': 'approvedBy'},
   ],
 };
 
@@ -207,7 +209,8 @@ final $typed_data.Uint8List reviewSummaryDescriptor = $convert.base64Decode(
     'gGIAEoCFIKZ2F0ZUZhaWxlZBIdCgpuX2ZpbmRpbmdzGAcgASgNUgluRmluZGluZ3MSIwoNZmls'
     'ZXNfY2hhbmdlZBgIIAEoDVIMZmlsZXNDaGFuZ2VkEhwKCWFkZGl0aW9ucxgJIAEoDVIJYWRkaX'
     'Rpb25zEhwKCWRlbGV0aW9ucxgKIAEoDVIJZGVsZXRpb25zEhYKBnN0YXR1cxgLIAEoCVIGc3Rh'
-    'dHVz');
+    'dHVzEiEKDHJlcXVlc3RlZF9ieRgMIAMoCVILcmVxdWVzdGVkQnkSHwoLYXBwcm92ZWRfYnkYDS'
+    'ABKAlSCmFwcHJvdmVkQnk=');
 
 @$core.Deprecated('Use listReviewsRequestDescriptor instead')
 const ListReviewsRequest$json = {

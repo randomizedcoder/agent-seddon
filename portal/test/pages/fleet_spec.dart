@@ -118,6 +118,27 @@ const fleetSpec = PageSpec('fleet', [
   ),
   // ── detail pane ─────────────────────────────────────────────────────────────
   SpecRow(
+    elementId: 'fleet.detail.attribution',
+    caseClass: CaseClass.positive,
+    name: 'attribution_shown',
+    description: 'the detail names who requested and who approved the review (S19)',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.attribution',
+    caseClass: CaseClass.corner,
+    name: 'poller_review_has_no_attribution',
+    description: 'a review the poller started names nobody',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.attribution',
+    caseClass: CaseClass.adversarial,
+    name: 'eight_long_requesters_clipped',
+    description: 'eight 300-character requesters render clipped, no overflow',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
     elementId: 'fleet.review.item',
     caseClass: CaseClass.positive,
     name: 'select_loads_detail',
