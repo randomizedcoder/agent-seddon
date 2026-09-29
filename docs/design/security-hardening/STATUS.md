@@ -32,7 +32,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ✅ | #560 |
 | S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
 | S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
-| S21 | CLI loopback-redirect login | deferral | 🟡 | — |
+| S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
 | S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
 
@@ -1020,7 +1020,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     client certificate earns is internal to agent B, so the harness has nothing to observe;
     the wire tests do the handshakes for real.
 
-- **2026-09-28 — S21: `agent login --browser`.**
+- **2026-09-28 — S21 (#566): `agent login --browser`.**
   - The CLI signs in through a browser: a one-shot loopback listener on
     `127.0.0.1:<any port>/agent-login`, `Begin` with a PKCE challenge, the IdP URL printed and
     opened with `xdg-open`, then `Exchange{code, state, code_verifier}`. The agent redeems the
