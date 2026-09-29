@@ -1135,6 +1135,12 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       (`PORTAL_TEST_OPENSSL`, set by the `portal-widget` check): mTLS round trip, server name,
       no client certificate refused, plaintext refused, name mismatch refused, another CA
       refused, and a broken setting against a plaintext server still refused.
+  - Live-verified on l2 on 2026-09-29. The setup was a real `agent --serve-all` serving mTLS only
+    (`[grpc.tls] client_ca`), with OIDC and the fake loopback IdP, and a `pki-dev` PKI with `cli`
+    and `portal` leaves.
+    - `agent login --browser` and `agent token --json` worked over TLS.
+    - The S24 `flutter build linux` bundle under Xvfb, with `PORTAL_TLS_CA/_CERT/_KEY`, signed in
+      through the CLI and loaded Access → Sessions ("this session").
 
 ## Cross-track note (not an S-increment)
 
