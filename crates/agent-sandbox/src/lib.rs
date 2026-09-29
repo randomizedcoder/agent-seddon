@@ -61,6 +61,39 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> (
 /// `NetworkPolicy` is **not** enforced — a plain `Command` has no way to; that
 /// arrives with the namespace/bwrap backends (C23). The caller sets the intent
 /// regardless, so upgrading the backend enforces it with no caller change.
+/// `errno` for "Text file busy": `execve` of a file some process still holds open
+/// for writing. Linux and the BSDs agree on the number.
+const ETXTBSY: i32 = 26;
+/// How long a spawn keeps retrying `ETXTBSY` before giving up (`RETRY_EVERY` apart).
+const ETXTBSY_RETRIES: u32 = 40;
+const ETXTBSY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// `cmd.spawn()`, retrying a transient `ETXTBSY`. The race is the classic one: a
+/// thread that just wrote and closed an executable races another thread's
+/// fork+exec, whose child holds the (close-on-exec) write descriptor for the
+/// instant between fork and exec — so `execve` of the new file fails with "Text
+/// file busy" although no writer is left. An agent both writes files and spawns
+/// children concurrently (a tool writes a script while a subprocess starts; the
+/// campaign driver's parallel worker dispatch), so the funnel absorbs the race the
+/// way Go's `os/exec` does: a bounded retry. A file that is genuinely still open
+/// for writing keeps failing and the error surfaces after the last retry.
+async fn spawn_retrying_etxtbsy(
+    cmd: &mut tokio::process::Command,
+    prog: &str,
+) -> Result<tokio::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < ETXTBSY_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(ETXTBSY_RETRY_EVERY).await;
+            }
+            Err(e) => return Err(Error::Sandbox(format!("spawning `{prog}`: {e}"))),
+        }
+    }
+}
+
 async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
     let (prog, args) = argv
         .split_first()
@@ -104,9 +137,7 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let run = async {
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Sandbox(format!("spawning `{prog}`: {e}")))?;
+        let mut child = spawn_retrying_etxtbsy(&mut cmd, prog).await?;
         // `piped()` guarantees these are `Some`.
         let out = child
             .stdout
@@ -398,6 +429,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.stdout, "__EMPTY__");
+    }
+
+    /// An executable some handle still holds open for writing: `execve` says "Text
+    /// file busy" (`ETXTBSY`). A script for the spawn to exec directly.
+    fn busy_script(dir: &std::path::Path) -> (std::path::PathBuf, std::fs::File) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("busy.sh");
+        std::fs::write(&path, "#!/bin/sh\necho ran\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let writer = std::fs::File::options().write(true).open(&path).unwrap();
+        (path, writer)
+    }
+
+    /// corner: a writer that goes away within the retry budget — the fork/exec race
+    /// an agent hits when a tool writes a script while a child starts — is absorbed
+    /// and the program runs.
+    #[tokio::test]
+    async fn corner_spawn_retries_transient_etxtbsy() {
+        let dir = tempdir();
+        let (path, writer) = busy_script(&dir);
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(ETXTBSY_RETRY_EVERY * 4).await;
+            drop(writer);
+        });
+        let out = LocalSandbox
+            .exec(&ExecSpec::argv(
+                vec![path.to_string_lossy().into_owned()],
+                dir.clone(),
+            ))
+            .await
+            .expect("the writer closed within the retry budget");
+        release.await.unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.trim(), "ran");
+    }
+
+    /// negative: a file genuinely still open for writing keeps failing — the retry
+    /// is bounded and the real error surfaces, naming the program.
+    #[tokio::test]
+    async fn negative_spawn_etxtbsy_bounded() {
+        let dir = tempdir();
+        let (path, writer) = busy_script(&dir);
+        let err = LocalSandbox
+            .exec(&ExecSpec::argv(
+                vec![path.to_string_lossy().into_owned()],
+                dir.clone(),
+            ))
+            .await
+            .expect_err("still busy after every retry");
+        drop(writer);
+        let text = err.to_string();
+        assert!(text.contains("busy.sh"), "{text}");
+        assert!(text.contains("Text file busy"), "{text}");
     }
 
     /// The name rule, table-driven over the pure check.

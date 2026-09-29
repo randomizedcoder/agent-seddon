@@ -244,14 +244,20 @@ pub async fn run_leaf(
         }
     }
 
-    // 3. The heartbeat; a lost lease flips `cancel`.
+    // 3. The heartbeat; a lost lease flips `cancel`. It carries the worker's
+    //    request scope (tenant identity, principal) so its store writes and
+    //    spans stay attributed to this leaf, not to nobody.
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let heartbeat = AbortOnDrop(tokio::spawn(heartbeat(
-        Arc::clone(&store),
-        task,
-        owner.clone(),
-        i64::from(clamp_lease(policy.lease_secs)),
-        cancel_tx,
+    let carried = agent_core::RequestScope::current();
+    let heartbeat = AbortOnDrop(tokio::spawn(agent_core::scope_request(
+        carried,
+        heartbeat(
+            Arc::clone(&store),
+            task,
+            owner.clone(),
+            i64::from(clamp_lease(policy.lease_secs)),
+            cancel_tx,
+        ),
     )));
 
     // 4–6. The body; every early return is settled below.
