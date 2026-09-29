@@ -1118,5 +1118,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   `/v1/…` path can't match a gRPC exempt prefix, so it hits the catch-all requires-token rule (401);
   fail-open is impossible. Same `PORTAL_AUTH` gate, same JWKS provider; loopback pin retained as
   defense-in-depth. Coordinated with the S14 session (no collision with in-flight S20 TLS/reload
-  work). Config-validated by the `portal-envoy` check across auth modes; behavioural 401/200 pending
-  l2 live-verify with `PORTAL_AUTH=on`. Detail: `docs/design/rest-openapi/STATUS.md` + gap-analysis §2.8.
+  work). Config-validated by the `portal-envoy` check across auth modes, and **behaviourally live-verified
+  on l2 (2026-09-29, `PORTAL_AUTH=on`, verdict PASS)**: a no-token RPC path → 401, an exempt `/v1/auth/*`
+  path → 501 (not 401, i.e. it passed the edge), a JWKS-signed bearer → 200. Detail:
+  `docs/design/rest-openapi/STATUS.md` + gap-analysis §2.8.

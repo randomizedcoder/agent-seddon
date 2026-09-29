@@ -208,9 +208,10 @@ body. The audit therefore passes while the surfaces above stay shared.
   `UNAUTHENTICATED_PREFIXES` as the grpc-web listeners — one source of truth, fail-closed (an unmapped
   or un-rewritten `/v1/…` path never matches a gRPC exempt prefix, so it hits the catch-all
   requires-token rule). The loopback pin stays as defense-in-depth. Config-validated across all auth
-  modes by the `portal-envoy` check (real `envoy --mode validate`); behavioural 401/200 pending live
-  verification on l2 with `PORTAL_AUTH=on` (the gate cannot run an auth-on REST call without the
-  fake-issuer harness).
+  modes by the `portal-envoy` check (real `envoy --mode validate`), and **behaviourally live-verified on
+  l2 (2026-09-29, `PORTAL_AUTH=on`, verdict PASS)**: an unauthenticated `GET /v1/config/values` → **401**;
+  an unauthenticated `GET /v1/auth/issuers` → **501 (not 401)**, proving the exempt AuthService prefix
+  passes the edge after the transcoder rewrites `:path`; a JWKS-signed bearer → **200**.
 
 ### 2.9 Multi-session leftovers
 
