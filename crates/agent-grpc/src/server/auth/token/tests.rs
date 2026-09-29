@@ -104,8 +104,8 @@ fn perms(n: usize) -> Vec<String> {
 fn sign_raw(svc: &TokenService, typ: Option<&str>, claims: &Value) -> String {
     let mut header = Header::new(Algorithm::ES256);
     header.typ = typ.map(str::to_string);
-    header.kid = Some(svc.current.kid.clone());
-    jsonwebtoken::encode(&header, claims, &svc.current.encoding).expect("sign")
+    header.kid = Some(svc.keys.load().current.kid.clone());
+    jsonwebtoken::encode(&header, claims, &svc.keys.load().current.encoding).expect("sign")
 }
 
 fn good_claims() -> Value {
@@ -327,7 +327,7 @@ fn positive_rotation_grace_accepts_previous_kid() {
         .unwrap()
         .kid
         .unwrap();
-    assert_eq!(kid, rotated.current.kid);
+    assert_eq!(kid, rotated.current_kid());
 }
 
 #[test]
@@ -348,13 +348,10 @@ fn positive_jwks_publishes_current_then_previous_and_verifies_elsewhere() {
         .iter()
         .filter_map(|k| k.common.key_id.clone())
         .collect();
-    assert_eq!(
-        kids,
-        vec![svc.current.kid.clone(), key_a().kid().to_string()]
-    );
+    assert_eq!(kids, vec![svc.current_kid(), key_a().kid().to_string()]);
     // A verifier that only has the published set (another process, Envoy) accepts it.
     let token = svc.mint(&grant(NOW + 3600), &[]).unwrap().token;
-    let jwk = set.find(&svc.current.kid).unwrap();
+    let jwk = set.find(&svc.current_kid()).unwrap();
     let mut v = Validation::new(Algorithm::ES256);
     v.set_audience(&[AUD]);
     v.validate_exp = false;
@@ -420,7 +417,7 @@ fn adversarial_rs256_with_agent_typ_and_kid_rejected() {
     let svc = service_at(NOW, key_a(), None);
     let mut header = Header::new(Algorithm::RS256);
     header.typ = Some(TOKEN_TYP.into());
-    header.kid = Some(svc.current.kid.clone());
+    header.kid = Some(svc.current_kid());
     let token =
         jsonwebtoken::encode(&header, &good_claims(), &TestKey::Rsa.encoding_key()).unwrap();
     assert!(svc.verify(&token).is_err());
@@ -432,7 +429,8 @@ fn adversarial_unknown_kid_rejected() {
     let mut header = Header::new(Algorithm::ES256);
     header.typ = Some(TOKEN_TYP.into());
     header.kid = Some("not-a-kid".into());
-    let token = jsonwebtoken::encode(&header, &good_claims(), &svc.current.encoding).unwrap();
+    let token =
+        jsonwebtoken::encode(&header, &good_claims(), &svc.keys.load().current.encoding).unwrap();
     assert!(svc.verify(&token).is_err());
 }
 
@@ -519,4 +517,155 @@ fn adversarial_mint_refuses_a_malformed_thumbprint(#[case] tp: &str) {
     let svc = service_at(NOW, key_a(), None);
     let grant = Grant::for_service(&fleet_binding(), tp, "sid-9", NOW + 3600);
     assert!(svc.mint(&grant, &[]).is_err());
+}
+
+// --- reload (S20) ----------------------------------------------------------------
+
+/// A fresh P-256 key as a PKCS#8 PEM file body.
+fn fresh_key_pem() -> String {
+    let pkcs8 =
+        EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+            .expect("generate");
+    pem("PRIVATE KEY", pkcs8.as_ref())
+}
+
+/// `signing_key` / `previous_key` files in a fresh dir, and a service loaded from
+/// them (the real clock: `from_params` is the only constructor that can reload).
+struct KeyDir {
+    signing: std::path::PathBuf,
+    previous: std::path::PathBuf,
+    svc: TokenService,
+}
+
+impl KeyDir {
+    fn new(signing_pem: &str, with_previous: Option<&str>) -> Self {
+        let dir = agent_testkit::tempdir();
+        let signing = dir.join("signing.pem");
+        let previous = dir.join("previous.pem");
+        std::fs::write(&signing, signing_pem).unwrap();
+        if let Some(p) = with_previous {
+            std::fs::write(&previous, p).unwrap();
+        }
+        let p = TokenParams {
+            signing_key: signing.display().to_string(),
+            previous_key: with_previous
+                .map(|_| previous.display().to_string())
+                .unwrap_or_default(),
+            ..params(0)
+        };
+        let svc = TokenService::from_params(&p, LEEWAY).expect("service");
+        Self {
+            signing,
+            previous,
+            svc,
+        }
+    }
+
+    fn mint(&self) -> String {
+        let far = SystemClock.now_secs() + 3600;
+        self.svc.mint(&grant(far), &[]).expect("mint").token
+    }
+}
+
+fn kid_of(token: &str) -> String {
+    jsonwebtoken::decode_header(token).unwrap().kid.unwrap()
+}
+
+#[test]
+fn positive_reload_rotates_and_the_old_kid_still_verifies() {
+    let old_pem = fresh_key_pem();
+    let keys = KeyDir::new(&old_pem, Some(&fresh_key_pem()));
+    let old_kid = keys.svc.current_kid();
+    let before = keys.mint();
+
+    // The rotation: old key → previous_key, new key → signing_key, reload.
+    std::fs::write(&keys.previous, &old_pem).unwrap();
+    std::fs::write(&keys.signing, fresh_key_pem()).unwrap();
+    let got = keys.svc.reload().expect("reload");
+
+    assert_ne!(got.current_kid, old_kid);
+    assert_eq!(got.previous_kid.as_deref(), Some(old_kid.as_str()));
+    assert!(
+        keys.svc.verify(&before).is_ok(),
+        "a token from before the rotation"
+    );
+    let after = keys.mint();
+    assert_eq!(kid_of(&after), got.current_kid);
+    assert!(keys.svc.verify(&after).is_ok());
+    let set: JwkSet = serde_json::from_str(&keys.svc.jwks_json()).unwrap();
+    let kids: Vec<_> = set
+        .keys
+        .iter()
+        .filter_map(|k| k.common.key_id.clone())
+        .collect();
+    assert_eq!(kids, vec![got.current_kid, old_kid]);
+}
+
+#[rstest]
+#[case::negative_signing_key_removed("remove")]
+#[case::negative_signing_key_not_pem("garbage")]
+#[case::adversarial_previous_equals_signing("same")]
+#[case::adversarial_rsa_key_swapped_in("rsa")]
+fn failed_reload_keeps_the_current_keys(#[case] damage: &str) {
+    let keys = KeyDir::new(&fresh_key_pem(), Some(&fresh_key_pem()));
+    let kid = keys.svc.current_kid();
+    let before = keys.mint();
+    match damage {
+        "remove" => std::fs::remove_file(&keys.signing).unwrap(),
+        "garbage" => std::fs::write(&keys.signing, "not a key").unwrap(),
+        "same" => std::fs::copy(&keys.signing, &keys.previous)
+            .map(drop)
+            .unwrap(),
+        "rsa" => std::fs::write(&keys.signing, RSA_PRIV_PEM).unwrap(),
+        other => unreachable!("{other}"),
+    }
+    assert!(keys.svc.reload().is_err(), "{damage}");
+    assert_eq!(keys.svc.current_kid(), kid, "{damage}: keys unchanged");
+    assert!(keys.svc.verify(&before).is_ok(), "{damage}");
+    assert_eq!(
+        kid_of(&keys.mint()),
+        kid,
+        "{damage}: still signs with the old key"
+    );
+}
+
+#[test]
+fn corner_reload_with_unchanged_files_is_idempotent() {
+    let keys = KeyDir::new(&fresh_key_pem(), None);
+    let kid = keys.svc.current_kid();
+    let token = keys.mint();
+    for _ in 0..2 {
+        let got = keys.svc.reload().expect("reload");
+        assert_eq!(
+            got,
+            ReloadedKeys {
+                current_kid: kid.clone(),
+                previous_kid: None
+            }
+        );
+    }
+    assert!(keys.svc.verify(&token).is_ok());
+}
+
+#[test]
+fn boundary_retired_key_is_rejected_once_rotated_out_of_previous() {
+    // Two rotations: the first key leaves the key set, so its tokens stop verifying.
+    let first = fresh_key_pem();
+    let keys = KeyDir::new(&first, Some(&fresh_key_pem()));
+    let from_first = keys.mint();
+    let second = fresh_key_pem();
+    std::fs::write(&keys.previous, &first).unwrap();
+    std::fs::write(&keys.signing, &second).unwrap();
+    keys.svc.reload().expect("first rotation");
+    assert!(keys.svc.verify(&from_first).is_ok());
+    std::fs::write(&keys.previous, &second).unwrap();
+    std::fs::write(&keys.signing, fresh_key_pem()).unwrap();
+    keys.svc.reload().expect("second rotation");
+    assert!(keys.svc.verify(&from_first).is_err());
+}
+
+#[test]
+fn negative_service_built_from_keys_has_nothing_to_reload() {
+    let e = service_at(NOW, key_a(), None).reload().unwrap_err();
+    assert!(e.contains("nothing to reload"), "{e}");
 }

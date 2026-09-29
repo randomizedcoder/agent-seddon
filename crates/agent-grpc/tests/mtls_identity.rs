@@ -20,7 +20,7 @@ use std::sync::Arc;
 use agent_core::{BearerSource, Tokenizer};
 use agent_grpc::client::MtlsBearerSource;
 use agent_grpc::server::{
-    base_router_with_tls, AuthLayer, AuthParams, IssuerParams, MtlsBindingParams, TokenParams,
+    base_router_with_auth, AuthLayer, AuthParams, IssuerParams, MtlsBindingParams, TokenParams,
     TokenizerServiceSvc,
 };
 use agent_grpc::{ClientTls, Endpoint, ServerTls};
@@ -190,15 +190,16 @@ impl Rig {
 async fn serve(layer: AuthLayer, tok: Arc<dyn Tokenizer>, tls: Option<ServerTls>) -> Endpoint {
     let bound = Endpoint::parse("127.0.0.1:0").bind().await.expect("bind");
     let dial = bound.dial_endpoint().expect("dial endpoint");
-    let (router, health) = base_router_with_tls(0, None, layer.clone(), None, tls.as_ref())
-        .await
-        .expect("router");
+    let (router, health) = base_router_with_auth(0, None, layer.clone(), None).await;
     let router = layer
         .serve_auth_service(router)
         .add_service(TokenizerServiceSvc::new(tok).into_server());
+    let served = tls.clone();
     tokio::spawn(async move {
         let _health = health;
-        let _ = bound.serve(router, std::future::pending()).await;
+        let _ = bound
+            .serve(router, served.as_ref(), std::future::pending())
+            .await;
     });
     match (dial, tls.is_some()) {
         (Endpoint::Tcp { hostport, .. }, true) => Endpoint::Tcp {

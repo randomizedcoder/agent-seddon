@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use agent_grpc::server::{base_router_with_tls, AuthLayer};
+use agent_grpc::server::{base_router_with_auth, AuthLayer};
 use agent_grpc::{ClientTls, Endpoint, ServerTls};
 use agent_testkit::pki::{Issued, LeafSpec, TestPki, Validity};
 use rstest::rstest;
@@ -108,12 +108,13 @@ impl Pkis {
 async fn serve(endpoint: Endpoint, tls: Option<ServerTls>) -> Endpoint {
     let bound = endpoint.bind().await.expect("bind");
     let dial = bound.dial_endpoint().expect("dial endpoint");
-    let (router, health) = base_router_with_tls(0, None, AuthLayer::disabled(), None, tls.as_ref())
-        .await
-        .expect("router");
+    let (router, health) = base_router_with_auth(0, None, AuthLayer::disabled(), None).await;
+    let served = tls.clone();
     tokio::spawn(async move {
         let _health = health; // keep the reporter alive for the server's lifetime
-        let _ = bound.serve(router, std::future::pending()).await;
+        let _ = bound
+            .serve(router, served.as_ref(), std::future::pending())
+            .await;
     });
     dial
 }

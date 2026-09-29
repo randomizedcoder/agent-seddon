@@ -94,6 +94,35 @@ key  = "…/pki/svc-a/key.pem"
   Unknown keys are errors.
 - The `renew_cmd` / `step ca renew` rows stay with S15.
 
+### As built (S20a): reload on SIGHUP
+
+`renew_cmd` was never built. A serve mode reloads its TLS files on SIGHUP instead, so any
+renewer works. For step-ca:
+
+```sh
+step ca renew --daemon --exec "kill -HUP <agent pid>" server.crt server.key
+```
+
+- **What reloads:** the listener's `[grpc.tls]` `cert`, `key` and `client_ca`, and the
+  `[auth.token]` `signing_key` / `previous_key` ([02](02-token-service.md)). A SIGHUP reloads
+  both. Each part is independent, and a part that fails keeps what it had: a half-written
+  renewal, a key that does not match its certificate, or an oversized file logs a warning,
+  and the listener keeps serving the old certificate.
+- **How:** the listener runs its own `tokio_rustls` acceptor instead of tonic's, and each
+  handshake takes the rustls config current at that moment (an `ArcSwap`). New connections
+  get the renewed certificate. Established HTTP/2 connections keep the session they
+  negotiated. The config is built the way tonic builds it (WebPKI client verifier, ALPN
+  `h2`), and `TlsConnectInfo` still reaches handlers, so peer certificates and mTLS bindings
+  are unchanged.
+- **Handshakes:** each one runs as its own task with a 10 s timeout, and at most 1024 run at
+  once, so a silent or plaintext peer cannot stall the listener.
+- **Refusals:** `Bound::serve` takes the TLS explicitly on every call, so no listener is
+  plaintext by omission. A unix socket given TLS is refused.
+- **Signal handling:** the SIGHUP handler is installed in every serve mode, so a SIGHUP no
+  longer terminates one, even with nothing to reload.
+- **Not yet reloaded:** the client side. `[grpc.tls.client]` and the channels already dialed
+  keep the identity they were built with until restart. That is S20b.
+
 ## Test matrix
 
 The transport matrix ([`transport.rs`](../../../crates/agent-grpc/src/transport.rs) tests and the

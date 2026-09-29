@@ -317,6 +317,7 @@ class FakeAgentA:
         self.revoked: set[str] = set()
         self.access: dict[str, str] = {}  # access token → session
         self.n = 0
+        self.kids = ["k1", "k0"]  # the published key set, current first
 
     def seed(self, who: str) -> dict:
         self.n += 1
@@ -335,6 +336,8 @@ class FakeAgentA:
             return "DIAL", {}
         if method.endswith("Health/Check"):
             return "OK", {"status": "SERVING"}
+        if method == ai.JWKS:
+            return "OK", {"jwksJson": json.dumps({"keys": [{"kid": k} for k in self.kids]})}
         if method == ai.EXCHANGE and data.get("useClientCert"):
             return "OK", {"accessToken": f"svc-{self.ca.gen if self.ca else 0}"}
         if method == ai.WHOAMI:
@@ -410,6 +413,102 @@ class CheckRenewal(unittest.TestCase):
                                   ("", "unbound_token"), ("", "strand_on_rotation")):
             with self.subTest(ca_bug=ca_bug, agent_bug=agent_bug), self.assertRaises(ae.ContractError):
                 self.run_with(ca_bug, agent_bug)
+
+
+class FakeReload:
+    """Agent A's reload as the SIGHUP step sees it: the serial it serves, the key
+    rotation on disk, the signal. `bug` breaks one promise."""
+
+    def __init__(self, ca: FakeCa, agent: FakeAgentA, bug: str = ""):
+        self.ca, self.agent, self.bug = ca, agent, bug
+        self.served, self.pending, self.alive = ca.gen, None, True
+
+    def served_serial(self) -> str:
+        return str(self.ca.gen if self.bug == "live_before_signal" else self.served)
+
+    def rotate(self) -> None:
+        self.pending = ["k2", self.agent.kids[0]]
+        if self.bug == "keys_before_signal":
+            self.agent.kids = self.pending
+
+    def hup(self) -> None:
+        if self.bug == "dies":
+            self.alive = False
+            return
+        if self.bug != "tls_not_reloaded":
+            self.served = self.ca.gen
+        if self.bug == "key_not_reloaded":
+            return
+        self.agent.kids = self.pending[:1] if self.bug == "previous_dropped" else self.pending
+
+
+class CheckSighupReload(unittest.TestCase):
+    def run_with(self, bug=""):
+        ca = FakeCa()
+        agent = FakeAgentA(ca)
+        fake = FakeReload(ca, agent, bug)
+        ctx = it_ctx(agent, ca=ca, served_serial=fake.served_serial, rotate_signer=fake.rotate,
+                     hup_a=fake.hup, a_alive=lambda: fake.alive, reload_wait=0.3)
+        ai.step_sighup_reloads_tls_and_signing_key(ctx)
+
+    def test_positive_reload_on_signal_passes(self):
+        self.run_with()
+
+    def test_negative_each_broken_promise_fails(self):
+        for bug in ("tls_not_reloaded", "key_not_reloaded", "previous_dropped", "dies",
+                    "live_before_signal", "keys_before_signal"):
+            with self.subTest(bug=bug), self.assertRaises(ae.ContractError):
+                self.run_with(bug)
+
+
+class WithPreviousKey(unittest.TestCase):
+    BASE = "[auth.token]\nissuer = \"x\"\nsigning_key = \"/k/signer.pem\"\nttl_secs = 300"
+
+    def test_positive_inserted_after_signing_key(self):
+        got = ai.with_previous_key(self.BASE, Path("/k/prev.pem")).split("\n")
+        i = got.index('signing_key = "/k/signer.pem"')
+        self.assertEqual(got[i + 1], 'previous_key = "/k/prev.pem"')
+        self.assertEqual(tomllib.loads(ai.with_previous_key(self.BASE, Path("/k/prev.pem")))["auth"]["token"]
+                         ["previous_key"], "/k/prev.pem")
+
+    def test_negative_no_signing_key(self):
+        with self.assertRaises(ValueError):
+            ai.with_previous_key("[auth.token]\nissuer = \"x\"", Path("/p"))
+
+    def test_corner_already_has_previous_key(self):
+        with self.assertRaises(ValueError):
+            ai.with_previous_key(self.BASE + '\nprevious_key = "/old"', Path("/p"))
+
+    def test_boundary_two_signing_keys_refused(self):
+        with self.assertRaises(ValueError):
+            ai.with_previous_key(self.BASE + '\nsigning_key = "/again"', Path("/p"))
+
+    def test_adversarial_path_with_quotes_stays_one_toml_string(self):
+        path = Path('/k/"]\nmode = "none')
+        doc = tomllib.loads(ai.with_previous_key(self.BASE, path))
+        self.assertEqual(doc["auth"]["token"]["previous_key"], str(path))
+        self.assertNotIn("mode", doc["auth"]["token"])
+
+
+class ParseKids(unittest.TestCase):
+    def test_positive_in_order(self):
+        self.assertEqual(ai.parse_kids('{"keys":[{"kid":"b"},{"kid":"a"}]}'), ["b", "a"])
+
+    def test_corner_empty_set(self):
+        self.assertEqual(ai.parse_kids('{"keys":[]}'), [])
+
+    def test_negative_not_json(self):
+        with self.assertRaises(ae.ContractError):
+            ai.parse_kids("nope")
+
+    def test_boundary_key_without_kid(self):
+        with self.assertRaises(ae.ContractError):
+            ai.parse_kids('{"keys":[{"kty":"EC"}]}')
+
+    def test_adversarial_wrong_shape(self):
+        for doc in ('{"keys":"k1"}', '[1,2]', '{"keys":null}'):
+            with self.subTest(doc=doc), self.assertRaises(ae.ContractError):
+                ai.parse_kids(doc)
 
 
 class CheckForeignCa(unittest.TestCase):

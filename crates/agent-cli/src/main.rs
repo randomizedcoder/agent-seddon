@@ -11,6 +11,7 @@ mod campaign_cli;
 mod grpc_server;
 mod mcp_server;
 mod metrics_server;
+mod reload;
 mod repl;
 mod shutdown;
 

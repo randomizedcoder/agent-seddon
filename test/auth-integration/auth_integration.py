@@ -9,7 +9,9 @@ host:
   daemon issues every certificate over its provisioner API. The agents serve and
   dial with those certificates, the fleet certificate is renewed through the
   daemon (`step ca renew`), and a certificate from a different CA carrying the
-  same SPIFFE name is refused.
+  same SPIFFE name is refused. Agent A's own certificate is then renewed and its
+  token signing key rotated on disk, and a SIGHUP makes it serve and sign with
+  them without a restart (S20).
 - **Postgres tier**: agent A keeps sign-in sessions in a throwaway Postgres
   (`[auth.token] session_store = "postgres"`, schema applied by the agent). Rows
   land per tenant, no refresh handle is stored in clear, and sessions and
@@ -35,6 +37,9 @@ import json
 import os
 import secrets
 import shutil
+import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -69,6 +74,11 @@ PG_DB = "agent_auth"
 PG_DSN_ENV = "AUTH_IT_PG_DSN"
 SERVICES = ("agent", "memory", "fleet", "cli")
 SIGNER = "token-signer"
+# Key sources for the signing-key rotation (S20): agent A starts with
+# PREV_SIGNER's key as `previous_key`, and the rotation moves SIGNER's key there
+# and NEXT_SIGNER's key into `signing_key`.
+PREV_SIGNER = "token-signer-prev"
+NEXT_SIGNER = "token-signer-next"
 PROVISIONER = "admin"
 WAIT_SECS = 30.0
 AUDIT_WAIT_SECS = 30.0
@@ -211,7 +221,7 @@ class StepCa:
 def build_pki(ca: StepCa, pki: Path) -> None:
     """Lay the daemon's certificates out the way `pki-dev` does, so the S15a
     config renderer and clients take them unchanged."""
-    for svc in (*SERVICES, SIGNER):
+    for svc in (*SERVICES, SIGNER, PREV_SIGNER, NEXT_SIGNER):
         ca.issue(svc, pki / svc / "cert.pem", pki / svc / "key.pem", (e2e.spiffe(svc), "localhost"))
     (pki / "ca").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ca.root, pki / "ca" / "root.crt")
@@ -270,6 +280,43 @@ class Postgres:
 # ---------------------------------------------------------------- config
 
 
+def with_previous_key(config: str, previous: Path) -> str:
+    """Add `previous_key` to the rendered `[auth.token]`, right after its one
+    `signing_key` line, so a SIGHUP rotation has a previous key to move into."""
+    lines = config.split("\n")
+    at = [i for i, line in enumerate(lines) if line.startswith("signing_key = ")]
+    if len(at) != 1:
+        raise ValueError(f"want exactly one signing_key line, found {len(at)}")
+    if any(line.startswith("previous_key = ") for line in lines):
+        raise ValueError("the config already sets previous_key")
+    lines.insert(at[0] + 1, f"previous_key = {e2e.toml_str(previous)}")
+    return "\n".join(lines)
+
+
+def parse_kids(jwks_json: str) -> list[str]:
+    """The `kid`s of a JWK Set document, in order."""
+    try:
+        keys = json.loads(jwks_json)["keys"]
+        return [str(k["kid"]) for k in keys]
+    except (ValueError, KeyError, TypeError) as e:
+        raise ContractError(f"not a JWK Set: {jwks_json[:120]!r} ({e})") from e
+
+
+def served_certificate_pem(addr: str, ca: Path, cert: Path, key: Path) -> str:
+    """The leaf certificate a TLS listener presents, as PEM (for `step certificate
+    inspect`). Verified against `ca` as `localhost`, presenting `cert` for mTLS."""
+    host, port = addr.rsplit(":", 1)
+    tls = ssl.create_default_context(cafile=str(ca))
+    tls.load_cert_chain(str(cert), str(key))
+    tls.set_alpn_protocols(["h2"])
+    with socket.create_connection((host, int(port)), timeout=10) as raw:
+        with tls.wrap_socket(raw, server_hostname="localhost") as conn:
+            der = conn.getpeercert(binary_form=True)
+    if not der:
+        raise HarnessError(f"{addr} presented no certificate")
+    return ssl.DER_cert_to_PEM_cert(der)
+
+
 def session_lines(pg: bool, state: Path) -> tuple[str, ...]:
     if pg:
         return ('session_store = "postgres"',)
@@ -313,12 +360,18 @@ class ItCtx(e2e.Ctx):
     pg: Callable[[str], str] | None = None
     ch: ChQuery | None = None
     restart_a: Callable[[], None] | None = None
+    served_serial: Callable[[], str] | None = None  # the serial agent A presents now
+    rotate_signer: Callable[[], None] | None = None  # rotate A's key files on disk
+    hup_a: Callable[[], None] | None = None
+    a_alive: Callable[[], bool] | None = None
+    reload_wait: float = WAIT_SECS
     audit_wait: float = AUDIT_WAIT_SECS
     svc_tokens: list = field(default_factory=list)
 
 
 EXCHANGE = "agent.v1.AuthService/Exchange"
 WHOAMI = "agent.v1.AuthService/WhoAmI"
+JWKS = "agent.v1.AuthService/Jwks"
 REFRESH = "agent.v1.AuthService/Refresh"
 LOGOUT = "agent.v1.AuthService/Logout"
 
@@ -365,6 +418,50 @@ def step_renewal_keeps_identity(ctx: ItCtx) -> None:
     bare = ctx.bare.call(ctx.lay.addr_a, WHOAMI, bearer=old_token)
     if bare.code not in ("DIAL", "Unauthenticated"):
         raise ContractError(f"the pre-renewal token with no client certificate: got {bare.code}")
+
+
+def _kids(ctx: ItCtx, what: str) -> list[str]:
+    reply = expect(ctx.fleet.call(ctx.lay.addr_a, JWKS), "OK", what)
+    return parse_kids(str(reply.body.get("jwksJson", "")))
+
+
+def step_sighup_reloads_tls_and_signing_key(ctx: ItCtx) -> None:
+    """Renew agent A's own certificate and rotate its signing key on disk, then
+    SIGHUP (S20): A serves the renewed certificate and signs with the new key with
+    no restart, the old key stays published as the previous one, and a token signed
+    before the rotation still verifies. Nothing changes before the signal."""
+    crt, key = ctx.lay.leaf("agent")
+    served = ctx.served_serial()
+    on_disk = ctx.ca.inspect(crt).serial
+    if served != on_disk:
+        raise ContractError(f"agent A serves serial {served}, its certificate file has {on_disk}")
+    kids = _kids(ctx, "Jwks before the rotation")
+    old_token = _svc_token(ctx, "service Exchange before the rotation")
+    ctx.ca.renew(crt, key)
+    renewed = ctx.ca.inspect(crt).serial
+    ctx.rotate_signer()
+    if ctx.served_serial() != served:
+        raise ContractError("agent A changed its certificate before any SIGHUP")
+    if _kids(ctx, "Jwks before SIGHUP") != kids:
+        raise ContractError("agent A changed its signing keys before any SIGHUP")
+
+    ctx.hup_a()
+    deadline = time.monotonic() + ctx.reload_wait
+    while ctx.served_serial() != renewed:
+        if not ctx.a_alive():
+            raise ContractError("agent A exited on SIGHUP")
+        if time.monotonic() > deadline:
+            raise ContractError(f"agent A still serves serial {served} after SIGHUP (renewed: {renewed})")
+        time.sleep(0.2)
+    if not ctx.a_alive():
+        raise ContractError("agent A exited on SIGHUP")
+    after = _kids(ctx, "Jwks after SIGHUP")
+    if len(after) != 2 or after[0] in kids or after[1] != kids[0]:
+        raise ContractError(f"key set after the rotation is {after}; want [<new>, {kids[0]}]")
+    expect(ctx.fleet.call(ctx.lay.addr_a, WHOAMI, bearer=old_token), "OK",
+           "a token signed before the rotation (its key is now the previous one)")
+    new_token = _svc_token(ctx, "service Exchange after SIGHUP")
+    expect(ctx.fleet.call(ctx.lay.addr_a, WHOAMI, bearer=new_token), "OK", "a token signed after SIGHUP")
 
 
 def step_foreign_ca_refused(ctx: ItCtx) -> None:
@@ -501,6 +598,7 @@ STEPCA_STEPS: tuple[Step, ...] = (
     ("mTLS service identity", e2e.step_mtls_service_identity),
     ("renewal through the daemon keeps the identity", step_renewal_keeps_identity),
     ("a foreign CA is refused", step_foreign_ca_refused),
+    ("SIGHUP reloads the certificate and the signing key", step_sighup_reloads_tls_and_signing_key),
 )
 PG_STEPS: tuple[Step, ...] = (
     ("sessions persist in Postgres, secrets hashed", step_sessions_in_postgres),
@@ -620,7 +718,7 @@ def main(argv: Sequence[str]) -> int:
             pg=pg.sql if pg else None,
             ch=(lambda role, sql: query(users[role], ch_pw[role], sql)) if ch else None,
         )
-        config_a = e2e.render_config(
+        config_a = with_previous_key(e2e.render_config(
             lay, "a",
             sessions=session_lines(pg is not None, work / "a"),
             extra=extra_sections(
@@ -628,7 +726,7 @@ def main(argv: Sequence[str]) -> int:
                 ch_native=args.ch_native_port if ch else None,
                 writer_password_file=ch_creds.password_path(creds, "writer") if ch else None,
             ),
-        )
+        ), lay.pki / PREV_SIGNER / "key.pem")
         env_a = {PG_DSN_ENV: pg.dsn} if pg else {}
 
         def start_a() -> None:
@@ -640,6 +738,21 @@ def main(argv: Sequence[str]) -> int:
             start_a()
 
         ctx.restart_a = restart_a
+
+        def served_serial() -> str:
+            served = work / "served.pem"
+            served.write_text(served_certificate_pem(lay.addr_a, lay.ca, fleet_cert, fleet_key))
+            return ca.inspect(served).serial
+
+        def rotate_signer() -> None:
+            signer = lay.pki / SIGNER / "key.pem"
+            shutil.copyfile(signer, lay.pki / PREV_SIGNER / "key.pem")
+            shutil.copyfile(lay.pki / NEXT_SIGNER / "key.pem", signer)
+
+        ctx.served_serial = served_serial
+        ctx.rotate_signer = rotate_signer
+        ctx.hup_a = lambda: os.kill(servers["a"].proc.pid, signal.SIGHUP)
+        ctx.a_alive = lambda: servers["a"].proc.poll() is None
         servers["b"] = e2e.start_server(args.agent, lay, "b", ["--serve-memory"], ctx.user, lay.addr_b)
         start_a()
         code = e2e.run_steps(ctx, plan(pg is not None, ch is not None))
