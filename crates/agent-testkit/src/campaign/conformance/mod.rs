@@ -523,6 +523,10 @@ macro_rules! campaign_conformance_suite {
                 adversarial_pr_url_long,
                 adversarial_tokens_negative,
                 adversarial_cross_tenant_complete,
+                positive_review_note_awaiting_once,
+                positive_review_note_error_bounded,
+                negative_review_note_not_in_review,
+                adversarial_review_note_huge_text,
             ]);
             $crate::__campaign_table!(t8, $make, $after, $ig, [
                 positive_approve,

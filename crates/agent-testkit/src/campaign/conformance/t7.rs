@@ -2,8 +2,8 @@
 
 use super::*;
 use agent_core::campaign::{
-    AttemptKind, AttemptOutcome, BlockReason, CampaignError, Fail, FailCause, TaskAttempt,
-    MAX_ERROR, MAX_PR_URL,
+    AttemptKind, AttemptOutcome, BlockReason, CampaignError, Fail, FailCause, ReviewNote,
+    TaskAttempt, MAX_ERROR, MAX_PR_URL,
 };
 use serde_json::json;
 
@@ -228,6 +228,126 @@ pub async fn negative_not_running(h: &Harness) {
         .unwrap_err();
     assert!(matches!(err, CampaignError::Conflict(_)), "{err}");
     assert_eq!(s.get(c.task.task_id).await.unwrap(), c.task);
+}
+
+/// `review_note(AwaitingApproval)` on an `in_review` leaf → one `poller` event with
+/// `detail.awaiting_pr_approval = true`, no transition, no version bump; a second
+/// call writes nothing and returns `false`.
+pub async fn positive_review_note_awaiting_once(h: &Harness) {
+    let s = h.a();
+    let (_, leaves) = ready_leaves(&*s, 1).await;
+    let r = in_review(&*s, leaves[0].task_id, &owner("w1"), 1).await;
+    let before = events(&*s, r.task_id).await.len();
+    assert!(s
+        .review_note(r.task_id, ReviewNote::AwaitingApproval)
+        .await
+        .unwrap());
+    assert!(!s
+        .review_note(r.task_id, ReviewNote::AwaitingApproval)
+        .await
+        .unwrap());
+    assert_eq!(s.get(r.task_id).await.unwrap(), r);
+    let ev = events(&*s, r.task_id).await;
+    assert_eq!(ev.len(), before + 1);
+    let last = ev.last().unwrap();
+    assert_eq!(last.actor, "poller");
+    assert_eq!(last.from_state, Some(TaskState::InReview));
+    assert_eq!(last.to_state, TaskState::InReview);
+    assert_eq!(last.version, r.version);
+    assert_eq!(last.detail, json!({"awaiting_pr_approval": true}));
+    // A poll error after the marker still writes (it is not deduplicated).
+    assert!(s
+        .review_note(r.task_id, ReviewNote::PollError("forge: 502".into()))
+        .await
+        .unwrap());
+    assert_eq!(events(&*s, r.task_id).await.len(), before + 2);
+}
+
+/// `review_note(PollError)` writes `detail.poll_error` every time, bounded to
+/// `MAX_ERROR` chars; state and version untouched.
+pub async fn positive_review_note_error_bounded(h: &Harness) {
+    let s = h.a();
+    let (_, leaves) = ready_leaves(&*s, 1).await;
+    let r = in_review(&*s, leaves[0].task_id, &owner("w1"), 1).await;
+    let before = events(&*s, r.task_id).await.len();
+    for _ in 0..2 {
+        assert!(s
+            .review_note(r.task_id, ReviewNote::PollError("é".repeat(MAX_ERROR + 1)))
+            .await
+            .unwrap());
+    }
+    assert_eq!(s.get(r.task_id).await.unwrap(), r);
+    let ev = events(&*s, r.task_id).await;
+    assert_eq!(ev.len(), before + 2);
+    for e in &ev[before..] {
+        assert_eq!(e.actor, "poller");
+        assert_eq!(e.version, r.version);
+        let text = e.detail["poll_error"].as_str().unwrap();
+        assert_eq!(text.chars().count(), MAX_ERROR);
+    }
+}
+
+/// `review_note` on a leaf that is not `in_review` (`claimed`, `running`, `done`) →
+/// `Conflict`; on an unknown id → `NotFound`; nothing written.
+pub async fn negative_review_note_not_in_review(h: &Harness) {
+    let s = h.a();
+    let (_, leaves) = ready_leaves(&*s, 2).await;
+    let w = owner("w1");
+    let c = claim_one(&*s, &w).await;
+    let before = events(&*s, c.task.task_id).await.len();
+    let err = s
+        .review_note(c.task.task_id, ReviewNote::AwaitingApproval)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CampaignError::Conflict(_)), "{err}");
+    let r = s.start(c.task.task_id, &w).await.unwrap();
+    let err = s
+        .review_note(r.task_id, ReviewNote::PollError("x".into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CampaignError::Conflict(_)), "{err}");
+    // start wrote its own event; nothing else did.
+    assert_eq!(events(&*s, r.task_id).await.len(), before + 1);
+    let d = done(&*s, leaves[1].task_id).await;
+    let err = s
+        .review_note(d.task_id, ReviewNote::AwaitingApproval)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CampaignError::Conflict(_)), "{err}");
+    assert_eq!(
+        s.review_note(TaskId(999_999), ReviewNote::AwaitingApproval)
+            .await
+            .unwrap_err(),
+        CampaignError::NotFound
+    );
+}
+
+/// A hostile poll-error text (huge, control chars, a cross-tenant id) is stored
+/// truncated and never moves the leaf; the other tenant's leaf is unreachable.
+pub async fn adversarial_review_note_huge_text(h: &Harness) {
+    let s = h.a();
+    let (_, leaves) = ready_leaves(&*s, 1).await;
+    let r = in_review(&*s, leaves[0].task_id, &owner("w1"), 1).await;
+    let text = format!("\u{0}\u{1b}[31m{}", "A".repeat(100_000));
+    assert!(s
+        .review_note(r.task_id, ReviewNote::PollError(text))
+        .await
+        .unwrap());
+    assert_eq!(s.get(r.task_id).await.unwrap(), r);
+    let ev = events(&*s, r.task_id).await;
+    let stored = ev.last().unwrap().detail["poll_error"].as_str().unwrap();
+    assert_eq!(stored.chars().count(), MAX_ERROR);
+    assert!(!stored.contains('\0'), "NUL must not reach the store");
+    assert!(stored.starts_with("\u{1b}[31mA"));
+    // Cross-tenant: tenant B cannot annotate A's leaf.
+    assert_eq!(
+        h.b()
+            .review_note(r.task_id, ReviewNote::AwaitingApproval)
+            .await
+            .unwrap_err(),
+        CampaignError::NotFound
+    );
+    assert_eq!(events(&*s, r.task_id).await.len(), ev.len());
 }
 
 /// The poller resolves a `running` (or `claimed`, or `done`) leaf → `Conflict`.

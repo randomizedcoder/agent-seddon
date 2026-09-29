@@ -11,8 +11,8 @@ use agent_core::campaign::{
     screen, truncate_chars, Actor, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
     CampaignBackend, CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete,
     Decomposed, Decomposition, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner,
-    PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome, Task,
-    TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
+    PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewNote, ReviewOutcome,
+    Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
     LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR,
     MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
 };
@@ -1058,6 +1058,31 @@ impl CampaignStore for MemCampaigns {
             }
             tx.rollup_from(t.parent_id)?;
             tx.task(task)
+        })
+    }
+
+    async fn review_note(&self, task: TaskId, note: ReviewNote) -> CampaignResult<bool> {
+        self.tx(|tx| {
+            let t = tx.task(task)?;
+            tx.require_state(&t, TaskState::InReview)?;
+            let detail = note.detail();
+            if note.once() {
+                let already = tx.st.events.iter().any(|((tenant, _), e)| {
+                    tenant == tx.tenant && e.task_id == task && e.detail == detail
+                });
+                if already {
+                    return Ok(false);
+                }
+            }
+            tx.event(
+                task,
+                Some(TaskState::InReview),
+                TaskState::InReview,
+                &Actor::Poller,
+                t.version,
+                detail,
+            );
+            Ok(true)
         })
     }
 
