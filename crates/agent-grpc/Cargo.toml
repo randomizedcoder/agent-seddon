@@ -27,13 +27,16 @@ url = { workspace = true, optional = true }
 # The agent token service (security-hardening S5): signing-key checks + base64url.
 ring = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
-# `tls`: TLS / mTLS on the TCP transport (security-hardening S4); `tls-webpki-roots`:
-# an `https://` endpoint with no configured CA trusts the public web roots.
-tonic = { workspace = true, features = ["tls", "tls-webpki-roots"] }
-# The listener's reloadable TLS acceptor (S20): see the workspace comment.
+# `tls`: tonic's `Connected` impl for a rustls stream, so a handler still sees the
+# peer's certificates (`TlsConnectInfo`). The handshakes themselves are ours below.
+tonic = { workspace = true, features = ["tls"] }
+# The listener's reloadable TLS acceptor (S20) and the dials' reloadable connector
+# (S20b): see the workspace comment. `webpki-roots` is what an `https://` dial with no
+# configured CA trusts.
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 arc-swap = { workspace = true }
+webpki-roots = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-health = { workspace = true }
 serde_json = { workspace = true }

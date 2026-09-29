@@ -4,7 +4,9 @@
 //! from files. Each case rewrites the files, calls [`ServerTls::reload`], and dials
 //! again. Which CA a client must trust (or which client certificate the server takes)
 //! tells which config the handshake used. Clients pass their `ClientTls` explicitly,
-//! so the cases never touch the process-wide client TLS.
+//! so the cases never touch the process-wide client TLS. The last cases reload the
+//! dialing side instead (S20b): a channel dialed before the reload must use the new
+//! client config for its next connection.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -239,4 +241,159 @@ async fn negative_unix_socket_refuses_tls() {
         .await
         .unwrap_err();
     assert!(e.to_string().contains("does not serve TLS"), "{e}");
+}
+
+// ---- the dialing side (S20b): a channel dialed once picks up a reloaded client TLS.
+
+/// A [`ClientTls`] loaded from files: trusting `ca`, presenting a leaf from
+/// `identity` when given. Returns the files so a case can rewrite them.
+struct ClientFiles {
+    ca: PathBuf,
+    cert: PathBuf,
+    key: PathBuf,
+    tls: ClientTls,
+}
+
+impl ClientFiles {
+    fn load(ca: &TestPki, identity: Option<&TestPki>) -> Self {
+        let dir = agent_testkit::tempdir();
+        let ca_file = ca.write_ca(&dir, "ca");
+        let issuer = identity.unwrap_or(ca);
+        let (cert, key) = issuer
+            .issue(&LeafSpec::service("client"))
+            .write_to(&dir, "client");
+        let tls = ClientTls::load(
+            Some(&ca_file),
+            identity.map(|_| cert.as_path()),
+            identity.map(|_| key.as_path()),
+            None,
+        )
+        .expect("client tls");
+        Self {
+            ca: ca_file,
+            cert,
+            key,
+            tls,
+        }
+    }
+
+    /// Put a leaf from `pki` in the identity files (not yet reloaded).
+    fn renew_identity_from(&self, pki: &TestPki) {
+        let leaf = pki.issue(&LeafSpec::service("client"));
+        std::fs::write(&self.cert, &leaf.cert_pem).unwrap();
+        std::fs::write(&self.key, &leaf.key_pem).unwrap();
+    }
+}
+
+/// One channel for the whole case: what it proves is that a channel dialed
+/// **before** the reload uses the reloaded config for its next connection.
+fn channel(l: &Listener, tls: &ClientTls) -> HealthClient<tonic::transport::Channel> {
+    HealthClient::new(l.dial.connect_lazy_with(Some(tls)).expect("channel"))
+}
+
+#[tokio::test]
+async fn positive_client_reload_trusts_the_rotated_ca_on_the_same_channel() {
+    let l = Listener::start(false).await;
+    let client = ClientFiles::load(&l.old_ca, None);
+    let mut dialed = channel(&l, &client.tls);
+    health(&mut dialed).await.expect("before the rotation");
+
+    // Both sides move to the new CA; the client learns it only on reload.
+    l.renew_from_new_ca();
+    l.tls.reload().expect("server reload");
+    let refused = channel(&l, &client.tls);
+    assert!(health(&mut refused.clone()).await.is_err(), "old trust");
+
+    std::fs::write(&client.ca, l.new_ca.ca_pem()).unwrap();
+    client.tls.reload().expect("client reload");
+    health(&mut refused.clone())
+        .await
+        .expect("the channel dialed before the reload now trusts the new CA");
+}
+
+#[tokio::test]
+async fn positive_client_reload_presents_the_renewed_identity() {
+    // mTLS: the listener's client CA moves to the new CA. The client's renewed
+    // certificate (from the new CA) is presented once the client reloads.
+    let l = Listener::start(true).await;
+    let client = ClientFiles::load(&l.old_ca, Some(&l.old_ca));
+    let mut dialed = channel(&l, &client.tls);
+    health(&mut dialed).await.expect("old identity before");
+
+    std::fs::write(&l.client_ca, l.new_ca.ca_pem()).unwrap();
+    l.tls.reload().expect("server reload");
+    let mut fresh = channel(&l, &client.tls);
+    assert!(health(&mut fresh).await.is_err(), "old identity refused");
+
+    client.renew_identity_from(&l.new_ca);
+    client.tls.reload().expect("client reload");
+    health(&mut fresh)
+        .await
+        .expect("the same channel presents the renewed certificate");
+    assert!(client.tls.has_identity());
+}
+
+#[rstest]
+#[case::negative_ca_not_pem("ca_garbage")]
+#[case::negative_key_removed("no_key")]
+#[case::negative_half_written_renewal("cert_only")]
+#[case::adversarial_key_from_another_pair("mismatch")]
+#[tokio::test]
+async fn failed_client_reload_keeps_the_old_identity(#[case] damage: &str) {
+    let l = Listener::start(true).await;
+    let client = ClientFiles::load(&l.old_ca, Some(&l.old_ca));
+    let other = l.new_ca.issue(&LeafSpec::service("client"));
+    match damage {
+        "ca_garbage" => std::fs::write(&client.ca, "not a CA").unwrap(),
+        "no_key" => std::fs::remove_file(&client.key).unwrap(),
+        "cert_only" => std::fs::write(&client.cert, &other.cert_pem).unwrap(),
+        "mismatch" => {
+            let stranger = l.old_ca.issue(&LeafSpec::service("client"));
+            std::fs::write(&client.cert, &stranger.cert_pem).unwrap();
+            std::fs::write(&client.key, &other.key_pem).unwrap();
+        }
+        other => unreachable!("{other}"),
+    }
+    let e = client.tls.reload().unwrap_err();
+    assert!(!e.is_empty(), "{damage}");
+    assert!(client.tls.has_identity(), "{damage}: identity kept");
+    health(&mut channel(&l, &client.tls))
+        .await
+        .unwrap_or_else(|e| panic!("{damage}: the old identity must still work: {e}"));
+}
+
+#[tokio::test]
+async fn corner_client_reload_through_a_clone_reaches_every_channel() {
+    // The SIGHUP handler reloads the process-wide copy; seam channels hold clones.
+    let l = Listener::start(false).await;
+    let client = ClientFiles::load(&l.old_ca, None);
+    let held_by_a_seam = client.tls.clone();
+    l.renew_from_new_ca();
+    l.tls.reload().expect("server reload");
+    std::fs::write(&client.ca, l.new_ca.ca_pem()).unwrap();
+    client.tls.reload().expect("reload");
+    client.tls.reload().expect("reload twice");
+    health(&mut channel(&l, &held_by_a_seam))
+        .await
+        .expect("the clone sees the reload");
+}
+
+#[tokio::test]
+async fn negative_in_memory_client_tls_has_nothing_to_reload() {
+    let e = ClientTls::default().reload().unwrap_err();
+    assert!(e.contains("nothing to reload"), "{e}");
+}
+
+#[tokio::test]
+async fn boundary_client_ca_file_at_the_cap_plus_one_is_refused_on_reload() {
+    let l = Listener::start(false).await;
+    let client = ClientFiles::load(&l.old_ca, None);
+    let mut big = b"-----BEGIN CERTIFICATE-----\n".to_vec();
+    big.resize(agent_grpc::tls::MAX_PEM_BYTES as usize + 1, b'A');
+    std::fs::write(&client.ca, big).unwrap();
+    let e = client.tls.reload().unwrap_err();
+    assert!(e.contains("exceeds"), "{e}");
+    health(&mut channel(&l, &client.tls))
+        .await
+        .expect("old trust kept");
 }

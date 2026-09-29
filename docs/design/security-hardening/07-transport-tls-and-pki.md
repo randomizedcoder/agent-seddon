@@ -120,8 +120,26 @@ step ca renew --daemon --exec "kill -HUP <agent pid>" server.crt server.key
   plaintext by omission. A unix socket given TLS is refused.
 - **Signal handling:** the SIGHUP handler is installed in every serve mode, so a SIGHUP no
   longer terminates one, even with nothing to reload.
-- **Not yet reloaded:** the client side. `[grpc.tls.client]` and the channels already dialed
-  keep the identity they were built with until restart. That is S20b.
+- **Client side:** see S20b below.
+
+### As built (S20b): dialed channels reload too
+
+The same SIGHUP reloads `[grpc.tls.client]`: the `ca`, `cert` and `key` every `https://` dial
+uses. A client certificate renewed by `step ca renew --exec "kill -HUP <agent pid>"` is
+presented on the next connection, with no restart.
+
+- **How:** an `https://` dial runs its own `tokio_rustls` connector instead of tonic's, and
+  each new connection takes the rustls client config current at that moment (an `ArcSwap`
+  shared by every clone of the `ClientTls`). So channels dialed **before** the reload, including
+  every `= "grpc"` seam client and the service-token exchange (S10), use the new identity on
+  their next connection. Open connections keep their session.
+- **Unchanged on the wire:** the config is built as tonic built it: the configured CA is the
+  only trust anchor (else the public web roots), the client identity when given, ALPN `h2`,
+  `TCP_NODELAY`, and the dialed host (or the `domain` override) as the server name.
+- **Failures:** a reload that fails (not PEM, a missing key, a key from another pair, an
+  oversized file) keeps the old config and logs a warning, separately from the listener's
+  reload. A reload never drops the client identity: whether one is presented is fixed by the
+  configured paths.
 
 ## Test matrix
 
