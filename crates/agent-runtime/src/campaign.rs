@@ -14,17 +14,30 @@
 
 use std::sync::Arc;
 
-use agent_core::campaign::{CampaignBackend, CampaignStore};
+use agent_core::campaign::{CampaignBackend, CampaignStore, EventSink};
 
 use crate::config::Config;
 
 /// How to open the store: the tenant to scope it to (the CLI's `--tenant`,
-/// validated as a path-safe segment by the store) and whether this open may
-/// apply pending migrations (`false` on the hermetic `--check-config` path).
-#[derive(Debug, Clone, Copy, Default)]
+/// validated as a path-safe segment by the store), whether this open may
+/// apply pending migrations (`false` on the hermetic `--check-config` path),
+/// and the sink every committed `task_events` row is mirrored into (CP-08: the
+/// process's `TelemetryHandle` when `[telemetry]` is on; `None` mirrors nothing).
+#[derive(Clone, Default)]
 pub struct CampaignOpen<'a> {
     pub tenant: Option<&'a str>,
     pub apply_migrations: bool,
+    pub sink: Option<Arc<dyn EventSink>>,
+}
+
+impl std::fmt::Debug for CampaignOpen<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CampaignOpen")
+            .field("tenant", &self.tenant)
+            .field("apply_migrations", &self.apply_migrations)
+            .field("sink", &self.sink.is_some())
+            .finish()
+    }
 }
 
 /// The `[campaign] store` selection as `--check-config` reports it.
@@ -56,6 +69,10 @@ pub async fn open_campaign_store(
             )?;
             let store = agent_campaign::PgCampaigns::connect_lazy(&dsn, cfg.campaign.pool_max)
                 .map_err(|e| anyhow::anyhow!("[campaign] postgres store: {e}"))?;
+            let store = match open.sink {
+                Some(sink) => store.with_sink(sink),
+                None => store,
+            };
             let store = match open.tenant {
                 Some(tenant) => store
                     .with_tenant(tenant)
@@ -87,13 +104,15 @@ pub async fn open_campaign_store(
 /// [`CampaignBackend`] (`04-executor.md`, CP-05), or `Ok(None)` when `[campaign]
 /// store` is empty. The same lazy rules as [`open_campaign_store`]: nothing dials
 /// here, and the schema is applied only when `apply_migrations` **and**
-/// `[config_store] migrate_on_start`.
+/// `[config_store] migrate_on_start`. Every tenant view the backend opens mirrors
+/// its committed events into `sink` (CP-08).
 pub async fn open_campaign_backend(
     cfg: &Config,
     apply_migrations: bool,
+    sink: Option<Arc<dyn EventSink>>,
 ) -> anyhow::Result<Option<Arc<dyn CampaignBackend>>> {
     #[cfg(not(feature = "campaign-postgres"))]
-    let _ = apply_migrations;
+    let _ = (apply_migrations, sink);
     match cfg.campaign.store.trim() {
         "" => Ok(None),
         #[cfg(feature = "campaign-postgres")]
@@ -104,6 +123,10 @@ pub async fn open_campaign_backend(
             )?;
             let store = agent_campaign::PgCampaigns::connect_lazy(&dsn, cfg.campaign.pool_max)
                 .map_err(|e| anyhow::anyhow!("[campaign] postgres store: {e}"))?;
+            let store = match sink {
+                Some(sink) => store.with_sink(sink),
+                None => store,
+            };
             if apply_migrations && cfg.config_store.migrate_on_start {
                 store
                     .ensure_migrated()
@@ -179,7 +202,7 @@ mod tests {
             .err()
             .expect("postgres arm is not linked");
         assert!(err.to_string().contains("campaign-postgres"), "{err}");
-        let err = open_campaign_backend(&cfg_with_store("postgres"), false)
+        let err = open_campaign_backend(&cfg_with_store("postgres"), false, None)
             .await
             .err()
             .expect("postgres arm is not linked");
@@ -192,7 +215,7 @@ mod tests {
 
         #[tokio::test]
         async fn corner_store_off_is_none() {
-            let got = open_campaign_backend(&cfg_with_store(""), false)
+            let got = open_campaign_backend(&cfg_with_store(""), false, None)
                 .await
                 .expect("off is not an error");
             assert!(got.is_none());
@@ -203,7 +226,7 @@ mod tests {
         #[case::adversarial_unknown_store_huge(&"s".repeat(100_000))]
         #[tokio::test]
         async fn negative_unknown_store_bails_bounded(#[case] store: &str) {
-            let err = open_campaign_backend(&cfg_with_store(store), true)
+            let err = open_campaign_backend(&cfg_with_store(store), true, None)
                 .await
                 .err()
                 .expect("unknown store must fail closed");
@@ -221,7 +244,7 @@ mod tests {
             );
             let got = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                open_campaign_backend(&cfg, false),
+                open_campaign_backend(&cfg, false, None),
             )
             .await
             .expect("a lazy open never dials, so it cannot hang")
@@ -238,7 +261,7 @@ mod tests {
         async fn negative_postgres_missing_dsn_ref_bails() {
             let mut cfg = cfg_with_store("postgres");
             cfg.config_store.dsn_ref = String::new();
-            let err = open_campaign_backend(&cfg, false)
+            let err = open_campaign_backend(&cfg, false, None)
                 .await
                 .err()
                 .expect("no DSN reference");
@@ -293,6 +316,7 @@ mod tests {
                     CampaignOpen {
                         tenant: None,
                         apply_migrations: false,
+                        sink: None,
                     },
                 ),
             )
@@ -311,6 +335,7 @@ mod tests {
                 CampaignOpen {
                     tenant: Some("acme"),
                     apply_migrations: false,
+                    sink: None,
                 },
             )
             .await
@@ -331,6 +356,7 @@ mod tests {
                     CampaignOpen {
                         tenant: None,
                         apply_migrations: true,
+                        sink: None,
                     },
                 ),
             )
@@ -355,6 +381,7 @@ mod tests {
                 CampaignOpen {
                     tenant: Some(tenant),
                     apply_migrations: false,
+                    sink: None,
                 },
             )
             .await
