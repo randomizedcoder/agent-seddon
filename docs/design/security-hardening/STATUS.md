@@ -30,7 +30,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 | S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | ✅ | #559 |
 | S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ✅ | #560 |
-| S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | 🟡 | — |
+| S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
 | S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ⬜ | — |
 | S21 | CLI loopback-redirect login | deferral | ⬜ | — |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
@@ -940,7 +940,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - A `ReviewNow` that arrives while the same review is already running is refused by the
       orchestrator's in-flight duplicate guard, so it is not recorded as a requester.
 
-- **2026-09-28 — S20a: SIGHUP reloads the listener's TLS and the signing key.**
+- **2026-09-28 — S20a (#562): SIGHUP reloads the listener's TLS and the signing key.**
   - Why: a renewed certificate or a rotated signing key needed a restart. `step ca renew
     --exec "kill -HUP <pid>"` now does it in place. `renew_cmd` from 07 was never built;
     the signal replaces it. Details are in [07](07-transport-tls-and-pki.md#as-built-s20a-reload-on-sighup).
