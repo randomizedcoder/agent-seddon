@@ -101,7 +101,9 @@ mod tenant;
 #[cfg(feature = "scheduler-store")]
 mod scheduler_driver;
 
-pub use agent::{Agent, GrpcTlsSettings, OpenError, Session, SessionManager, Settings};
+pub use agent::{
+    Agent, BudgetExceeded, GrpcTlsSettings, OpenError, Session, SessionManager, Settings, Spend,
+};
 pub use agent_metrics::Metrics;
 pub use builder::{
     build_agent, build_agent_mode, build_agent_with, build_agent_with_mode, BuildMode,

@@ -566,6 +566,10 @@ pool_max       = 4
 # [[route.upstreams]] name or a registry provider type); "" = the main provider. Also
 # the model label recorded on every planner attempt.
 planner_model  = ""
+# Role routing for the worker's implement sessions (CP-06b): the same reference
+# form; "" = the main provider. Also the model label recorded on every worker
+# attempt.
+worker_model   = ""
 # Nodes one `plan` / `run --once` tick decomposes (0..=32; 0 = reap only).
 plan_per_tick  = 4
 # Schema-repair round trips the planner allows per decision (0..=5).

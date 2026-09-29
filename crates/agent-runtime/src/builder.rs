@@ -372,6 +372,18 @@ pub async fn build_agent_with_mode(
                     .context("[campaign] planner_model (planner role routing)")?,
             )
         };
+    // `[campaign] worker_model` (CP-06b): the worker's implement sessions run on a
+    // dedicated provider, resolved the same way. Attached further down.
+    #[cfg(feature = "campaign")]
+    let campaign_worker_provider: Option<Arc<dyn agent_core::LlmProvider>> =
+        if cfg.campaign.worker_model.is_empty() {
+            None
+        } else {
+            Some(
+                crate::registry::resolve_provider_ref(&cfg.campaign.worker_model, &base_ctx)
+                    .context("[campaign] worker_model (worker role routing)")?,
+            )
+        };
     // A graph fork owns the response path: the builder composes the
     // BranchingProvider chain (branches, judge, post-merge gate) directly.
     #[cfg(feature = "graph")]
@@ -1561,6 +1573,11 @@ pub async fn build_agent_with_mode(
     #[cfg(feature = "campaign")]
     let agent = match campaign_planner_provider {
         Some(p) => agent.with_campaign_planner_provider(p),
+        None => agent,
+    };
+    #[cfg(feature = "campaign")]
+    let agent = match campaign_worker_provider {
+        Some(p) => agent.with_campaign_worker_provider(p),
         None => agent,
     };
     let agent = match prompt_store_seam {
