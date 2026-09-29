@@ -180,7 +180,9 @@ deviations and details.
 
 1. `get` then `state == claimed && claimed_by == owner`, else `LeaseLost` with nothing written.
    The root's `policy` (`Policy::default()` when unset) and up to 8 ancestor titles are read here.
-3. The heartbeat is a spawned task on a `tokio::time::interval` of `clamp_lease(policy.lease_secs)
+3. The heartbeat is a spawned task (under `agent_core::scope_request` with the worker's
+   `RequestScope`, so its writes keep the leaf's tenant identity — the served-paths spawn scan
+   in `agent-grpc` enforces it) on a `tokio::time::interval` of `clamp_lease(policy.lease_secs)
    / 3` whose first beat is immediate, so it **re-leases the claim to the campaign policy's
    `lease_secs`** (the driver claimed with `Policy::default()`). `LeaseLost` flips a `watch`
    cancel the session `select!`s on; any other error only warns and the next beat retries.

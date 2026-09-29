@@ -302,6 +302,11 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   1, and the driver then stored only "worker failed the leaf" — exactly the case the smoke hit,
   with the cause invisible. A child that wrote `failed` itself has an empty stderr, so its text
   is unchanged and `settle_failure` still only logs it.
+- 2026-09-29 — CP-06b: `agent-sandbox`'s one spawn funnel retries a transient `ETXTBSY` (40 × 5
+  ms, the way Go's `os/exec` does) instead of the T12 rows serialising their stub scripts. The
+  race is real for the agent, not only for the tests: a tool writes a script while a child
+  starts, and the driver dispatches workers in parallel. A file still open for writing keeps
+  failing and the error surfaces after the last retry (`negative_spawn_etxtbsy_bounded`).
 
 ## Gate status
 
@@ -354,6 +359,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-29 | CP-06b: `nix build --no-link "git+file://…/wt-cp06b?ref=refs/heads/campaigns/cp-06b#checks.x86_64-linux.campaign-e2e"` (@ `cfacc634`) | green, first build (the 4 rows in the hermetic sandbox with `pkgs.git`, no `$HOME` git config) |
 | 2026-09-29 | CP-06b: `CONTAINER_RUNTIME=podman nix run .#pg-integration` on the committed tree | green (`PASS: …`); campaign pg suite 173/173, 118 s; 246 passed across every pg suite |
 | 2026-09-29 | CP-06b manual smoke (`target/debug/agent`, default features, `nix run .#postgres-up`, a one-answer fake OpenAI-compatible planner on 127.0.0.1:18095, scratch config `[campaign] store = postgres enabled = true sandbox = "subprocess"`, `[git] push_policy = "never"`, `[forge] backend = "github" dry_run = true`, `[sandbox] backend = "local"`): (a) `env -u AGENT_CAMPAIGN_OWNER agent --config /nonexistent.toml --run-task …` → `run-task: lease lost (owner missing)`, exit 3, config never read; (b) with the token and the missing config → `Error: reading config`, exit 1, token absent from the output; (c) with the token, the real config and an unknown task → `leaf not found under this tenant`, exit 3, nothing written; (d) `add` → `created B  #5178  ready`; `run --once` → the fake planner splits (`B → split (1 children)`); `approve B --children`; `run --once` → `B.1 → execute` (the leaf lands in `awaiting_approval` again — the known double-approval at level 1, Open questions); `approve --children` again; `run --once` → `claimed 1  dispatched 1  failed 1` | **first dispatch red**: the child exited 1 in 60 ms and the leaf carried only `worker failed the leaf`. Diagnosed by keeping the stderr tail (`982b02d0`): `building search backend tantivy: Failed to acquire Lockfile: LockBusy` — the driver's writer lock on the shared index. With `isolate_indexes` (same commit) the retried leaf runs the whole child protocol: `claimed → running → failed` by `worker:<owner>`, attempt `work / error / "[forge] dry_run = true: a pull request cannot be opened"`, `session_id campaign-5179`, tokens 0 (the binding check ran before the session), the child's `campaign-5179` index dir removed. As designed on every path after the fix. The dev Postgres container is left running |
+| 2026-09-29 | CP-06b: `nix flake check "git+file://…/wt-cp06b?ref=refs/heads/campaigns/cp-06b"` (@ `9d837f59`), first pass, on a host at load ≈ 30 from another session | **red in `coverage`** (the workspace tests in one release process): `agent-grpc` `adversarial_no_unscoped_spawn_in_served_paths` — the worker's heartbeat was a bare `tokio::spawn` at `campaign_worker.rs:249` (not caught locally: the crate suites were run one at a time, never `-p agent-grpc`). While fixing it the T12 `subprocess_exit_rows` failed 13/40 back-to-back runs with `Text file busy (os error 26)` — the fork/exec race between parallel rows' stub scripts. Both fixed in `b811ea0d` (scoped heartbeat; `agent-sandbox` spawn funnel retries `ETXTBSY` 40 × 5 ms with two deterministic rows); the scan test 11/11, the worker module 40/40 |
 
 ## Open questions / blockers
 
