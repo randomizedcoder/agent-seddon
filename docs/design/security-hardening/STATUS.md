@@ -33,7 +33,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
 | S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
 | S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
-| S22 | Portal Access page (bindings, roles, sessions) | deferral | 🟡 | — |
+| S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
 | S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
 
 ## As-built log
@@ -1049,7 +1049,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       `check_redirect_uri` already accepts it.
     - The keyring stays deferred to parity 50.
 
-- **2026-09-29 — S22: the portal Access tab.**
+- **2026-09-29 — S22 (#567): the portal Access tab.**
   - A new Access tab in the portal has three views: role bindings (add, edit, delete, with
     expiry and "keep their sessions"), the role catalog (built-ins plus role cards, edited
     with `write:role`), and tenant sessions (list, revoke). It uses only the existing
