@@ -35,6 +35,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
 | S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
+| S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | 🔄 | — |
 
 ## As-built log
 
@@ -1117,6 +1118,23 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       - After the 300 s token expired, the portal was still signed in and loaded pages. The
         stored login file had rotated in that time, so the CLI did the refresh under its lock.
       - Still manual: `agent login --browser` against real Google.
+
+- **2026-09-29 — S24: native desktop TLS.**
+  - Found by the S21/S23 live check: the native portal only dialled plaintext, so it could not
+    reach an agent that serves TLS.
+  - [`native_tls.dart`](../../../portal/lib/src/transport/native_tls.dart) builds the native
+    channels' credentials from `PORTAL_TLS_CA`, `PORTAL_TLS_CERT` + `PORTAL_TLS_KEY` and
+    `PORTAL_TLS_SERVER_NAME` (threaded by `nix run .#portal`). None set ⇒ plaintext as before.
+    Any wrong setting ⇒ `FailedTlsCredentials`, which fails every connection with a message
+    naming the setting and never falls back to plaintext.
+  - Tests (`test/unit/native_tls_test.dart`, 27):
+    - the settings check, including a server name with a port, CR/LF, a space or a wildcard;
+    - file loading: a missing file names the setting, bad PEM is refused, and the 256 KiB cap is
+      checked at and one byte over;
+    - real handshakes against a TLS gRPC server with a PKI made by `openssl` for the run
+      (`PORTAL_TEST_OPENSSL`, set by the `portal-widget` check): mTLS round trip, server name,
+      no client certificate refused, plaintext refused, name mismatch refused, another CA
+      refused, and a broken setting against a plaintext server still refused.
 
 ## Cross-track note (not an S-increment)
 

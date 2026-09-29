@@ -49,6 +49,9 @@ knobs (`--dart-define`, wired in `nix/portal/default.nix`):
 | `PORTAL_REDIRECT_URI` | the page's own address | where the IdP returns; must be in `[auth] redirect_uris` |
 | `PORTAL_AGENT_BIN` | `agent` | native only: the `agent` CLI whose stored login the app borrows |
 | `PORTAL_AGENT_CONFIG` | empty | native only: the CLI's `--config` (empty: its default, or none) |
+| `PORTAL_TLS_CA` | empty | native only: PEM CA the agent's certificate must chain to; setting it turns TLS on |
+| `PORTAL_TLS_CERT`, `PORTAL_TLS_KEY` | empty | native only: PEM client certificate and key, for an agent that asks for one (`[grpc.tls] client_ca`); set both or neither |
+| `PORTAL_TLS_SERVER_NAME` | the host dialled | native only: the name the agent's certificate must carry |
 
 The native desktop build cannot take an IdP redirect, so it signs in with the `agent` CLI's stored
 login (security-hardening S23): run `agent login` in a terminal, then start the app. It runs
