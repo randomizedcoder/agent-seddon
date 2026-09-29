@@ -108,6 +108,49 @@ fn redirect_uri_rules(#[case] uri: &str, #[case] ok: bool) {
     assert_eq!(check_redirect_uri(uri).is_ok(), ok, "{uri}");
 }
 
+/// The registration `agent login --browser` needs (S21).
+const CLI_V4: &str = "http://127.0.0.1/agent-login";
+const CLI_V6: &str = "http://[::1]/agent-login";
+
+#[rstest]
+#[case::positive_exact(PORTAL, PORTAL, true)]
+#[case::positive_loopback_any_port(CLI_V4, "http://127.0.0.1:49152/agent-login", true)]
+#[case::positive_loopback_v6_any_port(CLI_V6, "http://[::1]:5000/agent-login", true)]
+#[case::positive_portless_itself(CLI_V4, CLI_V4, true)]
+#[case::positive_query_kept("http://127.0.0.1/cb?x=1", "http://127.0.0.1:5000/cb?x=1", true)]
+#[case::boundary_highest_port(CLI_V4, "http://127.0.0.1:65535/agent-login", true)]
+#[case::boundary_explicit_port_80_not_canonical(CLI_V4, "http://127.0.0.1:80/agent-login", false)]
+#[case::negative_path_mismatch(CLI_V4, "http://127.0.0.1:5000/other", false)]
+#[case::negative_trailing_slash(CLI_V4, "http://127.0.0.1:5000/agent-login/", false)]
+#[case::negative_query_added(CLI_V4, "http://127.0.0.1:5000/agent-login?next=x", false)]
+#[case::negative_other_family(CLI_V4, "http://[::1]:5000/agent-login", false)]
+#[case::corner_ported_registration_is_exact(PORTAL, "http://127.0.0.1:9000/", false)]
+#[case::adversarial_non_loopback_portless_not_wildcard(
+    "https://portal.example/cb",
+    "https://portal.example:444/cb",
+    false
+)]
+#[case::adversarial_localhost_name_not_wildcard(
+    "http://localhost/agent-login",
+    "http://localhost:5000/agent-login",
+    false
+)]
+#[case::adversarial_other_loopback_ip(CLI_V4, "http://127.0.0.2:5000/agent-login", false)]
+#[case::adversarial_https_on_loopback(CLI_V4, "https://127.0.0.1:5000/agent-login", false)]
+#[case::adversarial_userinfo(CLI_V4, "http://evil@127.0.0.1:5000/agent-login", false)]
+#[case::adversarial_at_host_swap(CLI_V4, "http://127.0.0.1:5000@evil.example/agent-login", false)]
+#[case::adversarial_dot_segments(CLI_V4, "http://127.0.0.1:5000/x/../agent-login", false)]
+#[case::adversarial_escaped_path(CLI_V4, "http://127.0.0.1:5000/agent%2Dlogin", false)]
+#[case::adversarial_fragment(CLI_V4, "http://127.0.0.1:5000/agent-login#x", false)]
+#[case::adversarial_path_prefix(CLI_V4, "http://127.0.0.1:5000/agent-login-evil", false)]
+fn redirect_allowed_cases(#[case] registered: &str, #[case] requested: &str, #[case] ok: bool) {
+    assert_eq!(
+        redirect_allowed(&[registered.to_string()], requested),
+        ok,
+        "{registered} vs {requested}"
+    );
+}
+
 #[test]
 fn positive_authorize_url_carries_every_parameter() {
     let url = authorize_url(

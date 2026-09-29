@@ -150,6 +150,54 @@ existing admission layer, so it is rate-limited. Portal details: [`06-portal-and
 >   [`agent-runtime/src/login.rs`](../../../crates/agent-runtime/src/login.rs).
 > - Config: `[grpc.client] auth_endpoint` and `bearer`.
 
+> **As built (S21): `agent login --browser`.** The loopback-redirect code flow now exists,
+> opt-in with `--browser`, and runs through the agent like the portal does.
+> - The CLI listens on `127.0.0.1:<port the OS picks>/agent-login` (one-shot `tiny_http`), calls
+>   `Begin{issuer, redirect_uri, code_challenge}` with a fresh PKCE verifier, prints the IdP URL on
+>   stderr and tries `xdg-open`. The browser comes back to the listener with `code` and `state`, and
+>   the CLI calls `Exchange{code, state, code_verifier}` (client kind `cli`). The agent redeems the
+>   code with its own client secret, so no IdP secret lives on the terminal's machine.
+> - The agent must list `http://127.0.0.1/agent-login` in `[auth] redirect_uris`. Following
+>   RFC 8252 §7.3, a registered `http://127.0.0.1/<path>` or `http://[::1]/<path>` with **no port**
+>   matches that IP on any port, with the same path and query. Everything else still matches
+>   exactly: another loopback address (`127.0.0.2`), a registration with a port, a host name, or a
+>   non-canonical request (userinfo, fragment, `%`-case tricks) is refused
+>   (`server::redirect_allowed`).
+> - The listener takes one callback: only `GET /agent-login` with exactly one `state` equal to this
+>   sign-in's. A stray path (404), a wrong, missing or repeated `state` (400), a non-GET (405) or an
+>   oversized request line (414) is answered and ignored, so another local process can neither end
+>   nor hijack the sign-in. An IdP `error=` with the right `state` ends it, and the error is shown
+>   only if printable. The listener closes on the code or after 5 minutes. Its replies carry
+>   `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+> - The IdP URL `Begin` returns must pass the fetch-URL check (`https://`, or `http` only to
+>   loopback) and be printable before it is shown or opened.
+> - Issuer choice: `--issuer`, else the local config's single login issuer, else the agent's only
+>   browser issuer (from `Issuers`). The name must be a plain identifier because it names the token
+>   file, which is the same one the device flow writes; `whoami`, `logout` and the bearer source are
+>   unchanged.
+> - Deviation from the plan: `--browser` is explicit. The CLI does not fall back to it when an
+>   issuer has no device endpoint, because the device flow needs only local config while the
+>   browser flow needs the agent's `redirect_uris`. The failing device flow's error is clearer than
+>   a silent switch.
+> - Code: [`client/browser_login.rs`](../../../crates/agent-grpc/src/client/browser_login.rs),
+>   `login_browser` in [`agent-runtime/src/login.rs`](../../../crates/agent-runtime/src/login.rs).
+>   Tests: `redirect_allowed_cases` (22 rows), `classify_callback_cases` and the listener tests,
+>   `browser_issuer_cases`, and the wire suite `tests/cli_browser_login.rs` against `FakeIssuer`.
+
+> **As built (S23): `agent token [--issuer NAME] [--json]`.** Prints a usable agent token from the
+> stored login, refreshed first under the token file's lock when it is within 30 s of lapsing.
+> This is how another program borrows the CLI's login without touching the file. The native portal
+> uses it: Dart's file lock is `fcntl`-based and would not exclude the CLI's `flock`, so two
+> refreshers could spend one single-use handle and end the session.
+> - `--json` prints one line: `{access_token, expires_at, issuer, endpoint}`. Without it, just the
+>   token (like `gcloud auth print-access-token`).
+> - Exit codes: 0 printed; 2 not signed in; 3 the session ended (run `agent login`); 1 anything
+>   else (an unsafe or unreadable token file, an unreachable agent). The token never appears in
+>   an error.
+> - It runs before the config is required. The issuer is `--issuer`, else the config's login
+>   issuer, else the only stored login. With no config file, the agent is dialed with default
+>   trust roots.
+
 The CLI is hand-parsed with a bare-word subcommand pattern
 ([`main.rs`](../../../crates/agent-cli/src/main.rs):766-768 for `doctor`); `login` / `logout` /
 `whoami` follow it.

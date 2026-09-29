@@ -30,10 +30,11 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 | S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | ✅ | #559 |
 | S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ✅ | #560 |
-| S20 | Hot reload of TLS material and the signing key | deferral | ⬜ | — |
-| S21 | CLI loopback-redirect login | deferral | ⬜ | — |
-| S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
-| S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
+| S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
+| S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
+| S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
+| S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
+| S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 
 ## As-built log
 
@@ -935,9 +936,171 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - No new `AuthEventKind::FleetTriggered` audit row. `ReviewNow` and `Approve` are
       already audited as `authz_allow` with the caller and `trace_id`.
     - The portal Fleet tab does not show the new fields yet. That needs a Dart proto regen,
-      so it is left for S22's portal work.
+      so it is left for S22's portal work. (Done in S22.)
     - A `ReviewNow` that arrives while the same review is already running is refused by the
       orchestrator's in-flight duplicate guard, so it is not recorded as a requester.
+
+- **2026-09-28 — S20a (#562): SIGHUP reloads the listener's TLS and the signing key.**
+  - Why: a renewed certificate or a rotated signing key needed a restart. `step ca renew
+    --exec "kill -HUP <pid>"` now does it in place. `renew_cmd` from 07 was never built;
+    the signal replaces it. Details are in [07](07-transport-tls-and-pki.md#as-built-s20a-reload-on-sighup).
+  - `ServerTls` holds a rustls `ServerConfig` behind an `ArcSwap`. `ServerTls::reload`
+    re-reads the files it was loaded from and swaps in a new config only if it builds.
+  - `Bound::serve(router, tls, shutdown)` takes the TLS explicitly. `base_router_with_tls`
+    is gone.
+  - A TLS listener runs its own acceptor. Each handshake is a separate task with a 10 s
+    timeout, at most 1024 run at once, and each takes the config current when it starts.
+  - `TokenService` keys sit behind an `ArcSwap<KeySet>`. `TokenService::reload` re-reads
+    `signing_key` / `previous_key`, keeps the same-key refusal, and keeps the old pair on
+    any error. `AuthLayer::reload_keys` reaches it.
+  - `agent-cli/src/reload.rs`: every serve mode installs a SIGHUP handler that reloads both
+    and logs each part's outcome (`info` with the new `kid`, or `warn` with the error).
+  - Tests:
+    - `tls_reload.rs` (wire, real handshakes):
+      - after a reload, new connections get the renewed certificate, and an open connection
+        keeps working;
+      - a bad PEM, a missing key, a half-written renewal, or a key from another pair each
+        keep the old certificate;
+      - reloading twice is idempotent;
+      - a client CA rotated out is refused after reload (adversarial);
+      - silent and plaintext peers do not stall a real client (adversarial);
+      - a unix socket refuses TLS.
+    - Token reload tables:
+      - a rotation keeps the old `kid` verifying and publishes `[new, old]`;
+      - a removed file, a garbage file, an RSA key, or `previous` = `signing` each keep the
+        keys;
+      - reloading twice is idempotent;
+      - a key rotated out of `previous` is rejected.
+    - `reload.rs` tables in the CLI.
+  - `auth-integration` (live, step-ca) gains a step: renew agent A's own certificate
+    through the daemon and rotate its signing key on disk, then SIGHUP.
+    - Before the signal, nothing changes.
+    - After it, A serves the renewed serial and publishes `[new kid, old kid]`.
+    - A token signed before the rotation still verifies, and A is still running.
+    - Check-the-check fakes break six promises (no TLS reload, no key reload, previous key
+      dropped, process dies, certificate changed before the signal, keys changed before the
+      signal), and each one fails the step.
+    - Live run on l2: 12/12 steps pass (step-ca, Postgres and ClickHouse tiers).
+  - Deviations from the plan:
+    - No `agent_tls_reload_total` metric; the outcome goes to the log.
+    - Swapping the whole `ServerConfig` replaced the planned custom cert resolver plus
+      reloadable client verifier. The effect is the same with less code.
+    - Client-side reload is split out as S20b. A dialed tonic channel pins its TLS connector
+      when it is built, so it needs a custom connector.
+
+- **2026-09-28 — S20b (#565): SIGHUP reloads the client TLS too.**
+  - Why: S20a reloaded the listener, but a renewed `[grpc.tls.client]` certificate was used
+    only after a restart, because each dialed tonic channel pinned the connector it was built
+    with. Details are in [07](07-transport-tls-and-pki.md#as-built-s20b-dialed-channels-reload-too).
+  - `ClientTls` holds a rustls `ClientConfig` behind an `ArcSwap` shared by its clones.
+    `ClientTls::reload` re-reads its files and swaps in a new config only if it builds.
+    `config_for` (the tonic `ClientTlsConfig`) is gone.
+  - `Endpoint::connect_lazy_with` dials `https://` through our own connector
+    (`connect_with_connector_lazy` over an `http://` URI with an `https://` origin, since tonic
+    refuses an `https://` URI without its own TLS). Each new connection handshakes with the
+    config current then, with `TCP_NODELAY`.
+  - tonic drops its `tls-webpki-roots` feature. `webpki-roots` 0.26 (the version tonic used) is
+    a direct dependency.
+  - `reload.rs`: SIGHUP also reloads the process-wide client TLS, read at each signal.
+  - Tests:
+    - `tls_reload.rs` (wire, real handshakes, one channel dialed before the reload):
+      - after the CA rotates, the same channel trusts the new CA;
+      - over mTLS, the same channel presents the renewed certificate;
+      - a CA file that is not PEM, a removed key, a half-written renewal, or a key from
+        another pair (adversarial) each keep the old identity;
+      - a reload through one clone reaches a channel built from another, and reloading twice
+        is idempotent;
+      - a CA file one byte over the cap is refused (boundary);
+      - an in-memory `ClientTls` has nothing to reload.
+    - `reload.rs` tables: the client part is reported beside the listener's, and a broken
+      client CA does not stop the listener's reload.
+    - The existing `tls` (60) and `mtls_identity` (12) matrices pass unchanged over the new
+      connector, including the public-web-roots and `domain`-override rows.
+  - Deviation from the plan: no new `auth-integration` step. The service token a renewed
+    client certificate earns is internal to agent B, so the harness has nothing to observe;
+    the wire tests do the handshakes for real.
+
+- **2026-09-28 — S21 (#566): `agent login --browser`.**
+  - The CLI signs in through a browser: a one-shot loopback listener on
+    `127.0.0.1:<any port>/agent-login`, `Begin` with a PKCE challenge, the IdP URL printed and
+    opened with `xdg-open`, then `Exchange{code, state, code_verifier}`. The agent redeems the
+    code with its secret, so the terminal needs no IdP secret.
+  - Server: a portless `http://127.0.0.1/<path>` or `http://[::1]/<path>` in `[auth]
+    redirect_uris` matches any port on that IP (RFC 8252 §7.3). Every other entry still matches
+    exactly. The request must be canonical, http, with a port, and have no userinfo or fragment.
+  - Listener: only `GET /agent-login` with exactly this sign-in's `state` ends the wait. Strays
+    get 404/400/405/414 and are ignored, and an IdP `error=` ends it. It times out after
+    5 minutes, and replies are `no-store` and `no-referrer`.
+  - The issuer comes from `--issuer`, the local config, or the agent's only one. It must be a plain
+    identifier (it names the token file).
+  - Tests:
+    - `redirect_allowed_cases` (22 rows, including another loopback address, a port-pinned
+      registration, dot segments, escaped paths, userinfo and https);
+    - `classify_callback_cases` (18) and the listener tests (strays then the code, IdP refusal,
+      timeout, POST);
+    - `browser_issuer_cases`, and the parse rows for `--browser`;
+    - wire suite `tests/cli_browser_login.rs` (8) against `FakeIssuer`: sign-in then `WhoAmI`, a
+      forged local callback ignored, four unlisted registrations refused, sign-in off, and a
+      timeout.
+  - Deviations from the plan:
+    - `--browser` is explicit. There is no automatic fallback when the issuer lacks a device
+      endpoint; the reasons are in 01.
+    - There is no config-load check for the portless form, because the existing
+      `check_redirect_uri` already accepts it.
+    - The keyring stays deferred to parity 50.
+
+- **2026-09-29 — S22 (#567): the portal Access tab.**
+  - A new Access tab in the portal has three views: role bindings (add, edit, delete, with
+    expiry and "keep their sessions"), the role catalog (built-ins plus role cards, edited
+    with `write:role`), and tenant sessions (list, revoke). It uses only the existing
+    `AuthService` and `RoleService` RPCs, so there is no wire change.
+  - Navigation hides Access without `read:binding`, from one filtered list so the rail and the
+    pages stay index-aligned. Other tabs keep their per-control gating.
+  - Refusal wording: the last-admin `FailedPrecondition` shows the server's text. The opaque
+    `PermissionDenied` lists its usual causes. Input is checked before sending (id, subject
+    length and control characters, role count, expiry).
+  - The Fleet review detail now shows S19's `requested_by` and `approved_by`.
+  - Only the `role.*` and `review_fleet.*` Dart stubs were regenerated.
+  - Tests:
+    - `access_test.dart`: 53 spec rows (the completeness critic now tables `access`);
+    - `access_model_test.dart`: tables for ids, drafts, expiry, the permission text, and
+      error wording;
+    - three Fleet attribution rows.
+    - The contract guard registers `FakeRoleService`. The full portal suite passes: 370 tests
+      before the Fleet rows.
+  - Deviations from the plan:
+    - Destinations other than Access are not hidden: their pages already gate each control,
+      and hiding a whole tab needs one permission that stands for it.
+    - `auth-integration` and `portal-auth-e2e` are unchanged; the hermetic widget suite
+      covers the page.
+
+- **2026-09-29 — S23 (#568): `agent token` and native desktop sign-in.**
+  - `agent token [--issuer NAME] [--json]` prints a usable agent token from the stored login.
+    It refreshes under the token file's lock when stale. Exit codes: 2 not signed in, 3 session
+    ended, 1 other.
+  - It runs before the config is required: the issuer comes from `--issuer`, the config, or the
+    only stored login.
+  - The native portal signs in with it:
+    - it runs `agent token --json`, validates the output (token68 token, size caps), confirms
+      with `WhoAmI`, and keeps the token in memory;
+    - it runs the command again 20 s before expiry (floor 10 s);
+    - sign-out sends no `Logout`;
+    - the sign-in page says to run `agent login`.
+  - Found while building: the CLI's refresh skew is 30 s, so re-asking at the web flow's
+    60 s-before-expiry would get the same token back and re-run in a tight loop. CLI sessions
+    use their own schedule (`cliRefreshDelaySecs`).
+  - Tests:
+    - Rust `token_cases` table (only login, named, none, absent, several, traversal) plus JSON
+      shape, config precedence, stale token with an unreachable agent, a world-readable file
+      refused with no token in the error, hostile file names skipped, and exit codes;
+    - parse rows for `token` / `--json`;
+    - Dart `cli_login_test.dart`: output checks including CR/LF header injection and caps, the
+      message, the schedule, and `ProcessCliLogin` against scripted and real processes;
+    - seven native rows in `login_test.dart`. The portal suite passes 416/416.
+  - Deviations from the plan:
+    - `--json` prints `issuer` and `endpoint` instead of `tenant` / `sid`. The app calls `WhoAmI`
+      anyway, so the CLI needs no extra RPC.
+    - There is no live `nix run .#portal` run on l2 yet.
 
 ## Cross-track note (not an S-increment)
 
@@ -947,3 +1110,13 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   work). Measured 49% smaller config reads on the wire (35,078 B → 17,878 B), and compact output is the
   safer default (no incidental formatting of attacker-influenced field values). `always_print_primitive_fields`
   left `true`. Detail: `docs/design/rest-openapi/STATUS.md` (post-verification follow-up).
+- **Edge `jwt_authn` on the REST transcoder listener.** Closes the one residual from S14 #536 (the
+  REST/JSON listener `:8094` had deferred edge auth, relying on its loopback pin + the agent
+  `AuthLayer`). The rest listener now runs `jwt_authn` **after** `grpc_json_transcoder`, so the
+  transcoder's `:path` rewrite lets it reuse the same `UNAUTHENTICATED_PREFIXES` as the grpc-web
+  listeners (one source of truth, no second REST-path list). Fail-closed: an unmapped or un-rewritten
+  `/v1/…` path can't match a gRPC exempt prefix, so it hits the catch-all requires-token rule (401);
+  fail-open is impossible. Same `PORTAL_AUTH` gate, same JWKS provider; loopback pin retained as
+  defense-in-depth. Coordinated with the S14 session (no collision with in-flight S20 TLS/reload
+  work). Config-validated by the `portal-envoy` check across auth modes; behavioural 401/200 pending
+  l2 live-verify with `PORTAL_AUTH=on`. Detail: `docs/design/rest-openapi/STATUS.md` + gap-analysis §2.8.

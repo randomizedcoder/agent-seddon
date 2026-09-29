@@ -13,8 +13,13 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use tokio::net::{TcpListener, TcpStream, UnixListener};
-use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tokio::sync::{mpsc, Semaphore};
+use tokio_rustls::server::TlsStream;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream, UnixListenerStream};
 use tokio_stream::StreamExt;
 use tonic::codegen::http;
 use tonic::transport::server::Router;
@@ -114,13 +119,25 @@ impl Endpoint {
                 hostport,
                 tls: true,
             } => {
-                let endpoint = TonicEndpoint::from_shared(format!("https://{hostport}"))?;
-                let host = endpoint.uri().host().unwrap_or_default().to_owned();
-                let config = match tls {
-                    Some(tls) => tls.config_for(&host),
-                    None => crate::tls::ClientTls::default().config_for(&host),
-                };
-                Ok(endpoint.tls_config(config)?.connect_lazy())
+                // Our own connector does the handshake, so every new connection
+                // takes the client config current then (S20b). tonic refuses an
+                // `https://` URI without its own TLS, so the channel dials `http://`
+                // and requests carry the `https://` origin.
+                let origin = TonicEndpoint::from_shared(format!("https://{hostport}"))?
+                    .uri()
+                    .clone();
+                let host = origin.host().unwrap_or_default().to_owned();
+                let tls = tls.cloned().unwrap_or_default();
+                let addr = hostport.clone();
+                Ok(TonicEndpoint::from_shared(format!("http://{hostport}"))?
+                    .origin(origin)
+                    .connect_with_connector_lazy(tower::service_fn(move |_: Uri| {
+                        let (tls, addr, host) = (tls.clone(), addr.clone(), host.clone());
+                        async move {
+                            let stream = tls.connect(&addr, &host).await?;
+                            Ok::<_, io::Error>(hyper_util::rt::TokioIo::new(stream))
+                        }
+                    })))
             }
             Endpoint::Uds(path) => {
                 let path = path.clone();
@@ -247,11 +264,18 @@ impl Bound {
     /// Serve `router` on this listener until `shutdown` resolves. Generic over the
     /// router's tower layer `L`, so it accepts both the bare `Router` (tests) and the
     /// admission-layered [`crate::server::ServeRouter`] (the CLI serve path).
+    ///
+    /// `tls` is explicit on every call, so no listener is plaintext by omission. A
+    /// TCP listener with `tls` runs its own acceptor ([`tls_incoming`]), taking the
+    /// [`ServerTls`](crate::ServerTls) config current at each handshake, which is what
+    /// makes certificate reload possible (S20). A unix socket never serves TLS (its
+    /// boundary is the 0600 file mode), so `tls` there is refused.
     pub async fn serve<L>(
         self,
         router: Router<L>,
+        tls: Option<&crate::ServerTls>,
         shutdown: impl std::future::Future<Output = ()> + Send,
-    ) -> Result<(), tonic::transport::Error>
+    ) -> io::Result<()>
     where
         L: tower::Layer<tonic::service::Routes> + Clone + Send + 'static,
         L::Service: tower::Service<
@@ -264,20 +288,96 @@ impl Bound {
         <L::Service as tower::Service<http::Request<tonic::body::BoxBody>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     {
-        match self {
-            Bound::Tcp(l) => {
+        let served = match (self, tls) {
+            (Bound::Tcp(l), None) => {
                 let incoming = TcpListenerStream::new(l).map(enable_nodelay);
                 router
                     .serve_with_incoming_shutdown(incoming, shutdown)
                     .await
             }
-            Bound::Uds(l, _guard) => {
+            (Bound::Tcp(l), Some(tls)) => {
+                router
+                    .serve_with_incoming_shutdown(tls_incoming(l, tls.clone()), shutdown)
+                    .await
+            }
+            (Bound::Uds(l, _guard), None) => {
                 router
                     .serve_with_incoming_shutdown(UnixListenerStream::new(l), shutdown)
                     .await
             }
-        }
+            (Bound::Uds(..), Some(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a unix-socket listener does not serve TLS",
+                ))
+            }
+        };
+        served.map_err(io::Error::other)
     }
+}
+
+/// How long one TLS handshake may take before the connection is dropped. A peer that
+/// opens a socket and says nothing must not hold a handshake slot forever.
+pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many TLS handshakes may be in progress at once. Past this, the listener stops
+/// accepting until one finishes (the kernel backlog queues the rest), so a flood of
+/// silent connections costs bounded memory.
+pub const MAX_PENDING_HANDSHAKES: usize = 1024;
+
+/// The accepted-and-handshaken connections of a TLS listener.
+///
+/// One task accepts TCP connections and spawns a handshake for each, so a slow or
+/// silent peer never delays anyone else's. Each handshake uses the acceptor current
+/// when it starts ([`ServerTls::acceptor`](crate::ServerTls)), so a reload applies to
+/// the next connection. A failed or timed-out handshake is logged and dropped; it
+/// never ends the listener. The task stops when the server drops the stream.
+fn tls_incoming(
+    listener: TcpListener,
+    tls: crate::ServerTls,
+) -> ReceiverStream<io::Result<TlsStream<TcpStream>>> {
+    let (tx, rx) = mpsc::channel(64);
+    let slots = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
+    // unscoped-spawn: the listener's accept loop; no request exists yet.
+    tokio::spawn(async move {
+        loop {
+            let slot = tokio::select! {
+                () = tx.closed() => break,
+                slot = slots.clone().acquire_owned() => match slot {
+                    Ok(slot) => slot,
+                    Err(_) => break,
+                },
+            };
+            let (stream, peer) = tokio::select! {
+                () = tx.closed() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok(accepted) => accepted,
+                    Err(e) => {
+                        // Out of file descriptors and the like: back off briefly
+                        // rather than spin, and keep serving.
+                        tracing::warn!("gRPC TLS listener accept failed: {e}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                },
+            };
+            let _ = stream.set_nodelay(true);
+            let acceptor = tls.acceptor();
+            let tx = tx.clone();
+            // unscoped-spawn: a connection handshake, before any request exists.
+            tokio::spawn(async move {
+                let _slot = slot;
+                match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                    Ok(Ok(conn)) => {
+                        let _ = tx.send(Ok(conn)).await;
+                    }
+                    Ok(Err(e)) => tracing::debug!(%peer, "gRPC TLS handshake failed: {e}"),
+                    Err(_) => tracing::debug!(%peer, "gRPC TLS handshake timed out"),
+                }
+            });
+        }
+    });
+    ReceiverStream::new(rx)
 }
 
 /// Unlinks a unix-domain-socket file when dropped, so a restarted server doesn't

@@ -412,6 +412,45 @@ impl AgentAuth {
         Ok(self.client.clone().exchange(req).await?.into_inner())
     }
 
+    /// The login issuers the agent offers for browser sign-in.
+    pub async fn issuers(&self) -> Result<Vec<pb::LoginIssuer>, tonic::Status> {
+        let resp = self.client.clone().issuers(pb::IssuersRequest {}).await?;
+        Ok(resp.into_inner().issuers)
+    }
+
+    /// Start a browser sign-in with `issuer`, coming back to `redirect_uri`.
+    pub async fn begin(
+        &self,
+        issuer: &str,
+        redirect_uri: &str,
+        challenge: &str,
+    ) -> Result<pb::BeginResponse, tonic::Status> {
+        let req = pb::BeginRequest {
+            issuer: issuer.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            code_challenge: challenge.to_string(),
+        };
+        Ok(self.client.clone().begin(req).await?.into_inner())
+    }
+
+    /// Finish a browser sign-in: the IdP's `code`, `Begin`'s `state`, the PKCE
+    /// verifier. Starts a CLI session like [`Self::exchange`].
+    pub async fn exchange_code(
+        &self,
+        code: &str,
+        state: &str,
+        verifier: &str,
+    ) -> Result<pb::ExchangeResponse, tonic::Status> {
+        let req = pb::ExchangeRequest {
+            code: code.to_string(),
+            state: state.to_string(),
+            code_verifier: verifier.to_string(),
+            client_kind: CLI_CLIENT_KIND.into(),
+            ..Default::default()
+        };
+        Ok(self.client.clone().exchange(req).await?.into_inner())
+    }
+
     /// A new token (and a new handle) from a live session.
     pub async fn refresh(&self, handle: &str) -> Result<pb::ExchangeResponse, tonic::Status> {
         let req = pb::RefreshRequest {

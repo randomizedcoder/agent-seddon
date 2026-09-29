@@ -65,7 +65,9 @@ let
   # Forward configurable endpoints to Flutter as --dart-define flags. Any set PORTAL_*
   # env var is threaded through; `-- <extra flags>` still passes through via "$@".
   # PORTAL_AUTH (auto|on|off), PORTAL_AUTH_ISSUER and PORTAL_REDIRECT_URI steer
-  # browser sign-in (security-hardening S13b).
+  # browser sign-in (security-hardening S13b). PORTAL_AGENT_BIN and
+  # PORTAL_AGENT_CONFIG name the `agent` CLI whose stored login the native app
+  # borrows via `agent token --json` (S23).
   # Shared by the `portal` (native) and `portal-web` builds.
   dartDefines = ''
     defines=()
@@ -75,7 +77,8 @@ let
       PORTAL_FLEET_HOST PORTAL_FLEET_PORT \
       PORTAL_GRPC_WEB_URL PORTAL_SESSIONS_GRPC_WEB_URL PORTAL_FLEET_GRPC_WEB_URL \
       PORTAL_GRAFANA_URL PORTAL_HYPERDX_URL PORTAL_PROMETHEUS_URL \
-      PORTAL_AUTH PORTAL_AUTH_ISSUER PORTAL_REDIRECT_URI; do
+      PORTAL_AUTH PORTAL_AUTH_ISSUER PORTAL_REDIRECT_URI \
+      PORTAL_AGENT_BIN PORTAL_AGENT_CONFIG; do
       val="''${!key:-}"
       if [ -n "$val" ]; then defines+=("--dart-define=$key=$val"); fi
     done

@@ -203,6 +203,15 @@ base64 = "0.22"
 # security-hardening S4). ring only: the workspace's rustls is ring-only, and a
 # second crypto provider would make rustls' process default ambiguous.
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+# The gRPC listener's own TLS acceptor, so certificates reload without a restart
+# (security-hardening S20). Same versions and features tonic already uses: ring only,
+# for the reason above. `arc-swap` holds the current config for lock-free handshakes.
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
+rustls-pemfile = "2"
+arc-swap = "1"
+# The public roots an `https://` dial with no configured CA trusts, now that dials run
+# their own connector too (S20b). The version tonic's `tls-webpki-roots` pulls in.
+webpki-roots = "0.26"
 
 # Drives the CLI through a real pty in tests. Needed because the REPL's line
 # editor and the policy guard's operator prompt are both tty-only: the guard

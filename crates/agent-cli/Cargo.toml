@@ -66,8 +66,9 @@ async-trait.workspace = true
 agent-mcp.workspace = true
 # Table-driven tests (the seam table's completeness + flag parsing).
 rstest.workspace = true
-# `tempdir()` for the campaign parser's `--goal-file` rows.
-agent-testkit.workspace = true
+# `tempdir()` for the campaign parser's `--goal-file` rows; `pki` for the SIGHUP
+# reload rows (throwaway certificates on disk).
+agent-testkit = { workspace = true, features = ["pki"] }
 
 # Pty-driven CLI tests (tests/repl_pty.rs). Unix-only: it spawns the binary on a
 # real terminal to reach the REPL's line editor and the policy guard's operator

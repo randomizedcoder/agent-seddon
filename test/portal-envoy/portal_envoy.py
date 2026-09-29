@@ -668,13 +668,32 @@ def transcoder_filter(descriptor_path: str, services: Sequence[str]) -> dict:
     }
 
 
-def rest_listener(rest: Rest, k: Knobs, descriptor_path: str, tls: Tls | None) -> dict:
+def rest_listener(rest: Rest, k: Knobs, descriptor_path: str, jwt: Jwt | None, tls: Tls | None) -> dict:
     """The REST/JSON transcoder listener. Filter order `cors ▶ grpc_json_transcoder ▶
-    router` (the transcoder must precede the router). No `grpc_web` (this is plain
-    HTTP+JSON, not grpc-web framing) and no edge `jwt_authn`: it is pinned to loopback,
-    and every transcoded call is an ordinary gRPC call the agent's AuthLayer still
-    verifies. Bind is FIXED 127.0.0.1 — it does not follow PORTAL_GRPC_WEB_HOST, so a
-    LAN bind of the grpc-web listeners never silently exposes REST."""
+    jwt_authn ▶ router` (the transcoder must precede the router; jwt_authn sits after
+    it — see below). No `grpc_web`: this is plain HTTP+JSON, not grpc-web framing.
+
+    Edge `jwt_authn` runs AFTER the transcoder because `grpc_json_transcoder` rewrites
+    `:path` to the gRPC method path while decoding headers, so the SAME
+    `UNAUTHENTICATED_PREFIXES` (gRPC paths — `/agent.v1.AuthService/` etc.) that guard
+    the grpc-web listeners apply here unchanged: one source of truth, no second
+    REST-path list to drift. This is **fail-closed** — a REST path that is unmapped, or
+    that reaches jwt_authn un-rewritten, never matches a gRPC exempt prefix, so it falls
+    to the catch-all `/` requires-token rule (401); it can never fall open. When auth is
+    off (`jwt is None`) there is no edge check and the agent's AuthLayer still verifies
+    every transcoded call. Bind is FIXED 127.0.0.1 — it does not follow
+    PORTAL_GRPC_WEB_HOST, so a LAN bind of the grpc-web listeners never silently exposes
+    REST, and edge auth is defense-in-depth on top of that loopback pin."""
+    filters: list = [
+        {"name": "envoy.filters.http.cors",
+         "typed_config": {"@type": any_type("envoy.extensions.filters.http.cors.v3.Cors")}},
+        transcoder_filter(descriptor_path, rest.services),
+    ]
+    if jwt is not None:
+        filters.append(jwt_filter(jwt))
+    filters.append(
+        {"name": "envoy.filters.http.router",
+         "typed_config": {"@type": any_type("envoy.extensions.filters.http.router.v3.Router")}})
     hcm = {
         "@type": any_type(
             "envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"),
@@ -692,13 +711,7 @@ def rest_listener(rest: Rest, k: Knobs, descriptor_path: str, tls: Tls | None) -
                             "route": {"cluster": rest.cluster, "timeout": "0s"}}],
             }],
         },
-        "http_filters": [
-            {"name": "envoy.filters.http.cors",
-             "typed_config": {"@type": any_type("envoy.extensions.filters.http.cors.v3.Cors")}},
-            transcoder_filter(descriptor_path, rest.services),
-            {"name": "envoy.filters.http.router",
-             "typed_config": {"@type": any_type("envoy.extensions.filters.http.router.v3.Router")}},
-        ],
+        "http_filters": filters,
     }
     chain: dict = {"filters": [{
         "name": "envoy.filters.network.http_connection_manager", "typed_config": hcm}]}
@@ -750,7 +763,8 @@ def render(spec: Spec, k: Knobs, jwt: Jwt | None, paths: Mapping[str, str]) -> d
     listeners = [listener(l, k, jwt, tls) for l in spec.listeners]
     if spec.rest is not None:
         # The transcoder fronts an existing cluster (agent_gateway); no new cluster.
-        listeners.append(rest_listener(spec.rest, k, p(spec.rest.descriptor), tls))
+        # `jwt` is the same provider the grpc-web listeners use — edge auth on REST too.
+        listeners.append(rest_listener(spec.rest, k, p(spec.rest.descriptor), jwt, tls))
     return {"static_resources": {"listeners": listeners, "clusters": clusters}}
 
 

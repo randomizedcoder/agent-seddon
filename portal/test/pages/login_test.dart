@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:agent_portal/src/auth/auth_state.dart';
+import 'package:agent_portal/src/auth/cli_login.dart';
 import 'package:agent_portal/src/auth/pkce.dart';
 import 'package:agent_portal/src/gen/agent/v1/auth.pb.dart';
 import 'package:agent_portal/src/gen/agent/v1/review_fleet.pb.dart';
@@ -51,9 +52,107 @@ void main() {
     return robot;
   }
 
+  /// A native app signed in through a scripted CLI; the shell is up afterwards.
+  Future<LoginRobot> cliSignIn(WidgetTester tester, FakeCliLogin cli) async {
+    final robot = await LoginRobot.create(tester, canRedirect: false);
+    robot.authFake.whoAmIResponse = principal();
+    await robot.load(cli: cli);
+    return robot;
+  }
+
   for (final row in loginSpec.rows) {
     testWidgets('login ${row.label} — ${row.description}', (tester) async {
       switch (row.label) {
+        case 'positive_native_cli_login_signs_in':
+          final robot = await cliSignIn(
+              tester, FakeCliLogin([const CliToken('cli-1', now + 900, 'google')]));
+          await robot.pumpUntilFound('login.account');
+          await robot.pumpUntil(() => robot.log.fired(LoginRobot.listReviews),
+              reason: 'the shell to call ListReviews');
+          expect(robot.log.authorizationFor('/${LoginRobot.whoAmI}'), ['Bearer cli-1']);
+          expect(robot.log.authorizationFor('/${LoginRobot.listReviews}').last,
+              'Bearer cli-1');
+          expect(robot.log.fired(LoginRobot.issuers), isFalse);
+          expect(robot.platform.storage, isEmpty, reason: 'the token stays in memory');
+          break;
+
+        case 'positive_native_without_cli_login_explains':
+          final robot = await cliSignIn(tester, FakeCliLogin([
+            const CliLoginError('not signed in: run `agent login`', signInNeeded: true),
+          ]));
+          robot.authFake.issuersResponse = issuers(['google']);
+          expect(robot.exists('login.cli.hint'), isTrue);
+          expect(robot.exists('login.issuer.google'), isFalse);
+          expect(robot.errorText, contains('agent login'));
+          expect(robot.shellShown, isFalse);
+          break;
+
+        case 'positive_native_retry_runs_the_cli_again':
+          final cli = FakeCliLogin([
+            const CliLoginError('not signed in: run `agent login`', signInNeeded: true),
+            const CliToken('cli-1', now + 900, 'google'),
+          ]);
+          final robot = await cliSignIn(tester, cli);
+          expect(robot.exists('login.cli.hint'), isTrue);
+          await robot.tap('login.retry', until: () => robot.auth.token != null);
+          await robot.pumpReal();
+          expect(cli.calls, 2);
+          expect(robot.auth.token, 'cli-1');
+          break;
+
+        case 'corner_native_refresh_asks_the_cli':
+          final cli = FakeCliLogin([
+            const CliToken('cli-1', now + 900, 'google'),
+            const CliToken('cli-2', now + 1800, 'google'),
+          ]);
+          final robot = await cliSignIn(tester, cli);
+          expect(robot.scheduled.single.delay, const Duration(seconds: 880));
+          await robot.act(() async => robot.scheduled.single.callback());
+          await robot.pumpUntil(() => robot.auth.token == 'cli-2',
+              reason: 'the CLI to hand over the next token');
+          expect(cli.calls, 2);
+          expect(robot.log.fired(LoginRobot.refresh), isFalse,
+              reason: 'the CLI holds the refresh handle');
+          expect(robot.scheduled.first.cancelled, isTrue);
+          expect(robot.scheduled.last.delay, const Duration(seconds: 1780));
+          break;
+
+        case 'negative_native_cli_token_refused_by_agent':
+          final robot = await LoginRobot.create(tester, canRedirect: false);
+          robot.authFake.whoAmIError = const GrpcError.unauthenticated('bad token');
+          await robot.load(
+              cli: FakeCliLogin([const CliToken('stale', now + 900, 'google')]));
+          expect(robot.errorText, contains('did not accept the CLI login'));
+          expect(robot.shellShown, isFalse);
+          expect(robot.auth.token, isNull);
+          break;
+
+        case 'negative_native_signout_keeps_the_cli_session':
+          final robot = await cliSignIn(
+              tester, FakeCliLogin([const CliToken('cli-1', now + 900, 'google')]));
+          await robot.pumpUntilFound('login.signout');
+          await robot.tap('login.signout', until: () => robot.exists('login.cli.hint'));
+          expect(robot.log.fired(LoginRobot.logout), isFalse);
+          expect(robot.auth.token, isNull);
+          expect(robot.errorText, contains('agent logout'));
+          expect(robot.scheduled.last.cancelled, isTrue);
+          break;
+
+        case 'adversarial_native_hostile_cli_output_refused':
+          final robot = await LoginRobot.create(tester, canRedirect: false);
+          Object hostile;
+          try {
+            hostile = parseCliToken(
+                '{"access_token":"a\\r\\nx-agent-user-id: evil","expires_at":5}');
+          } on CliLoginError catch (e) {
+            hostile = e;
+          }
+          await robot.load(cli: FakeCliLogin([hostile]));
+          expect(robot.errorText, contains('unexpected'));
+          expect(robot.log.fired(LoginRobot.whoAmI), isFalse);
+          expect(robot.auth.token, isNull);
+          break;
+
         case 'positive_issuer_button_begins_sign_in':
         case 'positive_progress_while_redirecting':
           final robot = await LoginRobot.create(tester);

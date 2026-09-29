@@ -92,6 +92,12 @@ previous_key = ""                                              # kept in the JWK
   (issuance, renewal, `not_after`) is step-ca's ([07](07-transport-tls-and-pki.md)); the agent refuses
   to start with an expired signer certificate and `agent doctor` warns two days before expiry.
 
+> **As built (S20a).** Rotation needs no restart. Write the old key to `previous_key`, the new
+> one to `signing_key`, and send SIGHUP. `TokenService` swaps the key pair whole (an `ArcSwap`),
+> so a mint or verify always sees one consistent pair. On any error (a missing or malformed file,
+> or `previous_key` equal to `signing_key`), the old keys stay in use. Retiring the previous key
+> is a second rotation, or a config change and restart.
+
 > **As built (S11b).** `[auth.token]` names a signing *key*, not a certificate, so there is no signer
 > expiry to check. `agent doctor` probes that the key (and `previous_key`) loads and is not readable
 > by group or other (`auth.signer`). Certificate expiry is checked for the gRPC listener and client

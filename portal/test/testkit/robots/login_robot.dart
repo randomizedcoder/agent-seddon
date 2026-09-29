@@ -4,6 +4,7 @@ import 'package:agent_portal/src/auth/auth_gate.dart';
 import 'package:agent_portal/src/auth/auth_interceptor.dart';
 import 'package:agent_portal/src/auth/auth_platform.dart';
 import 'package:agent_portal/src/auth/auth_state.dart';
+import 'package:agent_portal/src/auth/cli_login.dart';
 import 'package:agent_portal/src/pages/fleet_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,6 +22,24 @@ class ScheduledRefresh {
   final Duration delay;
   final void Function() callback;
   bool cancelled = false;
+}
+
+/// A scripted `agent token --json` (S23): each [token] call takes the next
+/// answer from [answers] (the last one repeats) and counts itself in [calls].
+class FakeCliLogin implements CliLogin {
+  FakeCliLogin(this.answers);
+
+  /// A [CliToken] to hand back, or an error to throw.
+  final List<Object> answers;
+  int calls = 0;
+
+  @override
+  Future<CliToken> token() async {
+    final a = answers[calls < answers.length ? calls : answers.length - 1];
+    calls++;
+    if (a is CliToken) return a;
+    throw a;
+  }
 }
 
 class _CapturedTimer implements Timer {
@@ -100,12 +119,17 @@ class LoginRobot extends Robot {
   }
 
   /// Build the [AuthState] in [mode], mount the gate and run `start()`.
-  Future<void> load({AuthMode mode = AuthMode.on, String preferred = ''}) async {
+  Future<void> load({
+    AuthMode mode = AuthMode.on,
+    String preferred = '',
+    CliLogin? cli,
+  }) async {
     auth = AuthState(
       client: clients.auth,
       platform: platform,
       mode: mode,
       preferredIssuer: preferred,
+      cliLogin: cli,
       now: () => now,
       schedule: (delay, cb) {
         final entry = ScheduledRefresh(delay, cb);

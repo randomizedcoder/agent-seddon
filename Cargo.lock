@@ -258,6 +258,7 @@ dependencies = [
  "agent-testkit",
  "agent-tokenizer",
  "agent-tools",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "futures-util",
@@ -266,9 +267,12 @@ dependencies = [
  "reqwest",
  "ring",
  "rstest",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "tiny_http",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tonic-health",
@@ -277,6 +281,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4769,7 +4774,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

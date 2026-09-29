@@ -11,6 +11,7 @@ mod campaign_cli;
 mod grpc_server;
 mod mcp_server;
 mod metrics_server;
+mod reload;
 mod repl;
 mod shutdown;
 
@@ -53,6 +54,35 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // `agent token` (security-hardening S23): print the stored login's token for
+    // another program (the native portal). Before the config is required: without
+    // a config file the only stored login is used.
+    #[cfg(feature = "auth")]
+    if let Mode::Token { issuer, json } = &mode {
+        let config = match std::fs::read_to_string(&config_path) {
+            Ok(toml) => Some(
+                agent_runtime::parse_config_reporting_unknown(&toml)
+                    .context("parsing config")?
+                    .0,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading config `{}`", config_path.display()))
+            }
+        };
+        match agent_runtime::login::token(config.as_ref(), issuer.as_deref(), *json).await {
+            Ok(out) => {
+                println!("{out}");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(e.exit_code());
+            }
+        }
+    }
+
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
     // Parse with the ignored-key list in hand rather than letting `parse_config`
@@ -78,9 +108,25 @@ async fn main() -> Result<()> {
     // not on its allow-list), telemetry, and any server.
     #[cfg(feature = "auth")]
     match &mode {
-        Mode::Login { issuer, endpoint } => {
+        Mode::Login {
+            issuer,
+            endpoint,
+            browser: false,
+        } => {
             return agent_runtime::login::login(&config, issuer.as_deref(), endpoint.as_deref())
                 .await;
+        }
+        Mode::Login {
+            issuer,
+            endpoint,
+            browser: true,
+        } => {
+            return agent_runtime::login::login_browser(
+                &config,
+                issuer.as_deref(),
+                endpoint.as_deref(),
+            )
+            .await;
         }
         Mode::Logout { issuer } => {
             return agent_runtime::login::logout(&config, issuer.as_deref()).await;
@@ -93,7 +139,7 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "auth"))]
     if matches!(
         mode,
-        Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. }
+        Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } | Mode::Token { .. }
     ) {
         anyhow::bail!("`agent login` needs the agent built with the `auth` feature");
     }
@@ -852,8 +898,8 @@ async fn main() -> Result<()> {
                 run_task_exit = Some(exit.code());
                 Ok(None)
             }
-            Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } => {
-                unreachable!("login/logout/whoami return before the run")
+            Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } | Mode::Token { .. } => {
+                unreachable!("login/logout/whoami/token return before the run")
             }
         }
     })
@@ -1041,14 +1087,16 @@ enum Mode {
         tenant: String,
         task: agent_core::campaign::TaskId,
     },
-    /// Sign in (`agent login [--issuer NAME] [--endpoint ADDR]`): the device flow at
-    /// the login issuer, then an agent token kept in
+    /// Sign in (`agent login [--browser] [--issuer NAME] [--endpoint ADDR]`): the
+    /// device flow at the login issuer, or with `--browser` the authorization-code
+    /// flow with a loopback redirect (S21), then an agent token kept in
     /// `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json`
     /// (docs/design/security-hardening/01-authentication.md "CLI").
     #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     Login {
         issuer: Option<String>,
         endpoint: Option<String>,
+        browser: bool,
     },
     /// Revoke the stored login's session and forget it (`agent logout`).
     #[cfg_attr(not(feature = "auth"), allow(dead_code))]
@@ -1059,6 +1107,13 @@ enum Mode {
     #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     WhoAmI {
         issuer: Option<String>,
+    },
+    /// Print the stored login's agent token, refreshed when stale (`agent token
+    /// [--issuer NAME] [--json]`, security-hardening S23).
+    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
+    Token {
+        issuer: Option<String>,
+        json: bool,
     },
 }
 
@@ -1192,8 +1247,11 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut login = false;
     let mut logout = false;
     let mut whoami = false;
+    let mut token = false;
+    let mut json = false;
     let mut issuer: Option<String> = None;
     let mut auth_endpoint: Option<String> = None;
+    let mut browser = false;
     let mut cognition_graph: Option<String> = None;
     let mut model_router_config: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
@@ -1253,12 +1311,15 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             "login" => login = true,
             "logout" => logout = true,
             "whoami" => whoami = true,
+            "token" => token = true,
+            "--json" => json = true,
             "--issuer" => {
                 issuer = Some(args.next().context("--issuer requires an issuer name")?);
             }
             "--endpoint" => {
                 auth_endpoint = Some(args.next().context("--endpoint requires an address")?);
             }
+            "--browser" => browser = true,
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
             "--serve-sessions" => serve_sessions = true,
@@ -1315,8 +1376,10 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                      doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
                      campaign <verb> …   manage campaigns — add / plan / list / show / approve / answer … (`agent campaign --help`)\n  \
                      login              sign in at the login issuer (device code) and keep an agent token [--issuer NAME] [--endpoint ADDR]\n  \
+                     login --browser    sign in through a browser (loopback redirect) instead of a device code\n  \
                      logout              revoke the stored login's session and forget it [--issuer NAME]\n  \
                      whoami              print the stored login's tenant, roles and permissions [--issuer NAME]\n  \
+                     token               print the stored login's agent token, refreshed when stale [--issuer NAME] [--json]\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -1334,24 +1397,38 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     }
 
     let goal = goal_parts.join(" ");
-    if [login, logout, whoami].iter().filter(|b| **b).count() > 1 {
-        anyhow::bail!("pick one of `login`, `logout`, `whoami`");
+    if [login, logout, whoami, token]
+        .iter()
+        .filter(|b| **b)
+        .count()
+        > 1
+    {
+        anyhow::bail!("pick one of `login`, `logout`, `whoami`, `token`");
     }
     if auth_endpoint.is_some() && !login {
         anyhow::bail!("--endpoint only applies to `agent login`");
     }
-    if issuer.is_some() && !(login || logout || whoami) {
-        anyhow::bail!("--issuer only applies to `login`, `logout` and `whoami`");
+    if browser && !login {
+        anyhow::bail!("--browser only applies to `agent login`");
+    }
+    if issuer.is_some() && !(login || logout || whoami || token) {
+        anyhow::bail!("--issuer only applies to `login`, `logout`, `whoami` and `token`");
+    }
+    if json && !token {
+        anyhow::bail!("--json only applies to `agent token`");
     }
     let mode = if login {
         Mode::Login {
             issuer,
             endpoint: auth_endpoint,
+            browser,
         }
     } else if logout {
         Mode::Logout { issuer }
     } else if whoami {
         Mode::WhoAmI { issuer }
+    } else if token {
+        Mode::Token { issuer, json }
     } else if check_config {
         Mode::CheckConfig
     } else if doctor {
@@ -1583,9 +1660,19 @@ mod tests {
     /// What the parsed mode is, for the login table below.
     fn login_mode(argv: &[&str]) -> Result<String> {
         parse(argv).map(|a| match a.mode {
-            Mode::Login { issuer, endpoint } => format!("login {issuer:?} {endpoint:?}"),
+            Mode::Login {
+                issuer,
+                endpoint,
+                browser: false,
+            } => format!("login {issuer:?} {endpoint:?}"),
+            Mode::Login {
+                issuer,
+                endpoint,
+                browser: true,
+            } => format!("login --browser {issuer:?} {endpoint:?}"),
             Mode::Logout { issuer } => format!("logout {issuer:?}"),
             Mode::WhoAmI { issuer } => format!("whoami {issuer:?}"),
+            Mode::Token { issuer, json } => format!("token {issuer:?} json={json}"),
             Mode::OneShot(goal) => format!("oneshot {goal}"),
             _ => "other".into(),
         })
@@ -1598,6 +1685,10 @@ mod tests {
     #[case::positive_login_with_options(&["login", "--issuer", "google", "--endpoint", "https://a:1"], "login Some(\"google\") Some(\"https://a:1\")")]
     #[case::positive_logout(&["logout", "--issuer", "kc"], "logout Some(\"kc\")")]
     #[case::positive_whoami(&["whoami"], "whoami None")]
+    #[case::positive_login_browser(&["login", "--browser"], "login --browser None None")]
+    #[case::positive_token(&["token"], "token None json=false")]
+    #[case::positive_token_json_issuer(&["token", "--json", "--issuer", "google"], "token Some(\"google\") json=true")]
+    #[case::corner_browser_before_the_word(&["--browser", "login", "--issuer", "kc"], "login --browser Some(\"kc\") None")]
     #[case::corner_login_after_double_dash_is_a_goal(&["--", "login"], "oneshot login")]
     fn login_words_parse(#[case] argv: &[&str], #[case] want: &str) {
         assert_eq!(login_mode(argv).expect("parses"), want);
@@ -1607,6 +1698,9 @@ mod tests {
     #[case::negative_two_words(&["login", "logout"], "pick one")]
     #[case::negative_endpoint_without_login(&["whoami", "--endpoint", "https://a:1"], "--endpoint only")]
     #[case::negative_issuer_alone(&["--issuer", "google", "hello"], "--issuer only")]
+    #[case::negative_browser_without_login(&["whoami", "--browser"], "--browser only")]
+    #[case::negative_json_without_token(&["whoami", "--json"], "--json only")]
+    #[case::negative_token_and_login(&["token", "login"], "pick one")]
     #[case::boundary_issuer_missing_value(&["login", "--issuer"], "requires an issuer name")]
     fn login_words_refused(#[case] argv: &[&str], #[case] want: &str) {
         let err = login_mode(argv).expect_err("refused");

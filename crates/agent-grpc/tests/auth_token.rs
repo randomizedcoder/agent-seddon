@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use agent_grpc::server::{
-    base_router_with_tls, AuthLayer, AuthParams, IssuerParams, ReviewFleetSvc, TokenParams,
+    base_router_with_auth, AuthLayer, AuthParams, IssuerParams, ReviewFleetSvc, TokenParams,
     TokenizerServiceSvc,
 };
 use agent_grpc::Endpoint;
@@ -91,9 +91,7 @@ impl Harness {
 
         let bound = Endpoint::parse("127.0.0.1:0").bind().await.expect("bind");
         let dial = bound.dial_endpoint().expect("dial endpoint");
-        let (router, health) = base_router_with_tls(0, None, layer.clone(), None, None)
-            .await
-            .expect("router");
+        let (router, health) = base_router_with_auth(0, None, layer.clone(), None).await;
         let router = layer.serve_auth_service(router).add_service(
             TokenizerServiceSvc::new(Arc::new(agent_tokenizer::ApproxTokenizer::new()))
                 .into_server(),
@@ -109,7 +107,7 @@ impl Harness {
         };
         tokio::spawn(async move {
             let _health = health;
-            let _ = bound.serve(router, std::future::pending()).await;
+            let _ = bound.serve(router, None, std::future::pending()).await;
         });
         Self {
             channel: dial.connect_lazy().expect("channel"),

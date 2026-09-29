@@ -68,7 +68,7 @@ where
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
         let _ = bound
-            .serve(router, async {
+            .serve(router, None, async {
                 let _ = rx.await;
             })
             .await;

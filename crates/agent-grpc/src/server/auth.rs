@@ -287,6 +287,10 @@ pub struct AuthLayer {
     /// certificate or a known service's on the connection (S10).
     #[cfg(feature = "auth")]
     mtls: Arc<mtls::MtlsBindings>,
+    /// The agent token service, present with `[auth.token]`: held so a SIGHUP can
+    /// rotate its signing key ([`Self::reload_keys`], S20).
+    #[cfg(feature = "auth")]
+    tokens: Option<Arc<token::TokenService>>,
 }
 
 impl AuthLayer {
@@ -304,6 +308,8 @@ impl AuthLayer {
             sessions: None,
             #[cfg(feature = "auth")]
             mtls: Arc::default(),
+            #[cfg(feature = "auth")]
+            tokens: None,
         }
     }
 
@@ -319,6 +325,8 @@ impl AuthLayer {
             sessions: None,
             #[cfg(feature = "auth")]
             mtls: Arc::default(),
+            #[cfg(feature = "auth")]
+            tokens: None,
         }
     }
 
@@ -334,6 +342,7 @@ impl AuthLayer {
         mtls: mtls::MtlsBindings,
     ) -> Self {
         let mut layer = Self::enabled(tokens.clone());
+        let tokens_for_reload = tokens.clone();
         let mtls = Arc::new(mtls);
         layer.auth_service = Some(service::AuthSvc::new(
             login,
@@ -345,7 +354,15 @@ impl AuthLayer {
         ));
         layer.sessions = Some(sessions);
         layer.mtls = mtls;
+        layer.tokens = Some(tokens_for_reload);
         layer
+    }
+
+    /// Re-read the token service's signing keys ([`token::TokenService::reload`]).
+    /// `None` when this layer issues no agent tokens (no `[auth.token]`).
+    #[cfg(feature = "auth")]
+    pub fn reload_keys(&self) -> Option<Result<token::ReloadedKeys, String>> {
+        self.tokens.as_ref().map(|t| t.reload())
     }
 
     /// Turn on browser sign-in (`AuthService.Issuers` / `Begin` and code
@@ -902,8 +919,8 @@ pub use binding::{
 };
 #[cfg(feature = "auth")]
 pub use code_flow::{
-    authorize_url, check_redirect_uri, discover_code, is_challenge, is_verifier, s256,
-    BrowserIssuer, CodeEndpoints, CodeFlow, CodeRefusal, MAX_CODE_BYTES, MAX_PENDING,
+    authorize_url, check_redirect_uri, discover_code, is_challenge, is_verifier, redirect_allowed,
+    s256, BrowserIssuer, CodeEndpoints, CodeFlow, CodeRefusal, MAX_CODE_BYTES, MAX_PENDING,
     STATE_TTL_SECS,
 };
 #[cfg(feature = "auth")]
@@ -931,8 +948,8 @@ pub use session::{
 };
 #[cfg(feature = "auth")]
 pub use token::{
-    AgentClaims, Grant, MintedToken, SigningKey, TokenService, AMR_MTLS, CNF_X5T, DEFAULT_TTL_SECS,
-    MAX_PERMS_IN_TOKEN, MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
+    AgentClaims, Grant, MintedToken, ReloadedKeys, SigningKey, TokenService, AMR_MTLS, CNF_X5T,
+    DEFAULT_TTL_SECS, MAX_PERMS_IN_TOKEN, MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
 };
 
 #[cfg(all(test, feature = "auth"))]

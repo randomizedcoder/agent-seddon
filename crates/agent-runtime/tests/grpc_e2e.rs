@@ -43,7 +43,7 @@ async fn serve(router: agent_grpc::server::Router) -> (String, Server) {
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
         let _ = bound
-            .serve(router, async {
+            .serve(router, None, async {
                 let _ = rx.await;
             })
             .await;

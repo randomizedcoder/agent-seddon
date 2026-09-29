@@ -52,7 +52,24 @@ class LoginPage extends StatelessWidget {
                 if (busy)
                   const Center(
                       child: CircularProgressIndicator(key: Key('login.progress')))
-                else if (auth.offered.isEmpty)
+                else if (auth.usesCliLogin) ...[
+                  // Native desktop: sign-in is the CLI's (S23).
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'This app uses the agent CLI\'s sign-in. Run `agent login` '
+                      'in a terminal, then try again.',
+                      key: Key('login.cli.hint'),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    key: const Key('login.retry'),
+                    onPressed: auth.start,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Try again'),
+                  ),
+                ] else if (auth.offered.isEmpty)
                   OutlinedButton.icon(
                     key: const Key('login.retry'),
                     onPressed: auth.start,

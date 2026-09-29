@@ -18,7 +18,7 @@ use agent_grpc::client::login::{
     device_login, discover_device, AgentAuth, DeviceClient, LoginBearerSource, PollTiming,
     RefreshError, StoredLogin, TokenFile,
 };
-use agent_grpc::server::{base_router_with_tls, AuthLayer, AuthParams, IssuerParams, TokenParams};
+use agent_grpc::server::{base_router_with_auth, AuthLayer, AuthParams, IssuerParams, TokenParams};
 use agent_grpc::Endpoint;
 use agent_testkit::oidc::{DeviceOutcome, DeviceScript, FakeIssuer, TestKey, EC_PRIV_SEC1_PEM};
 use serde_json::json;
@@ -81,13 +81,11 @@ impl Harness {
         let Endpoint::Tcp { hostport, .. } = bound.dial_endpoint().expect("dial") else {
             panic!("tcp listener");
         };
-        let (router, health) = base_router_with_tls(0, None, layer.clone(), None, None)
-            .await
-            .expect("router");
+        let (router, health) = base_router_with_auth(0, None, layer.clone(), None).await;
         let router = layer.serve_auth_service(router);
         tokio::spawn(async move {
             let _health = health;
-            let _ = bound.serve(router, std::future::pending()).await;
+            let _ = bound.serve(router, None, std::future::pending()).await;
         });
         Self {
             endpoint: format!("http://{hostport}"),

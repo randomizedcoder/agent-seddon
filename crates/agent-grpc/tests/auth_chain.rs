@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use agent_core::Tokenizer;
 use agent_grpc::client::GrpcTokenizer;
 use agent_grpc::server::{
-    base_router_with_tls, AuthLayer, AuthParams, IssuerParams, TokenParams, TokenizerServiceSvc,
+    base_router_with_auth, AuthLayer, AuthParams, IssuerParams, TokenParams, TokenizerServiceSvc,
 };
 use agent_grpc::Endpoint;
 use agent_proto::identity::HOPS_KEY;
@@ -143,15 +143,13 @@ impl Cluster {
 async fn serve(layer: AuthLayer, tok: Arc<dyn Tokenizer>) -> Endpoint {
     let bound = Endpoint::parse("127.0.0.1:0").bind().await.expect("bind");
     let dial = bound.dial_endpoint().expect("dial endpoint");
-    let (router, health) = base_router_with_tls(0, None, layer.clone(), None, None)
-        .await
-        .expect("router");
+    let (router, health) = base_router_with_auth(0, None, layer.clone(), None).await;
     let router = layer
         .serve_auth_service(router)
         .add_service(TokenizerServiceSvc::new(tok).into_server());
     tokio::spawn(async move {
         let _health = health;
-        let _ = bound.serve(router, std::future::pending()).await;
+        let _ = bound.serve(router, None, std::future::pending()).await;
     });
     dial
 }

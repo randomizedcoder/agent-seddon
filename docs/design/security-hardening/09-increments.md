@@ -32,7 +32,8 @@ Follow-ups, from the deferrals recorded in [`STATUS.md`](STATUS.md) once S1–S1
 |---|---|---|---|
 | S18 | Live verification of S16 on l2: recreate the ClickHouse / HyperDX / Grafana stack with the S16 logins (backup → recreate → restore), restart the fleet with writer / reader password files, run the login + row-policy + dashboard matrix; fix what it finds | S16 verification | S16 |
 | S19 | Attribute a queued `ReviewNow` (and `Approve`) to the requester: `FleetTrigger.requested_by`, merged on coalesce, `requested_by` / `approved_by` on the draft, an audit row when the job starts | S9–S11 deferral | S11a |
-| S20 | Hot reload of TLS material and the token-signing key on `SIGHUP` (reloadable rustls resolver + client-cert verifier, `ArcSwap` key set), paired with `step ca renew --exec` | S4 / S5 deferral | S15b |
+| S20a | Hot reload of server TLS and the token-signing key on `SIGHUP` (swapped rustls `ServerConfig`, `ArcSwap` key set), paired with `step ca renew --exec` | S4 / S5 deferral | S15b |
+| S20b | Hot reload of client TLS: `[grpc.tls.client]` and already-dialed channels pick up a renewed identity (reloadable connector) | S20a follow-up | S20a |
 | S21 | CLI loopback-redirect login (`agent login --browser`): RFC 8252 loopback-port matching for `redirect_uris`, a one-shot loopback listener, `Begin` / `Exchange` | S12 deferral | S13a |
 | S22 | Portal Access page: role bindings (create / edit / delete), the role catalog, sessions (list / revoke); navigation hides pages the principal cannot use | S13b deferral | S8, S13b |
 | S23 | Native desktop sign-in: `agent token --json` prints a fresh access token from the CLI login (refresh under the CLI's lock); the native portal runs it | S13b deferral | S12 |

@@ -12,6 +12,7 @@ import '../testkit/fakes/metrics_proxy_service.dart';
 import '../testkit/fakes/prompt_service.dart';
 import '../testkit/fakes/provider_registry_service.dart';
 import '../testkit/fakes/review_fleet_service.dart';
+import '../testkit/fakes/role_service.dart';
 import '../testkit/fakes/session_registry_service.dart';
 import '../testkit/recording.dart';
 import 'registry.dart';
@@ -47,6 +48,7 @@ void main() {
       FakeLlmPoolService(log),
       FakeMetricsProxyService(log),
       FakeAuthService(log),
+      FakeRoleService(log),
     ])
       s.$name: s,
   };

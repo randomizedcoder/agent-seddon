@@ -1,3 +1,4 @@
+import '../pages/access_spec.dart';
 import '../pages/agent_spec.dart';
 import '../pages/fleet_spec.dart';
 import '../pages/graph_spec.dart';
@@ -24,4 +25,5 @@ const allSpecs = <PageSpec>[
   fleetSpec,
   settingsSpec,
   loginSpec,
+  accessSpec,
 ];

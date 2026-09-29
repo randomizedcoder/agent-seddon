@@ -557,6 +557,21 @@ class _DraftDetailState extends State<_DraftDetail> {
                       ' · +${r.additions}/-${r.deletions} in ${r.filesChanged} files',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
+                    // Who asked for and who approved it (security-hardening S19);
+                    // a review the poller or Slack started has no requester.
+                    if (r.requestedBy.isNotEmpty || r.approvedBy.isNotEmpty)
+                      Text(
+                        [
+                          if (r.requestedBy.isNotEmpty)
+                            'requested by ${r.requestedBy.join(", ")}',
+                          if (r.approvedBy.isNotEmpty)
+                            'approved by ${r.approvedBy}',
+                        ].join(' · '),
+                        key: const Key('fleet.detail.attribution'),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                   ],
                 ),
               ),
