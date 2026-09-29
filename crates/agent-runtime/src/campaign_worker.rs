@@ -91,6 +91,55 @@ impl WorkerCfg {
     }
 }
 
+/// Give a worker child its own on-disk search indexes. The resident driver
+/// (`agent campaign run`) holds the tantivy `IndexWriter` lock on the shared
+/// `[search] index_dir` (and on the `[recall]` index when recall is on), so a
+/// child that re-read the same config could not build its agent (`LockBusy`).
+/// Rewrites `cfg.search.index_dir` to `<base>/campaign-<task>` (`base` = the
+/// configured dir, else the per-repo default under `.agent-seddon/index`) and,
+/// when `[recall] enabled`, `cfg.recall.index_dir` likewise; returns the dirs so
+/// `--run-task` can remove them on exit (they are disposable). A no-op for a
+/// runtime built without those seams.
+pub fn isolate_indexes(cfg: &mut Config, task: TaskId) -> Vec<PathBuf> {
+    let leaf = format!("campaign-{}", task.0);
+    let mut dirs = Vec::new();
+    #[cfg(feature = "search")]
+    {
+        let start = if cfg.agent.working_dir.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(&cfg.agent.working_dir)
+        };
+        let dir = if cfg.search.index_dir.is_empty() {
+            agent_search::default_index_dir(&agent_search::repo_root(&start), &leaf)
+        } else {
+            PathBuf::from(&cfg.search.index_dir).join(&leaf)
+        };
+        cfg.search.index_dir = dir.to_string_lossy().into_owned();
+        dirs.push(dir);
+    }
+    #[cfg(feature = "recall")]
+    if cfg.recall.enabled {
+        let sessions_dir = if cfg.recall.sessions_dir.is_empty() {
+            crate::session_store::dir_for(&cfg.agent.working_dir)
+        } else {
+            PathBuf::from(&cfg.recall.sessions_dir)
+        };
+        let dir = if cfg.recall.index_dir.is_empty() {
+            sessions_dir.join(".recall").join("index").join(&leaf)
+        } else {
+            PathBuf::from(&cfg.recall.index_dir).join(&leaf)
+        };
+        cfg.recall.index_dir = dir.to_string_lossy().into_owned();
+        dirs.push(dir);
+    }
+    #[cfg(not(any(feature = "search", feature = "recall")))]
+    {
+        let _ = (cfg, leaf);
+    }
+    dirs
+}
+
 /// How a leaf ended, as the `--run-task` exit code the driver maps
 /// (`04-executor.md` "Dispatch").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -789,9 +838,11 @@ impl WorkerExec for SubprocessExec {
 }
 
 /// The child's exit as the driver's `WorkerExec` result: `0` ⇒ `Ok` (the worker
-/// wrote its terminal state), `1` ⇒ the worker wrote `failed`, `3` ⇒ lease lost,
-/// a sandbox timeout ⇒ `timed out`, anything else ⇒ `exited N` with the tail of
-/// stderr (bounded, NUL-free).
+/// wrote its terminal state), `1` ⇒ the worker wrote `failed` (the stderr tail
+/// rides along when there is one: a child that died before its own `fail` write —
+/// a config or store error — also exits 1, and the driver then stores this text),
+/// `3` ⇒ lease lost, a sandbox timeout ⇒ `timed out`, anything else ⇒ `exited N`
+/// with the tail of stderr (bounded, NUL-free).
 pub fn map_exit(out: &ExecOutput, worker_timeout: Duration) -> Result<(), String> {
     if out.timed_out {
         return Err(format!(
@@ -801,7 +852,14 @@ pub fn map_exit(out: &ExecOutput, worker_timeout: Duration) -> Result<(), String
     }
     match out.exit_code {
         0 => Ok(()),
-        1 => Err(WORKER_FAILED.to_string()),
+        1 => {
+            let tail = stderr_tail(&out.stderr, STDERR_TAIL_CHARS);
+            if tail.is_empty() {
+                Err(WORKER_FAILED.to_string())
+            } else {
+                Err(format!("{WORKER_FAILED}: {tail}"))
+            }
+        }
         3 => Err(WORKER_LEASE_LOST.to_string()),
         code => Err(format!(
             "worker exited {code}: {}",
@@ -2177,6 +2235,10 @@ mod tests {
     #[rstest]
     #[case::positive_exit_zero_ok("exit 0", Ok(()))]
     #[case::negative_exit_one_failed("exit 1", Err("worker failed the leaf"))]
+    #[case::corner_exit_one_died_early_stderr_tail(
+        "echo 'Error: reading config' >&2; exit 1",
+        Err("worker failed the leaf: Error: reading config")
+    )]
     #[case::negative_exit_three_lease_lost("exit 3", Err("worker: lease lost"))]
     #[case::corner_exit_seven_stderr_tail("echo boom >&2; exit 7", Err("worker exited 7: boom"))]
     #[case::corner_exit_four_no_stderr("exit 4", Err("worker exited 4: "))]
@@ -2253,10 +2315,54 @@ mod tests {
         assert!(err.ends_with("END"), "the tail is kept");
     }
 
+    // isolate_indexes rows: the child's search index moves under a per-task dir so
+    // it never contends with the parent's writer lock; recall only when enabled.
+    #[cfg(feature = "search")]
+    #[rstest]
+    #[case::positive_configured_base("/srv/idx", "/srv/idx/campaign-7")]
+    #[case::corner_default_base("", ".agent-seddon/index/campaign-7")]
+    fn isolate_indexes_rows(#[case] base: &str, #[case] want_suffix: &str) {
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.working_dir = agent_testkit::tempdir().to_string_lossy().into_owned();
+        cfg.search.index_dir = base.to_string();
+        let dirs = isolate_indexes(&mut cfg, TaskId(7));
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        assert!(
+            cfg.search.index_dir.ends_with(want_suffix),
+            "{}",
+            cfg.search.index_dir
+        );
+        assert_eq!(dirs[0].to_string_lossy(), cfg.search.index_dir);
+        // Idempotent per task, distinct per task.
+        let mut other = Config::minimal_for_test();
+        other.agent.working_dir.clone_from(&cfg.agent.working_dir);
+        other.search.index_dir = base.to_string();
+        isolate_indexes(&mut other, TaskId(8));
+        assert_ne!(other.search.index_dir, cfg.search.index_dir);
+    }
+
+    #[cfg(all(feature = "search", feature = "recall"))]
+    #[test]
+    fn positive_isolate_indexes_recall_when_enabled() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.working_dir = agent_testkit::tempdir().to_string_lossy().into_owned();
+        cfg.recall.index_dir = "/srv/recall".into();
+        assert_eq!(isolate_indexes(&mut cfg, TaskId(7)).len(), 1, "recall off");
+        cfg.recall.enabled = true;
+        let dirs = isolate_indexes(&mut cfg, TaskId(7));
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert!(
+            cfg.recall.index_dir.ends_with("campaign-7"),
+            "{}",
+            cfg.recall.index_dir
+        );
+    }
+
     // map_exit rows over a synthetic output (no process).
     #[rstest]
     #[case::positive_zero(0, false, "", Ok(()))]
-    #[case::negative_one(1, false, "ignored", Err("worker failed the leaf"))]
+    #[case::negative_one(1, false, "", Err("worker failed the leaf"))]
+    #[case::corner_one_with_stderr(1, false, "boom\n", Err("worker failed the leaf: boom"))]
     #[case::negative_three(3, false, "", Err("worker: lease lost"))]
     #[case::corner_timed_out(-1, true, "", Err("worker timed out after 9s"))]
     #[case::adversarial_nul_in_stderr(2, false, "a\0b\n", Err("worker exited 2: ab"))]

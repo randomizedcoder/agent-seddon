@@ -64,6 +64,15 @@ async fn main() -> Result<()> {
     // Record where the config came from so the `ConfigStore` seam (portal
     // settings) can write edits back to the same file.
     config.source_path = Some(config_path.clone());
+    // A worker child (`--run-task`) re-reads the driver's config, and the driver
+    // holds the writer lock on the shared search index: give the child its own
+    // disposable index dirs before the build (removed after the leaf).
+    let run_task_index_dirs = match &mode {
+        Mode::RunTask { task, .. } => {
+            agent_runtime::campaign_worker::isolate_indexes(&mut config, *task)
+        }
+        _ => Vec::new(),
+    };
     // `agent login` / `logout` / `whoami` (security-hardening S12): talk to the IdP
     // and the agent's `AuthService`, then exit. Before the egress proxy (the IdP is
     // not on its allow-list), telemetry, and any server.
@@ -351,6 +360,7 @@ async fn main() -> Result<()> {
             owner: run_task_owner
                 .clone()
                 .expect("the owner is checked before the config is read"),
+            index_dirs: run_task_index_dirs.clone(),
         });
     }
 
@@ -828,11 +838,17 @@ async fn main() -> Result<()> {
                     store,
                     worker,
                     owner,
+                    index_dirs,
                 } = run_task.expect("the campaign store is opened before the build");
                 let exit = agent_runtime::campaign_worker::run_leaf(
                     &agent, store, &tenant, task, &owner, &worker,
                 )
                 .await;
+                // The child's disposable index dirs (best effort; a leftover is
+                // harmless and overwritten by the next attempt).
+                for dir in index_dirs {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
                 run_task_exit = Some(exit.code());
                 Ok(None)
             }
@@ -1071,6 +1087,9 @@ struct RunTaskRun {
     worker: agent_runtime::campaign_worker::WorkerCfg,
     /// The owner token from `AGENT_CAMPAIGN_OWNER`, already a path-safe segment.
     owner: agent_core::campaign::Owner,
+    /// This child's own search index dirs (`campaign_worker::isolate_indexes`),
+    /// removed once the leaf has run.
+    index_dirs: Vec<PathBuf>,
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the
