@@ -281,7 +281,9 @@ config-plane families):
 | `agent_campaign_nodes_total` | `tenant`, `kind` = `objective` \| `task` \| `leaf`, `state` | the plan phase only: the node each outcome left behind (a split's parent as `decomposed`, its children as `kind="task", state="created"`) |
 
 `model` folds to `other` unless it is at most 64 chars of `[A-Za-z0-9._:/-]`, and
-to `unknown` when no attempt row could be read. A zero count mints no series, so an
+to `unknown` when the attempt row carries none — which today is every `work`
+attempt (the worker does not label its row yet; the planner labels its
+`decompose` rows with `planner_model`). A zero count mints no series, so an
 idle driver leaves the exposition as it was. The question the design parked —
 "measure the rate of `failed` leaves per planner model first" — is one query:
 
@@ -296,7 +298,8 @@ stores emit it through the `EventSink` seam after the transaction commits (a
 rolled-back write mirrors nothing), and the process that performed the write owns
 the row: a CLI verb's `approve`, the driver's `claim` / `reap`, the worker child's
 `start` / `complete` / `fail` each go through that process's `TelemetryHandle`
-(`[telemetry] enabled`; off, the stores mirror nothing). Row shape: `session_id =
+(`[telemetry] enabled`; off, the stores mirror nothing; a store-only verb flushes
+the handle before it exits, since it returns before the end-of-run flush). Row shape: `session_id =
 campaign-<campaign id>` (a campaign groups like a run), `user` = the tenant (the
 row policy's key), `role` = the writer's **class** (`user` \| `model` \| `planner`
 \| `driver` \| `worker` \| `reaper` \| `poller` \| `rollup`) — never the lease token
