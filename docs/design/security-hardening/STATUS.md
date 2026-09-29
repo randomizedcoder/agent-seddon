@@ -31,7 +31,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | ✅ | #559 |
 | S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ✅ | #560 |
 | S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
-| S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | 🟡 | — |
+| S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
 | S21 | CLI loopback-redirect login | deferral | ⬜ | — |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
 | S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
@@ -988,7 +988,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - Client-side reload is split out as S20b. A dialed tonic channel pins its TLS connector
       when it is built, so it needs a custom connector.
 
-- **2026-09-28 — S20b: SIGHUP reloads the client TLS too.**
+- **2026-09-28 — S20b (#565): SIGHUP reloads the client TLS too.**
   - Why: S20a reloaded the listener, but a renewed `[grpc.tls.client]` certificate was used
     only after a restart, because each dialed tonic channel pinned the connector it was built
     with. Details are in [07](07-transport-tls-and-pki.md#as-built-s20b-dialed-channels-reload-too).
