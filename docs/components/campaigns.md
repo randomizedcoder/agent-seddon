@@ -200,8 +200,10 @@ the exec `[campaign] sandbox` selects: `"subprocess"` spawns `agent --config <sa
 path> --run-task --tenant T --task <id>` through the process `[sandbox]` backend
 with the owner token in the child's `AGENT_CAMPAIGN_OWNER` (never an argument) and
 a wall clock of `worker_timeout_secs` + 30 s grace, mapping exit 0 to success, 1 to
-"the worker failed the leaf" (the child wrote `failed` itself), 3 to "lease lost",
-a timeout and any other code to a bounded error with the last 512 chars of stderr;
+"the worker failed the leaf" (the child wrote `failed` itself; the last 512 chars
+of stderr are appended when there are any, which is how a child that died before
+its own write — a config or build error — leaves its diagnosis on the leaf), 3 to
+"lease lost", a timeout and any other code to a bounded error with the stderr tail;
 `"in_process"` runs the same worker function in this process under the tenant's
 session scope. A `"subprocess"` sandbox with no `[sandbox] backend`, or a process
 whose binary or `--config` path is unknown, refuses to start the driver naming
@@ -233,7 +235,12 @@ a random-tag `<untrusted-…>` fence labelled as data. `worker_model` routes the
 session's turns to a dedicated provider, like `planner_model` for the planner.
 `agent --run-task` needs a `[campaign] store` (exit 1 naming it otherwise) and the
 owner in `AGENT_CAMPAIGN_OWNER` (exit 3 `lease lost (owner missing)` before any
-config is read); it never prints the token.
+config is read); it never prints the token. Because the driver process holds the
+writer lock on the shared `[search]` index (and the `[recall]` one when enabled),
+the child builds its agent over its own disposable `<index_dir>/campaign-<task>`
+dirs and removes them when the leaf is done — so a worker's `search` tool starts
+from an empty index of the repo root, not the worktree (a gap noted under
+Deferred).
 
 **The poller** (`ForgePoller`, CP-06a) resolves leaves in review against the
 process's `[forge]` backend (`Agent::forge()`; no backend ⇒ a no-op poller and one
@@ -316,7 +323,10 @@ postgres` without dialing.
 ## Deferred
 
 Scoped git credentials for the worker's push (it uses the process's ambient git
-config / credential helper today; the smoke keeps `push_policy = "never"`); the
+config / credential helper today; the smoke keeps `push_policy = "never"`); a
+worker `search` index over its worktree (today the child's disposable index is
+over the repo root, so `search` in a worker session sees the base revision until
+it reindexes; `grep` / `find` / `read_file` work on the worktree as expected); the
 duplicate PR a leaf can open when `complete` loses its lease after `create_pr`
 (CP-10's merge webhook closes the window); a "changes requested" re-run on the same
 branch (CP-10); per-repo forge and git bindings (the worker and the poller use the

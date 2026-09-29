@@ -118,7 +118,10 @@ owner).timeout(worker_timeout + 30 s)`. `ExecSpec.env_set` landed in `agent-core
 `agent-sandbox`'s `run_argv` after the `Scrub` block so every backend (local, bwrap, nix) sees it;
 proto field 7 `ExecEnvVar` (additive, no `buf-image` bump). Exit mapping (`map_exit`): `0` ⇒ `Ok`;
 `1` ⇒ `Err("worker failed the leaf")` (the child wrote `failed` itself, so the driver's
-`settle_failure` finds a terminal state and only logs); `3` ⇒ `Err("worker: lease lost")`;
+`settle_failure` finds a terminal state and only logs) — with `: <stderr tail>` appended when
+stderr is not empty, because a child that dies **before** its own `fail` write (a config or
+build error) also exits 1, and that text is then what the driver stores; `3` ⇒ `Err("worker:
+lease lost")`;
 `timed_out` ⇒ `Err("worker timed out after <N>s")`; anything else ⇒ `Err("worker exited <N>:
 <stderr tail>")` with the tail cut to 512 chars and NUL dropped. The 30 s grace lets the child's
 own `fail` write land before the parent's kill in the normal case; the driver's `worker_timeout`
@@ -130,7 +133,11 @@ sandbox`: `"subprocess"` with no `[sandbox] backend`, no binary path (`current_e
 fall back to in-process — and `run --once` follows the same path. `agent --run-task` is the
 subprocess body: the pre-config owner check (`campaign_cli::run_task_owner`; a missing or unsafe
 `AGENT_CAMPAIGN_OWNER` ⇒ `run-task: lease lost (owner missing)`, exit 3, the token never printed)
-→ config load → `build_agent_mode(Run)` → `open_campaign_store` for the tenant (none configured ⇒
+→ config load → `campaign_worker::isolate_indexes` (the driver holds the tantivy `IndexWriter`
+lock on the shared `[search] index_dir`, so the child gets `<base>/campaign-<task>` — and its own
+`[recall]` index when recall is on — removed after the leaf; found by the smoke, where the child
+died in `build_agent` with `LockBusy`) → `build_agent_mode(Run)` → `open_campaign_store` for the
+tenant (none configured ⇒
 exit 1 naming `[campaign] store`) → `run_leaf` under the tenant's `campaign-<id>` session scope →
 `exit(LeafExit.code())`: `Completed 0`, `Failed 1`, `LeaseLost 3`. The CP-05 exit-4 stub is gone.
 

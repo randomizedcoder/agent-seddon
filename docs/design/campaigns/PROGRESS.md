@@ -111,7 +111,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 4. `SubprocessExec` (argv, `env_set(AGENT_CAMPAIGN_OWNER)`, `worker_timeout + 30 s`, `map_exit`) + `InProcessExec`; `build_driver(.., forge, WorkerDeps) -> anyhow::Result<Driver>`; `[campaign] target_branch` | ✅ | `9e6307b5`. `"subprocess"` without `agent.sandbox()` / `current_exe` / `--config` path ⇒ `Err` naming `[campaign] sandbox` and what is missing. `target_branch` (`"main"`, ≤ 128 chars, every `/`-segment `safe_segment`) added because `GitCfg` has no default-branch key; `config/agent.toml` + `config/multi-tenant.toml` carry it. 98 targeted tests green; `cargo check --no-default-features --features campaign` clean |
 | 5. CLI: `agent --run-task` body (`run_task_owner` → config → `build_agent_mode` → `open_campaign_store` → `run_leaf` under the tenant scope → `exit(code)`); `run` / `run --once` pass `WorkerDeps`; renderers drop `(workers: CP-06)`; `EXIT_NO_WORKER` retired | ✅ | `daf8233c`. Rows `run_task_owner_rows` (8), `positive_exit_lease_lost_matches_the_worker`, e2e `corner_run_task_owner_present_reads_config` / `negative_run_task_no_store`. `cargo test -p agent-cli` 271 bin + 29 e2e |
 | 6. `crates/agent-runtime/tests/campaign_e2e.rs` (`required-features = ["campaign", "git", "forge"]`) + `nix/checks/campaign-e2e.nix` registered after `test` | ✅ | `cfacc634`. Real `build_agent_with`, shipped `Driver` + `FactoryPlanner` + `ForgePoller` + `InProcessExec`, a real `agent_git::CliBackend` on a tempdir checkout with a bare origin (registered as the `"e2e"` repo backend because `git_paths` roots the shipped backend on the process cwd), a scripted model, a fake forge. 4 rows: `positive_first_autonomous_pr`, `negative_unapproved_merge_waits`, `corner_no_changes_fails_leaf`, `negative_push_policy_never` — green on the first run (0.34 s) |
-| 7. docs (04 dispatch + worker as-built + config, 02 worker writes, 05 row, 06 T12 + e2e notes, component doc, extending gate list), STATUS 🟡 `#561, #CP06B`, PROGRESS; gate; PR | 🟡 | Verification and the gate: Gate status |
+| 7. docs (04 dispatch + worker as-built + config, 02 worker writes, 05 row, 06 T12 + e2e notes, component doc, extending gate list), STATUS 🟡 `#561, #CP06B`, PROGRESS; gate; PR | 🟡 | `498947c1` docs. The manual smoke over the real binary then found the subprocess worker could never build (`982b02d0`, below: the driver's tantivy writer lock; exit-1 stderr kept). Verification and the gate: Gate status |
 | 8. Close-out docs PR: STATUS ✅ + as-built entry (both PR numbers), PROGRESS "Now", `docs/README.md` stage label, design README banner | ⬜ | after #CP06B merges |
 
 ## Decisions log (append-only)
@@ -290,6 +290,18 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   tempdir checkout) instead of `[git] backend = "cli"`, because `git_paths` roots the shipped
   backend on the process cwd — an operator note recorded in the component doc: `agent campaign
   run` works the checkout it is started in until RK-02's `repos` table carries the root.
+- 2026-09-29 — CP-06b: a worker child builds over its own `<index_dir>/campaign-<task>` search
+  (and recall) dirs, removed after the leaf (`campaign_worker::isolate_indexes`, applied by
+  `--run-task` before the build). Found by the smoke: the resident driver holds the tantivy
+  `IndexWriter` lock on the shared index, so the child died in `build_agent` with `LockBusy`.
+  A read-only open of the shared index was rejected (it would hide an operator's concurrency
+  error inside `agent-search` and still leave the child unable to reindex); a per-task dir is
+  disposable and cheap (empty until the worker's `search` tool indexes).
+- 2026-09-29 — CP-06b: `map_exit` keeps the stderr tail on exit 1 when there is one. The design
+  read exit 1 as "the child wrote `failed`", but a child that dies before that write also exits
+  1, and the driver then stored only "worker failed the leaf" — exactly the case the smoke hit,
+  with the cause invisible. A child that wrote `failed` itself has an empty stderr, so its text
+  is unchanged and `settle_failure` still only logs it.
 
 ## Gate status
 
@@ -338,6 +350,10 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-28 | CP-06a: `checks.x86_64-linux.leak` rebuilt alone on the same ref, still beside the other session's gate | red in a **different** test: `agent-providers` `tests/branch_leak.rs` `fork_cancel_cycle_does_not_leak` — `live heap grew across 30 fork/cancel cycles: 6404 -> 18000 bytes` after its 5 s settle poll; `agent-memory` green this pass. The test's own comment names it a recurring gate flake under load (aborted-task teardown sampled mid-release). Locally 2/3 under the same load (the one failure `2553 -> 9267`, never converged in 5 s); see Open questions |
 | 2026-09-28 | CP-06a: `checks.x86_64-linux.leak` rebuilt alone on the same ref (`nix build --no-link "git+file://…/wt-cp06a?ref=refs/heads/campaigns/cp-06a#checks.x86_64-linux.leak"`) after waiting for the other session's gate to leave the host (load 5.4 at start) | green on the first quiet-host attempt — same derivation `f4pnz9g8…-agent-seddon-leak-0.1.0.drv`, every crate's dhat test incl. `branch_leak` and `agent-memory` `summarize_step_does_not_leak` |
 | 2026-09-28 | CP-06a: `nix flake check "git+file://…/wt-cp06a?ref=refs/heads/campaigns/cp-06a"` (@ `e2780c87`), second pass on the quiet host (`leak` from the green build above; the remaining checks the aborted first pass never reached, incl. the per-crate `test` derivations, `nix-fmt`, `review-toolbox`) | green: `all checks passed!` |
+| 2026-09-28/29 | CP-06b steps 1–6 (`campaigns/cp-06b` @ `cfacc634`): `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo machete`, `cargo test -p agent-runtime --all-features` (1296 lib + every integration target incl. `campaign_e2e` 4/4), `-p agent-cli` (271 bin + 29 e2e), `cargo check -p agent-runtime --no-default-features --features campaign`, `-p agent-cli --no-default-features`; `cargo test -p agent-runtime -- --list \| grep campaign_worker::tests` (every T12 row id present, 76 fns incl. rstest cases) | green (fmt, clippy, machete clean; the lean builds clean — the three `agent-tools` dead-code warnings under the lean `campaign` build are pre-existing, `agent-tools` is untouched) |
+| 2026-09-29 | CP-06b: `nix build --no-link "git+file://…/wt-cp06b?ref=refs/heads/campaigns/cp-06b#checks.x86_64-linux.campaign-e2e"` (@ `cfacc634`) | green, first build (the 4 rows in the hermetic sandbox with `pkgs.git`, no `$HOME` git config) |
+| 2026-09-29 | CP-06b: `CONTAINER_RUNTIME=podman nix run .#pg-integration` on the committed tree | green (`PASS: …`); campaign pg suite 173/173, 118 s; 246 passed across every pg suite |
+| 2026-09-29 | CP-06b manual smoke (`target/debug/agent`, default features, `nix run .#postgres-up`, a one-answer fake OpenAI-compatible planner on 127.0.0.1:18095, scratch config `[campaign] store = postgres enabled = true sandbox = "subprocess"`, `[git] push_policy = "never"`, `[forge] backend = "github" dry_run = true`, `[sandbox] backend = "local"`): (a) `env -u AGENT_CAMPAIGN_OWNER agent --config /nonexistent.toml --run-task …` → `run-task: lease lost (owner missing)`, exit 3, config never read; (b) with the token and the missing config → `Error: reading config`, exit 1, token absent from the output; (c) with the token, the real config and an unknown task → `leaf not found under this tenant`, exit 3, nothing written; (d) `add` → `created B  #5178  ready`; `run --once` → the fake planner splits (`B → split (1 children)`); `approve B --children`; `run --once` → `B.1 → execute` (the leaf lands in `awaiting_approval` again — the known double-approval at level 1, Open questions); `approve --children` again; `run --once` → `claimed 1  dispatched 1  failed 1` | **first dispatch red**: the child exited 1 in 60 ms and the leaf carried only `worker failed the leaf`. Diagnosed by keeping the stderr tail (`982b02d0`): `building search backend tantivy: Failed to acquire Lockfile: LockBusy` — the driver's writer lock on the shared index. With `isolate_indexes` (same commit) the retried leaf runs the whole child protocol: `claimed → running → failed` by `worker:<owner>`, attempt `work / error / "[forge] dry_run = true: a pull request cannot be opened"`, `session_id campaign-5179`, tokens 0 (the binding check ran before the session), the child's `campaign-5179` index dir removed. As designed on every path after the fix. The dev Postgres container is left running |
 
 ## Open questions / blockers
 
@@ -454,3 +470,15 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   backend on `repo_root(current_dir)`, not `[agent] working_dir` or `[campaign] repo_root`, so
   `agent campaign run` works the checkout it is started in (the e2e sidesteps this with a
   registered `"e2e"` backend). Folds into RK-02's `repos` table (a root per repo card).
+- **The scheduler's `--run-scheduled-job` child shares the tantivy lock problem (CP-06b smoke).**
+  `scheduler_driver::dispatch_subprocess` spawns the same binary over the same config, so with
+  `[search]` on (the default) the child's `build_agent` should hit the same `LockBusy` the
+  campaign worker hit before `isolate_indexes`. Not from this track and not verified here (no
+  scheduler smoke was run); the same helper applies. Its own change on `main`.
+- **A worker's `search` tool indexes the repo root, not its worktree.** The `[search]` backend is
+  rooted at build time on `[agent] working_dir` / the process cwd; the worker session only moves
+  the tool cwd. With the per-task index dir the child starts empty and indexes the base
+  revision on first use, so `search` answers from `main`, not the branch under edit (`grep`,
+  `find`, `read_file`, `edit`, `bash` all work on the worktree). A per-worktree index root, or
+  the `search` tool re-rooting on `ctx.cwd`, is the fix; folds into CP-07 (the brief / `repo_graph`
+  tooling for workers).

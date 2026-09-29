@@ -425,7 +425,11 @@ naming the pushed branch; PR number `0` ⇒ `failed "forge returned an invalid p
 `spend_tokens_rows` (the `Spend` → `TokenUsage` clamp), `positive_worker_cfg_from_config`,
 `corner_fixture_tenant_is_acme`; the dispatch half — `subprocess_exit_rows` (stub scripts through
 `LocalSandbox`: 0 ⇒ `Ok`, 1 ⇒ "failed the leaf", 3 ⇒ "lease lost", 7 ⇒ "exited 7" + stderr tail,
-4 with no stderr), `boundary_subprocess_timeout` (`timed_out` ⇒ "timed out after"),
+4 with no stderr, and `corner_exit_one_died_early_stderr_tail`: exit 1 with stderr ⇒ "failed the
+leaf: <tail>", the diagnosis of a child that died before its own `fail` write),
+`isolate_indexes_rows` + `positive_isolate_indexes_recall_when_enabled` (the child's per-task
+search / recall index dirs, distinct per task), `boundary_subprocess_timeout` (`timed_out` ⇒
+"timed out after"),
 `positive_subprocess_env_set_owner_and_argv` (the script sees `AGENT_CAMPAIGN_OWNER` set; the argv
 carries `--config`, `--run-task`, `--tenant`, `--task`; the token is never in the argv),
 `adversarial_subprocess_stderr_bounded` (100 KiB stderr ⇒ ≤ 512 chars), `map_exit_rows` (incl. NUL
