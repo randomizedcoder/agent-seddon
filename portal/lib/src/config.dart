@@ -55,6 +55,17 @@ class PortalConfig {
   final String agentBin;
   final String agentConfig;
 
+  /// Native TLS to the agent (security-hardening S24): PEM files read at start.
+  /// All empty ⇒ plaintext (a loopback agent). [tlsCa] alone ⇒ TLS trusting only
+  /// that CA; [tlsCert] + [tlsKey] add a client certificate, for an agent whose
+  /// listener asks for one (`[grpc.tls] client_ca`). [tlsServerName] is the name
+  /// the agent's certificate must carry; empty ⇒ the host dialled. Applies to all
+  /// three native channels; the web build goes through Envoy and ignores them.
+  final String tlsCa;
+  final String tlsCert;
+  final String tlsKey;
+  final String tlsServerName;
+
   // Every endpoint is overridable at build time via `--dart-define=<KEY>=<value>`
   // (threaded through `nix run .#portal` / `.#portal-web` from env vars or flags —
   // see nix/portal/default.nix). `fromEnvironment` bakes the value at compile time,
@@ -120,5 +131,9 @@ class PortalConfig {
       defaultValue: 'agent',
     ),
     this.agentConfig = const String.fromEnvironment('PORTAL_AGENT_CONFIG'),
+    this.tlsCa = const String.fromEnvironment('PORTAL_TLS_CA'),
+    this.tlsCert = const String.fromEnvironment('PORTAL_TLS_CERT'),
+    this.tlsKey = const String.fromEnvironment('PORTAL_TLS_KEY'),
+    this.tlsServerName = const String.fromEnvironment('PORTAL_TLS_SERVER_NAME'),
   });
 }

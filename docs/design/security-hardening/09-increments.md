@@ -37,6 +37,7 @@ Follow-ups, from the deferrals recorded in [`STATUS.md`](STATUS.md) once S1–S1
 | S21 | CLI loopback-redirect login (`agent login --browser`): RFC 8252 loopback-port matching for `redirect_uris`, a one-shot loopback listener, `Begin` / `Exchange` | S12 deferral | S13a |
 | S22 | Portal Access page: role bindings (create / edit / delete), the role catalog, sessions (list / revoke); navigation hides pages the principal cannot use | S13b deferral | S8, S13b |
 | S23 | Native desktop sign-in: `agent token --json` prints a fresh access token from the CLI login (refresh under the CLI's lock); the native portal runs it | S13b deferral | S12 |
+| S24 | Native desktop TLS: `PORTAL_TLS_*` PEM settings for the native channels, never falling back to plaintext | S23 live-check gap | S23 |
 
 The keyring backend for the CLI token file stays with parity spec
 [50](../../parity/50-secret-store.md)'s `SecretStore`.

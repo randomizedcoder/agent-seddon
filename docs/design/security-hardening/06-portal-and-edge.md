@@ -69,6 +69,21 @@ the single-use `state`; the portal generates only the PKCE verifier. The portal 
 - Native desktop cannot redirect, so it shows an error rather than a sign-in button that goes
   nowhere. Reading the CLI's stored login (S12) there is a follow-up.
 
+**As built (S24): native desktop TLS.** The native build dials the agent directly, so it has its
+own TLS ([`native_tls.dart`](../../../portal/lib/src/transport/native_tls.dart)); the web build
+still goes through Envoy and ignores these settings:
+
+- `PORTAL_TLS_CA` names the PEM CA the agent's certificate must chain to. `PORTAL_TLS_CERT` and
+  `PORTAL_TLS_KEY` add a client certificate, for a listener with `[grpc.tls] client_ca`. With a
+  client certificate and no CA, the system roots are trusted. `PORTAL_TLS_SERVER_NAME` is the
+  name checked against the certificate; by default it is the host dialled.
+- All three native channels (gateway, sessions, fleet) use the same settings. With none set they
+  stay plaintext, as before, for a loopback agent.
+- The files are read once at start, at most 256 KiB each, and parsed then. A setting that is
+  wrong (cert without key, a missing or bad file, a server name with a port) never falls back
+  to plaintext: every call fails with a message naming the setting, so the user's token is
+  never sent in the clear.
+
 **As built (S23): native desktop sign-in through the CLI.** The desktop app borrows the `agent`
 CLI's stored login instead of taking a redirect
 ([`cli_login.dart`](../../../portal/lib/src/auth/cli_login.dart),

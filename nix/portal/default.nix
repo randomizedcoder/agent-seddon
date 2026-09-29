@@ -67,7 +67,8 @@ let
   # PORTAL_AUTH (auto|on|off), PORTAL_AUTH_ISSUER and PORTAL_REDIRECT_URI steer
   # browser sign-in (security-hardening S13b). PORTAL_AGENT_BIN and
   # PORTAL_AGENT_CONFIG name the `agent` CLI whose stored login the native app
-  # borrows via `agent token --json` (S23).
+  # borrows via `agent token --json` (S23). PORTAL_TLS_CA/_CERT/_KEY/_SERVER_NAME
+  # turn on TLS (and a client certificate) for the native channels (S24).
   # Shared by the `portal` (native) and `portal-web` builds.
   dartDefines = ''
     defines=()
@@ -78,7 +79,8 @@ let
       PORTAL_GRPC_WEB_URL PORTAL_SESSIONS_GRPC_WEB_URL PORTAL_FLEET_GRPC_WEB_URL \
       PORTAL_GRAFANA_URL PORTAL_HYPERDX_URL PORTAL_PROMETHEUS_URL \
       PORTAL_AUTH PORTAL_AUTH_ISSUER PORTAL_REDIRECT_URI \
-      PORTAL_AGENT_BIN PORTAL_AGENT_CONFIG; do
+      PORTAL_AGENT_BIN PORTAL_AGENT_CONFIG \
+      PORTAL_TLS_CA PORTAL_TLS_CERT PORTAL_TLS_KEY PORTAL_TLS_SERVER_NAME; do
       val="''${!key:-}"
       if [ -n "$val" ]; then defines+=("--dart-define=$key=$val"); fi
     done
