@@ -184,6 +184,20 @@ existing admission layer, so it is rate-limited. Portal details: [`06-portal-and
 >   Tests: `redirect_allowed_cases` (22 rows), `classify_callback_cases` and the listener tests,
 >   `browser_issuer_cases`, and the wire suite `tests/cli_browser_login.rs` against `FakeIssuer`.
 
+> **As built (S23): `agent token [--issuer NAME] [--json]`.** Prints a usable agent token from the
+> stored login, refreshed first under the token file's lock when it is within 30 s of lapsing.
+> This is how another program borrows the CLI's login without touching the file. The native portal
+> uses it: Dart's file lock is `fcntl`-based and would not exclude the CLI's `flock`, so two
+> refreshers could spend one single-use handle and end the session.
+> - `--json` prints one line: `{access_token, expires_at, issuer, endpoint}`. Without it, just the
+>   token (like `gcloud auth print-access-token`).
+> - Exit codes: 0 printed; 2 not signed in; 3 the session ended (run `agent login`); 1 anything
+>   else (an unsafe or unreadable token file, an unreachable agent). The token never appears in
+>   an error.
+> - It runs before the config is required. The issuer is `--issuer`, else the config's login
+>   issuer, else the only stored login. With no config file, the agent is dialed with default
+>   trust roots.
+
 The CLI is hand-parsed with a bare-word subcommand pattern
 ([`main.rs`](../../../crates/agent-cli/src/main.rs):766-768 for `doctor`); `login` / `logout` /
 `whoami` follow it.

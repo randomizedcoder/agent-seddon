@@ -34,7 +34,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
 | S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
-| S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
+| S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 
 ## As-built log
 
@@ -1073,6 +1073,34 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       and hiding a whole tab needs one permission that stands for it.
     - `auth-integration` and `portal-auth-e2e` are unchanged; the hermetic widget suite
       covers the page.
+
+- **2026-09-29 — S23 (#568): `agent token` and native desktop sign-in.**
+  - `agent token [--issuer NAME] [--json]` prints a usable agent token from the stored login.
+    It refreshes under the token file's lock when stale. Exit codes: 2 not signed in, 3 session
+    ended, 1 other.
+  - It runs before the config is required: the issuer comes from `--issuer`, the config, or the
+    only stored login.
+  - The native portal signs in with it:
+    - it runs `agent token --json`, validates the output (token68 token, size caps), confirms
+      with `WhoAmI`, and keeps the token in memory;
+    - it runs the command again 20 s before expiry (floor 10 s);
+    - sign-out sends no `Logout`;
+    - the sign-in page says to run `agent login`.
+  - Found while building: the CLI's refresh skew is 30 s, so re-asking at the web flow's
+    60 s-before-expiry would get the same token back and re-run in a tight loop. CLI sessions
+    use their own schedule (`cliRefreshDelaySecs`).
+  - Tests:
+    - Rust `token_cases` table (only login, named, none, absent, several, traversal) plus JSON
+      shape, config precedence, stale token with an unreachable agent, a world-readable file
+      refused with no token in the error, hostile file names skipped, and exit codes;
+    - parse rows for `token` / `--json`;
+    - Dart `cli_login_test.dart`: output checks including CR/LF header injection and caps, the
+      message, the schedule, and `ProcessCliLogin` against scripted and real processes;
+    - seven native rows in `login_test.dart`. The portal suite passes 416/416.
+  - Deviations from the plan:
+    - `--json` prints `issuer` and `endpoint` instead of `tenant` / `sid`. The app calls `WhoAmI`
+      anyway, so the CLI needs no extra RPC.
+    - There is no live `nix run .#portal` run on l2 yet.
 
 ## Cross-track note (not an S-increment)
 

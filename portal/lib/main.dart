@@ -46,6 +46,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
     mode: parseAuthMode(_config.authMode),
     preferredIssuer: _config.authIssuer,
     redirectUriOverride: _config.redirectUri,
+    cliLogin: createCliLogin(_config),
   );
   int _index = 0;
 

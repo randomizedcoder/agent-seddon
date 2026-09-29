@@ -49,6 +49,12 @@ class PortalConfig {
   /// one of the agent's `[auth] redirect_uris` exactly.
   final String redirectUri;
 
+  /// Native desktop sign-in (security-hardening S23): the `agent` binary whose
+  /// stored login (`agent login`) the app borrows through `agent token --json`,
+  /// and its config file (empty ⇒ the CLI's default).
+  final String agentBin;
+  final String agentConfig;
+
   // Every endpoint is overridable at build time via `--dart-define=<KEY>=<value>`
   // (threaded through `nix run .#portal` / `.#portal-web` from env vars or flags —
   // see nix/portal/default.nix). `fromEnvironment` bakes the value at compile time,
@@ -109,5 +115,10 @@ class PortalConfig {
     ),
     this.authIssuer = const String.fromEnvironment('PORTAL_AUTH_ISSUER'),
     this.redirectUri = const String.fromEnvironment('PORTAL_REDIRECT_URI'),
+    this.agentBin = const String.fromEnvironment(
+      'PORTAL_AGENT_BIN',
+      defaultValue: 'agent',
+    ),
+    this.agentConfig = const String.fromEnvironment('PORTAL_AGENT_CONFIG'),
   });
 }

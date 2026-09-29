@@ -328,6 +328,137 @@ pub async fn logout(cfg: &Config, issuer: Option<&str>) -> anyhow::Result<()> {
     }
 }
 
+/// Why `agent token` printed no token. Each has its own exit code, so a caller
+/// (the native portal, a script) can tell "sign in" from "try again".
+#[derive(Debug, PartialEq, Eq)]
+pub enum TokenError {
+    /// No stored login: run `agent login`. Exit 2.
+    NotSignedIn(String),
+    /// The session is over (revoked, expired, handle refused): sign in again. Exit 3.
+    Ended(String),
+    /// Anything else: an unreadable or unsafe token file, an unreachable agent. Exit 1.
+    Failed(String),
+}
+
+impl TokenError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::NotSignedIn(_) => 2,
+            Self::Ended(_) => 3,
+            Self::Failed(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for TokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSignedIn(m) | Self::Ended(m) | Self::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// `agent token [--issuer NAME] [--json]` (security-hardening S23): print a usable
+/// agent token from the stored login, refreshing it under the token file's lock
+/// first when it is stale. With `--json`: `{access_token, expires_at, issuer,
+/// endpoint}` on one line. This is how another program (the native portal) signs
+/// in: it never reads or refreshes the file itself, so the single-use refresh
+/// handle is only ever spent under this lock.
+///
+/// `cfg` is optional: without a config file the only stored login is used, and
+/// the agent is dialed with the default trust roots.
+pub async fn token(
+    cfg: Option<&Config>,
+    issuer: Option<&str>,
+    json: bool,
+) -> Result<String, TokenError> {
+    let dir = token_dir().map_err(|e| TokenError::Failed(format!("{e:#}")))?;
+    token_in(&dir, cfg, issuer, json).await
+}
+
+async fn token_in(
+    dir: &std::path::Path,
+    cfg: Option<&Config>,
+    issuer: Option<&str>,
+    json: bool,
+) -> Result<String, TokenError> {
+    if let Some(cfg) = cfg {
+        crate::builder::install_client_tls(&cfg.grpc.tls.client)
+            .map_err(|e| TokenError::Failed(format!("{e:#}")))?;
+    }
+    let name = token_issuer(dir, cfg, issuer)?;
+    let file = TokenFile::in_dir(dir, &name).map_err(TokenError::Failed)?;
+    let stored = file.load().map_err(TokenError::Failed)?.ok_or_else(|| {
+        TokenError::NotSignedIn(format!("not signed in with `{name}`: run `agent login`"))
+    })?;
+    let login = if stored.bearer_at(now_secs()).is_some() {
+        stored
+    } else {
+        let auth = AgentAuth::connect(&stored.endpoint).map_err(TokenError::Failed)?;
+        refresh_stored(&file, &auth, Some(&stored))
+            .await
+            .map_err(|e| match e {
+                RefreshError::Ended(r) => TokenError::Ended(format!("{r}: run `agent login`")),
+                RefreshError::Transient(r) => TokenError::Failed(r),
+            })?
+    };
+    Ok(if json {
+        serde_json::json!({
+            "access_token": login.access_token,
+            "expires_at": login.expires_at,
+            "issuer": login.issuer,
+            "endpoint": login.endpoint,
+        })
+        .to_string()
+    } else {
+        login.access_token
+    })
+}
+
+/// Which stored login `agent token` reads: `--issuer`, else the config's login
+/// issuer, else the only login stored in `dir`.
+fn token_issuer(
+    dir: &std::path::Path,
+    cfg: Option<&Config>,
+    wanted: Option<&str>,
+) -> Result<String, TokenError> {
+    if let Some(w) = wanted {
+        return Ok(w.to_string());
+    }
+    if let Some(name) = cfg.and_then(|c| c.auth.login_issuer(None).ok()) {
+        return Ok(name.to_string());
+    }
+    let stored = stored_logins(dir);
+    match stored.as_slice() {
+        [] => Err(TokenError::NotSignedIn(
+            "not signed in: run `agent login`".into(),
+        )),
+        [only] => Ok(only.clone()),
+        _ => Err(TokenError::Failed(format!(
+            "several logins are stored ({}); name one with `--issuer`",
+            stored.join(", ")
+        ))),
+    }
+}
+
+/// The issuer names with a token file in `dir`, sorted. A name that is not a
+/// plain identifier is skipped (it cannot be a file `agent login` wrote).
+fn stored_logins(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".json")?;
+            agent_core::safe_segment(stem).then(|| stem.to_string())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// The email when there is one, else the subject.
 fn shown_subject<'a>(email: &'a str, subject: &'a str) -> &'a str {
     if email.is_empty() {
