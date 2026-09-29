@@ -386,6 +386,15 @@ parent with no remaining `failed` / `blocked` live children returns to `decompos
 is not a state change: `approve` on an `in_review` leaf inserts an event with
 `detail.pr_approved = true` and the poller reads it.
 
+The poller's own non-verdicts use the same shape (CP-06a, `review_note(id, note)`): an event by
+`poller` with `from_state = to_state = in_review`, the row's current version and no update to
+the row, so the T2 transition count is unchanged. `AwaitingApproval` writes
+`{"awaiting_pr_approval": true}` once per leaf (a probe `SELECT 1 FROM task_events WHERE tenant =
+$1 AND task_id = $2 AND detail->>'awaiting_pr_approval' = 'true'` under the row lock skips the
+second); `PollError(text)` writes `{"poll_error": <text>}` every time, `text` cut to `MAX_ERROR`
+chars with NUL dropped. Any state but `in_review` is `Conflict`; a foreign tenant's id is
+`NotFound`.
+
 ### (f) Cancel a subtree
 
 ```sql

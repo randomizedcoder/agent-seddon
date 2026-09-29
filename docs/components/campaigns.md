@@ -58,8 +58,10 @@ enabled        = false        # the resident driver (`run`); true needs a store
 tick_secs      = 30           # 5..=3600 between resident ticks
 per_tenant_workers = 2        # 1..=32 concurrent workers per tenant
 global_workers = 8            # 1..=256 across every tenant
-sandbox        = "subprocess" # "subprocess" | "in_process" (dispatched in CP-06)
+sandbox        = "subprocess" # "subprocess" | "in_process" (dispatched in CP-06b)
 worker_timeout_secs = 3600    # 60..=86400 wall clock per worker
+poll_batch     = 20           # 1..=200 leaves in review the forge poller checks per
+                              # tenant per tick (one [forge] get_pr each)
 pool_max       = 4            # 1..=64
 planner_model  = ""           # "" = the main provider; else a [[route.upstreams]]
                               # name or a registry provider type (role routing)
@@ -102,12 +104,14 @@ agent [--config PATH] campaign [--tenant SEG] <verb> …
   **before** metrics and the agent build (like `doctor`); `plan`, `run --once` and
   `run` build the agent for the planner's provider and run inside the session scope.
 - **`run`.** `run --once` is one driver tick plus a drain over the `--tenant` (or
-  `local`) tenant, printing `reaped n  released n`, the per-node plan lines and
-  `plan:` summary, then `claimed n  dispatched n  failed n  (workers: CP-06)`. Bare
-  `run` is the resident driver: refused unless `[campaign] enabled` (naming the key,
-  before any store opens), then one `tick: tenants n  reaped n  released n  planned
-  n  claimed n  dispatched n  failed n  errors n` line every `tick_secs` until `^C`
-  / `SIGTERM`, which drains the workers for `worker_timeout_secs`.
+  `local`) tenant, printing `reaped n  released n`, `polled n  merged n  closed n
+  awaiting n  poll_errors n`, the per-node plan lines and `plan:` summary, then
+  `claimed n  dispatched n  failed n  (workers: CP-06)`. Bare `run` is the resident
+  driver: refused unless `[campaign] enabled` (naming the key, before any store
+  opens), then one `tick: tenants n  reaped n  released n  polled n  merged n
+  closed n  planned n  claimed n  dispatched n  failed n  errors n` line every
+  `tick_secs` until `^C` / `SIGTERM`, which drains the workers for
+  `worker_timeout_secs`.
 - **Identity.** Every verb runs as `user:local`; `--tenant SEG` (a `safe_segment`)
   only selects the tenant. Authentication is the security-hardening track.
 - **Rendering.** Plain text, no colour. Every stored string — titles, goals,
@@ -172,8 +176,9 @@ One tick (`04-executor.md`), per tenant in rotated order and under that tenant's
 identity: **reap** expired leases (`claimed` / `running` back to `ready`, attempt
 `lease_lost`), **release** stale plans (`reap_decomposing`: a non-leaf `decomposing`
 for longer than 900 s — a planner that died before its close — back to `ready` by
-`reaper` with `detail.reason = plan_stale`, no attempt counted), **poll** open PRs
-(a no-op until the CP-06 forge poller), **plan** up to `plan_per_tick` nodes with the
+`reaper` with `detail.reason = plan_stale`, no attempt counted), **poll** up to
+`poll_batch` leaves in review against the `[forge]` backend (below), **plan** up to
+`plan_per_tick` nodes with the
 planner above, and **claim** leaves for this process's owner token, sized to the
 free per-tenant permits and the remaining global budget; the claims are then
 interleaved across tenants (A, B, C, A, B, C …) and dispatched to workers under a
@@ -184,11 +189,23 @@ errors, times out (`worker_timeout_secs`) or panics is settled by the driver as 
 
 The tenants are `--tenant T`, else every tenant with live work under `[tenancy]
 per_tenant` (`CampaignBackend::tenants`, from the `tasks` table), else `local`. The
-owner is a random 32-hex token per process. **CP-05 ships no worker**, so the claim
-phase is off (`claimed 0  dispatched 0`); CP-06 adds the `--run-task` subprocess
+owner is a random 32-hex token per process. **No worker ships yet**, so the claim
+phase is off (`claimed 0  dispatched 0`); CP-06b adds the `--run-task` subprocess
 (today a stub: exit 3 `lease lost` without `AGENT_CAMPAIGN_OWNER`, exit 4 `not
-implemented` with it, before any config is read), the in-process exec, the forge
-poller and the `poll_batch` / `worker_model` keys.
+implemented` with it, before any config is read), the in-process exec and the
+`worker_model` key.
+
+**The poller** (`ForgePoller`, CP-06a) resolves leaves in review against the
+process's `[forge]` backend (`Agent::forge()`; no backend ⇒ a no-op poller and one
+warning that leaves in review are never resolved). Per leaf it asks `get_pr` under
+a 30 s timeout: `merged` moves the leaf to `done` when the campaign policy's
+`require_pr_approval` is off or a human `approve` left the `pr_approved` marker,
+otherwise it records `awaiting_pr_approval` once and waits; `closed` moves it to
+`failed` and blocks its dependents; `open` (including "changes requested") leaves
+it. A forge error, a timeout, a PR whose number is not the row's, or an unknown
+state string never moves the leaf: the first three are recorded on it as a bounded
+`poll_error` event (`agent campaign show` lists events), the last is only counted.
+The approval gate is enforced here, not in the store.
 
 ## Security
 
@@ -210,6 +227,10 @@ The model, the operator's typed text and every stored value are untrusted:
   skipped, a stored one dropped), holds the owner token in memory and hands it to a
   worker through the environment, never an argument; a worker's error text is cut
   to 2000 chars before it is stored.
+- **The forge's answers** are untrusted: the poller matches the PR `state` string
+  exactly and moves nothing on anything unknown, refuses a PR whose number differs
+  from the row's, bounds each call by a timeout, and stores a forge error message
+  cut to 2000 chars with NUL dropped.
 
 ## Testing
 
@@ -219,7 +240,10 @@ T6 includes the CP-05 `reap_decomposing` and `tenants` rows), T9–T10 (planner
 decisions and prompt assembly, `agent-campaign`), T11 (the driver tick over
 `MemCampaigns` with a recording store, a counting planner and closure execs,
 `agent-campaign`; the config bounds as `agent-runtime` rows, the owner-token row
-as an e2e), T14–T15 (Postgres protocols and invariants, live), T16 (CLI arguments,
+as an e2e), T13 (the forge poller over `MemCampaigns` and a scripted forge that
+answers a PR, an error or a hang per number, `agent-campaign`; the `review_note`
+seam has T7 conformance rows on both tiers), T14–T15 (Postgres protocols and
+invariants, live), T16 (CLI arguments,
 `agent-cli`), plus run-level CLI tests over `MemCampaigns` and an in-process `add →
 run --once → plan → show` path with a scripted provider through the driver. Gate
 checks: `cli-help` requires `campaign` in `agent --help`; `config-roundtrip`
@@ -228,8 +252,9 @@ dialing.
 
 ## Deferred
 
-CP-06 the worker body (`--run-task`: worktree, heartbeat, Implement session, push,
-PR), the subprocess / in-process execs, the forge poller and the `poll_batch` /
-`worker_model` keys; CP-07 the repo-knowledge brief and `node_key` touches; CP-08
+CP-06b the worker body (`--run-task`: worktree, heartbeat, Implement session, push,
+PR), the subprocess / in-process execs and the `worker_model` key; per-repo forge
+bindings (the poller uses the one process `[forge]` backend until RK-02's `repos`
+table carries a forge card); CP-07 the repo-knowledge brief and `node_key` touches; CP-08
 metrics and the observability section of this doc; CP-09 the gRPC
 `CampaignService`; RK-02 the `repos` table (replacing `[campaign.repos]`).

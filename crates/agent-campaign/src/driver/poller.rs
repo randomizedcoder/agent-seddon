@@ -230,9 +230,10 @@ impl PrPoller for ForgePoller {
 #[cfg(test)]
 mod tests {
     //! T13 — the PR poller (`06-test-matrix.md`), over `MemCampaigns` and a
-    //! scripted forge. `negative_noop_poller_no_store_calls` lives with the T11
-    //! recording store in `driver/tests.rs`; `boundary_poll_batch` for the config
-    //! key is a `campaign_validate_cases` row in `agent-runtime`.
+    //! scripted forge, one test per row id (`corner_changes_requested` is the
+    //! forge's `open` state). `negative_noop_poller_no_store_calls` lives with the
+    //! T11 recording store in `driver/tests.rs`; the `poll_batch` config bounds are
+    //! `campaign_validate_cases` rows in `agent-runtime`.
 
     use super::*;
     use agent_core::campaign::{Actor, CampaignError, Policy, TaskState};
@@ -381,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn positive_merged_approved_done() {
+    async fn positive_merged_with_approval() {
         let h = Harness::mem();
         let s = h.a();
         let r = one_in_review(&*s, approval_required(), 7).await;
@@ -407,7 +408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn positive_merged_no_approval_required_done() {
+    async fn positive_merged_no_approval_required() {
         let h = Harness::mem();
         let s = h.a();
         let r = one_in_review(&*s, no_approval(), 8).await;
@@ -419,7 +420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn negative_merged_unapproved_stays_in_review() {
+    async fn negative_merged_without_approval() {
         let h = Harness::mem();
         let s = h.a();
         let r = one_in_review(&*s, approval_required(), 9).await;
@@ -452,7 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn positive_closed_failed_blocks_dependents() {
+    async fn negative_closed_failed_blocks_dependents() {
         let h = Harness::mem();
         let s = h.a();
         let root = campaign_with(&*s, no_approval()).await;
@@ -475,7 +476,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corner_open_untouched() {
+    async fn corner_changes_requested_open_untouched() {
         let h = Harness::mem();
         let s = h.a();
         let r = one_in_review(&*s, no_approval(), 12).await;
@@ -521,6 +522,59 @@ mod tests {
         assert_eq!(forge.calls(), vec![21, 22]);
     }
 
+    #[tokio::test]
+    async fn corner_pr_not_found() {
+        // The forge has no such PR (a 404): one bounded `poll_error` event, the
+        // leaf stays, the next leaf in the batch still resolves, and the next
+        // tick asks again (the retry is one call per tick, never a loop).
+        let h = Harness::mem();
+        let s = h.a();
+        let (a, b) = two_in_review(&*s, 23, 24).await;
+        let forge = Arc::new(ScriptedForge::default().with(24, "merged"));
+        let p = poller(&forge);
+        let report = p.poll(Arc::clone(&s), 20).await;
+        assert_eq!(report.errors, 1);
+        assert_eq!(report.merged, 1);
+        assert_eq!(s.get(a.task_id).await.unwrap(), a);
+        let text = last_detail(&events(&*s, a.task_id).await)["poll_error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("no such pr 23"), "{text}");
+        assert_eq!(state(&*s, b.task_id).await, TaskState::Done);
+        let report = p.poll(Arc::clone(&s), 20).await;
+        assert_eq!(report.errors, 1);
+        assert_eq!(forge.calls(), vec![23, 24, 23]);
+    }
+
+    #[tokio::test]
+    async fn positive_oldest_first() {
+        // Three leaves completed out of id order on an advancing clock are
+        // polled by `updated_at`, not by id.
+        let h = Harness::mem();
+        let s = h.a();
+        let root = campaign_with(&*s, no_approval()).await;
+        let d = split_with(&*s, root.task_id, children(3), 7_300).await;
+        let mut ids = Vec::new();
+        for c in &d.children {
+            ids.push(leaf(&*s, c.task_id).await.task_id);
+        }
+        let mut forge = ScriptedForge::default();
+        for i in [2usize, 0, 1] {
+            h.advance_secs(10);
+            in_review(&*s, ids[i], &owner("w1"), ids[i].0).await;
+            forge = forge.with(ids[i].0.unsigned_abs(), "open");
+        }
+        let forge = Arc::new(forge);
+        let report = poller(&forge).poll(Arc::clone(&s), 20).await;
+        assert_eq!(report.polled, 3);
+        let want: Vec<u64> = [2usize, 0, 1]
+            .iter()
+            .map(|i| ids[*i].0.unsigned_abs())
+            .collect();
+        assert_eq!(forge.calls(), want);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn corner_forge_timeout() {
         let h = Harness::mem();
@@ -542,7 +596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn boundary_poll_batch_limits() {
+    async fn boundary_poll_batch() {
         let h = Harness::mem();
         let s = h.a();
         let mut forge = ScriptedForge::default();
@@ -584,7 +638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adversarial_unknown_pr_state_no_transition() {
+    async fn adversarial_forge_state_garbage() {
         let h = Harness::mem();
         let s = h.a();
         let r = one_in_review(&*s, no_approval(), 41).await;
@@ -600,7 +654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adversarial_pr_number_mismatch() {
+    async fn adversarial_forge_merged_wrong_number() {
         let h = Harness::mem();
         let s = h.a();
         let r = one_in_review(&*s, no_approval(), 7).await;
