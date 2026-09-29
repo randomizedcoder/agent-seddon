@@ -352,3 +352,21 @@ distinct control-plane group during the sweep and became its own final batch, 03
   not a latency one. Considered-and-deferred (marginal on this loopback bridge): tonic/Envoy HTTP/2 window
   tuning (wrong flow-control side + payloads under one 64 KB window), STATIC vs LOGICAL_DNS, circuit
   breakers, connection-balance, trace sampling.
+- **Follow-up: edge `jwt_authn` on the REST listener (closes gap-analysis §2.8 residual).** The REST
+  transcoder listener had no edge auth — deferred by S14 #536, mitigated by its fixed `127.0.0.1` bind +
+  the agent `AuthLayer`. Now the listener runs `jwt_authn` **after** `grpc_json_transcoder` in its filter
+  chain (`cors ▶ grpc_json_transcoder ▶ jwt_authn ▶ router`). Design (per the S14 session's steer):
+  the transcoder rewrites `:path` to the gRPC method path while decoding headers, so the SAME
+  `UNAUTHENTICATED_PREFIXES` (`/agent.v1.AuthService/`, `/grpc.health.v1.Health/`, `/grpc.reflection.`)
+  that guard the grpc-web listeners apply unchanged — **one source of truth**, no second REST-path list
+  to drift. **Fail-closed by construction:** a REST path that is unmapped, or that reaches `jwt_authn`
+  un-rewritten, never matches a gRPC exempt prefix, so it falls to the catch-all `/` requires-token rule
+  (401) — fail-open is impossible (a `/v1/…` path can't match a gRPC prefix). Same `PORTAL_AUTH` gate and
+  JWKS provider as grpc-web; the loopback pin is retained as defense-in-depth. `rest_listener` gained a
+  `jwt` param; `render()` threads the same provider it already builds. Tests: inverted the old
+  `test_corner_no_edge_jwt_on_rest_even_with_auth_on` → `test_positive_edge_jwt_on_rest_sits_after_the_transcoder`
+  + `test_corner_no_edge_jwt_on_rest_when_auth_off` + `test_positive_rest_jwt_reuses_grpc_prefixes_and_forwards`
+  + `test_adversarial_rest_catch_all_requires_a_token_no_open_prefix`. Gated by the `portal-envoy` check's
+  real `envoy --mode validate` across all auth modes (proves the transcoder▶jwt_authn ordering is valid);
+  behavioural 401/200 pending l2 live-verify with `PORTAL_AUTH=on` (the gate can't run an auth-on REST
+  call without the fake-issuer harness). S14-owned file — coordinated, no collision with in-flight S20 work.
