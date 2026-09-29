@@ -86,6 +86,10 @@ the forge post is attributed to the approver: audit `authz_allow{approve, review
   peer (S10). The fleet's trigger queue carries no caller scope (one review may merge
   triggers from several users), so a queued `ReviewNow` runs under the service token.
   Attributing it to the requester is left for S10/S11, together with the audit rows.
+  - As built (S19): the review still runs under the service token, but it is attributed.
+    Each queued trigger records who asked for it (`tenant/subject`). Coalesced triggers
+    merge their requesters, capped at 8. The draft stores `requested_by`, and the posted
+    row stores `approved_by`.
 
 ## mTLS between services
 

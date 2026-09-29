@@ -69,7 +69,7 @@ macro_rules! drafts_query {
         concat!(
             "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
              risk_score, gate_failed, n_findings, files_changed, additions, \
-             deletions, draft_path, status \
+             deletions, draft_path, status, requested_by, approved_by \
              FROM agent_review_drafts",
             $where,
             " ORDER BY ts DESC LIMIT 10000"
@@ -267,6 +267,8 @@ fn record_from_row(r: ReviewDraftRow) -> ReviewDraftRecord {
         deletions: r.deletions,
         draft_path: r.draft_path,
         status: r.status,
+        requested_by: r.requested_by,
+        approved_by: r.approved_by,
     }
 }
 
@@ -299,7 +301,7 @@ impl FleetHistory for ClickHouseHistory {
                     let q = QueryBuilder::new(
                         "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
                             risk_score, gate_failed, n_findings, files_changed, additions, \
-                            deletions, draft_path, status \
+                            deletions, draft_path, status, requested_by, approved_by \
                        FROM agent_review_drafts \
                       WHERE repo = $1 AND pr_number = $2 \
                       ORDER BY ts DESC LIMIT 1",
@@ -343,7 +345,7 @@ impl FleetHistory for ClickHouseHistory {
                 let q = QueryBuilder::new(
                     "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
                             risk_score, gate_failed, n_findings, files_changed, additions, \
-                            deletions, draft_path, status \
+                            deletions, draft_path, status, requested_by, approved_by \
                        FROM agent_review_drafts \
                       WHERE review_id = $1 \
                       ORDER BY ts DESC LIMIT 1",
@@ -413,11 +415,24 @@ mod tests {
             deletions: 5,
             draft_path: "/w/pr-7.md".into(),
             status: "drafted".into(),
+            requested_by: vec!["acme/alice".into()],
+            approved_by: "acme/bob".into(),
         };
         let rec = record_from_row(row);
+        assert_eq!(rec.requested_by, ["acme/alice"], "S19 requesters carried");
+        assert_eq!(rec.approved_by, "acme/bob", "S19 approver carried");
         assert_eq!(rec.gate_failed, expect, "gate_failed maps u8→bool");
         assert_eq!(rec.pr_number, 7);
         assert_eq!(rec.head_sha, "abc");
+    }
+
+    /// desc: S19 — every draft read selects the attribution columns, so a row read back
+    /// (prior, by id, list) keeps who asked and who approved.
+    #[rstest]
+    #[case::positive_list_unfiltered(drafts_sql(false, false))]
+    #[case::positive_list_by_repo_and_session(drafts_sql(true, true))]
+    fn positive_draft_reads_select_attribution(#[case] sql: &str) {
+        assert!(sql.contains("status, requested_by, approved_by"), "{sql}");
     }
 
     /// A minimal draft row for the `finalize_drafts` tables — only the fields the reducer reads
@@ -439,6 +454,8 @@ mod tests {
             deletions: 0,
             draft_path: "/w/p.md".into(),
             status: status.into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         }
     }
 

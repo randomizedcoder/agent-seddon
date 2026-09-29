@@ -72,7 +72,15 @@ fn summary_from_record(r: ReviewDraftRecord) -> pb::ReviewSummary {
         additions: r.additions,
         deletions: r.deletions,
         status: r.status,
+        requested_by: r.requested_by,
+        approved_by: r.approved_by,
     }
+}
+
+/// The caller's requester label (S19) — who asked for or approved a review — from the
+/// verified principal the auth layer installed. `None` when auth is off (`mode = "none"`).
+fn caller_label() -> Option<String> {
+    agent_core::current_principal().map(|p| agent_core::requester_label(&p))
 }
 
 /// An empty wire string means "no constraint" (the proto default); a non-empty one is a bound
@@ -240,6 +248,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         super::authz::require(agent_core::Action::Trigger, agent_core::ResourceType::Fleet)?;
         let key = super::identity_key(request.metadata());
         let sp = span("fleet.review_now", request.metadata());
+        let requester = caller_label();
         // Opt-in: only the full fleet process (with an orchestrator) wires a sink.
         let Some(triggers) = self.triggers.clone() else {
             return Err(Status::unimplemented(
@@ -253,6 +262,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
             let outcome = triggers.enqueue(FleetTrigger {
                 session_id: req.session_id,
                 pr_number: req.pr_number,
+                requested_by: requester.into_iter().collect(),
             });
             Ok(Response::new(pb::ReviewNowReply {
                 accepted: matches!(outcome, TriggerOutcome::Accepted),
@@ -272,6 +282,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         )?;
         let key = super::identity_key(request.metadata());
         let sp = span("fleet.approve", request.metadata());
+        let approver_label = caller_label();
         // Opt-in: only the full fleet process with persisted history wires an approver.
         let Some(approver) = self.approver.clone() else {
             return Err(Status::unimplemented(
@@ -282,7 +293,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         let work = async move {
             let review_id = request.into_inner().review_id;
             let outcome = approver
-                .approve(&review_id)
+                .approve(&review_id, approver_label.as_deref())
                 .await
                 .map_err(|e| status_from_error(&e))?;
             // NotFound/AlreadyPosted are ordinary outcomes (a total reply), not transport

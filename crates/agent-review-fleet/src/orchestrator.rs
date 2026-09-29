@@ -28,16 +28,16 @@
 //! becoming a path segment, and an unresolvable forge credential keeps the session
 //! **disabled** (fail closed) rather than admitting a broken session.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use std::path::PathBuf;
 
 use agent_core::{
-    draft_status, encode_review_session_id, safe_segment, DraftRequest, FleetHistory, FleetHost,
-    FleetProgress, FleetProgressEvent, FleetRegistry, FleetReviewFactory, FleetSession,
-    FleetTrigger, PriorReview, RepoBackend, ReviewDrafter, ReviewGrounder, ReviewTarget,
-    SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
+    draft_status, encode_review_session_id, merge_requesters, safe_segment, DraftRequest,
+    FleetHistory, FleetHost, FleetProgress, FleetProgressEvent, FleetRegistry, FleetReviewFactory,
+    FleetSession, FleetTrigger, PriorReview, RepoBackend, ReviewDrafter, ReviewGrounder,
+    ReviewTarget, SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
 };
 use agent_metrics::Metrics;
 use tracing::Instrument;
@@ -118,10 +118,11 @@ pub async fn reconcile(
 
 /// Shared state of a [`TriggerQueue`]/[`TriggerReceiver`] pair: the set of
 /// `(session_id, pr_number)` keys currently *pending* (queued but not yet popped), used
-/// to coalesce duplicates before they reach the orchestrator.
+/// to coalesce duplicates before they reach the orchestrator. Each key holds the merged
+/// requesters of every trigger folded into it (S19), handed to the popped trigger.
 #[derive(Default)]
 struct QueueShared {
-    pending: Mutex<HashSet<(String, u64)>>,
+    pending: Mutex<HashMap<(String, u64), Vec<String>>>,
 }
 
 /// The producer half of the orchestrator's **bounded, coalescing** trigger queue,
@@ -163,14 +164,28 @@ impl TriggerSink for TriggerQueue {
     fn enqueue(&self, trigger: FleetTrigger) -> TriggerOutcome {
         let kt = (trigger.session_id.clone(), trigger.pr_number);
         let mut pending = self.shared.pending.lock().expect("queue pending poisoned");
-        if pending.contains(&kt) {
+        if let Some(requesters) = pending.get_mut(&kt) {
+            // Folded into the pending review, but its requester is kept (S19): a second
+            // person asking for the same PR is attributed, not silently dropped.
+            let dropped = merge_requesters(requesters, trigger.requested_by);
+            if dropped > 0 {
+                tracing::warn!(session_id = %trigger.session_id, pr = trigger.pr_number,
+                    dropped, "fleet trigger requesters over the cap; extra names not recorded");
+            }
             tracing::debug!(session_id = %trigger.session_id, pr = trigger.pr_number,
                 "fleet trigger coalesced (already pending)");
             return TriggerOutcome::Coalesced;
         }
-        match self.tx.try_send(trigger.clone()) {
+        // The channel carries the key; the requesters live in `pending` so later
+        // coalesced triggers can add theirs until `recv` pops it.
+        let mut requesters = Vec::new();
+        merge_requesters(&mut requesters, trigger.requested_by.iter().cloned());
+        match self.tx.try_send(FleetTrigger {
+            requested_by: Vec::new(),
+            ..trigger.clone()
+        }) {
             Ok(()) => {
-                pending.insert(kt);
+                pending.insert(kt, requesters);
                 TriggerOutcome::Accepted
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -192,12 +207,14 @@ impl TriggerReceiver {
     /// Await the next trigger, clearing its pending mark. `None` once every
     /// [`TriggerQueue`] is dropped and the backlog is drained.
     pub async fn recv(&mut self) -> Option<FleetTrigger> {
-        let trigger = self.rx.recv().await?;
-        self.shared
+        let mut trigger = self.rx.recv().await?;
+        trigger.requested_by = self
+            .shared
             .pending
             .lock()
             .expect("queue pending poisoned")
-            .remove(&(trigger.session_id.clone(), trigger.pr_number));
+            .remove(&(trigger.session_id.clone(), trigger.pr_number))
+            .unwrap_or_default();
         Some(trigger)
     }
 }
@@ -556,12 +573,18 @@ impl FleetOrchestrator {
         // background task with no ambient identity — and re-validated before they are
         // stamped (`safe_segment`), so a malformed row attributes nothing.
         let fm = self.fleet_metrics(&row);
+        // `requested_by` (S19): who asked, when a person did — the review itself runs as
+        // the fleet, so this attribute is what ties it back to them.
         let review_span = tracing::info_span!(
             "fleet.review",
             tenant = tracing::field::Empty,
             repo = tracing::field::Empty,
             pr,
+            requested_by = tracing::field::Empty,
         );
+        if !trigger.requested_by.is_empty() {
+            review_span.record("requested_by", trigger.requested_by.join(",").as_str());
+        }
         if safe_segment(&row.user) {
             review_span.record("tenant", row.user.as_str());
         }
@@ -771,6 +794,8 @@ impl FleetOrchestrator {
         // Carry the prior round's still-open items into the draft so the tracker (C16) can
         // reconcile them against this round's findings (addressed vs still-open).
         let open_items = prior.open_items;
+        // Who asked for this round (S19), onto the draft record.
+        let requested_by = trigger.requested_by.clone();
         // Whatever scope `handle` runs under rides into the review task (S9). Triggers
         // from the queue carry none, so the review's seam calls use the service token.
         let carried = agent_core::RequestScope::current();
@@ -807,6 +832,7 @@ impl FleetOrchestrator {
                                 narrative,
                                 workspace,
                                 prior: open_items,
+                                requested_by,
                             };
                             // CH6b: record the draft (and its review/collector/feedback
                             // rows) under this review's identity, not the fleet process's.
@@ -1258,6 +1284,8 @@ mod tests {
             deletions: 0,
             draft_path: "/tmp/old.md".into(),
             status: status.into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         }
     }
 
@@ -1416,6 +1444,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -1472,6 +1501,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -1563,6 +1593,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -1623,6 +1654,7 @@ mod tests {
             o.handle(FleetTrigger {
                 session_id: id.into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -1664,6 +1696,7 @@ mod tests {
         let t = || FleetTrigger {
             session_id: "web".into(),
             pr_number: 7,
+            requested_by: Vec::new(),
         };
         let first = o.handle(t()).await.expect("first ok");
         let second = o.handle(t()).await.expect("second ok");
@@ -1691,6 +1724,7 @@ mod tests {
         let t = || FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         };
         assert!(matches!(
             o.handle(t()).await.expect("first ok"),
@@ -1717,6 +1751,7 @@ mod tests {
         let t = || FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         };
         assert!(matches!(
             o.handle(t()).await.expect("first ok"),
@@ -1763,6 +1798,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -1785,6 +1821,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -1820,6 +1857,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok despite a stale worktree");
@@ -1844,6 +1882,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 7,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -1865,6 +1904,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -1894,6 +1934,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -1920,6 +1961,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok despite a base-refresh failure");
@@ -1963,6 +2005,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "ghost".into(),
                 pr_number: 1,
+                requested_by: Vec::new(),
             })
             .await;
         assert!(err.is_err(), "unknown row must be an error");
@@ -1987,6 +2030,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 9,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2019,6 +2063,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -2059,6 +2104,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 8,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok despite engine error");
@@ -2091,6 +2137,7 @@ mod tests {
         let t = || FleetTrigger {
             session_id: "web".into(),
             pr_number: 3,
+            requested_by: Vec::new(),
         };
         o.handle(t()).await.expect("first ok");
         let second = o.handle(t()).await.expect("second ok");
@@ -2116,6 +2163,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "ghost".into(),
                 pr_number: 1,
+                requested_by: Vec::new(),
             })
             .await;
         assert!(err.is_err(), "unknown row must be an error");
@@ -2155,6 +2203,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2187,6 +2236,7 @@ mod tests {
         let t = || FleetTrigger {
             session_id: "web".into(),
             pr_number: 7,
+            requested_by: Vec::new(),
         };
         o.handle(t()).await.expect("first ok");
         o.handle(t()).await.expect("second ok");
@@ -2212,12 +2262,14 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 5,
+            requested_by: Vec::new(),
         })
         .await
         .expect("web ok");
         o.handle(FleetTrigger {
             session_id: "api".into(),
             pr_number: 5,
+            requested_by: Vec::new(),
         })
         .await
         .expect("api ok");
@@ -2249,6 +2301,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "../../etc/web".into(),
                 pr_number: 1,
+                requested_by: Vec::new(),
             })
             .await;
         assert!(got.is_err(), "an unmatched/hostile session is an error");
@@ -2279,6 +2332,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2310,6 +2364,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 9,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2344,6 +2399,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2387,6 +2443,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2439,6 +2496,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 9,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2468,6 +2526,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 5,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2489,6 +2548,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 6,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2509,6 +2569,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 4,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2544,6 +2605,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -2580,6 +2642,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -2613,6 +2676,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2646,6 +2710,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok");
@@ -2670,6 +2735,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle ok despite history error");
@@ -2777,12 +2843,14 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("web handle ok");
         o.handle(FleetTrigger {
             session_id: "api".into(),
             pr_number: 97,
+            requested_by: Vec::new(),
         })
         .await
         .expect("api handle ok");
@@ -2829,6 +2897,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2862,6 +2931,7 @@ mod tests {
             .handle(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             })
             .await
             .expect("handle is fail-soft, not an error");
@@ -2894,6 +2964,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 1,
+            requested_by: Vec::new(),
         })
         .await
         .expect("pr1 ok");
@@ -2901,6 +2972,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 2,
+            requested_by: Vec::new(),
         })
         .await
         .expect("pr2 ok");
@@ -2931,6 +3003,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -2949,6 +3022,7 @@ mod tests {
         let t = FleetTrigger {
             session_id: "web".into(),
             pr_number: 3,
+            requested_by: Vec::new(),
         };
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Accepted);
         assert_eq!(rx.recv().await, Some(t));
@@ -2962,6 +3036,7 @@ mod tests {
         let t = FleetTrigger {
             session_id: "web".into(),
             pr_number: 5,
+            requested_by: Vec::new(),
         };
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Accepted);
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Coalesced);
@@ -2976,10 +3051,12 @@ mod tests {
         let a = FleetTrigger {
             session_id: "web".into(),
             pr_number: 1,
+            requested_by: Vec::new(),
         };
         let b = FleetTrigger {
             session_id: "web".into(),
             pr_number: 2,
+            requested_by: Vec::new(),
         };
         assert_eq!(q.enqueue(a.clone()), TriggerOutcome::Accepted);
         assert_eq!(
@@ -2998,6 +3075,7 @@ mod tests {
         let t = FleetTrigger {
             session_id: "web".into(),
             pr_number: 4,
+            requested_by: Vec::new(),
         };
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Accepted);
         assert_eq!(rx.recv().await, Some(t.clone()));
@@ -3007,6 +3085,92 @@ mod tests {
             "requeue after pop is a fresh accept"
         );
         assert_eq!(rx.recv().await, Some(t));
+    }
+
+    // ---- requester attribution through the queue (security-hardening S19) ----
+
+    fn requested(pr: u64, by: &[&str]) -> FleetTrigger {
+        FleetTrigger {
+            session_id: "web".into(),
+            pr_number: pr,
+            requested_by: by.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// desc: triggers for one pending PR coalesce into one review, and the popped
+    /// trigger carries every requester, first-seen order, deduped, capped at 8. Each
+    /// `triggers` entry is one trigger's requesters, comma-separated ("" = the poller).
+    #[rstest]
+    #[case::positive_second_person_is_kept(&["acme/alice", "acme/bob"], &["acme/alice", "acme/bob"])]
+    #[case::corner_same_requester_twice(&["acme/alice", "acme/alice"], &["acme/alice"])]
+    #[case::negative_poller_then_person(&["", "acme/alice"], &["acme/alice"])]
+    #[case::negative_poller_only(&["", ""], &[])]
+    #[case::boundary_cap_8(
+        &["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        &["1", "2", "3", "4", "5", "6", "7", "8"])]
+    #[tokio::test]
+    async fn coalesced_triggers_merge_requesters(#[case] triggers: &[&str], #[case] want: &[&str]) {
+        let (q, mut rx) = TriggerQueue::channel(8);
+        for (i, by) in triggers.iter().enumerate() {
+            let by: Vec<&str> = by.split(',').filter(|s| !s.is_empty()).collect();
+            let want_outcome = if i == 0 {
+                TriggerOutcome::Accepted
+            } else {
+                TriggerOutcome::Coalesced
+            };
+            assert_eq!(q.enqueue(requested(5, &by)), want_outcome);
+        }
+        let got = rx.recv().await.expect("one trigger");
+        assert_eq!(got.pr_number, 5);
+        assert_eq!(got.requested_by, want);
+    }
+
+    #[tokio::test]
+    async fn adversarial_requester_flood_on_one_pr_stays_bounded() {
+        // desc: 10k distinct callers ask for the same pending PR. expect: one queued review
+        // whose requester list is capped — the flood cannot grow queue memory.
+        let (q, mut rx) = TriggerQueue::channel(8);
+        for i in 0..10_000 {
+            q.enqueue(requested(9, &[&format!("acme/u{i}")]));
+        }
+        let got = rx.recv().await.expect("one trigger");
+        assert_eq!(got.requested_by.len(), agent_core::MAX_REQUESTERS);
+        assert_eq!(got.requested_by[0], "acme/u0", "first-seen order is kept");
+    }
+
+    #[tokio::test]
+    async fn positive_requesters_are_per_round_not_sticky() {
+        // desc: after a round is popped, the next round for the same PR starts with only
+        // its own requester (the popped list is not reused).
+        let (q, mut rx) = TriggerQueue::channel(8);
+        q.enqueue(requested(4, &["acme/alice"]));
+        assert_eq!(rx.recv().await.unwrap().requested_by, ["acme/alice"]);
+        q.enqueue(requested(4, &["acme/bob"]));
+        assert_eq!(rx.recv().await.unwrap().requested_by, ["acme/bob"]);
+    }
+
+    #[tokio::test]
+    async fn positive_requesters_reach_the_draft_request() {
+        // desc: the trigger's requesters ride into the drafter, which copies them onto the
+        // draft record. expect: the DraftRequest names the requester.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, repo, host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_drafter(drafter.clone());
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+            requested_by: vec!["acme/alice".into()],
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await);
+        let drafts = drafter.drafts();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].requested_by, ["acme/alice"]);
     }
 
     // ---- intake → drain → orchestrator → draft (the serve_fleet wiring) ----
@@ -3043,6 +3207,7 @@ mod tests {
             q.enqueue(FleetTrigger {
                 session_id: "web".into(),
                 pr_number: 42,
+                requested_by: Vec::new(),
             }),
             TriggerOutcome::Accepted
         );
@@ -3050,6 +3215,7 @@ mod tests {
             q.enqueue(FleetTrigger {
                 session_id: "api".into(),
                 pr_number: 97,
+                requested_by: Vec::new(),
             }),
             TriggerOutcome::Accepted
         );
@@ -3109,6 +3275,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");
@@ -3152,6 +3319,7 @@ mod tests {
         o.handle(FleetTrigger {
             session_id: "web".into(),
             pr_number: 42,
+            requested_by: Vec::new(),
         })
         .await
         .expect("handle ok");

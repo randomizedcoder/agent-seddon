@@ -526,14 +526,18 @@ impl agent_core::ReviewDrafter for EngineDrafter {
             })
             .await;
 
-        let rec = agent_core::ReviewDraftRecord::from_facts(
-            req.review_id,
-            req.repo,
-            req.pr_number,
-            &req.facts,
-            path.to_string_lossy().into_owned(),
-            agent_core::draft_status::DRAFTED,
-        );
+        let rec = agent_core::ReviewDraftRecord {
+            // Who asked for this round (S19); later rows of the review copy the record.
+            requested_by: req.requested_by,
+            ..agent_core::ReviewDraftRecord::from_facts(
+                req.review_id,
+                req.repo,
+                req.pr_number,
+                &req.facts,
+                path.to_string_lossy().into_owned(),
+                agent_core::draft_status::DRAFTED,
+            )
+        };
         // Persist the operational row (→ agent_review_drafts) through the same funnel the
         // anonymized review row uses.
         self.agent.record_draft(rec.clone()).await;
@@ -662,7 +666,11 @@ fn plan_approve(
 #[cfg(all(feature = "review", feature = "fleet"))]
 #[async_trait::async_trait]
 impl agent_core::FleetApprover for EngineApprover {
-    async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
+    async fn approve(
+        &self,
+        review_id: &str,
+        approved_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::ApproveOutcome> {
         // C19 observability: a `fleet.approve` span carrying tenant/repo/pr/outcome as
         // attributes (pr is never a metric label), and the per-`(user,repo)` approval
         // counter. Values are threaded explicitly from the resolved row (no ambient
@@ -777,6 +785,8 @@ impl agent_core::FleetApprover for EngineApprover {
             // `plan_approve` early-out, the C16 head-oid dedup, and the operator's history.
             let mut posted = record.clone();
             posted.status = agent_core::draft_status::POSTED.to_string();
+            // Who approved it (S19); `requested_by` rides over from the drafted row.
+            posted.approved_by = approved_by.unwrap_or_default().to_string();
             self.agent.record_draft(posted).await;
 
             // C18 progress feed (config C37): announce the posted review to the row's progress
@@ -3611,6 +3621,8 @@ mod tests {
             deletions: 0,
             draft_path: draft_path.to_string(),
             status: "drafted".into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         };
         let mut map = std::collections::HashMap::new();
         map.insert("rid".to_string(), rec);
@@ -3732,6 +3744,8 @@ mod tests {
             deletions: 0,
             draft_path: path.to_string_lossy().into_owned(),
             status: status.into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         };
         let mut map = std::collections::HashMap::new();
         map.insert("rid".to_string(), rec);
@@ -3866,6 +3880,8 @@ mod tests {
             deletions: 0,
             draft_path: other_path.to_string_lossy().into_owned(),
             status: status.into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         };
         let mut map = std::collections::HashMap::new();
         map.insert("rid".to_string(), rec);
@@ -3913,6 +3929,8 @@ mod tests {
             deletions: 0,
             draft_path: link.to_string_lossy().into_owned(),
             status: "drafted".into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         };
         let mut map = std::collections::HashMap::new();
         map.insert("rid".to_string(), rec);
@@ -3990,6 +4008,8 @@ mod tests {
             deletions: 0,
             draft_path: victim.to_string_lossy().into_owned(),
             status: "drafted".into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         };
         let mut map = std::collections::HashMap::new();
         map.insert("rid".to_string(), rec);
@@ -6910,6 +6930,14 @@ mod tests {
 
     #[cfg(all(feature = "review", feature = "fleet"))]
     async fn ch6_draft_events(facts: agent_core::ReviewFacts) -> Vec<MemoryEvent> {
+        draft_events_requested_by(facts, Vec::new()).await
+    }
+
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    async fn draft_events_requested_by(
+        facts: agent_core::ReviewFacts,
+        requested_by: Vec<String>,
+    ) -> Vec<MemoryEvent> {
         let memory = RecordingMemory::new();
         let agent = Arc::new(Agent::new(
             Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
@@ -6929,11 +6957,33 @@ mod tests {
             narrative: "looks fine".into(),
             workspace: agent_testkit::tempdir(),
             prior: Vec::new(),
+            requested_by,
         };
         agent_core::ReviewDrafter::draft(&drafter, req)
             .await
             .expect("draft writes the .md and records rows");
         memory.events()
+    }
+
+    /// desc: S19 — the drafter copies the round's requesters onto the persisted draft
+    /// row (`agent_review_drafts.requested_by`); a poller-started round stores none.
+    /// expect: the `kind="draft"` event's record carries exactly the requesters given.
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    #[rstest]
+    #[case::positive_requester_recorded(vec!["acme/user:kc/alice".to_string()])]
+    #[case::negative_poller_round_has_none(vec![])]
+    #[tokio::test]
+    async fn fleet_draft_records_requested_by(#[case] requested_by: Vec<String>) {
+        let events =
+            draft_events_requested_by(ch6_facts(1, Vec::new()), requested_by.clone()).await;
+        let drafts: Vec<&agent_core::ReviewDraftRecord> =
+            events.iter().filter_map(|e| e.draft.as_ref()).collect();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].requested_by, requested_by);
+        assert!(
+            drafts[0].approved_by.is_empty(),
+            "not approved at draft time"
+        );
     }
 
     /// desc: the fleet draft path records one `agent_reviews` headline whose collector
@@ -7039,6 +7089,8 @@ mod tests {
                 deletions: 3,
                 draft_path: "/w/reviews/pr-7-rr-uuid.md".into(),
                 status: status.into(),
+                requested_by: Vec::new(),
+                approved_by: String::new(),
             }
         }
         fn row(id: &str, repo: &str, enabled: bool) -> FleetSession {

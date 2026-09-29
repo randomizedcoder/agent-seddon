@@ -270,6 +270,10 @@ pub struct ReviewDraftRow {
     pub deletions: u32,
     pub draft_path: String,
     pub status: String,
+    /// Who asked for the review (S19), `Array(String)`.
+    pub requested_by: Vec<String>,
+    /// Who approved the post (S19); `''` until posted.
+    pub approved_by: String,
 }
 
 impl ReviewDraftRow {
@@ -292,6 +296,8 @@ impl ReviewDraftRow {
             deletions: d.deletions,
             draft_path: d.draft_path.clone(),
             status: d.status.clone(),
+            requested_by: d.requested_by.clone(),
+            approved_by: d.approved_by.clone(),
         })
     }
 }
@@ -1045,6 +1051,8 @@ mod tests {
             deletions: 4,
             draft_path: "/w/reviews/pr-42-rrid.md".into(),
             status: "drafted".into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         };
         let row = ReviewDraftRow::from_event(&draft_event(rec)).expect("draft row");
         assert_eq!(row.user, "u");

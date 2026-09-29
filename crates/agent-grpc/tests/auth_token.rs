@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use agent_grpc::server::{
-    base_router_with_tls, AuthLayer, AuthParams, IssuerParams, TokenParams, TokenizerServiceSvc,
+    base_router_with_tls, AuthLayer, AuthParams, IssuerParams, ReviewFleetSvc, TokenParams,
+    TokenizerServiceSvc,
 };
 use agent_grpc::Endpoint;
 use agent_proto::pb;
@@ -53,6 +54,16 @@ impl Harness {
 
     /// As [`Harness::start`], with `[auth] operator_subjects`.
     async fn start_with(operators: &[&str]) -> Self {
+        Self::start_inner(operators, None).await
+    }
+
+    /// As [`Harness::start`], also serving `ReviewFleetService` over the given
+    /// recording doubles (S19).
+    async fn start_fleet(fleet: Arc<FleetRecorder>) -> Self {
+        Self::start_inner(&[], Some(fleet)).await
+    }
+
+    async fn start_inner(operators: &[&str], fleet: Option<Arc<FleetRecorder>>) -> Self {
         let idp = FakeIssuer::start(TestKey::Rsa);
         let keys = agent_testkit::tempdir();
         let signing_key = keys.join("token-signer.key");
@@ -87,6 +98,15 @@ impl Harness {
             TokenizerServiceSvc::new(Arc::new(agent_tokenizer::ApproxTokenizer::new()))
                 .into_server(),
         );
+        let router = match fleet {
+            Some(rec) => router.add_service(
+                ReviewFleetSvc::new(Arc::new(agent_review_fleet::MemoryFleet::new()))
+                    .with_triggers(rec.clone() as Arc<dyn agent_core::TriggerSink>)
+                    .with_approver(rec as Arc<dyn agent_core::FleetApprover>)
+                    .into_server(),
+            ),
+            None => router,
+        };
         tokio::spawn(async move {
             let _health = health;
             let _ = bound.serve(router, std::future::pending()).await;
@@ -1028,4 +1048,122 @@ async fn negative_gate_denial_is_audited() {
         .map(|(_, _, rpc, ..)| rpc)
         .collect();
     assert_eq!(denials, ["/agent.v1.ReviewFleetService/Approve"]);
+}
+
+/// Records what the fleet service hands its trigger sink and approver (S19).
+#[derive(Default)]
+struct FleetRecorder {
+    triggers: std::sync::Mutex<Vec<agent_core::FleetTrigger>>,
+    approvals: std::sync::Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl agent_core::TriggerSink for FleetRecorder {
+    fn enqueue(&self, trigger: agent_core::FleetTrigger) -> agent_core::TriggerOutcome {
+        self.triggers.lock().unwrap().push(trigger);
+        agent_core::TriggerOutcome::Accepted
+    }
+}
+
+#[async_trait::async_trait]
+impl agent_core::FleetApprover for FleetRecorder {
+    async fn approve(
+        &self,
+        review_id: &str,
+        approved_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::ApproveOutcome> {
+        self.approvals
+            .lock()
+            .unwrap()
+            .push((review_id.to_string(), approved_by.map(str::to_string)));
+        Ok(agent_core::ApproveOutcome::AlreadyPosted)
+    }
+}
+
+fn fleet_req<T>(msg: T, bearer: &str) -> tonic::Request<T> {
+    let mut req = with_bearer(msg, Some(bearer));
+    req.metadata_mut()
+        .insert("x-agent-session-id", "s1".parse().expect("header"));
+    req
+}
+
+/// desc: S19 — a queued `ReviewNow` and an `Approve` are attributed to the verified
+/// caller. expect: the trigger carries `tenant/subject` from the agent token, and the
+/// approver is handed the same label; a hostile subject arrives stripped and capped.
+#[rstest]
+#[case::positive_person("alice", "alice")]
+#[case::adversarial_hostile_subject_stripped("x\u{1b}[2J", "x[2J")]
+#[tokio::test(flavor = "multi_thread")]
+async fn review_now_and_approve_are_attributed_to_the_caller(
+    #[case] sub: &str,
+    #[case] clean_sub: &str,
+) {
+    let rec = Arc::new(FleetRecorder::default());
+    let h = Harness::start_fleet(rec.clone()).await;
+    let token = h
+        .exchange(&h.id_token(json!({"sub": sub, "roles": ["reviewer"]})))
+        .await
+        .expect("exchange")
+        .access_token;
+    let me = h.who_am_i(Some(&token)).await.expect("who am i");
+    // The verified subject keeps whatever the IdP signed (control bytes included); the
+    // stored label is that subject with control characters removed.
+    let want: String = format!("{}/{}", me.tenant, me.subject)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    assert!(want.ends_with(clean_sub), "{want:?}");
+
+    let mut fleet = ReviewFleetServiceClient::new(h.channel.clone());
+    fleet
+        .review_now(fleet_req(
+            pb::ReviewNowRequest {
+                session_id: "web".into(),
+                pr_number: 7,
+            },
+            &token,
+        ))
+        .await
+        .expect("review now");
+    fleet
+        .approve(fleet_req(
+            pb::ApproveRequest {
+                review_id: "r1".into(),
+            },
+            &token,
+        ))
+        .await
+        .expect("approve");
+
+    let triggers = rec.triggers.lock().unwrap().clone();
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].requested_by, std::slice::from_ref(&want));
+    assert_eq!(
+        *rec.approvals.lock().unwrap(),
+        [("r1".to_string(), Some(want))]
+    );
+}
+
+/// desc: S19 — a caller without `trigger:fleet` is refused before anything is queued,
+/// so no attribution is recorded for a denied request.
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_denied_review_now_records_nothing() {
+    let rec = Arc::new(FleetRecorder::default());
+    let h = Harness::start_fleet(rec.clone()).await;
+    let token = h
+        .exchange(&h.id_token(json!({"roles": ["agent_user"]})))
+        .await
+        .expect("exchange")
+        .access_token;
+    let err = ReviewFleetServiceClient::new(h.channel.clone())
+        .review_now(fleet_req(
+            pb::ReviewNowRequest {
+                session_id: "web".into(),
+                pr_number: 7,
+            },
+            &token,
+        ))
+        .await
+        .expect_err("agent_user may not trigger");
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert!(rec.triggers.lock().unwrap().is_empty());
 }

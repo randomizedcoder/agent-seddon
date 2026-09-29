@@ -29,7 +29,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 | S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | ✅ | #559 |
-| S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ⬜ | — |
+| S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ✅ | #560 |
 | S20 | Hot reload of TLS material and the signing key | deferral | ⬜ | — |
 | S21 | CLI loopback-redirect login | deferral | ⬜ | — |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
@@ -898,6 +898,46 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       the empty-file case built the same temp dir name, so when run in parallel one deleted
       the other's file. Each case now gets its own `agent_testkit::tempdir()`.
     - `crates/agent-grpc/src/transport.rs` from #555 was not rustfmt-clean.
+
+- **2026-09-28 — S19: queued reviews are attributed to who asked for them.** This is
+  attribution, not impersonation. The review still runs under the service token, because a
+  15-minute user token could expire while it waits in the queue.
+  - `agent_core::requester_label` turns the caller's principal into `tenant/subject`, strips
+    control characters and caps the label at 256 bytes. `merge_requesters` dedupes, keeps
+    first-seen order and caps the list at 8.
+  - `FleetTrigger.requested_by`: `ReviewNow` fills it from the caller. Poll and Slack triggers
+    leave it empty. The trigger queue keeps the pending requesters beside each coalesced
+    `(session, PR)` key, so a second requester of a queued review is merged, not dropped. A
+    requester only counts for the round they asked for: once the review is taken off the
+    queue, the next trigger starts a fresh list.
+  - The `fleet.review` span carries `requested_by`. `ReviewDraftRecord` gains `requested_by`
+    and `approved_by`. `FleetApprover::approve` takes the approver's label, and the posted
+    draft row stores it. The draft table is append-only, so `requested_by` carries forward
+    onto every status row.
+  - Wire: `ReviewSummary` gains `requested_by = 12` and `approved_by = 13`. The fields are
+    additive, so old clients ignore them.
+  - Storage: `agent.agent_review_drafts` gains `requested_by Array(String)` and
+    `approved_by String`. The columns are added with `ADD COLUMN IF NOT EXISTS`.
+    **Upgrade: run `clickhouse-migrate` before you deploy this build.** Until the columns
+    exist, an S19 binary's draft inserts fail.
+  - Tests:
+    - `requester_label` / `merge_requesters` tables, including a flood and hostile-subject
+      `adversarial_` rows.
+    - Queue tables: coalesced triggers merge requesters; a flood on one PR stays bounded;
+      requesters apply per round only; requesters reach the `DraftRequest`.
+    - The runtime drafter records `requested_by`.
+    - History reads select both columns, and `record_from_row` maps them.
+    - A roundtrip test through the gRPC client.
+    - Wire tests with real bearer tokens: `ReviewNow` and `Approve` are attributed to the
+      caller, a hostile subject has its control characters stripped, and a denied
+      `ReviewNow` records nothing.
+  - Deviations from the plan:
+    - No new `AuthEventKind::FleetTriggered` audit row. `ReviewNow` and `Approve` are
+      already audited as `authz_allow` with the caller and `trace_id`.
+    - The portal Fleet tab does not show the new fields yet. That needs a Dart proto regen,
+      so it is left for S22's portal work.
+    - A `ReviewNow` that arrives while the same review is already running is refused by the
+      orchestrator's in-flight duplicate guard, so it is not recorded as a requester.
 
 ## Cross-track note (not an S-increment)
 
