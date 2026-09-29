@@ -36,8 +36,8 @@ pub use display::Letters;
 pub use driver::poller::ForgePoller;
 pub use driver::{
     mint_owner, ClosureExec, DrainReport, Driver, DriverConfig, FactoryPlanner, NoopPoller,
-    PlanReport, PlannerFactory, PollReport, PrPoller, Settled, TenantReport, Tenants, TickPlanner,
-    TickReport, WorkerExec, WorkerOutcome, POLL_BATCH,
+    PlanReport, PlannerFactory, PollReport, PrPoller, Settled, TenantReport, Tenants, TickObserver,
+    TickPlanner, TickReport, WorkerExec, WorkerOutcome, POLL_BATCH,
 };
 pub use planner::{
     BriefSource, FallbackBrief, PlanOutcome, Planned, Planner, SkipReason, StaticBrief,
