@@ -28,6 +28,12 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S15c | `portal-auth-e2e`: browser sign-in through the hardened edge | testing | ✅ | #549 |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
+| S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | 🟡 | — |
+| S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ⬜ | — |
+| S20 | Hot reload of TLS material and the signing key | deferral | ⬜ | — |
+| S21 | CLI loopback-redirect login | deferral | ⬜ | — |
+| S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
+| S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
 
 ## As-built log
 
@@ -842,3 +848,48 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     `tls: false` even when it serves mTLS. The line comes from `Bound::dial_endpoint`, which
     rebuilds a bare `host:port`; the earlier `gRPC listener transport` line shows `mtls`
     correctly.
+- **2026-09-28 — S18: S16 verified live on l2.** The long-lived stack predated S16, so it was
+  recreated with the S16 logins. Row counts were taken and every non-empty `agent.*` and
+  `default.otel_*` table was exported to Native files first, then restored as the admin into
+  the new container (counts matched), so no telemetry was lost. HyperDX came back with a fresh
+  Mongo volume, which re-seeds its connection as `agent_viewer`. The review fleet was restarted
+  on a current build with `password_file` / `reader_password_file`. Steps are in
+  [08's upgrade runbook](08-data-plane-and-secrets.md#upgrading-a-live-stack).
+  - Result: 46 live checks pass (scripted, run as each login over HTTP):
+    - each of the four logins is refused with no password and with a wrong one, and accepted
+      with its file;
+    - the row-policy default is closed (a user named in no policy on a table reads nothing);
+    - `agent_reader` sees exactly its own rows for every tenant present in five tables, nothing
+      without a tenant, and cannot insert;
+    - `agent_viewer` cannot insert, reads `default.otel_*`, and runs a cross-database
+      `trace_id` JOIN;
+    - the restarted fleet's writes and OTLP spans land;
+    - HyperDX's connection is `agent_viewer` and its query proxy runs as `agent_viewer`;
+    - Grafana's ClickHouse datasource is `agent_viewer`, its health check passes, a panel query
+      returns rows, and both dashboards are provisioned.
+  - **Bug found and fixed: a reader that binds no tenant read the unscoped rows.** Rows written
+    outside a request scope carry `user = ''` (3,874 process-log rows in `agent_logs` on l2), and
+    `agent_reader`'s default `SQL_tenant_id` is `''`, so `user = getSetting('SQL_tenant_id')`
+    matched them. Only `agent_auth_events` had the `AND user != ''` guard. The agent's own reader
+    always binds a tenant, so this was reachable only by logging in as `agent_reader` directly.
+    - The fix: every `tenant_iso_*` policy now excludes the empty tenant, and is created with
+      `OR REPLACE`, so `clickhouse-migrate` updates a live database (applied on l2).
+    - Tests: two `adversarial_` rows in the live RLS matrix (no tenant, and an explicit empty
+      tenant, each reading `agent_logs` as a count, since the row matcher drops empty lines) plus
+      a `positive_` viewer row; a `SchemaPolicies` table in `ch-creds-tests` that parses
+      `schema.sql` and requires the guard and `OR REPLACE` on every tenant policy.
+    - Check-the-check: against `main`'s schema, `SchemaPolicies` fails on all 12 policies; the
+      live bug was observed before the fix.
+  - Bugs found in the apps on the way:
+    - `prometheus-up` did not build: its unquoted heredoc held backticks, which shellcheck
+      parses as a command substitution (the #544 class). The heredoc is now quoted; its
+      interpolations are all Nix's.
+    - `grafana-up` reported "Grafana is up" while its container had exited: with
+      `--network host`, a host Grafana already on :3000 answered the readiness probe. It now
+      refuses a busy port up front, fails if its container stops while waiting, and takes
+      `GRAFANA_PORT` (l2 runs a native Grafana and Prometheus as NixOS services, so the stack's
+      Grafana runs on :3300 there).
+  - Not verified live: a new review draft written by the restarted fleet (that would spend a
+    model review on a real PR). The fleet's writer login is proven by its log rows landing.
+  - The `gRPC seam server ready` line noted under S15c now shows `tls: true` (#557).
+

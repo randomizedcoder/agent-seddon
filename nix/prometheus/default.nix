@@ -125,7 +125,8 @@ in
           sleep 1
         done
 
-        cat <<EOF
+        # Quoted: the text has backticks and no shell variables (the interpolations are Nix's).
+        cat <<'EOF'
 
       Prometheus is up.
         UI:      http://localhost:${port}        (Status → Targets to see scrape health)

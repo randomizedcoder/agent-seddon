@@ -6,6 +6,7 @@
 # 09). Mirrors the clickhouse/hyperdx/prometheus modules.
 #
 # Networking (Linux): runs with `--network host` so Grafana serves on host :3000
+# (`GRAFANA_PORT` overrides it, e.g. beside a host Grafana that already holds :3000)
 # and reaches Prometheus at 127.0.0.1:9090. Provisioning (the datasource + the
 # dashboard) is bind-mounted, so the "agent-seddon" dashboard appears on first
 # start. Anonymous Admin access is enabled for a friction-free *local* view — do
@@ -22,7 +23,7 @@ let
   # Fully-qualified so podman (whose short-name resolution is disabled on the
   # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
   image = "docker.io/${versions.grafanaImage}";
-  port = toString versions.grafanaPort;
+  defaultPort = toString versions.grafanaPort;
 
   provisioning = ./provisioning;
   dashboards = ./dashboards;
@@ -40,6 +41,7 @@ in
     text = ''
         set -euo pipefail
         ${c.pickRuntime}
+        port="''${GRAFANA_PORT:-${defaultPort}}"
 
         # The ClickHouse datasource reads as the read-only agent_viewer (S16); the
         # provisioning file expands $CLICKHOUSE_VIEWER_PASSWORD, which reaches the
@@ -57,13 +59,20 @@ in
           echo "==> container '${name}' already exists; (re)starting it"
           "$runtime" start "${name}" >/dev/null
         else
-          echo "==> starting Grafana (${image})"
-          # `--network host` (Linux): Grafana serves on host :${port} and reaches
+          # With `--network host` a port someone else holds (a host Grafana, say) makes
+          # the container exit at once, while the readiness probe below would get its
+          # answer from the other server. Refuse up front instead.
+          if curl -s -o /dev/null "http://localhost:$port/" 2>/dev/null; then
+            echo "grafana-up: port $port is already in use; set GRAFANA_PORT to a free port" >&2
+            exit 1
+          fi
+          echo "==> starting Grafana (${image}) on :$port"
+          # `--network host` (Linux): Grafana serves on host :$port and reaches
           # Prometheus at 127.0.0.1:9090 (the provisioned datasource).
           "$runtime" run -d \
             --name "${name}" \
             --network host \
-            -e GF_SERVER_HTTP_PORT="${port}" \
+            -e GF_SERVER_HTTP_PORT="$port" \
             -e GF_INSTALL_PLUGINS=grafana-clickhouse-datasource \
             -e CLICKHOUSE_VIEWER_PASSWORD \
             -e GF_AUTH_ANONYMOUS_ENABLED=true \
@@ -76,7 +85,12 @@ in
 
         echo -n "==> waiting for Grafana to be ready"
         for _ in $(seq 1 60); do
-          if curl -sf -o /dev/null "http://localhost:${port}/api/health" 2>/dev/null; then
+          if [ "$("$runtime" inspect -f '{{.State.Running}}' "${name}")" != true ]; then
+            echo " exited" >&2
+            echo "grafana-up: container '${name}' stopped; see: $runtime logs ${name}" >&2
+            exit 1
+          fi
+          if curl -sf -o /dev/null "http://localhost:$port/api/health" 2>/dev/null; then
             echo " ready"
             break
           fi
@@ -87,7 +101,7 @@ in
         cat <<EOF
 
       Grafana is up.
-        UI:        http://localhost:${port}   (anonymous Admin; Dashboards → agent-seddon)
+        UI:        http://localhost:$port   (anonymous Admin; Dashboards → agent-seddon)
         Datasource + dashboard are provisioned from ${provisioning}
 
       Make sure Prometheus is up (nix run .#prometheus-up) and the agent is running

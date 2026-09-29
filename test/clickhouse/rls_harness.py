@@ -143,6 +143,15 @@ MATRIX = (
          distinct_users(" SETTINGS SQL_tenant_id = 'rls-a'' OR ''1''=''1'"), ()),
     Case("adversarial_reader_cannot_read_other_tenant_auth_events", "agent_reader", "reader",
          auth_users(f" WHERE user = '{TENANT_B}' SETTINGS SQL_tenant_id = '{TENANT_A}'"), ()),
+    # adversarial: rows written outside a scope (user = '') stay hidden from a reader
+    # that binds no tenant, or binds the empty one (found live on l2, S18). Counted,
+    # since the row matcher drops empty lines.
+    Case("adversarial_reader_without_tenant_cannot_read_unscoped_rows", "agent_reader", "reader",
+         "SELECT count() FROM agent.agent_logs", ("0",)),
+    Case("adversarial_reader_empty_tenant_cannot_read_unscoped_rows", "agent_reader", "reader",
+         "SELECT count() FROM agent.agent_logs SETTINGS SQL_tenant_id = ''", ("0",)),
+    Case("positive_viewer_reads_unscoped_rows", "agent_viewer", "viewer",
+         "SELECT count() FROM agent.agent_logs WHERE user = ''", ("1",)),
     # corner: an unproven refusal ('' tenant) is visible to operators, never to a tenant
     Case("corner_unproven_auth_refusal_hidden_from_reader", "agent_reader", "reader",
          auth_users(" SETTINGS SQL_tenant_id = ''"), ()),
@@ -159,6 +168,7 @@ SEED = f"""
 INSERT INTO agent.agent_events (user, session_id) VALUES ('{TENANT_A}', 's1'), ('{TENANT_B}', 's1');
 -- ts must be recent: the table's 400-day TTL drops a default (1970) row on insert.
 INSERT INTO agent.agent_auth_events (ts, user, event, reason) VALUES (now64(3), '{TENANT_A}', 'login', ''), (now64(3), '{TENANT_B}', 'authz_deny', 'missing_permission'), (now64(3), '', 'verify_fail', 'no_token');
+INSERT INTO agent.agent_logs (ts, user, session_id, message) VALUES (now64(3), '', '', 'process log'), (now64(3), '{TENANT_A}', 's1', 'tenant log');
 INSERT INTO agent.agent_turn_digests (user_id, session_id) VALUES ('{TENANT_A}', 's1'), ('{TENANT_B}', 's1');
 CREATE TABLE IF NOT EXISTS default.rls_probe (x UInt8) ENGINE = MergeTree ORDER BY x;
 INSERT INTO default.rls_probe VALUES (1);

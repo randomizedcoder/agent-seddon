@@ -328,5 +328,29 @@ class HarnessMatrix(unittest.TestCase):
         self.assertEqual(refused, {"default", "agent_writer", "agent_reader", "agent_viewer"})
 
 
+class SchemaPolicies(unittest.TestCase):
+    """Static checks on the tenant row policies in nix/clickhouse/schema.sql."""
+
+    SCHEMA = Path(os.environ.get("CH_SCHEMA", Path(__file__).resolve().parents[2] / "nix/clickhouse/schema.sql"))
+    POLICY = re.compile(r"CREATE ROW POLICY (.*?) (tenant_iso_\w+)\s+ON \S+\s+USING (.*?) TO agent_reader;")
+
+    def policies(self):
+        found = self.POLICY.findall(self.SCHEMA.read_text())
+        self.assertGreaterEqual(len(found), 12, "tenant policies parsed")
+        return found
+
+    def test_adversarial_every_tenant_policy_excludes_the_empty_tenant(self):
+        for _, name, using in self.policies():
+            with self.subTest(name):
+                col = using.split(" ", 1)[0]
+                self.assertIn(f"{col} != ''", using)
+
+    def test_positive_tenant_policies_replace_on_reapply(self):
+        # IF NOT EXISTS would leave an old, looser policy in place on a live database.
+        for mode_, name, _ in self.policies():
+            with self.subTest(name):
+                self.assertEqual(mode_, "OR REPLACE")
+
+
 if __name__ == "__main__":
     unittest.main()
