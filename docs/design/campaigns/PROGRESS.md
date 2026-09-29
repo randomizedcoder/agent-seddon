@@ -401,6 +401,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-29 | CP-06 close-out (`docs/cp-06-closeout` @ `6a633f3f`, docs only): `nix flake check` on the committed ref | green — `all checks passed!`, 73 checks, first pass (code outputs cached from the #569 gate) |
 | 2026-09-29 | CP-08: `nix flake check "git+file://…/wt-cp08?ref=refs/heads/campaigns/cp-08"` (@ `1073babb`), first pass | **red in `mt-audit` only** (every other check built): 9 `[unclassified]` findings, one per new `agent_campaign_*` family — the auditor reconciles `agent-metrics` against `test/mt-audit/manifest.toml`, which the plan did not list. Classified in the next commit (7 `attributable`, 2 `health`); `nix run .#mt-audit -- --gate` clean |
 | 2026-09-29 | CP-08: `nix flake check "git+file://…/wt-cp08?ref=refs/heads/campaigns/cp-08"` (@ `bc2ad567`: the manifest fix on top of the smoke-verified tree), second pass, quiet host (load ≈ 1) | green — `all checks passed!`, 73 `checks.x86_64-linux.*` derivations checked, first attempt (code outputs cached from the first pass) |
+| 2026-09-29 | CP-08 close-out (`docs/cp-08-closeout` @ `970b11bb`, docs only): `nix flake check` on the committed ref | green — `all checks passed!`, 73 checks, first pass (code outputs cached from the #574 gate) |
 
 ## Open questions / blockers
 
