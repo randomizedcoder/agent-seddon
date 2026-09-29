@@ -16,7 +16,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ✅ | #553 |
 | CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ✅ | #561 (poller), #569 (worker, `SubprocessExec` / `InProcessExec`, `campaign-e2e`) |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |
-| CP-08 | Metrics, ClickHouse events, component doc | — | 🟡 | #574 |
+| CP-08 | Metrics, ClickHouse events, component doc | — | ✅ | #574 |
 | CP-09 | gRPC `CampaignService` (`scoped`), mt-audit, constants | — | ⬜ | — |
 | CP-10 | Merge webhook, re-run on "changes requested", fleet auto-review | — | ⬜ | — |
 
@@ -225,3 +225,37 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   index over its worktree (today the repo root); the scheduler child's identical lock problem;
   the git root being the process cwd; the level-1 double approval; "changes requested" re-runs
   and the merge webhook (CP-10); per-repo forge / git cards (RK-02).
+- **2026-09-29 — CP-08 (#574).** Observability. `agent_core::campaign::EventSink` (synchronous,
+  after-commit, never fails) on both stores: `MemCampaigns::with_sink` emits after the
+  clone-mutate-swap with the lock released, `PgCampaigns::with_sink` in `Tx::commit` after
+  `COMMIT` (`INSERT_EVENT … RETURNING event_id`; the two reap statements return `campaign_id`),
+  so every committed `task_events` row is mirrored in write order with its campaign and a
+  rolled-back write mirrors nothing. `TelemetryHandle` is the sink (`record_campaign_event`):
+  one `agent_events` row per event, `kind = campaign`, `session_id = campaign-<id>`, `user` =
+  tenant, `role` = the writer's class (`actor_class` folds `worker:<owner>` to `worker`, so the
+  lease token is never persisted), `content` = the event as JSON through the shared redaction
+  (`detail` ≤ 8 KiB, the row ≤ 16 KiB), `tool_call_id` = the task; the CLI installs the process
+  handle at every store open (verbs, the driver backend, the `--run-task` child) and the
+  store-only verb path now flushes the handle before it returns. Metrics are recorded by the
+  driver process from the tick report through `TickObserver` (`agent-campaign` stays free of
+  `agent-metrics`) → `agent_runtime::campaign_metrics::MetricsObserver` → nine `agent_campaign_*`
+  families in `agent-metrics`: `tick_seconds`, `tick_errors_total` (health, label-less) and,
+  under `tenant`, `nodes_total{kind,state}`, `attempts_total{kind,outcome,model}`,
+  `tokens_total{kind,direction}`, `claims_total`, `leases_lost_total`, `plans_released_total`,
+  `polls_total{outcome}`; `Settled` carries the leaf's latest `work` attempt's tokens and model
+  (read back after settling, so a `subprocess` worker counts), `PlanReport` the planner's model.
+  Funnels: tenant `safe_segment`-validated and admitted into the shared tenant LRU
+  (`TenantSeries::Campaign`), `model` folded to `other` / `unknown`, tick seconds clamped, token
+  counts clamped ≥ 0, a zero add mints no series; the families are classified in the mt-audit
+  manifest (7 `attributable`, 2 `health`). Deviations from `04-executor.md`, recorded there under
+  "As built in CP-08": `attempts_total` gains `model`, `tokens_total` gains `direction`;
+  `plans_released_total`, `polls_total`, `tick_errors_total` added; `nodes_total` counts the plan
+  phase's outcomes only. Docs: `docs/components/campaigns.md` §Observability, the metric census
+  §G, the ClickHouse schema comment. Tests: T17 — sink rows as conformance on both tiers
+  (`mem::t17` / `pg::t17`, 6 rows), 9 ClickHouse row rows, 8 family rows, 11 bridge rows, T11 +4.
+  Gate: `pg-integration` 252; `nix run .#bench -- -p agent-metrics` under the bumped ceilings; the
+  real-binary smoke (Postgres + ClickHouse + a `/metrics` scrape: 12 rows over six writer classes,
+  no token anywhere) which found the verb-path flush; `nix flake check` green on the committed
+  ref (second pass: the first was red in `mt-audit` alone, the unclassified families). Deferred
+  (PROGRESS "Open questions"): the worker never labels its `work` attempt with a model
+  (`model="unknown"` until it does); a `MeteredCampaigns` store-op decorator.
