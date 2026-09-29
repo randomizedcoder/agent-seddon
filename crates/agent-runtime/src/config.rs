@@ -4848,14 +4848,10 @@ mod tests {
         #[case] content: Option<&str>,
         #[case] want: std::result::Result<&str, &str>,
     ) {
-        let dir = std::env::temp_dir().join(format!(
-            "s16-pw-{}-{}",
-            std::process::id(),
-            content.map_or(0, str::len)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // A unique dir per case: the missing-file and empty-file cases once shared one
+        // (both "length 0") and deleted each other's file when run in parallel.
+        let dir = agent_testkit::tempdir();
         let file = dir.join("writer.password");
-        let _ = std::fs::remove_file(&file);
         if let Some(c) = content {
             std::fs::write(&file, c).unwrap();
         }

@@ -892,4 +892,9 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Not verified live: a new review draft written by the restarted fleet (that would spend a
     model review on a real PR). The fleet's writer login is proven by its log rows landing.
   - The `gRPC seam server ready` line noted under S15c now shows `tls: true` (#557).
+  - The gate for this PR found two failures that were already on main, and this PR fixes both:
+    - S16's `telemetry_password_file_cases` test raced with itself. The missing-file case and
+      the empty-file case built the same temp dir name, so when run in parallel one deleted
+      the other's file. Each case now gets its own `agent_testkit::tempdir()`.
+    - `crates/agent-grpc/src/transport.rs` from #555 was not rustfmt-clean.
 
