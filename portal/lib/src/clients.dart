@@ -9,6 +9,7 @@ import 'gen/agent/v1/llm_pool.pbgrpc.dart';
 import 'gen/agent/v1/metrics_proxy.pbgrpc.dart';
 import 'gen/agent/v1/prompt.pbgrpc.dart';
 import 'gen/agent/v1/review_fleet.pbgrpc.dart';
+import 'gen/agent/v1/role.pbgrpc.dart';
 import 'gen/agent/v1/session_registry.pbgrpc.dart';
 import 'gen/agent/v1/upstream.pbgrpc.dart';
 import 'transport/channel_factory.dart';
@@ -38,9 +39,13 @@ class PortalClients {
   final ClientChannel fleetChannel;
   final List<ClientInterceptor> interceptors;
 
-  // Sign-in (`Issuers` / `Begin` / `Exchange` / `Refresh` / `WhoAmI` / `Logout`).
+  // Sign-in (`Issuers` / `Begin` / `Exchange` / `Refresh` / `WhoAmI` / `Logout`),
+  // and the Access tab's role bindings and sessions.
   late final AuthServiceClient auth =
       AuthServiceClient(gatewayChannel, interceptors: interceptors);
+  // The operator-defined role cards (Access tab, security-hardening S22).
+  late final RoleServiceClient roles =
+      RoleServiceClient(gatewayChannel, interceptors: interceptors);
 
   late final PromptServiceClient prompts = PromptServiceClient(gatewayChannel, interceptors: interceptors);
   late final MetricsProxyServiceClient metrics =

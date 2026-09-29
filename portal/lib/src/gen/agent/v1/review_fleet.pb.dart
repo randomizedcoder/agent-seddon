@@ -800,6 +800,8 @@ class ReviewSummary extends $pb.GeneratedMessage {
     $core.int? additions,
     $core.int? deletions,
     $core.String? status,
+    $core.Iterable<$core.String>? requestedBy,
+    $core.String? approvedBy,
   }) {
     final result = create();
     if (reviewId != null) result.reviewId = reviewId;
@@ -813,6 +815,8 @@ class ReviewSummary extends $pb.GeneratedMessage {
     if (additions != null) result.additions = additions;
     if (deletions != null) result.deletions = deletions;
     if (status != null) result.status = status;
+    if (requestedBy != null) result.requestedBy.addAll(requestedBy);
+    if (approvedBy != null) result.approvedBy = approvedBy;
     return result;
   }
 
@@ -843,6 +847,8 @@ class ReviewSummary extends $pb.GeneratedMessage {
     ..aI(9, _omitFieldNames ? '' : 'additions', fieldType: $pb.PbFieldType.OU3)
     ..aI(10, _omitFieldNames ? '' : 'deletions', fieldType: $pb.PbFieldType.OU3)
     ..aOS(11, _omitFieldNames ? '' : 'status')
+    ..pPS(12, _omitFieldNames ? '' : 'requestedBy')
+    ..aOS(13, _omitFieldNames ? '' : 'approvedBy')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -962,6 +968,22 @@ class ReviewSummary extends $pb.GeneratedMessage {
   $core.bool hasStatus() => $_has(10);
   @$pb.TagNumber(11)
   void clearStatus() => $_clearField(11);
+
+  /// Who asked for this review (security-hardening S19): `tenant/subject` of each
+  /// ReviewNow caller, at most 8; empty when the forge poller or Slack watcher started it.
+  @$pb.TagNumber(12)
+  $pb.PbList<$core.String> get requestedBy => $_getList(11);
+
+  /// Who approved the post (`tenant/subject`); empty until posted, or on a server
+  /// without auth.
+  @$pb.TagNumber(13)
+  $core.String get approvedBy => $_getSZ(12);
+  @$pb.TagNumber(13)
+  set approvedBy($core.String value) => $_setString(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasApprovedBy() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearApprovedBy() => $_clearField(13);
 }
 
 /// List persisted review drafts (review-fleet C14). All filters are optional AND-ed

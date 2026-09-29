@@ -62,12 +62,40 @@ the single-use `state`; the portal generates only the PKCE verifier. The portal 
 - Capability-aware controls: Fleet Approve (`approve:review`), draft edits (`write:review`),
   Review now (`trigger:fleet`), the enable switch (`write:fleet`); Router add / save / enable
   (`write:registry`) and delete (`delete:registry`). `perms_ref` tokens show everything.
-  There is no Roles page yet.
+  The Roles page came later, as the Access tab (S22, below).
 - The Agent tab's `OpenRequest.user` and `x-agent-user-id` carry the verified tenant (advisory).
 - Envoy's CORS `allow_headers` gains `authorization`, so the bearer survives the preflight; the
   rest of the Envoy hardening is S14.
 - Native desktop cannot redirect, so it shows an error rather than a sign-in button that goes
   nowhere. Reading the CLI's stored login (S12) there is a follow-up.
+
+**As built (S22): the Access tab.** [`access_page.dart`](../../../portal/lib/src/pages/access_page.dart)
+manages who may do what in the signed-in tenant, over the existing RPCs (no wire change):
+
+- **Bindings** (`ListBindings` / `PutBinding` / `DeleteBinding`): list, add, edit, delete. The
+  editor offers the four subject kinds, the built-in roles plus the tenant's role cards, an
+  expiry in days (blank keeps an existing one), and "keep their sessions" (off by default, so a
+  change that takes roles away signs people out now). The reply's `revoked_sessions` count is
+  shown. `PutBinding` runs inside the dialog, so a refusal keeps the draft on screen.
+- **Roles** (`RoleService`): the built-in names, then the operator-defined cards with a one-line
+  grant summary. Cards can be added, edited and deleted with `write:role` / `delete:role`. The
+  permission text is `*`, or `action:*` lines, or `action:resource` lines; the three wire
+  shapes cannot mix. A gateway with no role store (`UNIMPLEMENTED`) shows only the built-ins.
+- **Sessions** (`ListSessions` / `RevokeSession`): newest activity first, the caller's own
+  marked; revoking your own warns that it signs you out.
+- Refusals are worded from the status: `FailedPrecondition` shows the server's text (the
+  last-admin guard), and the opaque `PermissionDenied` lists the usual causes (a permission you
+  do not hold, a host-wide role, your own binding). Input is checked before sending (id charset
+  and `..`, 320-character subject, no control characters, ≤ 32 roles, ≤ 3650 days) for a faster
+  answer; the server still decides.
+- Navigation hides a destination whose `needs` pair the user lacks. Only Access has one
+  (`read:binding`); the other tabs already hide their controls.
+- The Fleet review detail shows S19's `requested_by` and `approved_by`.
+- Only the `role.*` and `review_fleet.*` Dart stubs were regenerated. A full `gen-dart` also
+  rewrites comments in 34 other files and adds unused stubs, so it is left for its own change.
+- Tests: `access_test.dart` has 53 spec rows (the completeness critic covers every `access.*`
+  key); `access_model_test.dart` has the tables for the pure checks; and there are three Fleet
+  attribution rows.
 
 ## Envoy hardening
 
