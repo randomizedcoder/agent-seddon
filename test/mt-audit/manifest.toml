@@ -149,14 +149,21 @@ class = "stateless"
 class = "stateless"
 
 # --- metric families (census docs/design/observability/01-metric-census.md) -------
-# attributable = carries a tenant/repo dimension (via a recorder view); §A/B/D/E.
-# health       = label-less by design (seam-health); §C/E-kept/F. The Rust
+# attributable = carries a tenant/repo dimension (via a recorder view); §A/B/D/E/G.
+# health       = label-less by design (seam-health); §C/E-kept/F/G-tick. The Rust
 #   negative_*_stay_label_less guards remain the runtime proof (asserted below).
 [metrics]
 attributable = [
   "agent_active",
   "agent_api_calls_total",
   "agent_cache_tokens_total",
+  "agent_campaign_attempts_total",
+  "agent_campaign_claims_total",
+  "agent_campaign_leases_lost_total",
+  "agent_campaign_nodes_total",
+  "agent_campaign_plans_released_total",
+  "agent_campaign_polls_total",
+  "agent_campaign_tokens_total",
   "agent_config_store_ops_total",
   "agent_context_messages",
   "agent_context_tokens",
@@ -187,6 +194,8 @@ health = [
   "agent_auth_verify_total",
   "agent_authz_decisions_total",
   "agent_cache_breakpoints_total",
+  "agent_campaign_tick_errors_total",
+  "agent_campaign_tick_seconds",
   "agent_config_store_op_seconds",
   "agent_content_blocks_dropped_total",
   "agent_content_blocks_total",
