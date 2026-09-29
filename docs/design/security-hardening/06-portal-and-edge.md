@@ -69,6 +69,27 @@ the single-use `state`; the portal generates only the PKCE verifier. The portal 
 - Native desktop cannot redirect, so it shows an error rather than a sign-in button that goes
   nowhere. Reading the CLI's stored login (S12) there is a follow-up.
 
+**As built (S23): native desktop sign-in through the CLI.** The desktop app borrows the `agent`
+CLI's stored login instead of taking a redirect
+([`cli_login.dart`](../../../portal/lib/src/auth/cli_login.dart),
+[`platform_io.dart`](../../../portal/lib/src/auth/platform_io.dart)):
+
+- `AuthState` gets a `CliLogin` on native only. It runs `agent token --json` (`PORTAL_AGENT_BIN`,
+  default `agent`; `PORTAL_AUTH_ISSUER` as `--issuer`; `PORTAL_AGENT_CONFIG` as `--config`) with a
+  30 s timeout that kills the process. It confirms the token with `WhoAmI` and holds it in memory
+  only.
+- The output is checked before use: one JSON object of at most 64 KiB; a token of token68
+  characters (no space, CR or LF, so it cannot split the `authorization` header) of at most
+  16 KiB; a positive `expires_at`; a plain issuer name.
+- "Refresh" runs the command again 20 s before expiry, inside the CLI's 30 s refresh window so
+  the CLI really refreshes, and never sooner than 10 s, so a nearly spent token cannot make it
+  spin. Only the CLI spends the refresh handle.
+- Signing out forgets the token here and sends no `Logout`, so the terminal stays signed in.
+- The sign-in page on native says to run `agent login`, with a Try again button, instead of
+  issuer buttons. Exit 2 and 3 show the CLI's own message.
+- If there is no CLI login, `auto` mode still falls back to asking `Issuers`, and runs
+  anonymously when the agent offers no sign-in, as before.
+
 **As built (S22): the Access tab.** [`access_page.dart`](../../../portal/lib/src/pages/access_page.dart)
 manages who may do what in the signed-in tenant, over the existing RPCs (no wire change):
 

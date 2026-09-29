@@ -163,3 +163,120 @@ async fn adversarial_browser_login_refuses_a_plaintext_remote_endpoint() {
         "{err:#}"
     );
 }
+
+// ── `agent token` (S23) ─────────────────────────────────────────────────────
+
+const FAR: u64 = 4_000_000_000;
+
+fn stored_login(issuer: &str, expires_at: u64) -> StoredLogin {
+    StoredLogin {
+        endpoint: "http://127.0.0.1:1".into(),
+        issuer: issuer.into(),
+        access_token: format!("tok-{issuer}"),
+        expires_at,
+        refresh_handle: "handle".into(),
+        session_expires_at: expires_at.saturating_add(3600),
+    }
+}
+
+/// A token dir holding a login for each of `issuers`.
+fn token_dir_with(issuers: &[&str], expires_at: u64) -> PathBuf {
+    let dir = agent_testkit::tempdir().join("tokens");
+    for issuer in issuers {
+        TokenFile::in_dir(&dir, issuer)
+            .expect("name")
+            .save(&stored_login(issuer, expires_at))
+            .expect("save");
+    }
+    dir
+}
+
+#[rstest]
+#[case::positive_the_only_login(&["google"], None, false, Ok("tok-google"))]
+#[case::positive_named(&["google", "okta"], Some("okta"), false, Ok("tok-okta"))]
+#[case::negative_none_stored(&[], None, false, Err(2))]
+#[case::negative_named_but_absent(&["google"], Some("okta"), false, Err(2))]
+#[case::corner_several_need_a_name(&["google", "okta"], None, false, Err(1))]
+#[case::adversarial_traversal_name(&["google"], Some("../google"), false, Err(1))]
+#[tokio::test]
+async fn token_cases(
+    #[case] issuers: &[&str],
+    #[case] wanted: Option<&str>,
+    #[case] json: bool,
+    #[case] want: Result<&str, i32>,
+) {
+    let dir = token_dir_with(issuers, FAR);
+    let got = token_in(&dir, None, wanted, json).await;
+    match (got, want) {
+        (Ok(got), Ok(want)) => assert_eq!(got, want),
+        (Err(got), Err(code)) => assert_eq!(got.exit_code(), code, "{got}"),
+        (got, want) => panic!("got {got:?}, want {want:?}"),
+    }
+}
+
+#[tokio::test]
+async fn positive_token_json_names_the_login() {
+    let dir = token_dir_with(&["google"], FAR);
+    let out = token_in(&dir, None, None, true).await.expect("token");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("one JSON object");
+    assert_eq!(v["access_token"], "tok-google");
+    assert_eq!(v["expires_at"], FAR);
+    assert_eq!(v["issuer"], "google");
+    assert_eq!(v["endpoint"], "http://127.0.0.1:1");
+    assert!(!out.contains('\n'), "one line");
+}
+
+#[tokio::test]
+async fn corner_config_login_issuer_is_used_before_the_directory() {
+    // Two stored logins would be ambiguous; the config names `google`.
+    let dir = token_dir_with(&["google", "okta"], FAR);
+    let out = token_in(&dir, Some(&config(GOOGLE)), None, false)
+        .await
+        .expect("token");
+    assert_eq!(out, "tok-google");
+}
+
+#[tokio::test]
+async fn boundary_stale_token_refreshes_and_an_unreachable_agent_is_transient() {
+    // Expired now: it must be refreshed, and the agent at :1 is not there.
+    let dir = token_dir_with(&["google"], 1);
+    let err = token_in(&dir, None, None, false)
+        .await
+        .expect_err("no agent to refresh at");
+    assert_eq!(err.exit_code(), 1, "{err}");
+    assert!(!err.to_string().contains("tok-google"), "{err}");
+}
+
+#[tokio::test]
+async fn adversarial_world_readable_token_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = token_dir_with(&["google"], FAR);
+    let path = dir.join("google.json");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let err = token_in(&dir, None, None, true).await.expect_err("refused");
+    assert_eq!(err.exit_code(), 1);
+    assert!(err.to_string().contains("readable by others"), "{err}");
+    assert!(
+        !err.to_string().contains("tok-google"),
+        "no token in the error"
+    );
+}
+
+#[test]
+fn adversarial_stored_logins_skips_names_login_never_writes() {
+    let dir = token_dir_with(&["google"], FAR);
+    std::fs::write(dir.join("bad name.json"), "{}").expect("write");
+    std::fs::write(dir.join("-x.json"), "{}").expect("write");
+    std::fs::write(dir.join("notes.txt"), "x").expect("write");
+    assert_eq!(stored_logins(&dir), vec!["google".to_string()]);
+    assert!(stored_logins(&dir.join("absent")).is_empty());
+}
+
+#[rstest]
+#[case::positive_failed(TokenError::Failed("x".into()), 1)]
+#[case::negative_not_signed_in(TokenError::NotSignedIn("x".into()), 2)]
+#[case::corner_ended(TokenError::Ended("x".into()), 3)]
+fn token_exit_codes(#[case] err: TokenError, #[case] code: i32) {
+    assert_eq!(err.exit_code(), code);
+    assert_eq!(err.to_string(), "x");
+}

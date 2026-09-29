@@ -47,9 +47,16 @@ knobs (`--dart-define`, wired in `nix/portal/default.nix`):
 | `PORTAL_AUTH` | `auto` | `auto` signs in when the agent offers it; `on` insists; `off` never asks |
 | `PORTAL_AUTH_ISSUER` | empty | offer only this login issuer when the agent lists it |
 | `PORTAL_REDIRECT_URI` | the page's own address | where the IdP returns; must be in `[auth] redirect_uris` |
+| `PORTAL_AGENT_BIN` | `agent` | native only: the `agent` CLI whose stored login the app borrows |
+| `PORTAL_AGENT_CONFIG` | empty | native only: the CLI's `--config` (empty: its default, or none) |
 
-The native desktop build cannot redirect to an IdP; run it with `PORTAL_AUTH=off` against a
-loopback agent.
+The native desktop build cannot take an IdP redirect, so it signs in with the `agent` CLI's stored
+login (security-hardening S23): run `agent login` in a terminal, then start the app. It runs
+`agent token --json` (passing `PORTAL_AUTH_ISSUER` as `--issuer` when set), confirms the token
+with `WhoAmI`, and runs the command again 20 s before the token lapses. The CLI refreshes under its
+own lock, and the app never reads the token file. Signing out of the app leaves the terminal signed
+in (`agent logout` ends both). Against a loopback agent without auth, `PORTAL_AUTH=off` still
+skips all of this.
 
 ### The grpc-web bridge (security-hardening S14)
 

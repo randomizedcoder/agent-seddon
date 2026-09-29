@@ -10,6 +10,7 @@ import 'package:grpc/service_api.dart';
 import '../gen/agent/v1/auth.pbgrpc.dart';
 import 'auth_platform.dart';
 import 'capabilities.dart';
+import 'cli_login.dart';
 import 'pkce.dart';
 
 /// `--dart-define=PORTAL_AUTH=`: `auto` (default) signs in when the agent offers
@@ -59,6 +60,13 @@ class SignedIn {
 /// never negative.
 int refreshDelaySecs(int expiresAt, int now) => max(0, expiresAt - 60 - now);
 
+/// Seconds until a CLI session asks `agent token` again: 20 s before the token
+/// lapses, inside the CLI's own 30 s refresh window (`REFRESH_SKEW_SECS`), so the
+/// CLI refreshes rather than hand back the same token. Never sooner than 10 s,
+/// so a CLI that keeps answering with a nearly spent token is not re-run in a
+/// tight loop.
+int cliRefreshDelaySecs(int expiresAt, int now) => max(10, expiresAt - 20 - now);
+
 /// Browser sign-in for the portal (security-hardening S13b,
 /// docs/design/security-hardening/06-portal-and-edge.md).
 ///
@@ -69,6 +77,11 @@ int refreshDelaySecs(int expiresAt, int now) => max(0, expiresAt - 60 - now);
 /// trades the code at `Exchange`, strips the query from the address bar, and
 /// schedules a refresh one minute before the token lapses. A failed refresh
 /// signs out with a notice.
+///
+/// The native desktop cannot take a redirect; with a [cliLogin] it borrows the
+/// `agent` CLI's stored login instead (S23): the token comes from `agent token
+/// --json`, is confirmed with `WhoAmI`, and "refreshing" runs the command again.
+/// Signing out forgets it here and leaves the CLI's session alone.
 class AuthState extends ChangeNotifier {
   AuthState({
     required this.client,
@@ -79,6 +92,7 @@ class AuthState extends ChangeNotifier {
     int Function()? now,
     Timer Function(Duration, void Function())? schedule,
     this.random,
+    this.cliLogin,
   })  : _now = now ?? _unixNow,
         _schedule = schedule ?? Timer.new;
 
@@ -99,6 +113,13 @@ class AuthState extends ChangeNotifier {
 
   /// The verifier's source; null ⇒ `Random.secure()`.
   final Random? random;
+
+  /// The native desktop's source of agent tokens (`agent token --json`); null
+  /// on the web, which signs in in the browser.
+  final CliLogin? cliLogin;
+
+  /// Whether sign-in goes through the `agent` CLI (native desktop).
+  bool get usesCliLogin => cliLogin != null;
 
   AuthPhase phase = AuthPhase.checking;
   List<LoginIssuer> issuers = const [];
@@ -171,6 +192,15 @@ class AuthState extends ChangeNotifier {
   Future<void> start() async {
     if (mode == AuthMode.off) {
       _set(AuthPhase.off);
+      return;
+    }
+    if (cliLogin != null) {
+      final why = await _cliSignIn();
+      if (why == null) return;
+      // No usable CLI login: sign-in may be off at this agent (auto mode runs
+      // anonymously then); otherwise say what to do.
+      await _listIssuers();
+      if (phase == AuthPhase.signedOut) _set(AuthPhase.signedOut, error: why);
       return;
     }
     final q = platform.currentUri.queryParameters;
@@ -336,18 +366,52 @@ class AuthState extends ChangeNotifier {
     _refreshTimer?.cancel();
     final s = session;
     if (s == null) return;
+    final delay = cliLogin != null && s.refreshHandle.isEmpty
+        ? cliRefreshDelaySecs(s.expiresAt, _now())
+        : refreshDelaySecs(s.expiresAt, _now());
     _refreshTimer = _schedule(
-      Duration(seconds: refreshDelaySecs(s.expiresAt, _now())),
+      Duration(seconds: delay),
       () => unawaited(refresh()),
     );
   }
 
   /// Trade the refresh handle for a new token. Called by the timer; a refusal
-  /// ends the session with a notice.
+  /// ends the session with a notice. A CLI session asks the CLI again (it holds
+  /// the refresh handle, and refreshes under its own lock).
   Future<bool> refresh() async {
     final s = session;
     if (s == null) return false;
+    if (cliLogin != null && s.refreshHandle.isEmpty) {
+      final why = await _cliSignIn();
+      if (why == null) return true;
+      _clear();
+      expired = true;
+      _set(AuthPhase.signedOut, error: why);
+      return false;
+    }
     return _refreshWith(s.refreshHandle, quiet: false);
+  }
+
+  /// Sign in with the CLI's token; the reason when that did not work. The token
+  /// is kept in memory only: the CLI's file is where the login lives.
+  Future<String?> _cliSignIn() async {
+    try {
+      final t = await cliLogin!.token();
+      final me = await client.whoAmI(WhoAmIRequest(),
+          options: CallOptions(
+              metadata: {'authorization': 'Bearer ${t.accessToken}'}));
+      _refreshTimer?.cancel();
+      session = SignedIn(t.accessToken, t.expiresAt, '', me);
+      expired = false;
+      _scheduleRefresh();
+      _set(AuthPhase.signedIn);
+      return null;
+    } on CliLoginError catch (e) {
+      return e.message;
+    } on GrpcError catch (e) {
+      return 'The agent did not accept the CLI login (${e.codeName}). Run '
+          '`agent login` against this agent, then try again.';
+    }
   }
 
   Future<bool> _refreshWith(String handle, {required bool quiet}) async {
@@ -364,8 +428,17 @@ class AuthState extends ChangeNotifier {
     }
   }
 
-  /// Revoke the session at the agent (best effort) and forget it here.
+  /// Revoke the session at the agent (best effort) and forget it here. A CLI
+  /// session is only forgotten here: revoking it would sign the terminal out.
   Future<void> signOut() async {
+    if (cliLogin != null && (session?.refreshHandle.isEmpty ?? false)) {
+      _clear();
+      expired = false;
+      _set(AuthPhase.signedOut,
+          error: 'Signed out of this window. The CLI stays signed in until '
+              '`agent logout`.');
+      return;
+    }
     if (session != null) {
       try {
         await client.logout(LogoutRequest());

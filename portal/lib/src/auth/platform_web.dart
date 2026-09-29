@@ -1,6 +1,8 @@
 import 'package:web/web.dart' as web;
 
+import '../config.dart';
 import 'auth_platform.dart';
+import 'cli_login.dart';
 
 /// Web build: the browser's location, history and per-tab `sessionStorage`
 /// (cleared when the tab closes, never shared with other tabs).
@@ -30,3 +32,6 @@ class _WebAuthPlatform implements AuthPlatform {
   @override
   void remove(String key) => web.window.sessionStorage.removeItem(key);
 }
+
+/// Only the native desktop signs in through the CLI.
+CliLogin? createCliLogin(PortalConfig cfg) => null;
