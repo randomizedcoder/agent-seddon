@@ -996,3 +996,13 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   work). Measured 49% smaller config reads on the wire (35,078 B → 17,878 B), and compact output is the
   safer default (no incidental formatting of attacker-influenced field values). `always_print_primitive_fields`
   left `true`. Detail: `docs/design/rest-openapi/STATUS.md` (post-verification follow-up).
+- **Edge `jwt_authn` on the REST transcoder listener.** Closes the one residual from S14 #536 (the
+  REST/JSON listener `:8094` had deferred edge auth, relying on its loopback pin + the agent
+  `AuthLayer`). The rest listener now runs `jwt_authn` **after** `grpc_json_transcoder`, so the
+  transcoder's `:path` rewrite lets it reuse the same `UNAUTHENTICATED_PREFIXES` as the grpc-web
+  listeners (one source of truth, no second REST-path list). Fail-closed: an unmapped or un-rewritten
+  `/v1/…` path can't match a gRPC exempt prefix, so it hits the catch-all requires-token rule (401);
+  fail-open is impossible. Same `PORTAL_AUTH` gate, same JWKS provider; loopback pin retained as
+  defense-in-depth. Coordinated with the S14 session (no collision with in-flight S20 TLS/reload
+  work). Config-validated by the `portal-envoy` check across auth modes; behavioural 401/200 pending
+  l2 live-verify with `PORTAL_AUTH=on`. Detail: `docs/design/rest-openapi/STATUS.md` + gap-analysis §2.8.

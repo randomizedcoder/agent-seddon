@@ -179,13 +179,38 @@ body. The audit therefore passes while the surfaces above stay shared.
 
 ### 2.8 Portal and edge
 
-- No login; the portal hardcodes `x-agent-user-id: 'portal'`
-  ([agent_view_page.dart](../../portal/lib/src/pages/agent_view_page.dart):97, 107).
-- Envoy binds `0.0.0.0` on all three grpc-web listeners ([nix/portal/default.nix](../../nix/portal/default.nix):191, 278, 365),
-  CORS `allow_origin_string_match: prefix: "*"` (:258, 345, 432), and `allow_headers` includes the
-  identity headers but **not** `authorization` (:260, 347, 434). No `jwt_authn` / `ext_authz` filter.
-  A browser on the LAN can therefore assert any tenant, and a bearer token could not be forwarded
-  even if the portal sent one.
+> **Update (closed by the security-hardening track).** Every item below was fixed after this
+> gap was first written; it is retained with strikethroughs for provenance. The edge is now
+> authenticated (`jwt_authn`), loopback-by-default, exact-origin CORS, and the identity header is
+> advisory (the agent takes the tenant from the verified token). See
+> [`security-hardening/`](../design/security-hardening/README.md) and
+> [`rest-openapi/`](../design/rest-openapi/README.md).
+
+- ~~No login; the portal hardcodes `x-agent-user-id: 'portal'`.~~ **Fixed.** The portal has browser
+  sign-in (OIDC/PKCE) — S13a **#528** (`Issuers`/`Begin`/`Exchange` RPCs) + S13b **#533** (the portal
+  UI, `portal/lib/src/auth/auth_state.dart`); the tenant now comes from the signed-in token, and
+  `'portal'` is only the unauthenticated fallback ([agent_view_page.dart](../../portal/lib/src/pages/agent_view_page.dart):96).
+  `x-agent-user-id` is advisory: the agent's `AuthLayer` derives identity from the verified token and
+  ignores a spoofed header (`WhoAmI` returns the token's tenant, not the header's — S16).
+- ~~Envoy binds `0.0.0.0`; CORS `prefix: "*"`; `allow_headers` omits `authorization`; no `jwt_authn`
+  / `ext_authz`.~~ **Fixed by S14 #536** ("Envoy hardening + `jwt_authn`"). The whole Envoy config
+  moved out of `nix/portal/default.nix` into the data-driven
+  [test/portal-envoy/portal_envoy.py](../../test/portal-envoy/portal_envoy.py) (validated by real
+  `envoy --mode validate`): default bind **`127.0.0.1`** (LAN bind is opt-in and IP-literal-checked),
+  **exact-origin** CORS (no wildcard), `authorization` in `allow_headers`, and an
+  `envoy.filters.http.jwt_authn` filter gated by `PORTAL_AUTH=auto|on|off` (`on` refuses to start
+  without JWKS), verifying against the agent's own JWK Set. A LAN browser can no longer assert an
+  arbitrary tenant, and the bearer is forwarded to the agent.
+- **Residual — now closed too: edge `jwt_authn` on the REST/JSON transcoder listener.** S14's
+  transcoder deferred edge auth on the REST listener (`:8094`), relying on its fixed loopback bind +
+  the agent `AuthLayer`. This is now closed: the REST listener runs `jwt_authn` **after** the
+  `grpc_json_transcoder` (which rewrites `:path` to the gRPC method path), reusing the same
+  `UNAUTHENTICATED_PREFIXES` as the grpc-web listeners — one source of truth, fail-closed (an unmapped
+  or un-rewritten `/v1/…` path never matches a gRPC exempt prefix, so it hits the catch-all
+  requires-token rule). The loopback pin stays as defense-in-depth. Config-validated across all auth
+  modes by the `portal-envoy` check (real `envoy --mode validate`); behavioural 401/200 pending live
+  verification on l2 with `PORTAL_AUTH=on` (the gate cannot run an auth-on REST call without the
+  fake-issuer harness).
 
 ### 2.9 Multi-session leftovers
 

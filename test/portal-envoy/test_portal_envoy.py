@@ -612,6 +612,11 @@ def rest_transcoder_of(cfg: dict) -> dict:
                if f["name"].endswith("grpc_json_transcoder"))["typed_config"]
 
 
+def rest_jwt_of(cfg: dict) -> dict:
+    return next(f for f in rest_hcm(cfg)["http_filters"]
+               if f["name"].endswith("jwt_authn"))["typed_config"]
+
+
 class LoadServices(unittest.TestCase):
     """The transcoder service list is derived from the descriptor build; the renderer
     fails closed on anything that is not a clean, populated agent.v1 list (untrusted
@@ -727,11 +732,44 @@ class RestTranscoder(unittest.TestCase):
         gw = cfg["static_resources"]["listeners"][0]["address"]["socket_address"]["address"]
         self.assertEqual(gw, "0.0.0.0", "the grpc-web listener still honours the host knob")
 
-    def test_corner_no_edge_jwt_on_rest_even_with_auth_on(self):
-        # The grpc-web listeners get jwt_authn; the loopback REST surface does not
-        # (the agent's AuthLayer verifies every transcoded call).
+    def test_positive_edge_jwt_on_rest_sits_after_the_transcoder(self):
+        # With auth on, the REST listener gains jwt_authn — AFTER grpc_json_transcoder,
+        # so the transcoder's :path rewrite lets it reuse the gRPC UNAUTHENTICATED_PREFIXES.
         names = [f["name"] for f in rest_hcm(self.render({}, self.JWT))["http_filters"]]
+        self.assertEqual(names, [
+            "envoy.filters.http.cors",
+            "envoy.filters.http.grpc_json_transcoder",
+            "envoy.filters.http.jwt_authn",
+            "envoy.filters.http.router"])
+
+    def test_corner_no_edge_jwt_on_rest_when_auth_off(self):
+        # Auth off (jwt is None): no edge check; the agent's AuthLayer still verifies.
+        names = [f["name"] for f in rest_hcm(self.render({}))["http_filters"]]
         self.assertNotIn("envoy.filters.http.jwt_authn", names)
+
+    def test_positive_rest_jwt_reuses_grpc_prefixes_and_forwards(self):
+        # One source of truth: the REST edge check reuses the same exempt prefixes as
+        # the grpc-web listeners (the transcoder rewrites :path to the gRPC method path),
+        # and forwards the bearer so the agent's AuthLayer still sees it.
+        jwt = rest_jwt_of(self.render({}, self.JWT))
+        rules = jwt["rules"]
+        self.assertEqual([r["match"]["prefix"] for r in rules[:-1]], list(E.UNAUTHENTICATED_PREFIXES))
+        self.assertTrue(all("requires" not in r for r in rules[:-1]))
+        self.assertTrue(jwt["providers"]["agent"]["forward"], "the agent must still see the bearer")
+
+    def test_adversarial_rest_catch_all_requires_a_token_no_open_prefix(self):
+        # Fail-closed: the only exempt prefixes are the gRPC ones (never "/", "/v1", or a
+        # REST prefix that would bypass the surface); every other path requires a token.
+        # So an unmapped or un-rewritten /v1/... path falls through to the "/" rule → 401.
+        jwt = rest_jwt_of(self.render({}, self.JWT))
+        rules = jwt["rules"]
+        exempt = [r["match"]["prefix"] for r in rules[:-1]]
+        self.assertNotIn("/", exempt)
+        self.assertFalse([p for p in exempt if p.startswith("/v1")],
+                         "no REST-path exemption may bypass the transcoded surface")
+        self.assertTrue(all(p.startswith(("/agent.", "/grpc.")) for p in exempt),
+                        "exempt prefixes are gRPC method paths only")
+        self.assertEqual(rules[-1], {"match": {"prefix": "/"}, "requires": {"provider_name": "agent"}})
 
     def test_positive_rest_reuses_the_gateway_cluster_no_duplicate(self):
         cfg = self.render({})
