@@ -37,10 +37,11 @@ use agent_core::campaign::{
     screen, truncate_chars, Actor, ActorClass, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
     CampaignBackend, CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete,
     Decomposed, Decomposition, EstSize, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign,
-    Owner, PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewOutcome,
-    Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
-    LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR,
-    MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
+    Owner, PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewNote,
+    ReviewOutcome, Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState,
+    CLARIFICATION_HEADER, LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER,
+    MAX_CHILDREN, MAX_ERROR, MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH,
+    MAX_TOUCHES,
 };
 use agent_core::{safe_segment, scan_for_injection, UserId};
 use async_trait::async_trait;
@@ -518,6 +519,17 @@ impl Tx {
         sqlx::query(sql::IDEM_EXISTS)
             .bind(&self.tenant)
             .bind(key.as_str())
+            .fetch_optional(&mut *self.conn)
+            .await
+            .map(|r| r.is_some())
+            .map_err(map_db)
+    }
+
+    /// Whether `review_note(AwaitingApproval)` already marked `task`.
+    async fn has_awaiting_mark(&mut self, task: TaskId) -> CampaignResult<bool> {
+        sqlx::query(sql::HAS_AWAITING_MARK)
+            .bind(&self.tenant)
+            .bind(task.0)
             .fetch_optional(&mut *self.conn)
             .await
             .map(|r| r.is_some())
@@ -1474,6 +1486,28 @@ impl CampaignStore for PgCampaigns {
         let task = tx.peek(task).await?;
         tx.commit().await?;
         Ok(task)
+    }
+
+    async fn review_note(&self, task: TaskId, note: ReviewNote) -> CampaignResult<bool> {
+        let mut tx = self.begin().await?;
+        let t = tx.lock(task).await?;
+        require_state(&t, TaskState::InReview)?;
+        if note.once() && tx.has_awaiting_mark(task).await? {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let detail = note.detail();
+        tx.event(
+            task,
+            Some(TaskState::InReview),
+            TaskState::InReview,
+            &Actor::Poller,
+            t.version,
+            detail,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn approve(

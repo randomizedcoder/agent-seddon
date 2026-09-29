@@ -99,6 +99,9 @@ pub(super) const LIST_CAMPAIGNS: &str = concat!(
 pub(super) const EVENTS: &str = "SELECT event_id, task_id, from_state, to_state, actor, version,
             detail::text AS detail, (EXTRACT(EPOCH FROM at) * 1000)::BIGINT AS at_ms
      FROM task_events WHERE tenant = $1 AND task_id = $2 ORDER BY event_id";
+/// Whether `review_note(AwaitingApproval)` already wrote its marker on `$2`.
+pub(super) const HAS_AWAITING_MARK: &str = "SELECT 1 FROM task_events
+     WHERE tenant = $1 AND task_id = $2 AND (detail->>'awaiting_pr_approval') = 'true' LIMIT 1";
 pub(super) const ATTEMPTS: &str =
     "SELECT attempt_id, task_id, kind, idem_key, prompt_hash, model, tokens_in, tokens_out,
             session_id, owner, outcome, pr_url, error,

@@ -89,6 +89,13 @@ impl CampaignStore for Recording {
     async fn resolve_review(&self, task: TaskId, outcome: ReviewOutcome) -> CampaignResult<Task> {
         self.inner.resolve_review(task, outcome).await
     }
+    async fn review_note(
+        &self,
+        task: TaskId,
+        note: agent_core::campaign::ReviewNote,
+    ) -> CampaignResult<bool> {
+        self.inner.review_note(task, note).await
+    }
     async fn approve(
         &self,
         task: TaskId,
@@ -282,6 +289,21 @@ impl Fx {
     fn log_entries(&self) -> Vec<(String, &'static str)> {
         self.log.lock().unwrap().clone()
     }
+}
+
+/// T13 `negative_noop_poller_no_store_calls`: the [`NoopPoller`] never touches
+/// the store, even with an `in_review` leaf waiting.
+#[tokio::test]
+async fn negative_noop_poller_no_store_calls() {
+    let fx = Fx::new();
+    let seed = fx.store("ta");
+    let (_, leaves) = ready_leaves(&*seed, 1).await;
+    agent_testkit::campaign::conformance::in_review(&*seed, leaves[0].task_id, &owner("w1"), 1)
+        .await;
+    let logged = fx.backend.with_tenant("ta").expect("open");
+    let report = NoopPoller.poll(logged, 20).await;
+    assert_eq!(report, PollReport::default());
+    assert!(fx.log_entries().is_empty(), "{:?}", fx.log_entries());
 }
 
 fn cfg(per_tenant_workers: usize, global_workers: usize) -> DriverConfig {

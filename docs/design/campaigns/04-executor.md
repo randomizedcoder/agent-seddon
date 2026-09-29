@@ -38,9 +38,9 @@ it on `MemCampaigns` with doubles: the tenants come from a `CampaignBackend`
 `with_tenant(t)` the bound store — the config store's `tenants()` counts config cards, which
 campaigns never write), the plan phase is a `TickPlanner` (`FactoryPlanner` builds a CP-03
 `Planner` per tenant per tick and runs the CLI's own loop: one `plannable` read, `plan_node` per
-node), the poll phase a `PrPoller` (`NoopPoller`, zeros and no store call, until CP-06's forge
-poller; the batch is the const `POLL_BATCH = 20` until `poll_batch` lands with it), the worker a
-`WorkerExec`. Deviations from the sketch above, each for a reason:
+node), the poll phase a `PrPoller` (the `ForgePoller` since CP-06a, below; `NoopPoller`, zeros
+and no store call, when no `[forge]` backend is configured; the batch is `[campaign] poll_batch`),
+the worker a `WorkerExec`. Deviations from the sketch above, each for a reason:
 
 - **The tick does not join its workers.** A leaf may legitimately run for `worker_timeout_secs`;
   a tick that waited on it would stop reaping and planning for every other tenant. The `JoinSet`
@@ -88,11 +88,12 @@ poller; the batch is the const `POLL_BATCH = 20` until `poll_batch` lands with i
   config load, before any store opens, naming the key — then builds the driver (`build_driver`:
   `[campaign]` keys → `DriverConfig`, tenants = `--tenant T`, else discovery under `[tenancy]
   per_tenant`, else `local`), prints `campaign: ticking every Ns — ^C to stop`, and one line per
-  tick `tick: tenants n  reaped n  released n  planned n  claimed n  dispatched n  failed n
-  errors n`; on `^C` / `SIGTERM` it drains for `worker_timeout_secs`. `run --once` is `tick()` +
-  `drain()` over the one tenant the verb's store is bound to, `enabled` ignored, printing
-  `reaped n  released n`, CP-04's per-node plan lines and `plan:` summary, then `claimed n
-  dispatched n  failed n  (workers: CP-06)`.
+  tick `tick: tenants n  reaped n  released n  polled n  merged n  closed n  planned n  claimed n
+  dispatched n  failed n  errors n` (the poll counts since CP-06a); on `^C` / `SIGTERM` it drains
+  for `worker_timeout_secs`. `run --once` is `tick()` + `drain()` over the one tenant the verb's
+  store is bound to, `enabled` ignored, printing `reaped n  released n`, `polled n  merged n
+  closed n  awaiting n  poll_errors n` (CP-06a), CP-04's per-node plan lines and `plan:` summary,
+  then `claimed n  dispatched n  failed n  (workers: CP-06)`.
 
 ## Dispatch
 
@@ -144,7 +145,7 @@ Nothing the worker writes to the store omits `AND claimed_by = $owner`.
 ## PR poller
 
 Per tenant per tick, `in_review` leaves oldest first, batch 20 (`tasks_review` index):
-`Forge::get_pr` (`crates/agent-core/src/lib.rs:4000`).
+`Forge::get_pr` (`crates/agent-core/src/lib.rs:4026`, the `Forge` trait).
 
 | Forge says | Policy | Result |
 |---|---|---|
@@ -156,6 +157,31 @@ Per tenant per tick, `in_review` leaves oldest first, batch 20 (`tasks_review` i
 | unknown state string | any | no transition (fail closed) |
 
 Lookups are keyed by `(tenant, task_id)`; a PR number is data on the row, never a key.
+
+**As built in CP-06a** (`agent_campaign::driver::poller::ForgePoller`,
+`crates/agent-campaign/src/driver/poller.rs`; wired by `build_driver` from `Agent::forge()`, the
+process `[forge]` backend — per-repo forge cards wait for RK-02). The table above holds, with
+these precisions:
+
+- **The approval gate lives in the poller, not the store.** `resolve_review` is the poller's verb
+  and neither tier reads policy for it; the poller reads the campaign root's `require_pr_approval`
+  (once per campaign per batch) and scans the leaf's events for `detail.pr_approved = true`.
+- **The two "stays" rows are `CampaignStore::review_note(task, ReviewNote)`**, a new seam method
+  that writes an event by `poller` with no transition and no version bump (`from = to =
+  in_review`, like `approve`'s `pr_approved` marker; `Conflict` on any other state):
+  `AwaitingApproval` → `detail.awaiting_pr_approval = true`, written **once per leaf** (a second
+  call returns `false`); `PollError(text)` → `detail.poll_error = <text>`, written every tick it
+  happens, the untrusted text cut to `MAX_ERROR` chars with NUL dropped (`jsonb` cannot hold it).
+  "Bounded retries per tick" is one `get_pr` per leaf per tick, never a loop.
+- **Every forge value is untrusted.** `get_pr` runs under a 30 s timeout
+  (`POLL_PR_TIMEOUT_SECS`); a timeout or error is a `poll_error`; a PR whose `number` is not the
+  row's is a `poll_error` and never a transition; the `state` string is matched exactly
+  (`open` / `merged` / `closed`) and anything else moves nothing, writes nothing and counts as an
+  error (the warning shows at most 40 escaped chars of it). "Changes requested" is `open` to the
+  poller (v1; CP-10).
+- **Counts.** `PollReport { polled, merged, closed, awaiting, errors }` per tenant; `[campaign]
+  poll_batch` (`20`, `1..=200`) sizes the batch. Without a `[forge]` backend the driver runs the
+  `NoopPoller` and warns once at build that leaves in review are never resolved.
 
 ## Dependencies
 
@@ -197,7 +223,8 @@ so one secret reference names the one Postgres. **CP-05** added the driver keys 
 tenants may together exceed one tenant's share), `sandbox` (validated, dispatched in CP-06) and
 `worker_timeout_secs` — each range-checked at load with an error under 200 chars naming the key
 (T11 `boundary_config_floor` / `boundary_config_ceiling` as `campaign_validate_cases` rows).
-`worker_model` and `poll_batch` land with the worker and the poller (CP-06). Component doc:
+**CP-06a** added `poll_batch` (`20`, `1..=200`, `campaign_validate_cases` rows); `worker_model`
+lands with the worker (CP-06b). Component doc:
 [`docs/components/campaigns.md`](../../components/campaigns.md).
 
 ## Observability (CP-08)

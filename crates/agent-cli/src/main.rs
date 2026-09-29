@@ -689,6 +689,7 @@ async fn main() -> Result<()> {
                                     .tenant()
                                     .to_string()]),
                                 planner,
+                                agent.forge(),
                             );
                             let mut out = stdout.lock();
                             return campaign_cli::run_driver_once(&ctx, &driver, &mut out)
@@ -698,7 +699,11 @@ async fn main() -> Result<()> {
                         // The resident loop, mirroring `--scheduler`: tick every
                         // `tick_secs` until interrupted, then drain the workers.
                         let driver = agent_runtime::campaign_driver::build_driver(
-                            &cfg, backend, tenants, planner,
+                            &cfg,
+                            backend,
+                            tenants,
+                            planner,
+                            agent.forge(),
                         );
                         let every = Duration::from_secs(cfg.tick_secs.max(1));
                         eprintln!(

@@ -417,6 +417,22 @@ CLI's `positive_run_once_reports_phases` / `positive_run_once_reaps_decomposing`
 | `adversarial_forge_merged_wrong_number` | forge returns a PR whose number differs from the row | no transition; error event |
 | `adversarial_cross_tenant_pr` | tenant B's PR number equals A's | lookups keyed by `(tenant, task_id)`; no cross-effect |
 
+**As built in CP-06a** (`crates/agent-campaign/src/driver/poller.rs` `tests`, over `MemCampaigns`
+and a scripted forge that answers a PR, an error or a hang per number): one test per row id.
+`corner_changes_requested` is `corner_changes_requested_open_untouched` (the forge's `open`
+state; a review verdict is not a PR state); `corner_pr_not_found` is the forge answering "no
+such pr" and asserts one call per tick, never a retry loop; `corner_forge_timeout` runs on the
+paused clock (`start_paused`, 30 s `POLL_PR_TIMEOUT_SECS`); `boundary_poll_batch` uses 28
+leaves (4 campaigns × 7, under `max_children`), not 100; `negative_closed` is
+`negative_closed_failed_blocks_dependents`. Added: `corner_forge_error_logged_continues` (a
+transport error, the next leaf still resolved), `negative_noop_poller_no_store_calls` (in
+`driver/tests.rs` beside the T11 recording store: the `NoopPoller` makes no store call), the
+`poll_batch` config bounds as `campaign_validate_cases` rows (`boundary_poll_batch_floor` /
+`_ceiling`), and the runtime wiring rows `positive_build_driver_with_forge_polls` /
+`corner_build_driver_without_forge_noop`. The `review_note` seam method has four T7 conformance
+rows on both tiers: `positive_review_note_awaiting_once`, `positive_review_note_error_bounded`,
+`negative_review_note_not_in_review`, `adversarial_review_note_huge_text`.
+
 ## T14 Multi-tenant isolation (CP-02 pg)
 
 | case | input / description | expected |

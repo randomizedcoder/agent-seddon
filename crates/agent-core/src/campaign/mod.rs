@@ -841,6 +841,47 @@ pub enum ReviewOutcome {
     Closed,
 }
 
+/// A poller observation on an `in_review` leaf that is **not** a verdict: an event
+/// only, no transition (like `approve` on `in_review`, which records
+/// `detail.pr_approved = true`). The markers a reader looks for in `detail`:
+///
+/// | marker | written by | meaning |
+/// |---|---|---|
+/// | `pr_approved: true` | `approve` (a human) | the PR may be merged by the poller's rule |
+/// | `awaiting_pr_approval: true` | `review_note(AwaitingApproval)` | the forge says merged but `require_pr_approval` holds and no `pr_approved` event exists; written once per leaf |
+/// | `poll_error: "<text>"` | `review_note(PollError)` | the forge call failed or answered nonsense; text capped at [`MAX_ERROR`] chars |
+/// | `review: "merged" \| "closed"` | `resolve_review` | the transition itself |
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewNote {
+    /// The PR is merged on the forge but the campaign policy still needs a human
+    /// `approve` before the leaf is `done`.
+    AwaitingApproval,
+    /// The forge lookup failed (transport, timeout, a PR number that does not match).
+    /// The text is untrusted (it can carry a server message) and is truncated.
+    PollError(String),
+}
+
+impl ReviewNote {
+    /// The marker written to `TaskEvent.detail` (see the table above). Untrusted
+    /// text is bounded to [`MAX_ERROR`] chars, and NUL is dropped because neither
+    /// `jsonb` nor `text` can hold it.
+    pub fn detail(&self) -> serde_json::Value {
+        match self {
+            ReviewNote::AwaitingApproval => serde_json::json!({"awaiting_pr_approval": true}),
+            ReviewNote::PollError(text) => {
+                let clean: String = text.chars().filter(|c| *c != '\0').collect();
+                serde_json::json!({"poll_error": truncate_chars(&clean, MAX_ERROR)})
+            }
+        }
+    }
+
+    /// Whether the marker is written at most once per leaf.
+    pub fn once(&self) -> bool {
+        matches!(self, ReviewNote::AwaitingApproval)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ListFilter {
     pub repo_id: Option<i64>,
@@ -904,6 +945,12 @@ pub trait CampaignStore: Send + Sync {
     async fn fail(&self, req: Fail) -> CampaignResult<Task>;
     /// Poller: `in_review → done | failed`; ancestors rolled up.
     async fn resolve_review(&self, task: TaskId, outcome: ReviewOutcome) -> CampaignResult<Task>;
+    /// Poller: record a [`ReviewNote`] on an `in_review` leaf as an event by
+    /// `poller`, with no transition and no version bump; `Conflict` on any other
+    /// state. `AwaitingApproval` is written once per leaf (`Ok(false)` when the
+    /// marker already exists); `PollError` is written every time, its text
+    /// truncated to [`MAX_ERROR`] chars. Returns whether an event was written.
+    async fn review_note(&self, task: TaskId, note: ReviewNote) -> CampaignResult<bool>;
 
     // -- (e) human ----------------------------------------------------------------
     /// `awaiting_approval → ready` (CAS on `expected_version`); on an `in_review`

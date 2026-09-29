@@ -93,6 +93,13 @@ impl CampaignStore for Overlay {
     async fn resolve_review(&self, task: TaskId, outcome: ReviewOutcome) -> CampaignResult<Task> {
         self.inner.resolve_review(task, outcome).await
     }
+    async fn review_note(
+        &self,
+        task: TaskId,
+        note: agent_core::campaign::ReviewNote,
+    ) -> CampaignResult<bool> {
+        self.inner.review_note(task, note).await
+    }
     async fn approve(
         &self,
         task: TaskId,

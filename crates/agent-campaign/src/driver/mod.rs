@@ -48,8 +48,10 @@ use tracing::Instrument;
 
 use crate::planner::{Planned, Planner, TickSummary};
 
-/// `in_review` leaves handed to the poller per tenant per tick (`04-executor.md`
-/// "PR poller"); the `poll_batch` config key lands with the poller in CP-06.
+pub mod poller;
+
+/// Default `in_review` leaves handed to the poller per tenant per tick
+/// (`04-executor.md` "PR poller"; the `[campaign] poll_batch` key).
 pub const POLL_BATCH: usize = 20;
 
 /// The driver's knobs, mapped from `[campaign]` by the runtime (`build_driver`).
@@ -71,6 +73,9 @@ pub struct DriverConfig {
     pub lease_secs: i64,
     /// How long a node may sit in `decomposing` before the reaper releases it.
     pub decomposing_max_secs: i64,
+    /// `in_review` leaves the poll phase hands the [`PrPoller`] per tenant per
+    /// tick.
+    pub poll_batch: usize,
 }
 
 impl Default for DriverConfig {
@@ -83,6 +88,7 @@ impl Default for DriverConfig {
             worker_timeout: Duration::from_secs(3_600),
             lease_secs: Policy::default().lease_secs,
             decomposing_max_secs: DECOMPOSING_MAX_SECS,
+            poll_batch: POLL_BATCH,
         }
     }
 }
@@ -160,16 +166,22 @@ pub struct PollReport {
     pub polled: usize,
     pub merged: usize,
     pub closed: usize,
+    /// Merged on the forge but waiting for a human `approve`
+    /// (`require_pr_approval`); the leaf stays `in_review`.
+    pub awaiting: usize,
+    /// Forge failures, timeouts, unknown states, store errors; each is logged.
     pub errors: usize,
 }
 
 /// The poll phase seam: resolve up to `batch` `in_review` leaves of `store`.
+/// The shipped implementation is [`poller::ForgePoller`].
 #[async_trait]
 pub trait PrPoller: Send + Sync {
     async fn poll(&self, store: Arc<dyn CampaignStore>, batch: usize) -> PollReport;
 }
 
-/// No forge yet (CP-06): reports zeros and never touches the store.
+/// No `[forge]` backend configured: reports zeros and never touches the store,
+/// so `in_review` leaves are never resolved (the runtime warns once at build).
 pub struct NoopPoller;
 
 #[async_trait]
@@ -305,6 +317,19 @@ impl TickReport {
 
     pub fn claimed(&self) -> usize {
         self.per_tenant.iter().map(|t| t.claimed).sum()
+    }
+
+    /// Every tenant's poll phase summed.
+    pub fn poll(&self) -> PollReport {
+        self.per_tenant
+            .iter()
+            .fold(PollReport::default(), |acc, t| PollReport {
+                polled: acc.polled + t.poll.polled,
+                merged: acc.merged + t.poll.merged,
+                closed: acc.closed + t.poll.closed,
+                awaiting: acc.awaiting + t.poll.awaiting,
+                errors: acc.errors + t.poll.errors,
+            })
     }
 
     /// Harvested workers that did not end `Ok`.
@@ -529,7 +554,10 @@ impl Driver {
                 tr.errors += 1;
             }
         }
-        tr.poll = self.poller.poll(Arc::clone(&store), POLL_BATCH).await;
+        tr.poll = self
+            .poller
+            .poll(Arc::clone(&store), self.cfg.poll_batch)
+            .await;
         tr.errors += tr.poll.errors;
         if self.cfg.plan_per_tick > 0 {
             let plan = self
