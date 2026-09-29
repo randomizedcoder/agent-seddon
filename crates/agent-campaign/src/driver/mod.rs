@@ -319,6 +319,19 @@ impl TickReport {
         self.per_tenant.iter().map(|t| t.claimed).sum()
     }
 
+    /// Every tenant's poll phase summed.
+    pub fn poll(&self) -> PollReport {
+        self.per_tenant
+            .iter()
+            .fold(PollReport::default(), |acc, t| PollReport {
+                polled: acc.polled + t.poll.polled,
+                merged: acc.merged + t.poll.merged,
+                closed: acc.closed + t.poll.closed,
+                awaiting: acc.awaiting + t.poll.awaiting,
+                errors: acc.errors + t.poll.errors,
+            })
+    }
+
     /// Harvested workers that did not end `Ok`.
     pub fn failed(&self) -> usize {
         self.harvested

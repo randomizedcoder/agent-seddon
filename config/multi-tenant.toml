@@ -133,3 +133,4 @@ per_tenant_workers = 2
 global_workers = 8
 sandbox = "subprocess"
 worker_timeout_secs = 3600
+poll_batch = 20

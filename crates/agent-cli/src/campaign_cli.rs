@@ -677,7 +677,8 @@ pub async fn run_driver_once(
     render_once(ctx, &report, &drained, out).await
 }
 
-/// The `run --once` report: `reaped n  released n`, the plan lines and `plan:`
+/// The `run --once` report: `reaped n  released n`, the poll phase (`polled n
+/// merged n  closed n  awaiting n  poll_errors n`), the plan lines and `plan:`
 /// summary CP-04 printed, then `claimed n  dispatched n  failed n  (workers:
 /// CP-06)`. A tenant the driver skipped is an error naming why (never the tenant).
 async fn render_once(
@@ -696,6 +697,15 @@ async fn render_once(
         out,
         "reaped {}  released {}",
         tenant.reaped, tenant.released
+    )?;
+    writeln!(
+        out,
+        "polled {}  merged {}  closed {}  awaiting {}  poll_errors {}",
+        tenant.poll.polled,
+        tenant.poll.merged,
+        tenant.poll.closed,
+        tenant.poll.awaiting,
+        tenant.poll.errors
     )?;
     match &tenant.plan {
         Some(plan) => render_plan(ctx, plan, out).await?,
@@ -746,12 +756,16 @@ async fn render_plan(ctx: &CampaignCtx, plan: &PlanReport, out: &mut dyn Write) 
 /// One line per resident tick: the counts only (the per-node plan lines go to the
 /// log at `info`, since a resident process prints for hours).
 pub fn render_resident_tick(report: &TickReport, out: &mut dyn Write) -> Result<()> {
+    let poll = report.poll();
     writeln!(
         out,
-        "tick: tenants {}  reaped {}  released {}  planned {}  claimed {}  dispatched {}  failed {}  errors {}",
+        "tick: tenants {}  reaped {}  released {}  polled {}  merged {}  closed {}  planned {}  claimed {}  dispatched {}  failed {}  errors {}",
         report.tenants.len(),
         report.reaped(),
         report.released(),
+        poll.polled,
+        poll.merged,
+        poll.closed,
         report.planned(),
         report.claimed(),
         report.dispatched.len(),
@@ -2366,19 +2380,23 @@ mod tests {
         let lines: Vec<&str> = once.lines().collect();
         assert_eq!(lines[0], "reaped 0  released 0", "{once}");
         assert_eq!(
-            lines[1],
+            lines[1], "polled 0  merged 0  closed 0  awaiting 0  poll_errors 0",
+            "{once}"
+        );
+        assert_eq!(
+            lines[2],
             format!("#{}  {:<12} → split (2 children)", root.0, "A"),
             "{once}"
         );
         assert!(
-            lines[2].starts_with("plan: 1 node(s); calls 1, repairs 0, tokens in "),
+            lines[3].starts_with("plan: 1 node(s); calls 1, repairs 0, tokens in "),
             "{once}"
         );
         assert_eq!(
-            lines[3], "claimed 0  dispatched 0  failed 0  (workers: CP-06)",
+            lines[4], "claimed 0  dispatched 0  failed 0  (workers: CP-06)",
             "{once}"
         );
-        assert_eq!(lines.len(), 4, "{once}");
+        assert_eq!(lines.len(), 5, "{once}");
 
         // The children were created by the split during the previous tick, so
         // they wait for this one; both execute (the last scripted answer repeats).
@@ -2477,16 +2495,20 @@ mod tests {
         assert_terminal_safe(&out);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "reaped 0  released 0", "{out}");
-        assert!(
-            lines[1].starts_with(&format!("#1  {:<12} → error (ready): ", "A")),
+        assert_eq!(
+            lines[1], "polled 0  merged 0  closed 0  awaiting 0  poll_errors 0",
             "{out}"
         );
         assert!(
-            lines[2].starts_with("plan: 1 node(s); calls 1, repairs 0,"),
+            lines[2].starts_with(&format!("#1  {:<12} → error (ready): ", "A")),
+            "{out}"
+        );
+        assert!(
+            lines[3].starts_with("plan: 1 node(s); calls 1, repairs 0,"),
             "{out}"
         );
         assert_eq!(
-            lines[3],
+            lines[4],
             "claimed 0  dispatched 0  failed 0  (workers: CP-06)"
         );
     }
@@ -2502,7 +2524,7 @@ mod tests {
         let out = go_once(&ctx, &driver).await.unwrap();
         assert_eq!(
             out,
-            "reaped 0  released 0\nplan: 0 node(s); calls 0, repairs 0, tokens in 0 out 0\nclaimed 0  dispatched 0  failed 0  (workers: CP-06)\n"
+            "reaped 0  released 0\npolled 0  merged 0  closed 0  awaiting 0  poll_errors 0\nplan: 0 node(s); calls 0, repairs 0, tokens in 0 out 0\nclaimed 0  dispatched 0  failed 0  (workers: CP-06)\n"
         );
     }
 
@@ -2532,7 +2554,7 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "reaped 0  released 1", "{out}");
         assert_eq!(
-            lines[1],
+            lines[2],
             format!("#{a}  {:<12} → split (2 children)", "A"),
             "{out}"
         );
@@ -2581,6 +2603,13 @@ mod tests {
                     tenant: "a".into(),
                     reaped: 1,
                     released: 2,
+                    poll: agent_campaign::PollReport {
+                        polled: 4,
+                        merged: 2,
+                        closed: 1,
+                        awaiting: 1,
+                        errors: 0,
+                    },
                     claimed: 3,
                     errors: 1,
                     ..agent_campaign::TenantReport::default()
@@ -2598,7 +2627,7 @@ mod tests {
         render_resident_tick(&report, &mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "tick: tenants 2  reaped 1  released 2  planned 0  claimed 3  dispatched 3  failed 0  errors 1\n"
+            "tick: tenants 2  reaped 1  released 2  polled 4  merged 2  closed 1  planned 0  claimed 3  dispatched 3  failed 0  errors 1\n"
         );
     }
 

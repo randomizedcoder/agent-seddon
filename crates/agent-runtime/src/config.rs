@@ -513,9 +513,9 @@ fn default_claim_ttl_secs() -> u64 {
 /// the `agent campaign …` CLI (CP-04) and the resident driver (CP-05). Empty `store`
 /// = off, and every `agent campaign` verb refuses with a hint. `"postgres"` reuses
 /// `[config_store] dsn_ref` for its DSN, like the scheduler and digest tiers — there
-/// is deliberately no `dsn_ref` here (`04-executor.md`). The worker's own keys
-/// (`worker_model`, `poll_batch`) land with the worker in CP-06. Validated at config
-/// load, so the CLI, `doctor` and `--check-config` all refuse a bad block.
+/// is deliberately no `dsn_ref` here (`04-executor.md`). The worker's own key
+/// (`worker_model`) lands with the worker in CP-06b. Validated at config load, so
+/// the CLI, `doctor` and `--check-config` all refuse a bad block.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
@@ -550,6 +550,10 @@ pub struct CampaignCfg {
     /// it the leaf is failed with cause `timeout`.
     #[serde(default = "default_campaign_worker_timeout_secs")]
     pub worker_timeout_secs: u64,
+    /// `in_review` leaves the forge poller checks per tenant per tick,
+    /// [`CampaignCfg::POLL_BATCH`] (CP-06a).
+    #[serde(default = "default_campaign_poll_batch")]
+    pub poll_batch: usize,
     /// Connection-pool ceiling for the campaign store's own pool (`postgres` only),
     /// [`CampaignCfg::POOL_MAX`].
     #[serde(default = "default_campaign_pool_max")]
@@ -593,6 +597,8 @@ impl CampaignCfg {
     pub const GLOBAL_WORKERS: std::ops::RangeInclusive<usize> = 1..=256;
     /// Accepted `worker_timeout_secs`.
     pub const WORKER_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 60..=86_400;
+    /// Accepted `poll_batch` (each leaf is one forge call per tick).
+    pub const POLL_BATCH: std::ops::RangeInclusive<usize> = 1..=200;
     /// Accepted `sandbox` values.
     pub const SANDBOXES: [&'static str; 2] = ["subprocess", "in_process"];
 
@@ -648,6 +654,14 @@ impl CampaignCfg {
                 self.worker_timeout_secs,
                 Self::WORKER_TIMEOUT_SECS.start(),
                 Self::WORKER_TIMEOUT_SECS.end()
+            ));
+        }
+        if !Self::POLL_BATCH.contains(&self.poll_batch) {
+            return Err(format!(
+                "`[campaign] poll_batch` = {} is outside {}..={}",
+                self.poll_batch,
+                Self::POLL_BATCH.start(),
+                Self::POLL_BATCH.end()
             ));
         }
         if !Self::POOL_MAX.contains(&self.pool_max) {
@@ -733,6 +747,7 @@ impl Default for CampaignCfg {
             global_workers: default_campaign_global_workers(),
             sandbox: default_campaign_sandbox(),
             worker_timeout_secs: default_campaign_worker_timeout_secs(),
+            poll_batch: default_campaign_poll_batch(),
             pool_max: default_campaign_pool_max(),
             planner_model: String::new(),
             plan_per_tick: default_campaign_plan_per_tick(),
@@ -745,6 +760,11 @@ impl Default for CampaignCfg {
 
 fn default_campaign_pool_max() -> u32 {
     4
+}
+/// `agent_campaign::POLL_BATCH` (the crate is an optional dependency, so the
+/// value is repeated here; `campaign_driver` pins the two equal).
+fn default_campaign_poll_batch() -> usize {
+    20
 }
 fn default_campaign_plan_per_tick() -> usize {
     4
@@ -4534,6 +4554,11 @@ mod tests {
     #[case::negative_plan_per_tick_33("plan_per_tick = 33", Err("plan_per_tick"))]
     #[case::boundary_max_repairs_5("max_repairs = 5", Ok(()))]
     #[case::negative_max_repairs_6("max_repairs = 6", Err("max_repairs"))]
+    // The CP-06a poller key (T13 `boundary_poll_batch`).
+    #[case::positive_poll_batch_bounds_ok("poll_batch = 1", Ok(()))]
+    #[case::boundary_poll_batch_ceiling_ok("poll_batch = 200", Ok(()))]
+    #[case::boundary_poll_batch_floor("poll_batch = 0", Err("poll_batch"))]
+    #[case::boundary_poll_batch_ceiling("poll_batch = 201", Err("poll_batch"))]
     // The CP-05 driver keys (T11 `boundary_config_floor` / `boundary_config_ceiling`).
     #[case::positive_driver_keys(
         r#"

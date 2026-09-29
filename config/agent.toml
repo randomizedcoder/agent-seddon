@@ -556,6 +556,10 @@ global_workers = 8
 sandbox        = "subprocess"
 # Wall clock per worker in seconds (60..=86400); past it the leaf fails `timeout`.
 worker_timeout_secs = 3600
+# `in_review` leaves the forge poller checks per tenant per tick (1..=200; one
+# [forge] `get_pr` each). Needs a [forge] backend: without one, leaves in review are
+# never resolved (the driver warns at start).
+poll_batch     = 20
 # Pool ceiling for the campaign store's own pool (1..=64).
 pool_max       = 4
 # Role routing: the provider the planner's decomposition calls use (a
