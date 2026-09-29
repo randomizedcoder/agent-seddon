@@ -17,7 +17,8 @@
 //! `run` (CP-05) drives the campaign driver (`agent_campaign::Driver`): `run
 //! --once` is one tick plus a drain over the `--tenant` (or `local`) tenant,
 //! `run` the resident loop `main.rs` ticks every `[campaign] tick_secs`. The
-//! hidden `--run-task` worker mode is a stub until CP-06 ([`run_task_stub`]).
+//! hidden `--run-task` worker mode (CP-06b) checks its owner token here
+//! ([`run_task_owner`]) before `main.rs` runs the leaf.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -26,8 +27,9 @@ use std::sync::Arc;
 use agent_campaign::display::{escape_terminal, letters, parse_letter, Letters};
 use agent_campaign::{DrainReport, Driver, PlanOutcome, PlanReport, Planned, Planner, TickReport};
 use agent_core::campaign::{
-    check_len, screen, truncate_chars, Actor, CampaignStore, ListFilter, NewCampaign, Policy, Task,
-    TaskId, TaskPath, TaskState, MAX_ANSWER, MAX_DETAIL_BYTES, MAX_GOAL, MAX_SOURCE_REF, MAX_TITLE,
+    check_len, screen, truncate_chars, Actor, CampaignStore, ListFilter, NewCampaign, Owner,
+    Policy, Task, TaskId, TaskPath, TaskState, MAX_ANSWER, MAX_DETAIL_BYTES, MAX_GOAL,
+    MAX_SOURCE_REF, MAX_TITLE,
 };
 use agent_core::safe_segment;
 use anyhow::{anyhow, bail, Context, Result};
@@ -44,20 +46,19 @@ pub const USAGE: &str = "usage: agent [--config PATH] campaign [--tenant SEG] <v
   retry <ref>                 requeue a failed or blocked node
   replan <ref>                discard a node's subtree and plan it again
   cancel <ref>                cancel a node and everything under it
-  run [--once]                drive campaigns: reap, poll, plan, claim (resident unless --once; needs [campaign] enabled)
+  run [--once]                drive campaigns: reap, poll, plan, claim, dispatch workers (resident unless --once; needs [campaign] enabled)
 
 <ref> is an id from `list`/`show` (`12`) or a letter path (`A`, `B.2`, `AB.1.3`).
 Letters are minted from the unfiltered listing, so `A` names the same campaign in
 `list`, `list --needs-attention` and `show`; scripts should use ids.
 Every verb runs as `user:local`; `--tenant SEG` scopes it to that tenant.";
 
-/// `agent --run-task` exit when the owner token is missing or not a path-safe
-/// segment: the worker never held a lease it could act on, so it touches nothing
-/// (`04-executor.md` "Worker protocol" step 1).
+/// `agent --run-task` exit when the lease was not this worker's at some point:
+/// the owner token is missing or not a path-safe segment (checked before any
+/// config or store is opened), the leaf is not `claimed` by it, or a heartbeat
+/// lost it (`04-executor.md` "Worker protocol"). Equals
+/// `agent_runtime::campaign_worker::LeafExit::LeaseLost.code()`.
 pub const EXIT_LEASE_LOST: i32 = 3;
-/// `agent --run-task` exit while the worker body is not implemented (CP-06): the
-/// owner was present, the store is untouched, the driver fails the leaf.
-pub const EXIT_NO_WORKER: i32 = 4;
 
 /// How many chars of a user token an error may echo (escaped).
 const ECHO_CHARS: usize = 40;
@@ -489,15 +490,14 @@ pub fn parse_task_id(s: &str) -> Result<TaskId> {
     }
 }
 
-/// The `--run-task` worker mode until CP-06 lands the worker body: the owner token
-/// comes through `AGENT_CAMPAIGN_OWNER` (never an argument); missing or not a
-/// path-safe segment ⇒ [`EXIT_LEASE_LOST`] before any config or store is opened;
-/// present ⇒ [`EXIT_NO_WORKER`]. The message never carries the token.
-pub fn run_task_stub(owner: Option<&str>) -> (i32, &'static str) {
-    match owner {
-        Some(o) if safe_segment(o) => (EXIT_NO_WORKER, "run-task: worker not implemented (CP-06)"),
-        _ => (EXIT_LEASE_LOST, "run-task: lease lost (owner missing)"),
-    }
+/// The `--run-task` owner check, BEFORE any config or store is opened: the owner
+/// token comes through `AGENT_CAMPAIGN_OWNER` (never an argument); missing or not
+/// a path-safe segment ⇒ `Err` with [`EXIT_LEASE_LOST`] and a fixed message that
+/// never carries the token. A valid token is the worker's [`Owner`].
+pub fn run_task_owner(owner: Option<&str>) -> Result<Owner, (i32, &'static str)> {
+    owner
+        .and_then(|o| Owner::parse(o).ok())
+        .ok_or((EXIT_LEASE_LOST, "run-task: lease lost (owner missing)"))
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +718,7 @@ async fn render_once(
         .count();
     writeln!(
         out,
-        "claimed {}  dispatched {}  failed {}  (workers: CP-06)",
+        "claimed {}  dispatched {}  failed {}",
         tenant.claimed,
         report.dispatched.len(),
         failed
@@ -1708,32 +1708,43 @@ mod tests {
     /// 129 chars: one over the `safe_segment` length cap.
     const HUGE_OWNER: &str = "ooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo";
 
-    // T11 `adversarial_owner_from_env_missing` (unit half): no owner, an unsafe
-    // owner or an empty one exit `lease lost` before anything opens; a valid one
-    // exits `no worker` (CP-06). The message never carries the token.
+    // T11 `adversarial_owner_from_env_missing` (unit half) / T12
+    // `positive_run_task_owner_valid`: no owner, an unsafe owner or an empty one
+    // exit `lease lost` before anything opens; a valid one is the worker's owner.
+    // The message never carries the token.
     #[rstest]
-    #[case::adversarial_owner_from_env_missing(None, EXIT_LEASE_LOST, "lease lost")]
-    #[case::adversarial_owner_traversal(Some("../x"), EXIT_LEASE_LOST, "lease lost")]
-    #[case::adversarial_owner_empty(Some(""), EXIT_LEASE_LOST, "lease lost")]
-    #[case::adversarial_owner_space(Some("a b"), EXIT_LEASE_LOST, "lease lost")]
-    #[case::adversarial_owner_huge(Some(HUGE_OWNER), EXIT_LEASE_LOST, "lease lost")]
-    #[case::corner_owner_present(
-        Some("0123456789abcdef0123456789abcdef"),
-        EXIT_NO_WORKER,
-        "not implemented (CP-06)"
-    )]
-    fn run_task_stub_rows(#[case] owner: Option<&str>, #[case] code: i32, #[case] needle: &str) {
-        let (got, msg) = run_task_stub(owner);
-        assert_eq!(got, code);
-        assert!(msg.contains(needle), "{msg}");
-        if let Some(o) = owner.filter(|o| !o.is_empty()) {
-            assert!(!msg.contains(o), "the token leaked: {msg}");
+    #[case::adversarial_owner_from_env_missing(None, Err(EXIT_LEASE_LOST))]
+    #[case::adversarial_owner_traversal(Some("../x"), Err(EXIT_LEASE_LOST))]
+    #[case::adversarial_owner_empty(Some(""), Err(EXIT_LEASE_LOST))]
+    #[case::adversarial_owner_space(Some("a b"), Err(EXIT_LEASE_LOST))]
+    #[case::adversarial_owner_leading_dash(Some("-x"), Err(EXIT_LEASE_LOST))]
+    #[case::adversarial_owner_huge(Some(HUGE_OWNER), Err(EXIT_LEASE_LOST))]
+    #[case::positive_run_task_owner_valid(Some("0123456789abcdef0123456789abcdef"), Ok(()))]
+    #[case::boundary_owner_128(Some(&HUGE_OWNER[..128]), Ok(()))]
+    fn run_task_owner_rows(#[case] owner: Option<&str>, #[case] want: Result<(), i32>) {
+        match (run_task_owner(owner), want) {
+            (Ok(o), Ok(())) => assert_eq!(o.as_str(), owner.unwrap()),
+            (Err((code, msg)), Err(want_code)) => {
+                assert_eq!(code, want_code);
+                assert!(msg.contains("lease lost"), "{msg}");
+                if let Some(o) = owner.filter(|o| !o.is_empty()) {
+                    assert!(!msg.contains(o), "the token leaked: {msg}");
+                }
+            }
+            (got, want) => panic!("owner {owner:?}: got {got:?}, want {want:?}"),
         }
     }
 
-    // The two worker exits are distinct from each other and from a plain error (1).
-    const _: () = assert!(EXIT_LEASE_LOST != EXIT_NO_WORKER);
-    const _: () = assert!(EXIT_LEASE_LOST > 1 && EXIT_NO_WORKER > 1);
+    // The worker's lease-lost exit is the runtime's, and distinct from a plain
+    // error (1).
+    #[test]
+    fn positive_exit_lease_lost_matches_the_worker() {
+        use agent_runtime::campaign_worker::LeafExit;
+        assert_eq!(LeafExit::LeaseLost.code(), EXIT_LEASE_LOST);
+        assert_eq!(LeafExit::Failed.code(), 1);
+        assert_eq!(LeafExit::Completed.code(), 0);
+    }
+    const _: () = assert!(EXIT_LEASE_LOST > 1);
 
     #[rstest]
     #[case::positive_id("12", Ok(TaskId(12)))]
@@ -2392,10 +2403,7 @@ mod tests {
             lines[3].starts_with("plan: 1 node(s); calls 1, repairs 0, tokens in "),
             "{once}"
         );
-        assert_eq!(
-            lines[4], "claimed 0  dispatched 0  failed 0  (workers: CP-06)",
-            "{once}"
-        );
+        assert_eq!(lines[4], "claimed 0  dispatched 0  failed 0", "{once}");
         assert_eq!(lines.len(), 5, "{once}");
 
         // The children were created by the split during the previous tick, so
@@ -2507,10 +2515,7 @@ mod tests {
             lines[3].starts_with("plan: 1 node(s); calls 1, repairs 0,"),
             "{out}"
         );
-        assert_eq!(
-            lines[4],
-            "claimed 0  dispatched 0  failed 0  (workers: CP-06)"
-        );
+        assert_eq!(lines[4], "claimed 0  dispatched 0  failed 0");
     }
 
     // T11 (CLI half) `positive_run_once_reports_phases`: an idle campaign prints
@@ -2524,7 +2529,7 @@ mod tests {
         let out = go_once(&ctx, &driver).await.unwrap();
         assert_eq!(
             out,
-            "reaped 0  released 0\npolled 0  merged 0  closed 0  awaiting 0  poll_errors 0\nplan: 0 node(s); calls 0, repairs 0, tokens in 0 out 0\nclaimed 0  dispatched 0  failed 0  (workers: CP-06)\n"
+            "reaped 0  released 0\npolled 0  merged 0  closed 0  awaiting 0  poll_errors 0\nplan: 0 node(s); calls 0, repairs 0, tokens in 0 out 0\nclaimed 0  dispatched 0  failed 0\n"
         );
     }
 

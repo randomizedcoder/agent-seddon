@@ -738,10 +738,11 @@ fn adversarial_owner_from_env_missing() {
     assert!(stdout.is_empty(), "stdout must be empty, got:\n{stdout}");
 }
 
-/// With the owner present the stub exits `no worker` (4) until CP-06, and the
-/// token never reaches stderr.
+/// With the owner present the worker (CP-06b) goes on to read the config: a
+/// missing config path is a plain error (1) naming the path, and the token never
+/// reaches stderr.
 #[test]
-fn corner_run_task_owner_present_exits_no_worker() {
+fn corner_run_task_owner_present_reads_config() {
     let ws = TempWorkspace::new("run-task-owner");
     let missing_cfg = ws.path("does-not-exist.toml");
     let token = "0123456789abcdef0123456789abcdef";
@@ -753,13 +754,48 @@ fn corner_run_task_owner_present_exits_no_worker() {
         &[("AGENT_CAMPAIGN_OWNER", token)],
     );
 
-    assert_eq!(code, 4, "exit code; stderr:\n{stderr}");
+    assert_eq!(code, 1, "exit code; stderr:\n{stderr}");
     assert!(
-        stderr.contains("not implemented"),
-        "stderr must name the stub, got:\n{stderr}"
+        stderr.contains("does-not-exist"),
+        "stderr must name the config path, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("lease lost"),
+        "a valid owner is not a lost lease, got:\n{stderr}"
     );
     assert!(!stderr.contains(token), "the token leaked:\n{stderr}");
     assert!(stdout.is_empty(), "stdout must be empty, got:\n{stdout}");
+}
+
+/// T12 (CLI half): a valid owner and a readable config with **no** `[campaign]
+/// store` exit 1 naming the key, before the agent is built — nothing is dialed,
+/// the token never reaches stderr.
+#[test]
+fn negative_run_task_no_store() {
+    let ws = TempWorkspace::new("run-task-no-store");
+    let cfg = write_config(&ws, "http://127.0.0.1:1/v1", "");
+    let token = "0123456789abcdef0123456789abcdef";
+
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_agent_env(
+        &cfg,
+        &ws,
+        &["--run-task", "--tenant", "t", "--task", "1"],
+        &[("AGENT_CAMPAIGN_OWNER", token)],
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!(code, 1, "exit code; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("[campaign] store"),
+        "stderr must name the key, got:\n{stderr}"
+    );
+    assert!(!stderr.contains(token), "the token leaked:\n{stderr}");
+    assert!(stdout.is_empty(), "stdout must be empty, got:\n{stdout}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the refusal must come before any dial ({elapsed:?})"
+    );
 }
 
 /// A bad `--task` (zero, a word) is an argument error (1), never a worker exit.
