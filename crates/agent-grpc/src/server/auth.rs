@@ -919,8 +919,8 @@ pub use binding::{
 };
 #[cfg(feature = "auth")]
 pub use code_flow::{
-    authorize_url, check_redirect_uri, discover_code, is_challenge, is_verifier, s256,
-    BrowserIssuer, CodeEndpoints, CodeFlow, CodeRefusal, MAX_CODE_BYTES, MAX_PENDING,
+    authorize_url, check_redirect_uri, discover_code, is_challenge, is_verifier, redirect_allowed,
+    s256, BrowserIssuer, CodeEndpoints, CodeFlow, CodeRefusal, MAX_CODE_BYTES, MAX_PENDING,
     STATE_TTL_SECS,
 };
 #[cfg(feature = "auth")]

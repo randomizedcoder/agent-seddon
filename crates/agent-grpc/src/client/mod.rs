@@ -39,6 +39,8 @@ macro_rules! unary {
 }
 
 mod ast;
+#[cfg(feature = "auth")]
+pub mod browser_login;
 mod context;
 mod digest;
 mod dimension;

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_grpc::client::browser_login::{browser_login, CALLBACK_TIMEOUT};
 use agent_grpc::client::login::{
     device_login, discover_device, idp_client, refresh_stored, AgentAuth, DeviceClient,
     DevicePrompt, LoginBearerSource, PollTiming, RefreshError, StoredLogin, TokenFile,
@@ -121,18 +122,7 @@ pub async fn login(
 ) -> anyhow::Result<()> {
     crate::builder::install_client_tls(&cfg.grpc.tls.client)?;
     let idp = login_issuer(cfg, issuer)?;
-    let endpoint = endpoint
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .or_else(|| Some(cfg.grpc.client.auth_endpoint.trim()).filter(|e| !e.is_empty()))
-        .context(
-            "no agent to sign in at: set `[grpc.client] auth_endpoint` or pass `--endpoint`",
-        )?;
-    if !crate::config::private_or_tls_endpoint(endpoint) {
-        anyhow::bail!(
-            "`{endpoint}` must be `https://…`, a loopback IP or `unix:` (an ID token is sent on it)"
-        );
-    }
+    let endpoint = login_endpoint(cfg, endpoint)?;
     let http = idp_client(IDP_TIMEOUT).map_err(anyhow::Error::msg)?;
     let endpoints = discover_device(&http, &idp.issuer)
         .await
@@ -153,7 +143,30 @@ pub async fn login(
         .map_err(|s| anyhow::anyhow!("the agent refused the login: {}", s.message()))?;
     let login = StoredLogin::from_response(endpoint, &idp.name, resp, now_secs())
         .map_err(anyhow::Error::msg)?;
-    let file = TokenFile::in_dir(&token_dir()?, &idp.name).map_err(anyhow::Error::msg)?;
+    keep_login(&auth, &idp.name, login).await
+}
+
+/// The agent to sign in at: `--endpoint`, else `[grpc.client] auth_endpoint`. A
+/// credential crosses it, so it must be TLS, loopback or a unix socket.
+fn login_endpoint<'a>(cfg: &'a Config, endpoint: Option<&'a str>) -> anyhow::Result<&'a str> {
+    let endpoint = endpoint
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .or_else(|| Some(cfg.grpc.client.auth_endpoint.trim()).filter(|e| !e.is_empty()))
+        .context(
+            "no agent to sign in at: set `[grpc.client] auth_endpoint` or pass `--endpoint`",
+        )?;
+    if !crate::config::private_or_tls_endpoint(endpoint) {
+        anyhow::bail!(
+            "`{endpoint}` must be `https://…`, a loopback IP or `unix:` (an ID token is sent on it)"
+        );
+    }
+    Ok(endpoint)
+}
+
+/// Keep `login` as the login for `issuer`, then say who signed in.
+async fn keep_login(auth: &AgentAuth, issuer: &str, login: StoredLogin) -> anyhow::Result<()> {
+    let file = TokenFile::in_dir(&token_dir()?, issuer).map_err(anyhow::Error::msg)?;
     file.save(&login).map_err(anyhow::Error::msg)?;
     let me = auth
         .who_am_i(&login.access_token)
@@ -167,6 +180,83 @@ pub async fn login(
         file.path().display()
     );
     Ok(())
+}
+
+/// `agent login --browser [--issuer NAME] [--endpoint ADDR]`: the
+/// authorization-code flow with a loopback redirect, run through the agent
+/// (`agent_grpc::client::browser_login`). No IdP client secret is needed here: the
+/// agent redeems the code.
+pub async fn login_browser(
+    cfg: &Config,
+    issuer: Option<&str>,
+    endpoint: Option<&str>,
+) -> anyhow::Result<()> {
+    crate::builder::install_client_tls(&cfg.grpc.tls.client)?;
+    let endpoint = login_endpoint(cfg, endpoint)?;
+    let auth = AgentAuth::connect(endpoint).map_err(anyhow::Error::msg)?;
+    let offered = auth
+        .issuers()
+        .await
+        .map_err(|s| anyhow::anyhow!("the agent's login issuers: {}", s.message()))?;
+    let offered: Vec<String> = offered.into_iter().map(|i| i.name).collect();
+    let local = cfg.auth.login_issuer(issuer).ok();
+    let name = browser_issuer(issuer.or(local), &offered).map_err(anyhow::Error::msg)?;
+    let resp = browser_login(&auth, &name, open_browser, CALLBACK_TIMEOUT)
+        .await
+        .map_err(|e| anyhow::anyhow!("login issuer `{name}`: {e}"))?;
+    let login = StoredLogin::from_response(endpoint, &name, resp, now_secs())
+        .map_err(anyhow::Error::msg)?;
+    keep_login(&auth, &name, login).await
+}
+
+/// Which of the agent's browser sign-in issuers to use: `wanted` (from
+/// `--issuer` or the local config), else the only one it offers.
+/// The name becomes the token file's name, so one the agent made up must be a
+/// plain identifier.
+fn browser_issuer(wanted: Option<&str>, offered: &[String]) -> Result<String, String> {
+    let name = match (wanted, offered) {
+        (_, []) => Err(
+            "the agent offers no browser sign-in (its `[auth] redirect_uris` \
+                        is empty); use `agent login` without `--browser`"
+                .into(),
+        ),
+        (Some(w), _) if offered.iter().any(|o| o == w) => Ok(w.to_string()),
+        (Some(w), _) => Err(format!(
+            "the agent offers no browser sign-in with `{w}` (it offers: {})",
+            offered.join(", ")
+        )),
+        (None, [only]) => Ok(only.clone()),
+        (None, _) => Err(format!(
+            "the agent offers several login issuers ({}); name one with `--issuer <name>`",
+            offered.join(", ")
+        )),
+    }?;
+    if !agent_core::safe_segment(&name) {
+        return Err("the agent's login issuer name is not a plain identifier".into());
+    }
+    Ok(name)
+}
+
+/// Show the authorization URL (stderr; stdout stays for results) and try to open
+/// a browser. A missing or failing opener is fine: the URL is on screen.
+fn open_browser(url: &str) {
+    eprintln!();
+    eprintln!("  Open {url}");
+    eprintln!(
+        "  to sign in (waiting up to {} min)",
+        CALLBACK_TIMEOUT.as_secs().div_ceil(60)
+    );
+    eprintln!();
+    let opener = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(mut child) = opener {
+        // Reap it, so a long wait for the browser leaves no zombie behind.
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// The stored login with a usable token, refreshing it when stale.

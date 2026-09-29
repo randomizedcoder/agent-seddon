@@ -278,7 +278,7 @@ impl CodeFlow {
         challenge: &str,
     ) -> Result<Begun, CodeRefusal> {
         let login = self.issuer(issuer)?;
-        if !self.redirect_uris.iter().any(|u| u == redirect_uri) {
+        if !redirect_allowed(&self.redirect_uris, redirect_uri) {
             return Err(CodeRefusal::RedirectNotAllowed);
         }
         if !is_challenge(challenge) {
@@ -414,6 +414,55 @@ pub fn check_redirect_uri(raw: &str) -> Result<(), String> {
         return Err("must not have a fragment".into());
     }
     Ok(())
+}
+
+/// Whether an IdP may send the browser back to `requested`: it equals one of the
+/// `registered` URIs, or a registered `http://127.0.0.1/<path>` / `http://[::1]/<path>`
+/// with **no port** matches that loopback IP on any port with the same path and query
+/// (RFC 8252 §7.3). That form is what `agent login --browser` uses: it listens on
+/// a port the OS picks. Everything else, a ported loopback URI included, matches
+/// exactly.
+///
+/// A wildcard match must also be canonical (`requested` is what the URL parser would
+/// write back), so dot segments, escapes or an explicit `:80` cannot make two strings
+/// that look different to the IdP and to this check.
+pub fn redirect_allowed(registered: &[String], requested: &str) -> bool {
+    registered
+        .iter()
+        .any(|r| r == requested || loopback_any_port(r, requested))
+}
+
+fn loopback_any_port(registered: &str, requested: &str) -> bool {
+    let Some(host) = portless_loopback_host(registered) else {
+        return false;
+    };
+    let (Ok(reg), Ok(req)) = (
+        reqwest::Url::parse(registered),
+        reqwest::Url::parse(requested),
+    ) else {
+        return false;
+    };
+    req.as_str() == requested
+        && req.scheme() == "http"
+        && req.username().is_empty()
+        && req.password().is_none()
+        && req.host_str() == Some(host)
+        && req.port().is_some()
+        && req.path() == reg.path()
+        && req.query() == reg.query()
+        && req.fragment().is_none()
+}
+
+/// The loopback IP of a registered `http://127.0.0.1/…` or `http://[::1]/…` that
+/// names no port; `None` for anything else (a name such as `localhost` included).
+fn portless_loopback_host(raw: &str) -> Option<&'static str> {
+    let rest = raw.strip_prefix("http://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match &rest[..end] {
+        "127.0.0.1" => Some("127.0.0.1"),
+        "[::1]" => Some("[::1]"),
+        _ => None,
+    }
 }
 
 /// Discover an issuer's authorization and token endpoints. The document must

@@ -125,3 +125,41 @@ async fn adversarial_login_refuses_a_plaintext_remote_endpoint() {
         "{err:#}"
     );
 }
+
+fn offered(names: &[&str]) -> Vec<String> {
+    names.iter().map(ToString::to_string).collect()
+}
+
+#[rstest]
+#[case::positive_the_only_one(None, &["google"], Ok("google"))]
+#[case::positive_named(Some("okta"), &["google", "okta"], Ok("okta"))]
+#[case::negative_none_offered(None, &[], Err("offers no browser sign-in"))]
+#[case::negative_named_but_none_offered(Some("google"), &[], Err("offers no browser sign-in"))]
+#[case::negative_named_not_offered(Some("okta"), &["google"], Err("no browser sign-in with `okta`"))]
+#[case::corner_several_unnamed(None, &["google", "okta"], Err("name one with `--issuer"))]
+#[case::boundary_prefix_is_not_a_match(Some("goo"), &["google"], Err("no browser sign-in with `goo`"))]
+#[case::adversarial_traversal_name(Some("../x"), &["google"], Err("no browser sign-in with"))]
+#[case::adversarial_agent_offers_a_traversal_name(None, &["../x"], Err("not a plain identifier"))]
+fn browser_issuer_cases(
+    #[case] wanted: Option<&str>,
+    #[case] names: &[&str],
+    #[case] want: Result<&str, &str>,
+) {
+    let got = browser_issuer(wanted, &offered(names));
+    match (got, want) {
+        (Ok(got), Ok(want)) => assert_eq!(got, want),
+        (Err(got), Err(want)) => assert!(got.contains(want), "{got}"),
+        (got, want) => panic!("got {got:?}, want {want:?}"),
+    }
+}
+
+#[tokio::test]
+async fn adversarial_browser_login_refuses_a_plaintext_remote_endpoint() {
+    let err = login_browser(&config(""), None, Some("http://agent.example:50090"))
+        .await
+        .expect_err("refused before any call");
+    assert!(
+        format!("{err:#}").contains("must be `https://…`"),
+        "{err:#}"
+    );
+}
