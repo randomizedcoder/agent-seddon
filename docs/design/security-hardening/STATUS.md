@@ -31,7 +31,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | ✅ | #559 |
 | S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ✅ | #560 |
 | S20a | Hot reload of server TLS and the signing key on SIGHUP | deferral | ✅ | #562 |
-| S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ⬜ | — |
+| S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | 🟡 | — |
 | S21 | CLI loopback-redirect login | deferral | ⬜ | — |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ⬜ | — |
 | S23 | Native desktop sign-in via the CLI login | deferral | ⬜ | — |
@@ -987,6 +987,38 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       reloadable client verifier. The effect is the same with less code.
     - Client-side reload is split out as S20b. A dialed tonic channel pins its TLS connector
       when it is built, so it needs a custom connector.
+
+- **2026-09-28 — S20b: SIGHUP reloads the client TLS too.**
+  - Why: S20a reloaded the listener, but a renewed `[grpc.tls.client]` certificate was used
+    only after a restart, because each dialed tonic channel pinned the connector it was built
+    with. Details are in [07](07-transport-tls-and-pki.md#as-built-s20b-dialed-channels-reload-too).
+  - `ClientTls` holds a rustls `ClientConfig` behind an `ArcSwap` shared by its clones.
+    `ClientTls::reload` re-reads its files and swaps in a new config only if it builds.
+    `config_for` (the tonic `ClientTlsConfig`) is gone.
+  - `Endpoint::connect_lazy_with` dials `https://` through our own connector
+    (`connect_with_connector_lazy` over an `http://` URI with an `https://` origin, since tonic
+    refuses an `https://` URI without its own TLS). Each new connection handshakes with the
+    config current then, with `TCP_NODELAY`.
+  - tonic drops its `tls-webpki-roots` feature. `webpki-roots` 0.26 (the version tonic used) is
+    a direct dependency.
+  - `reload.rs`: SIGHUP also reloads the process-wide client TLS, read at each signal.
+  - Tests:
+    - `tls_reload.rs` (wire, real handshakes, one channel dialed before the reload):
+      - after the CA rotates, the same channel trusts the new CA;
+      - over mTLS, the same channel presents the renewed certificate;
+      - a CA file that is not PEM, a removed key, a half-written renewal, or a key from
+        another pair (adversarial) each keep the old identity;
+      - a reload through one clone reaches a channel built from another, and reloading twice
+        is idempotent;
+      - a CA file one byte over the cap is refused (boundary);
+      - an in-memory `ClientTls` has nothing to reload.
+    - `reload.rs` tables: the client part is reported beside the listener's, and a broken
+      client CA does not stop the listener's reload.
+    - The existing `tls` (60) and `mtls_identity` (12) matrices pass unchanged over the new
+      connector, including the public-web-roots and `domain`-override rows.
+  - Deviation from the plan: no new `auth-integration` step. The service token a renewed
+    client certificate earns is internal to agent B, so the harness has nothing to observe;
+    the wire tests do the handshakes for real.
 
 ## Cross-track note (not an S-increment)
 

@@ -119,13 +119,25 @@ impl Endpoint {
                 hostport,
                 tls: true,
             } => {
-                let endpoint = TonicEndpoint::from_shared(format!("https://{hostport}"))?;
-                let host = endpoint.uri().host().unwrap_or_default().to_owned();
-                let config = match tls {
-                    Some(tls) => tls.config_for(&host),
-                    None => crate::tls::ClientTls::default().config_for(&host),
-                };
-                Ok(endpoint.tls_config(config)?.connect_lazy())
+                // Our own connector does the handshake, so every new connection
+                // takes the client config current then (S20b). tonic refuses an
+                // `https://` URI without its own TLS, so the channel dials `http://`
+                // and requests carry the `https://` origin.
+                let origin = TonicEndpoint::from_shared(format!("https://{hostport}"))?
+                    .uri()
+                    .clone();
+                let host = origin.host().unwrap_or_default().to_owned();
+                let tls = tls.cloned().unwrap_or_default();
+                let addr = hostport.clone();
+                Ok(TonicEndpoint::from_shared(format!("http://{hostport}"))?
+                    .origin(origin)
+                    .connect_with_connector_lazy(tower::service_fn(move |_: Uri| {
+                        let (tls, addr, host) = (tls.clone(), addr.clone(), host.clone());
+                        async move {
+                            let stream = tls.connect(&addr, &host).await?;
+                            Ok::<_, io::Error>(hyper_util::rt::TokioIo::new(stream))
+                        }
+                    })))
             }
             Endpoint::Uds(path) => {
                 let path = path.clone();
