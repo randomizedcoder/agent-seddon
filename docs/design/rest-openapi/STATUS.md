@@ -367,6 +367,12 @@ distinct control-plane group during the sweep and became its own final batch, 03
   `test_corner_no_edge_jwt_on_rest_even_with_auth_on` → `test_positive_edge_jwt_on_rest_sits_after_the_transcoder`
   + `test_corner_no_edge_jwt_on_rest_when_auth_off` + `test_positive_rest_jwt_reuses_grpc_prefixes_and_forwards`
   + `test_adversarial_rest_catch_all_requires_a_token_no_open_prefix`. Gated by the `portal-envoy` check's
-  real `envoy --mode validate` across all auth modes (proves the transcoder▶jwt_authn ordering is valid);
-  behavioural 401/200 pending l2 live-verify with `PORTAL_AUTH=on` (the gate can't run an auth-on REST
-  call without the fake-issuer harness). S14-owned file — coordinated, no collision with in-flight S20 work.
+  real `envoy --mode validate` across all auth modes (proves the transcoder▶jwt_authn ordering is valid),
+  and **behaviourally live-verified on l2 2026-09-29 with `PORTAL_AUTH=on`** (verdict PASS): an
+  unauthenticated `GET /v1/config/values` → **401** (the edge rejects a normal RPC path); an
+  unauthenticated `GET /v1/auth/issuers` → **501, not 401** (the transcoder rewrote `:path` to
+  `/agent.v1.AuthService/Issuers` before `jwt_authn`, so the exempt prefix passed the edge to the
+  upstream — 501 = the method is unserved under `mode="none"`, i.e. it got *through*); a JWKS-signed
+  bearer `GET /v1/config/values` → **200** (a signed token clears the edge). This is the one thing the
+  gate can't show — it config-validates but can't run an auth-on REST call. S14-owned file (portal_envoy.py)
+  — coordinated, no collision with in-flight S20 work.
