@@ -247,13 +247,14 @@ fn open_browser(url: &str) {
         CALLBACK_TIMEOUT.as_secs().div_ceil(60)
     );
     eprintln!();
-    let opener = std::process::Command::new("xdg-open")
+    let mut opener = std::process::Command::new("xdg-open");
+    opener
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    if let Ok(mut child) = opener {
+        .stderr(std::process::Stdio::null());
+    // unscoped-spawn: a child process, not a task; the CLI serves no caller.
+    if let Ok(mut child) = opener.spawn() {
         // Reap it, so a long wait for the browser leaves no zombie behind.
         std::thread::spawn(move || child.wait());
     }
