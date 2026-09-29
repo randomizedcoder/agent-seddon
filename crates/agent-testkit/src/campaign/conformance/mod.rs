@@ -11,14 +11,15 @@
 use crate::campaign::MemCampaigns;
 use agent_core::campaign::{
     Actor, CampaignBackend, CampaignResult, CampaignStore, ChildSpec, ClaimRequest, Claimed,
-    Complete, Decomposed, Decomposition, EstSize, IdemKey, ListFilter, MarkLeaf, NewCampaign,
-    Owner, PlanAttempt, PlanStart, Policy, PrRef, ReviewOutcome, Task, TaskEvent, TaskId,
-    TaskState, TokenUsage,
+    Complete, Decomposed, Decomposition, EstSize, EventSink, IdemKey, ListFilter, MarkLeaf,
+    NewCampaign, Owner, PlanAttempt, PlanStart, Policy, PrRef, ReviewOutcome, Task, TaskEvent,
+    TaskId, TaskState, TokenUsage,
 };
 use agent_core::UserId;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+pub mod t17;
 pub mod t3;
 pub mod t4;
 pub mod t5;
@@ -28,21 +29,59 @@ pub mod t8;
 
 type Open = dyn Fn(&str) -> CampaignResult<Arc<dyn CampaignStore>> + Send + Sync;
 
+/// An [`EventSink`] that keeps what it was given — `(tenant, campaign, event)` in
+/// emit order — so the T17 rows can assert exactly which committed rows a tier
+/// mirrored (CP-08). Every tier's harness installs one on its base store.
+#[derive(Default)]
+pub struct RecordingSink {
+    rows: Mutex<Vec<(String, TaskId, TaskEvent)>>,
+}
+
+impl RecordingSink {
+    /// Everything emitted so far, in order; the record is cleared.
+    pub fn take(&self) -> Vec<(String, TaskId, TaskEvent)> {
+        std::mem::take(&mut *self.rows.lock().expect("recording sink poisoned"))
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.lock().expect("recording sink poisoned").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl EventSink for RecordingSink {
+    fn emit(&self, tenant: &str, campaign: TaskId, event: &TaskEvent) {
+        self.rows.lock().expect("recording sink poisoned").push((
+            tenant.to_string(),
+            campaign,
+            event.clone(),
+        ));
+    }
+}
+
 /// One tier under test: a clock the rows can advance, a factory that opens the
-/// backend under a tenant, and the tier's [`CampaignBackend`] (the tenant
-/// enumeration the driver tick uses; CP-05 rows).
+/// backend under a tenant, the tier's [`CampaignBackend`] (the tenant
+/// enumeration the driver tick uses; CP-05 rows) and the [`RecordingSink`] its
+/// base store mirrors every committed event into (CP-08 rows).
 pub struct Harness {
     pub clock: Arc<AtomicU64>,
     open: Arc<Open>,
     pub backend: Arc<dyn CampaignBackend>,
+    pub sink: Arc<RecordingSink>,
 }
 
 impl Harness {
-    /// A fresh `MemCampaigns` on a settable clock.
+    /// A fresh `MemCampaigns` on a settable clock, mirroring into a fresh sink.
     pub fn mem() -> Harness {
         let clock = Arc::new(AtomicU64::new(1_700_000_000_000));
+        let sink = Arc::new(RecordingSink::default());
         let c = Arc::clone(&clock);
-        let base = MemCampaigns::new().with_clock(Arc::new(move || c.load(Ordering::SeqCst)));
+        let base = MemCampaigns::new()
+            .with_clock(Arc::new(move || c.load(Ordering::SeqCst)))
+            .with_sink(Arc::clone(&sink) as Arc<dyn EventSink>);
         let backend: Arc<dyn CampaignBackend> = Arc::new(base.clone());
         Harness::from_factory(
             clock,
@@ -51,20 +90,24 @@ impl Harness {
                     .map(|s| Arc::new(s) as Arc<dyn CampaignStore>)
             }),
             backend,
+            sink,
         )
     }
 
     /// Any tier: `open(tenant)` must return a store bound to `tenant` that reads
-    /// `clock` for its time; `backend` is the same tier's multi-tenant handle.
+    /// `clock` for its time and mirrors its events into `sink`; `backend` is the
+    /// same tier's multi-tenant handle.
     pub fn from_factory(
         clock: Arc<AtomicU64>,
         open: Arc<Open>,
         backend: Arc<dyn CampaignBackend>,
+        sink: Arc<RecordingSink>,
     ) -> Harness {
         Harness {
             clock,
             open,
             backend,
+            sink,
         }
     }
 
@@ -554,6 +597,14 @@ macro_rules! campaign_conformance_suite {
                 adversarial_policy_edit_loosens_check,
                 adversarial_cross_tenant_approve,
                 adversarial_cross_tenant_cancel,
+            ]);
+            $crate::__campaign_table!(t17, $make, $after, $ig, [
+                positive_sink_every_write,
+                positive_sink_after_commit_only,
+                positive_sink_reap_carries_campaign,
+                positive_sink_event_ids_match,
+                positive_sink_multi_task_write_in_order,
+                adversarial_sink_cross_tenant_isolated,
             ]);
         }
     };

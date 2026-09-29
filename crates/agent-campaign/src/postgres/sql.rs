@@ -127,10 +127,12 @@ pub(super) const IN_REVIEW: &str = concat!(
 pub(super) const ENSURE_TENANT: &str =
     "INSERT INTO tenants (tenant) VALUES ($1) ON CONFLICT DO NOTHING";
 /// `$1` tenant, `$2` task_id, `$3` from_state, `$4` to_state, `$5` actor, `$6` version,
-/// `$7` detail JSON text, `$8` now_ms.
+/// `$7` detail JSON text, `$8` now_ms. Returns the generated `event_id` so the sink
+/// mirror (CP-08) carries the row's real id.
 pub(super) const INSERT_EVENT: &str =
     "INSERT INTO task_events (tenant, task_id, from_state, to_state, actor, version, detail, at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, to_timestamp($8::double precision / 1000.0))";
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, to_timestamp($8::double precision / 1000.0))
+     RETURNING event_id";
 /// The one state write: CAS on `$3` (version), `$4` new state, `$5` now_ms, `$6` keep
 /// the lease (the new state is `claimed` / `running`).
 pub(super) const TRANSITION: &str = concat!(
@@ -238,7 +240,7 @@ pub(super) const HEARTBEAT: &str = "UPDATE tasks
 /// `$2` now_ms: every expired lease back to `ready` (`SKIP LOCKED`), returning what
 /// the events need.
 pub(super) const REAP: &str = "WITH exp AS MATERIALIZED (
-       SELECT task_id AS eid, state AS from_state, claimed_by AS lost_owner
+       SELECT task_id AS eid, campaign_id AS cid, state AS from_state, claimed_by AS lost_owner
        FROM tasks
        WHERE tenant = $1 AND claimed_by IS NOT NULL
          AND lease_until < to_timestamp($2::double precision / 1000.0)
@@ -249,13 +251,13 @@ pub(super) const REAP: &str = "WITH exp AS MATERIALIZED (
      SET state = 'ready', claimed_by = NULL, lease_until = NULL,
          version = version + 1, updated_at = to_timestamp($2::double precision / 1000.0)
      FROM exp WHERE tasks.tenant = $1 AND tasks.task_id = exp.eid
-     RETURNING task_id, exp.from_state, exp.lost_owner, version";
+     RETURNING task_id, exp.cid, exp.from_state, exp.lost_owner, version";
 /// `$2` now_ms, `$3` bound in seconds: every non-leaf `decomposing` for longer than
 /// the bound back to `ready` (`SKIP LOCKED`: a planner mid-write holds its row and
 /// is left alone; one that is merely slow loses its CAS afterwards). The driver's
 /// reaper for a plan a crashed process never closed (CP-05).
 pub(super) const REAP_DECOMPOSING: &str = "WITH stale AS MATERIALIZED (
-       SELECT task_id AS sid
+       SELECT task_id AS sid, campaign_id AS cid
        FROM tasks
        WHERE tenant = $1 AND state = 'decomposing' AND kind <> 'leaf'
          AND updated_at + make_interval(secs => $3::double precision)
@@ -267,7 +269,7 @@ pub(super) const REAP_DECOMPOSING: &str = "WITH stale AS MATERIALIZED (
      SET state = 'ready', version = version + 1,
          updated_at = to_timestamp($2::double precision / 1000.0)
      FROM stale WHERE tasks.tenant = $1 AND tasks.task_id = stale.sid
-     RETURNING task_id, version";
+     RETURNING task_id, stale.cid, version";
 /// `$1` the live states (`LIVE_STATES` as text): the distinct tenants the driver
 /// tick has work for, sorted (`CampaignBackend::tenants`).
 pub(super) const TENANTS_LIVE: &str =

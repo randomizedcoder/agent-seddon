@@ -10,11 +10,12 @@ use agent_core::campaign::{
     allowed, check_deps, check_len, check_list, check_max, clamp_lease, plan_detail, rollup,
     screen, truncate_chars, Actor, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
     CampaignBackend, CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete,
-    Decomposed, Decomposition, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign, Owner,
-    PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewNote, ReviewOutcome,
-    Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState, CLARIFICATION_HEADER,
-    LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER, MAX_CHILDREN, MAX_ERROR,
-    MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH, MAX_TOUCHES,
+    Decomposed, Decomposition, EventId, EventSink, Fail, IdemKey, ListFilter, MarkLeaf,
+    NewCampaign, Owner, PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped,
+    ReviewNote, ReviewOutcome, Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState,
+    CLARIFICATION_HEADER, LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER,
+    MAX_CHILDREN, MAX_ERROR, MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH,
+    MAX_TOUCHES,
 };
 use agent_core::{safe_segment, scan_for_injection, UserId};
 use async_trait::async_trait;
@@ -45,6 +46,8 @@ pub struct MemCampaigns {
     inner: Arc<Mutex<MemState>>,
     tenant: String,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The after-commit mirror of every event (CP-08); `None` emits nothing.
+    sink: Option<Arc<dyn EventSink>>,
 }
 
 impl std::fmt::Debug for MemCampaigns {
@@ -75,7 +78,17 @@ impl MemCampaigns {
             inner: Arc::new(Mutex::new(MemState::default())),
             tenant: UserId::LOCAL.to_string(),
             now_ms: Arc::new(wall_clock_ms),
+            sink: None,
         }
+    }
+
+    /// Mirror every committed event into `sink` (CP-08 observability): called once
+    /// per `task_events` row, after the write is committed and the store lock is
+    /// released, in write order. Shared by every tenant view derived from this one.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// The same backend and clock under `tenant`; refuses anything that is not a
@@ -90,6 +103,7 @@ impl MemCampaigns {
             inner: Arc::clone(&self.inner),
             tenant: tenant.to_string(),
             now_ms: Arc::clone(&self.now_ms),
+            sink: self.sink.clone(),
         })
     }
 
@@ -109,19 +123,33 @@ impl MemCampaigns {
             inner: Arc::clone(&self.inner),
             tenant: tenant.to_string(),
             now_ms: Arc::clone(&self.now_ms),
+            sink: self.sink.clone(),
         }
     }
 
+    /// One protocol as a transaction: the closure mutates a clone of the state,
+    /// which replaces the shared one only on `Ok` — an `Err` leaves it untouched.
+    /// The events the closure wrote reach the sink after the swap, with the lock
+    /// released (a slow sink cannot hold the store), and never on a rollback.
     fn tx<T>(&self, f: impl FnOnce(&mut Tx<'_>) -> CampaignResult<T>) -> CampaignResult<T> {
         let mut guard = self.inner.lock().expect("campaign store poisoned");
         let mut candidate = guard.clone();
         let now = (self.now_ms)();
-        let out = f(&mut Tx {
+        let mut tx = Tx {
             st: &mut candidate,
             tenant: &self.tenant,
             now,
-        })?;
+            pending: Vec::new(),
+        };
+        let out = f(&mut tx)?;
+        let pending = std::mem::take(&mut tx.pending);
         *guard = candidate;
+        drop(guard);
+        if let Some(sink) = &self.sink {
+            for (campaign, event) in &pending {
+                sink.emit(&self.tenant, *campaign, event);
+            }
+        }
         Ok(out)
     }
 
@@ -133,6 +161,7 @@ impl MemCampaigns {
             st,
             tenant: &self.tenant,
             now,
+            pending: Vec::new(),
         })
     }
 }
@@ -142,6 +171,9 @@ struct Tx<'a> {
     st: &'a mut MemState,
     tenant: &'a str,
     now: u64,
+    /// `(campaign_id, event)` for every event this transaction wrote, handed to
+    /// the sink by [`MemCampaigns::tx`] once the candidate state is committed.
+    pending: Vec<(TaskId, TaskEvent)>,
 }
 
 impl Tx<'_> {
@@ -230,19 +262,26 @@ impl Tx<'_> {
     ) {
         self.st.next_event_id += 1;
         let id = EventId(self.st.next_event_id);
-        self.st.events.insert(
-            (self.tenant.to_string(), id),
-            TaskEvent {
-                event_id: id,
-                task_id,
-                from_state: from,
-                to_state: to,
-                actor: actor.render(),
-                version,
-                detail,
-                at_ms: self.now,
-            },
-        );
+        let event = TaskEvent {
+            event_id: id,
+            task_id,
+            from_state: from,
+            to_state: to,
+            actor: actor.render(),
+            version,
+            detail,
+            at_ms: self.now,
+        };
+        // The row's campaign for the sink: every writer inserts the task before its
+        // first event, so the lookup only misses for a task that does not exist —
+        // then the task is its own campaign rather than a fabricated id.
+        let campaign = self
+            .st
+            .tasks
+            .get(&self.key(task_id))
+            .map_or(task_id, |t| t.campaign_id);
+        self.pending.push((campaign, event.clone()));
+        self.st.events.insert((self.tenant.to_string(), id), event);
     }
 
     /// The one state write: `allowed()` → `Denied`; `version + 1`; lease cleared unless

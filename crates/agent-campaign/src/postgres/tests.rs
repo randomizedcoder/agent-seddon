@@ -11,7 +11,7 @@
 use super::*;
 use agent_core::campaign::{ActorClass, Decomposed, Decomposition, PlanAttempt};
 use agent_testkit::campaign::conformance::{
-    campaign, children, dave, idem, ready_leaves, split, worker, Harness,
+    campaign, children, dave, idem, ready_leaves, split, worker, Harness, RecordingSink,
 };
 use rstest::rstest;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,9 +55,12 @@ async fn pg_base() -> (Arc<AtomicU64>, PgCampaigns) {
 }
 
 /// The harness the conformance rows run against: `open(tenant)` = `with_tenant` on one
-/// shared pool, reading the harness clock.
+/// shared pool, reading the harness clock, mirroring every committed event into the
+/// harness sink (T17).
 async fn pg_harness() -> Harness {
     let (clock, base) = pg_base().await;
+    let sink = Arc::new(RecordingSink::default());
+    let base = base.with_sink(Arc::clone(&sink) as Arc<dyn EventSink>);
     let backend: Arc<dyn CampaignBackend> = Arc::new(base.clone());
     Harness::from_factory(
         clock,
@@ -66,6 +69,7 @@ async fn pg_harness() -> Harness {
                 .map(|s| Arc::new(s) as Arc<dyn CampaignStore>)
         }),
         backend,
+        sink,
     )
 }
 
