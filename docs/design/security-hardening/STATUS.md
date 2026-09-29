@@ -1100,7 +1100,23 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Deviations from the plan:
     - `--json` prints `issuer` and `endpoint` instead of `tenant` / `sid`. The app calls `WhoAmI`
       anyway, so the CLI needs no extra RPC.
-    - There is no live `nix run .#portal` run on l2 yet.
+    - Live-verified on l2 on 2026-09-29, with a fake IdP in place of Google:
+      - The setup was a real `agent --serve-all` with OIDC on plain loopback, and a fake
+        authorization-code IdP from `portal_auth_e2e.py` that accepts any 127.0.0.1 port, as
+        Google does for desktop clients. The agent's redirect URI was the portless
+        `http://127.0.0.1/agent-login`.
+      - The CLI steps (S21 + S23):
+        - `agent token --json` exited 2 with "not signed in … run `agent login`".
+        - `agent login --browser` completed. A scripted `xdg-open` followed the IdP's 302 to the
+          CLI's loopback callback on an ephemeral port. The agent redeemed the code once.
+        - `agent token --json` then printed a 300 s token.
+      - The native portal was a `flutter build linux` bundle under Xvfb, with `PORTAL_AUTH=on`.
+        `PORTAL_AGENT_BIN` and `PORTAL_AGENT_CONFIG` pointed at that CLI.
+      - The portal signed in with no sign-in page. Prompts loaded, and Access loaded all three
+        views. Sessions listed the CLI session as "this session".
+      - After the 300 s token expired, the portal was still signed in and loaded pages. The
+        stored login file had rotated in that time, so the CLI did the refresh under its lock.
+      - Still manual: `agent login --browser` against real Google.
 
 ## Cross-track note (not an S-increment)
 
