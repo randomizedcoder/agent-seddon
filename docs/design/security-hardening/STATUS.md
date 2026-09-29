@@ -848,6 +848,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     `tls: false` even when it serves mTLS. The line comes from `Bound::dial_endpoint`, which
     rebuilds a bare `host:port`; the earlier `gRPC listener transport` line shows `mtls`
     correctly.
+
 - **2026-09-28 — S18: S16 verified live on l2.** The long-lived stack predated S16, so it was
   recreated with the S16 logins. Row counts were taken and every non-empty `agent.*` and
   `default.otel_*` table was exported to Native files first, then restored as the admin into
@@ -898,3 +899,11 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       the other's file. Each case now gets its own `agent_testkit::tempdir()`.
     - `crates/agent-grpc/src/transport.rs` from #555 was not rustfmt-clean.
 
+## Cross-track note (not an S-increment)
+
+- **Transcoder emits compact JSON (`add_whitespace: false`).** A perf follow-up from the rest-openapi
+  track flipped `grpc_json_transcoder` `print_options.add_whitespace` → `false` in
+  `test/portal-envoy/portal_envoy.py` (an S14-owned file; coordinated — no conflict with in-flight S14
+  work). Measured 49% smaller config reads on the wire (35,078 B → 17,878 B), and compact output is the
+  safer default (no incidental formatting of attacker-influenced field values). `always_print_primitive_fields`
+  left `true`. Detail: `docs/design/rest-openapi/STATUS.md` (post-verification follow-up).
