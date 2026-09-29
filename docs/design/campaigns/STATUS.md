@@ -14,7 +14,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ✅ | #525 |
 | CP-04 | CLI `agent campaign …` | SI-11 | ✅ | #531 |
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ✅ | #553 |
-| CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | 🟡 | #561 (poller, `campaigns/cp-06a`), #569 (worker, `SubprocessExec` / `InProcessExec`, `campaign-e2e`, `campaigns/cp-06b`); ✅ with the close-out docs PR |
+| CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ✅ | #561 (poller), #569 (worker, `SubprocessExec` / `InProcessExec`, `campaign-e2e`) |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |
 | CP-08 | Metrics, ClickHouse events, component doc | — | ⬜ | — |
 | CP-09 | gRPC `CampaignService` (`scoped`), mt-audit, constants | — | ⬜ | — |
@@ -173,3 +173,55 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   builder rows, CLI parse / render / `run --once` rows, four e2e rows. Gate: `pg-integration`
   green (169/169); the manual smoke over the dev Postgres green on every path; `nix flake check`
   green on the committed ref first pass (72 checks).
+- **2026-09-28/29 — CP-06 (#561 poller, #569 worker).** Two PRs. **#561** (`campaigns/cp-06a`):
+  `agent_campaign::driver::poller::ForgePoller` over the process `[forge]` backend
+  (`Agent::forge()`; none ⇒ `NoopPoller` + one warning) — per `in_review` leaf, `get_pr` under a
+  30 s timeout: `merged` ⇒ `done` when the root policy's `require_pr_approval` is off or a
+  human `approve` left the `pr_approved` marker, else a `review_note(AwaitingApproval)` event
+  once; `closed` ⇒ `failed` + dependents blocked; `open` ⇒ nothing; an unknown state string, a
+  wrong PR number, a forge error or a timeout never moves the leaf (the last three recorded as a
+  bounded `poll_error` event). The approval gate lives in the poller, not the stores. Seam:
+  `CampaignStore::review_note(task, ReviewNote)` (event-only, mem + pg, four T7 rows);
+  `[campaign] poll_batch` (`20`, `1..=200`); the `run --once` poll line and the resident tick's
+  `polled / merged / closed` counts. **#569** (`campaigns/cp-06b`): the worker.
+  `ExecSpec.env_set` (one validated per-exec variable applied after `Scrub` in `agent-sandbox`'s
+  spawn funnel; proto `ExecEnvVar` field 7) carries the owner token to the child.
+  `agent_runtime::campaign_worker::run_leaf` is the protocol for the subprocess, the in-process
+  exec and the tests: owner check (else exit 3, nothing written) → `start` → heartbeat every
+  `lease / 3` under the worker's request scope, re-leasing to the campaign policy, a lost lease
+  cancelling the session → bindings that need no work fail the leaf **before a token is spent**
+  (no `[git]` / `[forge]` backend, `[forge] dry_run`, `[git] push_policy = never` — the first
+  enforcement of `push_policy`) → `worktree_remove` + `worktree_add` at the new `[campaign]
+  target_branch` (`"main"`; `GitCfg` has no default-branch key) → `Agent::worker_session`
+  (Implement mode, worktree cwd, `forge` tool withdrawn, a `Spend` cap of
+  `max_worker_tokens_per_leaf` counted at the loop's one usage site, the `[campaign]
+  worker_model` provider) under `worker_timeout` with the goal from a fixed template and the
+  model-written text in a random-uuid fence → `checkpoint` (a clean tree ⇒ `failed "no changes
+  committed"`) → push `campaign/<cid>-<path dashed>` (each `/`-segment `safe_segment`) →
+  `Policy::authorize(create_pr)` → `create_pr` (draft per policy, ≤ 200-char title, ≤ 8 KiB body
+  with the `campaign:<id> task:<path>` trailer, `PrRef::validate` on the answer) → `complete`.
+  `SubprocessExec` spawns `agent --config <same> --run-task --tenant T --task <id>` through the
+  process `Sandbox` with `worker_timeout + 30 s`, mapping exit 0 / 1 / 3 / timeout / other (a
+  512-char NUL-free stderr tail; kept on exit 1 too, for a child that dies before its own `fail`);
+  `InProcessExec` runs the same body in-process; `build_driver` **refuses** `"subprocess"`
+  without a `[sandbox] backend`, a binary path or a `--config` path. `agent --run-task` is the
+  real child (owner check before any config is read; no store ⇒ exit 1 naming `[campaign]
+  store`; its own disposable `<index_dir>/campaign-<task>` search / recall dirs, because the
+  driver holds the tantivy writer lock on the shared index). `crates/agent-runtime/tests/
+  campaign_e2e.rs` + the `campaign-e2e` flake check prove create → split → execute → claim →
+  worktree → session → push to a bare origin → draft PR → approve → merged → `done` over the
+  shipped driver, planner and poller with a real `git`, a scripted model and a fake forge.
+  Deviations from `04-executor.md`, recorded there under "As built in CP-06a/b": the approval
+  gate in the poller; per-segment branch checks (the design's "passes `safe_segment` trivially"
+  was wrong); the heartbeat's re-lease; the accepted duplicate-PR window when `complete` loses
+  the lease after `create_pr`; the child's isolated index dirs; the exit-1 stderr tail.
+  Hardening found on the way: `agent-sandbox`'s spawn funnel retries a transient `ETXTBSY`
+  (the fork/exec race between parallel spawns, 13/40 flaky rows before, 40/40 after). Tests:
+  T13 13/13 (+2), T12 every row id (76 fns in `campaign_worker::tests`), the `env_set` rows, the
+  e2e 4 rows, CLI `run_task_owner_rows` + e2e rows; `pg-integration` 173/173 both PRs; the
+  real-binary subprocess smoke (Postgres, fake planner, `dry_run` + `push_policy = never`) green
+  after two fixes it found; `nix flake check` green on each PR's committed ref (73 checks).
+  Deferred (PROGRESS "Open questions"): scoped git credentials for the push; a worker `search`
+  index over its worktree (today the repo root); the scheduler child's identical lock problem;
+  the git root being the process cwd; the level-1 double approval; "changes requested" re-runs
+  and the merge webhook (CP-10); per-repo forge / git cards (RK-02).
