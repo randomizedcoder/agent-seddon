@@ -33,17 +33,26 @@ async fn main() -> Result<()> {
         model_router_config,
     } = parse_args()?;
 
-    // `agent --run-task --tenant T --task <id>` (docs/design/campaigns, CP-05): the
-    // worker subprocess the campaign driver will dispatch. Until CP-06 lands the
-    // worker body it is a stub that exits BEFORE the config is read or any store
-    // is opened: `AGENT_CAMPAIGN_OWNER` missing / unsafe ⇒ `lease lost` (exit 3),
-    // present ⇒ `not implemented` (exit 4). The token is never printed.
-    if let Mode::RunTask { tenant, task } = &mode {
-        let owner = std::env::var(agent_core::campaign::CAMPAIGN_OWNER_ENV).ok();
-        let (code, msg) = campaign_cli::run_task_stub(owner.as_deref());
-        eprintln!("{msg} (tenant {tenant}, task #{task})");
-        std::process::exit(code);
-    }
+    // `agent --run-task --tenant T --task <id>` (docs/design/campaigns, CP-06b): the
+    // worker subprocess the campaign driver dispatches. The owner token comes
+    // through `AGENT_CAMPAIGN_OWNER` (never an argument) and is checked BEFORE the
+    // config is read or any store is opened: missing / unsafe ⇒ `lease lost`
+    // (exit 3), nothing touched. The token is never printed. With a valid owner
+    // the run continues: config, store, agent build, then the worker protocol in
+    // the `Mode::RunTask` arm below.
+    let run_task_owner = match &mode {
+        Mode::RunTask { tenant, task } => {
+            let owner = std::env::var(agent_core::campaign::CAMPAIGN_OWNER_ENV).ok();
+            match campaign_cli::run_task_owner(owner.as_deref()) {
+                Ok(o) => Some(o),
+                Err((code, msg)) => {
+                    eprintln!("{msg} (tenant {tenant}, task #{task})");
+                    std::process::exit(code);
+                }
+            }
+        }
+        _ => None,
+    };
 
     // `agent token` (security-hardening S23): print the stored login's token for
     // another program (the native portal). Before the config is required: without
@@ -85,6 +94,15 @@ async fn main() -> Result<()> {
     // Record where the config came from so the `ConfigStore` seam (portal
     // settings) can write edits back to the same file.
     config.source_path = Some(config_path.clone());
+    // A worker child (`--run-task`) re-reads the driver's config, and the driver
+    // holds the writer lock on the shared search index: give the child its own
+    // disposable index dirs before the build (removed after the leaf).
+    let run_task_index_dirs = match &mode {
+        Mode::RunTask { task, .. } => {
+            agent_runtime::campaign_worker::isolate_indexes(&mut config, *task)
+        }
+        _ => Vec::new(),
+    };
     // `agent login` / `logout` / `whoami` (security-hardening S12): talk to the IdP
     // and the agent's `AuthService`, then exit. Before the egress proxy (the IdP is
     // not on its allow-list), telemetry, and any server.
@@ -358,6 +376,37 @@ async fn main() -> Result<()> {
             main_model: config.provider.model.clone(),
             backend,
             tenants: agent_runtime::campaign_driver::tenants_for(&config, args.tenant.as_deref()),
+            worker: agent_runtime::campaign_worker::WorkerCfg::from_config(&config),
+            config_path: config.source_path.clone(),
+        });
+    }
+
+    // `agent --run-task` (CP-06b): the worker opens its tenant's store view now —
+    // lazily, no migration (the driver's own open applied the schema) — and keeps
+    // the worker knobs before `config` moves into the builder. No store ⇒ exit 1
+    // naming the key; the driver then fails the leaf with the exit.
+    let mut run_task: Option<RunTaskRun> = None;
+    if let Mode::RunTask { tenant, .. } = &mode {
+        let store = agent_runtime::campaign::open_campaign_store(
+            &config,
+            agent_runtime::campaign::CampaignOpen {
+                tenant: Some(tenant),
+                apply_migrations: false,
+            },
+        )
+        .await
+        .context("[campaign] store")?
+        .context(
+            "agent --run-task: no campaign store is configured — set `[campaign] store = \
+             \"postgres\"` (the DSN comes from `[config_store] dsn_ref`)",
+        )?;
+        run_task = Some(RunTaskRun {
+            store,
+            worker: agent_runtime::campaign_worker::WorkerCfg::from_config(&config),
+            owner: run_task_owner
+                .clone()
+                .expect("the owner is checked before the config is read"),
+            index_dirs: run_task_index_dirs.clone(),
         });
     }
 
@@ -520,8 +569,18 @@ async fn main() -> Result<()> {
     let identity = match &mode {
         Mode::RunScheduledJob { tenant, .. } => agent_core::SessionKey::parse(tenant, "scheduler")
             .with_context(|| format!("--tenant `{tenant}` is not a valid tenant segment"))?,
+        // A campaign worker child (CP-06b) likewise: the tenant it was dispatched
+        // for, the leaf's own session id.
+        Mode::RunTask { tenant, task } => agent_core::SessionKey::parse(
+            tenant,
+            &agent_runtime::campaign_worker::leaf_session(*task),
+        )
+        .with_context(|| format!("--tenant `{tenant}` is not a valid tenant segment"))?,
         _ => agent_core::SessionKey::local(run_session),
     };
+
+    // `--run-task`'s protocol exit (0 / 1 / 3), surfaced after the cleanup below.
+    let mut run_task_exit: Option<i32> = None;
 
     // Run either one-shot or the REPL, capturing the answer (one-shot only).
     let outcome: Result<Option<String>> = agent_core::scope(identity, async {
@@ -695,6 +754,8 @@ async fn main() -> Result<()> {
                     main_model,
                     backend,
                     tenants,
+                    worker,
+                    config_path,
                 } = campaign_run.expect("the campaign store is opened before the build");
                 let provider = agent.campaign_planner_provider();
                 let brief: std::sync::Arc<dyn agent_campaign::BriefSource> =
@@ -736,7 +797,13 @@ async fn main() -> Result<()> {
                                     .to_string()]),
                                 planner,
                                 agent.forge(),
-                            );
+                                agent_runtime::campaign_driver::WorkerDeps {
+                                    agent: agent.clone(),
+                                    agent_bin: std::env::current_exe().ok(),
+                                    config_path,
+                                    worker,
+                                },
+                            )?;
                             let mut out = stdout.lock();
                             return campaign_cli::run_driver_once(&ctx, &driver, &mut out)
                                 .await
@@ -750,7 +817,13 @@ async fn main() -> Result<()> {
                             tenants,
                             planner,
                             agent.forge(),
-                        );
+                            agent_runtime::campaign_driver::WorkerDeps {
+                                agent: agent.clone(),
+                                agent_bin: std::env::current_exe().ok(),
+                                config_path,
+                                worker,
+                            },
+                        )?;
                         let every = Duration::from_secs(cfg.tick_secs.max(1));
                         eprintln!(
                             "campaign: ticking every {}s — ^C to stop",
@@ -802,8 +875,29 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            // Returned before the config was read (the stub exits the process).
-            Mode::RunTask { .. } => unreachable!("--run-task exits before the run"),
+            // The campaign worker (CP-06b, `04-executor.md` "Worker protocol"): one
+            // leaf, claimed for this owner by the dispatching driver, run to its own
+            // terminal state on this tenant's store view. The exit code is the
+            // protocol's (0 completed, 1 failed, 3 lease lost); nothing is printed.
+            Mode::RunTask { tenant, task } => {
+                let RunTaskRun {
+                    store,
+                    worker,
+                    owner,
+                    index_dirs,
+                } = run_task.expect("the campaign store is opened before the build");
+                let exit = agent_runtime::campaign_worker::run_leaf(
+                    &agent, store, &tenant, task, &owner, &worker,
+                )
+                .await;
+                // The child's disposable index dirs (best effort; a leftover is
+                // harmless and overwritten by the next attempt).
+                for dir in index_dirs {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                run_task_exit = Some(exit.code());
+                Ok(None)
+            }
             Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } | Mode::Token { .. } => {
                 unreachable!("login/logout/whoami/token return before the run")
             }
@@ -826,6 +920,11 @@ async fn main() -> Result<()> {
         metrics_server::push(&metrics, &metrics_cfg.pushgateway, &metrics_cfg.job).await;
     }
 
+    if let Some(code) = run_task_exit {
+        // The worker's exit code is the protocol; flushed above, exit now.
+        outcome?;
+        std::process::exit(code);
+    }
     if let Some(answer) = outcome? {
         println!("\n=== ANSWER ===\n{answer}");
         if !session_id.is_empty() {
@@ -977,11 +1076,13 @@ enum Mode {
     /// for the planner's provider. The bare word `campaign` selects this only as
     /// the first non-option token — after `--` it is a goal word like any other.
     Campaign(campaign_cli::CampaignArgs),
-    /// `agent --run-task --tenant T --task <id>` (campaigns CP-05): the worker
+    /// `agent --run-task --tenant T --task <id>` (campaigns CP-06b): the worker
     /// subprocess the campaign driver dispatches, hidden like
-    /// `--run-scheduled-job`. A stub until CP-06 — it exits before the config is
-    /// read (`campaign_cli::run_task_stub`). The tenant is validated fail-closed
-    /// at parse time; the task is an id, never a listing letter.
+    /// `--run-scheduled-job`. The owner token is checked before the config is read
+    /// (`campaign_cli::run_task_owner`); the leaf then runs through
+    /// `agent_runtime::campaign_worker::run_leaf` and the process exits with the
+    /// protocol's code. The tenant is validated fail-closed at parse time; the
+    /// task is an id, never a listing letter.
     RunTask {
         tenant: String,
         task: agent_core::campaign::TaskId,
@@ -1027,6 +1128,23 @@ struct CampaignRun {
     backend: Option<std::sync::Arc<dyn agent_core::campaign::CampaignBackend>>,
     /// The tenants the resident driver serves (`--tenant`, discovery, or `local`).
     tenants: agent_campaign::Tenants,
+    /// The worker knobs (`[campaign] worker_timeout_secs` / `target_branch`,
+    /// `[forge] dry_run`, `[git] push_policy`), captured before `config` moves.
+    worker: agent_runtime::campaign_worker::WorkerCfg,
+    /// The `--config` path a `sandbox = "subprocess"` worker child re-reads.
+    config_path: Option<PathBuf>,
+}
+
+/// What `agent --run-task` keeps from the config load for the worker arm (CP-06b).
+struct RunTaskRun {
+    /// The store bound to the `--tenant` view.
+    store: std::sync::Arc<dyn agent_core::campaign::CampaignStore>,
+    worker: agent_runtime::campaign_worker::WorkerCfg,
+    /// The owner token from `AGENT_CAMPAIGN_OWNER`, already a path-safe segment.
+    owner: agent_core::campaign::Owner,
+    /// This child's own search index dirs (`campaign_worker::isolate_indexes`),
+    /// removed once the leaf has run.
+    index_dirs: Vec<PathBuf>,
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the

@@ -109,6 +109,38 @@ completed.
 `sandbox = "in_process"` (tests, single-user CLI `agent campaign run --once`): the same worker
 function under `agent_core::scope(SessionKey, fut)` (`crates/agent-core/src/identity.rs:305`).
 
+**As built in CP-06b** (`agent_runtime::campaign_worker`,
+`crates/agent-runtime/src/campaign_worker.rs`). `SubprocessExec` runs `[<current_exe>, --config,
+<path>, --run-task, --tenant, T, --task, <id>]` through the process `Sandbox` (`Agent::sandbox()`)
+as `ExecSpec::argv(..).env(Inherit).network(On).env_set(AGENT_CAMPAIGN_OWNER,
+owner).timeout(worker_timeout + 30 s)`. `ExecSpec.env_set` landed in `agent-core` for this: names
+`[A-Za-z_][A-Za-z0-9_]*`, NUL-free values, rejected before spawn otherwise, applied in
+`agent-sandbox`'s `run_argv` after the `Scrub` block so every backend (local, bwrap, nix) sees it;
+proto field 7 `ExecEnvVar` (additive, no `buf-image` bump). Exit mapping (`map_exit`): `0` ⇒ `Ok`;
+`1` ⇒ `Err("worker failed the leaf")` (the child wrote `failed` itself, so the driver's
+`settle_failure` finds a terminal state and only logs) — with `: <stderr tail>` appended when
+stderr is not empty, because a child that dies **before** its own `fail` write (a config or
+build error) also exits 1, and that text is then what the driver stores; `3` ⇒ `Err("worker:
+lease lost")`;
+`timed_out` ⇒ `Err("worker timed out after <N>s")`; anything else ⇒ `Err("worker exited <N>:
+<stderr tail>")` with the tail cut to 512 chars and NUL dropped. The 30 s grace lets the child's
+own `fail` write land before the parent's kill in the normal case; the driver's `worker_timeout`
+still settles `Timeout` first. `InProcessExec` runs `run_leaf` under
+`scope(SessionKey::parse(tenant, "campaign-<id>"))` (an unsafe tenant is `Err` before any store
+call) and maps `LeafExit` to the same texts. `build_driver` picks the exec from `[campaign]
+sandbox`: `"subprocess"` with no `[sandbox] backend`, no binary path (`current_exe`) or no
+`--config` path is an **error naming what is missing** — the driver refuses to start rather than
+fall back to in-process — and `run --once` follows the same path. `agent --run-task` is the
+subprocess body: the pre-config owner check (`campaign_cli::run_task_owner`; a missing or unsafe
+`AGENT_CAMPAIGN_OWNER` ⇒ `run-task: lease lost (owner missing)`, exit 3, the token never printed)
+→ config load → `campaign_worker::isolate_indexes` (the driver holds the tantivy `IndexWriter`
+lock on the shared `[search] index_dir`, so the child gets `<base>/campaign-<task>` — and its own
+`[recall]` index when recall is on — removed after the leaf; found by the smoke, where the child
+died in `build_agent` with `LockBusy`) → `build_agent_mode(Run)` → `open_campaign_store` for the
+tenant (none configured ⇒
+exit 1 naming `[campaign] store`) → `run_leaf` under the tenant's `campaign-<id>` session scope →
+`exit(LeafExit.code())`: `Completed 0`, `Failed 1`, `LeaseLost 3`. The CP-05 exit-4 stub is gone.
+
 ## Worker protocol (`--run-task`)
 
 1. `PgCampaigns::with_tenant(T)`; `get(task)`; require `state = 'claimed' AND claimed_by = owner`,
@@ -141,6 +173,57 @@ function under `agent_core::scope(SessionKey, fut)` (`crates/agent-core/src/iden
    `error | timeout | lease_lost`; worktree removed either way.
 
 Nothing the worker writes to the store omits `AND claimed_by = $owner`.
+
+**As built in CP-06b** (`run_leaf(agent, store, tenant, task, owner, cfg) -> LeafExit`, one body
+for the subprocess, the in-process exec and the tests): the eight steps as designed, with these
+deviations and details.
+
+1. `get` then `state == claimed && claimed_by == owner`, else `LeaseLost` with nothing written.
+   The root's `policy` (`Policy::default()` when unset) and up to 8 ancestor titles are read here.
+3. The heartbeat is a spawned task (under `agent_core::scope_request` with the worker's
+   `RequestScope`, so its writes keep the leaf's tenant identity — the served-paths spawn scan
+   in `agent-grpc` enforces it) on a `tokio::time::interval` of `clamp_lease(policy.lease_secs)
+   / 3` whose first beat is immediate, so it **re-leases the claim to the campaign policy's
+   `lease_secs`** (the driver claimed with `Policy::default()`). `LeaseLost` flips a `watch`
+   cancel the session `select!`s on; any other error only warns and the next beat retries.
+4. Bindings that need no work fail the leaf **before a token is spent**: no `[git]` backend, no
+   `[forge]` backend, `[forge] dry_run = true` ("a pull request cannot be opened") and `[git]
+   push_policy = never` (compared trimmed and case-insensitively; **the first code that enforces
+   `push_policy`**). The worktree is `worktree_remove` then `worktree_add` at `[campaign]
+   target_branch` (a new key, `"main"` by default — `GitCfg` has no default-branch key) with id
+   `campaign-<cid>-<path with dots as dashes>`. The branch `campaign/<cid>-<path dashed>` is
+   validated **per `/`-segment** with `safe_segment`; the sentence above ("passes `safe_segment`
+   trivially") was wrong, `safe_segment` rejects `/`.
+5. The session is `Agent::worker_session(key, worktree, policy.max_worker_tokens_per_leaf)`:
+   `session_with(key)` seeded Implement-mode, the worktree as the tool cwd, the `forge` tool
+   withdrawn (the protocol opens the PR after the push), a `Spend` cap counted at the loop's one
+   usage-accounting site (`BudgetExceeded` ⇒ `failed "budget: used N of cap M tokens"`, no push)
+   and the `[campaign] worker_model` provider when pinned. It runs under
+   `timeout(worker_timeout, select! { send, cancel })`; not through `SessionManager::admit` — the
+   CLI's own `scope` already carries the tenant. The goal (`build_goal`) puts the fixed
+   instructions first ("Work only inside the git worktree at …", "Run the repository's gate",
+   "Commit … conventional commit message", "Do not push and do not open a pull request: the
+   campaign worker pushes the branch and opens the PR after you finish"), then `Campaign:`,
+   `Parents: a > b`, `Task <path>: <title>`, `Acceptance:` and `Touches:` lines, then the
+   model-written goal inside `<untrusted-<uuid>> … </untrusted-<uuid>>` labelled as data, with any
+   text matching the close tag stripped from the goal.
+6. `checkpoint(wt, "pr")` with `oid == head` is `failed "no changes committed"`. `push(&ckpt,
+   "refs/heads/<branch>")`. `Policy::authorize(ToolCall { name: "forge", arguments: { action:
+   create_pr, source_branch, target_branch } })`: a `Deny` is `failed "policy denied create_pr
+   (<reason>); branch <b> was pushed"`. `create_pr` with `draft = policy.draft_prs`, title
+   `pr_title` (`<campaign> / <path>: <leaf>`, cut to 200 chars) and body `build_pr_body`
+   (`## Acceptance` checklist, `## Touches`, the `campaign:<id> task:<path>` trailer; cut at a char
+   boundary to ≤ 8 KiB with the trailer always kept). The forge's answer goes through
+   `PrRef::validate` (`number 0`, a non-`https://` url ⇒ `failed "forge returned an invalid pull
+   request"`).
+7. `complete` with the tokens from `Spend` (clamped into `i64`) and `session_id = campaign-<id>`.
+   A `LeaseLost` **here, after `create_pr`**, exits 3 with the PR URL in the log: the reaper
+   re-queues the leaf and the next attempt opens a second PR. This duplicate-PR window is accepted
+   (CP-10's webhook can close it) and is the one place the protocol is not idempotent.
+8. `fail` with `truncate_chars(error, MAX_ERROR)`; `cause = Timeout` only for the wall clock,
+   `Error` otherwise (a lost lease writes nothing). The heartbeat is aborted and the worktree
+   removed on every path. The push uses the process's ambient git credentials (open question in
+   `PROGRESS.md`).
 
 ## PR poller
 
@@ -207,6 +290,7 @@ campaign_id, path` claim order, which is a preference, not a guarantee.
 | `worker_model` | the default provider | a registered provider name |
 | `worker_timeout_secs` | `3600` | `60..=86400` |
 | `poll_batch` | `20` | `1..=200` |
+| `target_branch` | `"main"` | a branch of path-safe `/`-segments, ≤ 128 chars (CP-06b) |
 | `dsn_ref` | none | `env:` / `file:` reference (`crates/agent-runtime/src/store_backend.rs:26`) |
 
 `lease_secs` lives in the campaign policy (per campaign), not here; the config floor of `60`
@@ -223,8 +307,14 @@ so one secret reference names the one Postgres. **CP-05** added the driver keys 
 tenants may together exceed one tenant's share), `sandbox` (validated, dispatched in CP-06) and
 `worker_timeout_secs` — each range-checked at load with an error under 200 chars naming the key
 (T11 `boundary_config_floor` / `boundary_config_ceiling` as `campaign_validate_cases` rows).
-**CP-06a** added `poll_batch` (`20`, `1..=200`, `campaign_validate_cases` rows); `worker_model`
-lands with the worker (CP-06b). Component doc:
+**CP-06a** added `poll_batch` (`20`, `1..=200`, `campaign_validate_cases` rows). **CP-06b** added
+`worker_model` (`""` = the main provider; resolved in the builder exactly like `planner_model`
+into `Agent::campaign_worker_provider()`, which the worker session's turns use) and
+`target_branch` (`"main"`; at most 128 chars, every `/`-segment a `safe_segment`, rows
+`negative_target_branch_empty`, `adversarial_target_branch_{traversal, leading_dash, space,
+control, trailing_slash}`, `positive_target_branch_nested`): the revision every worker worktree
+is added at and the PR's target — `GitCfg` has no default-branch key, so the campaign block
+carries it. Component doc:
 [`docs/components/campaigns.md`](../../components/campaigns.md).
 
 ## Observability (CP-08)

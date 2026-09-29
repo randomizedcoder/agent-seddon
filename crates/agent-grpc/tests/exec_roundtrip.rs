@@ -31,8 +31,52 @@ fn spec(cmd: &str) -> ExecSpec {
         cwd: std::env::temp_dir(),
         network: NetworkPolicy::On,
         env: EnvPolicy::Inherit,
+        env_set: Vec::new(),
         timeout_secs: 20,
     }
+}
+
+/// A per-exec variable crosses the wire and is visible in the child under `Scrub`
+/// — what the campaign worker's owner token relies on when the sandbox is remote.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_env_set_round_trips_under_scrub(#[case] transport: Transport) {
+    let (dial, _srv) = spawn(transport, sandbox_router(sandbox())).await;
+    let client = GrpcSandbox::connect(&dial).unwrap();
+
+    let out = client
+        .exec(
+            &ExecSpec::sh(
+                r#"printf '%s' "${AGENT_GRPC_ENV_SET_PROBE:-__EMPTY__}""#,
+                std::env::temp_dir(),
+            )
+            .env(EnvPolicy::Scrub)
+            .env_set("AGENT_GRPC_ENV_SET_PROBE", "over-grpc"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout, "over-grpc",
+        "env_set must survive the wire and Scrub"
+    );
+}
+
+/// The remote backend, not the client, enforces the name rule: a hostile request
+/// with `A=B` is refused as an error, never spawned with a mangled environment.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_env_set_bad_name_refused_by_the_remote() {
+    let (dial, _srv) = spawn(Transport::Tcp, sandbox_router(sandbox())).await;
+    let client = GrpcSandbox::connect(&dial).unwrap();
+
+    let out = client
+        .exec(&ExecSpec::sh("echo ran", std::env::temp_dir()).env_set("A=B", "secret-value"))
+        .await;
+    let err = out.expect_err("an invalid env_set name must be an error over the wire");
+    let text = err.to_string();
+    assert!(text.contains("invalid variable name"), "{text}");
+    assert!(!text.contains("secret-value"), "value echoed: {text}");
 }
 
 /// A real command, run through the service: stdout and the exit code must come

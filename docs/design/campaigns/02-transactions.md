@@ -395,6 +395,14 @@ second); `PollError(text)` writes `{"poll_error": <text>}` every time, `text` cu
 chars with NUL dropped. Any state but `in_review` is `Conflict`; a foreign tenant's id is
 `NotFound`.
 
+The worker's writes (CP-06b) are the protocol (c)/(d) verbs unchanged: `start` right after the
+owner check, `heartbeat` every `lease / 3` with the **campaign policy's** `lease_secs` (the claim
+itself used the policy default, so the first beat re-leases), then exactly one of `complete`
+(with the PR fields and the session's token spend) or `fail` (error cut to `MAX_ERROR`, cause
+`timeout` only for the wall clock). A `LeaseLost` from any of them ends the worker with exit 3 and
+no further write; when it comes from `complete` the PR already exists on the forge and the
+re-queued leaf's next attempt opens a second one (recorded in `04-executor.md`).
+
 ### (f) Cancel a subtree
 
 ```sql

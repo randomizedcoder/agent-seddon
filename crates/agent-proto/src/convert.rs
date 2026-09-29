@@ -2060,6 +2060,11 @@ impl From<agent_core::ExecSpec> for pb::ExecRequest {
             env: pb::ExecEnvPolicy::from(s.env) as i32,
             timeout_secs: s.timeout_secs,
             argv: s.argv,
+            env_set: s
+                .env_set
+                .into_iter()
+                .map(|(name, value)| pb::ExecEnvVar { name, value })
+                .collect(),
         }
     }
 }
@@ -2072,6 +2077,9 @@ impl From<pb::ExecRequest> for agent_core::ExecSpec {
             cwd: std::path::PathBuf::from(s.cwd),
             network: exec_network_from_i32(s.network),
             env: exec_env_from_i32(s.env),
+            // Carried verbatim; the executing backend validates names/values
+            // before spawning (the wire is not trusted to have done so).
+            env_set: s.env_set.into_iter().map(|v| (v.name, v.value)).collect(),
             timeout_secs: s.timeout_secs,
         }
     }

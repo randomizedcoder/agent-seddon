@@ -19,7 +19,17 @@ re-derive.
   mirroring the old `BashTool`) + `capabilities() -> SandboxCapabilities` (a probe:
   binary present, can it enforce network-off / private-tmp, is it content-addressed).
   `ExecSpec` carries the command, cwd, a `NetworkPolicy` (`Off`/`On`/`Loopback`),
-  an `EnvPolicy` (`Inherit`/`Scrub`), and a timeout.
+  an `EnvPolicy` (`Inherit`/`Scrub`), `env_set` (per-exec variables applied
+  **after** the policy, so they survive `Scrub` — the campaign worker's owner
+  token; names must match `[A-Za-z_][A-Za-z0-9_]*`, values must be NUL-free, and
+  the backend refuses the exec before spawning otherwise; values are never echoed),
+  and a timeout. The shared spawn funnel (`run_argv`, every local backend) retries
+  a transient `ETXTBSY` ("Text file busy", 40 × 5 ms): the fork/exec race an agent
+  hits when one thread has just written an executable while another thread's
+  child holds the descriptor between fork and exec (a tool writing a script as a
+  subprocess starts; the campaign driver's parallel worker dispatch). A file still
+  genuinely open for writing keeps failing and the error surfaces after the last
+  retry.
 - **Impl crate:** [`agent-sandbox`](../../crates/agent-sandbox).
   - **`local`** (`sandbox-local`, default) — today's unconfined spawn, so selecting
     it changes nothing.

@@ -399,6 +399,64 @@ CLI's `positive_run_once_reports_phases` / `positive_run_once_reaps_decomposing`
 | `adversarial_session_key_tenant` | tenant string with `/` | `SessionKey::parse` refuses; exit before any store call |
 | `adversarial_pr_title_injection` | leaf title with injection text | title screened at creation, so unreachable; test asserts the screen |
 
+**As built in CP-06b** (`crates/agent-runtime/src/campaign_worker.rs` `tests`, over `MemCampaigns`
+through the conformance fixtures, a `WorkerRepo` double with `commits` / `push_fails` knobs that
+records worktree ids and pushed refs, a `ScriptedForge` (PR 7, or a failure / a bad number) and a
+bare `Agent` over `ScriptedProvider`): one test per row id, with these renamings. `positive_pr_body`
+is the pure builder (three items listed, trailer present); `negative_session_error` is
+`negative_session_error_bounded` (a 10 000-char provider error stored ≤ `MAX_ERROR`);
+`negative_not_claimed_by_me` has a sibling `negative_task_not_claimed` (`ready`, exit 3, zero
+events); `boundary_token_budget` is `token_budget_rows` (`boundary_token_budget_exceeded`: cap 100,
+usage 60 + 60 ⇒ `failed "budget: used 120 of cap 100 tokens"`, no push;
+`boundary_token_budget_exact`: cap 120 passes); `boundary_pr_body_cap` is a `pr_body_rows` case
+beside `adversarial_pr_body_huge` (6 × 20 000-char items, still ≤ 8 KiB with the trailer) and
+`corner_pr_body_empty`;
+`adversarial_branch_name` is a three-case table (leaf, root leaf, deepest path) plus
+`adversarial_path_rows` (`..`, `-1`, ordinal `0`, letters — all refused by `TaskPath::parse`, so
+the branch is never built) and `branch_segment_rows` (`branch_segments_safe`: `a/b` ok; empty,
+`../x`, `-x`, a space, `~`/`:`/`?`, a trailing `/` refused); `positive_heartbeat_cadence` and
+`boundary_timeout` and `adversarial_lease_lost_midway` run on the paused clock (`start_paused`,
+`MemCampaigns::with_clock` bound to `tokio::time::Instant`; the lease-lost row cancels the claim
+under a hanging provider, the next beat cancels the session, exit 3, nothing pushed, worktree
+removed). Added beyond the design table: `forge_answer_rows` (`create_pr` fails ⇒ `failed`
+naming the pushed branch; PR number `0` ⇒ `failed "forge returned an invalid pull request"`),
+`binding_rows` / `missing_binding_rows` (`dry_run`, `push_policy = never` in two spellings, no
+`[git]`, no `[forge]` — each before any token is spent), `exit_code_rows` (0 / 1 / 3),
+`spend_tokens_rows` (the `Spend` → `TokenUsage` clamp), `positive_worker_cfg_from_config`,
+`corner_fixture_tenant_is_acme`; the dispatch half — `subprocess_exit_rows` (stub scripts through
+`LocalSandbox`: 0 ⇒ `Ok`, 1 ⇒ "failed the leaf", 3 ⇒ "lease lost", 7 ⇒ "exited 7" + stderr tail,
+4 with no stderr, and `corner_exit_one_died_early_stderr_tail`: exit 1 with stderr ⇒ "failed the
+leaf: <tail>", the diagnosis of a child that died before its own `fail` write),
+`isolate_indexes_rows` + `positive_isolate_indexes_recall_when_enabled` (the child's per-task
+search / recall index dirs, distinct per task), `boundary_subprocess_timeout` (`timed_out` ⇒
+"timed out after"),
+`positive_subprocess_env_set_owner_and_argv` (the script sees `AGENT_CAMPAIGN_OWNER` set; the argv
+carries `--config`, `--run-task`, `--tenant`, `--task`; the token is never in the argv),
+`adversarial_subprocess_stderr_bounded` (100 KiB stderr ⇒ ≤ 512 chars), `map_exit_rows` (incl. NUL
+in stderr, a negative code), `in_process_exec_rows`, `adversarial_in_process_exec_bad_tenant`,
+`negative_in_process_exec_lease_lost`; the runtime wiring rows
+`positive_build_driver_subprocess_has_exec`, `positive_build_driver_in_process_has_exec`,
+`build_driver_subprocess_refusal_rows` (no sandbox / no binary / no config path ⇒ `Err` naming
+`[campaign] sandbox`); the `env_set` rows in `agent-sandbox` (`positive_env_set_visible_under_scrub`
+/ `_inherit`, `adversarial_env_set_bad_name` / `_empty_name` / `_nul_value` — refused before
+spawn, `corner_env_set_overrides_inherited`, `negative_env_set_absent_when_not_set`) and in
+`agent-grpc` (`positive_env_set_round_trips_under_scrub` per transport,
+`adversarial_env_set_bad_name_refused_by_the_remote`); the CLI
+rows `run_task_owner_rows` (8, incl. `positive_run_task_owner_valid`, `boundary_owner_128`, the
+adversarial owner strings), `positive_exit_lease_lost_matches_the_worker`, and the e2e rows
+`corner_run_task_owner_present_reads_config` (a missing config ⇒ exit 1 naming the path, the token
+never printed) / `negative_run_task_no_store` (exit 1 naming `[campaign] store`).
+
+**End to end** (`crates/agent-runtime/tests/campaign_e2e.rs`, the `campaign-e2e` flake check): the
+shipped `Driver` + `FactoryPlanner` + `ForgePoller` + `InProcessExec` over a real
+`agent_git::CliBackend` on a tempdir checkout with a bare origin, a scripted model and a fake
+forge. `positive_first_autonomous_pr` (create → split → execute → claim → worktree → session
+writes `hello.txt` → checkpoint → push → `create_pr(draft)` → `in_review` pr 7, the branch on the
+origin, the worktree removed, four provider calls → `approve` → merged → tick → `done`, root
+`done`), `negative_unapproved_merge_waits` (`awaiting_pr_approval` once across two polls, then
+approval completes it), `corner_no_changes_fails_leaf` (`failed "no changes committed"`, origin
+untouched, no PR), `negative_push_policy_never` (fails before the session: two provider calls).
+
 ## T13 PR poller (CP-06 fake forge)
 
 | case | input / description | expected |

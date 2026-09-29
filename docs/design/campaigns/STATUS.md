@@ -14,7 +14,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ✅ | #525 |
 | CP-04 | CLI `agent campaign …` | SI-11 | ✅ | #531 |
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ✅ | #553 |
-| CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | 🟡 | #561 (poller, `campaigns/cp-06a`); the worker follows as `campaigns/cp-06b` |
+| CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | 🟡 | #561 (poller, `campaigns/cp-06a`), #569 (worker, `SubprocessExec` / `InProcessExec`, `campaign-e2e`, `campaigns/cp-06b`); ✅ with the close-out docs PR |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |
 | CP-08 | Metrics, ClickHouse events, component doc | — | ⬜ | — |
 | CP-09 | gRPC `CampaignService` (`scoped`), mt-audit, constants | — | ⬜ | — |

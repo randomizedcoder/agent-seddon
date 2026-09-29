@@ -341,6 +341,10 @@ pub struct Agent {
     /// docs/design/campaigns 03): the provider `agent campaign plan` asks for a
     /// node's decision. `None` = the main provider. Not consumed by the loop.
     campaign_planner_provider: Option<Arc<dyn LlmProvider>>,
+    /// Role routing for the campaign worker (`[campaign] worker_model`, CP-06b):
+    /// the provider a worker session's implement turns run on. `None` = the main
+    /// provider. Consumed by the loop only through a worker session's override.
+    campaign_worker_provider: Option<Arc<dyn LlmProvider>>,
     /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
     /// graph-less built-in behavior.
     graph: Option<Arc<dyn agent_core::GraphStore>>,
@@ -1038,6 +1042,7 @@ impl Agent {
             distill_kinds: (true, true),
             distill_provider: None,
             campaign_planner_provider: None,
+            campaign_worker_provider: None,
             graph: None,
             fleet_review_factory: None,
         }
@@ -1099,6 +1104,21 @@ impl Agent {
     /// decorator, same route hints as the loop).
     pub fn campaign_planner_provider(&self) -> Arc<dyn LlmProvider> {
         self.campaign_planner_provider
+            .clone()
+            .unwrap_or_else(|| self.provider.clone())
+    }
+
+    /// Route the campaign worker's implement sessions to a dedicated provider
+    /// (`[campaign] worker_model`, CP-06b).
+    pub fn with_campaign_worker_provider(mut self, p: Arc<dyn LlmProvider>) -> Self {
+        self.campaign_worker_provider = Some(p);
+        self
+    }
+
+    /// The provider a campaign worker session runs on: the `[campaign]
+    /// worker_model` override when one is pinned, else the main provider.
+    pub fn campaign_worker_provider(&self) -> Arc<dyn LlmProvider> {
+        self.campaign_worker_provider
             .clone()
             .unwrap_or_else(|| self.provider.clone())
     }
@@ -2071,7 +2091,24 @@ impl Agent {
             situational_present: false,
             agreed_seq: 0,
             distiller: None,
+            spend: Spend::default(),
+            provider_override: None,
         }
+    }
+
+    /// Open a campaign worker session (CP-06b): `session_with(id)` seeded for one
+    /// leaf — implement mode, `cwd` (the leaf's worktree) as the tool cwd, the
+    /// `forge` tool withdrawn, `token_cap` armed as the session's [`Spend`] cap and
+    /// the `[campaign] worker_model` provider (when pinned) driving every turn.
+    pub fn worker_session(
+        self: &Arc<Self>,
+        id: agent_core::SessionKey,
+        cwd: std::path::PathBuf,
+        token_cap: u64,
+    ) -> Session {
+        let mut session = self.session_with(id);
+        session.seed_worker(cwd, token_cap, self.campaign_worker_provider.clone());
+        session
     }
 
     /// The process default identity: the local user + this run's session id (or
@@ -2137,6 +2174,8 @@ impl Agent {
         mode: agent_core::TaskMode,
         events: &crate::SessionEvents,
         metrics: &SessionMetrics,
+        spend: &mut Spend,
+        provider: &Arc<dyn LlmProvider>,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
         // A review turn's final answer needs room: 4096 truncated a real review to
@@ -2218,11 +2257,11 @@ impl Agent {
             // echo); `stream=false` is the buffered path (an escape hatch for
             // servers that misbehave on SSE).
             let resp = if self.settings.stream {
-                self.complete_streaming(req, events)
+                self.complete_streaming(provider, req, events)
                     .instrument(tracing::info_span!("provider.stream", iter, model))
                     .await?
             } else {
-                self.provider
+                provider
                     .complete(req)
                     .instrument(tracing::info_span!("provider.complete", iter, model))
                     .await?
@@ -2289,6 +2328,19 @@ impl Agent {
                     );
                 }
                 self.record_usage(iter as u32, u).await;
+                // Per-session spend (CP-06b): the wire counts are `u32`, so no
+                // hostile-number clamp is needed here, and the sum saturates so a
+                // provider can never overflow it. A worker session is capped by the
+                // campaign policy; passing the cap fails the turn with a downcastable
+                // `BudgetExceeded` (the worker maps it to `failed "budget: …"`) instead
+                // of spending on.
+                spend.add(u64::from(u.prompt_tokens), u64::from(u.completion_tokens));
+                if let Some(cap) = spend.cap.filter(|cap| spend.total() > *cap) {
+                    anyhow::bail!(BudgetExceeded {
+                        used: spend.total(),
+                        cap,
+                    });
+                }
             }
 
             // A completion with no tool calls is the final answer — UNLESS the
@@ -2778,11 +2830,11 @@ impl Agent {
             }),
         };
         let finalize = if self.settings.stream {
-            self.complete_streaming(finalize_req, events)
+            self.complete_streaming(provider, finalize_req, events)
                 .instrument(tracing::info_span!("provider.finalize", model))
                 .await
         } else {
-            self.provider
+            provider
                 .complete(finalize_req)
                 .instrument(tracing::info_span!("provider.finalize", model))
                 .await
@@ -2824,10 +2876,11 @@ impl Agent {
     /// echoing assistant text to stderr as it arrives.
     async fn complete_streaming(
         &self,
+        provider: &Arc<dyn LlmProvider>,
         req: CompletionRequest,
         events: &crate::SessionEvents,
     ) -> anyhow::Result<CompletionResponse> {
-        let mut stream = self.provider.stream(req).await?;
+        let mut stream = provider.stream(req).await?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
         let mut finish_reason = String::from("stop");
@@ -3213,6 +3266,56 @@ last turn.";
 /// restricts the advertised schemas to this set; the loop's dispatch then refuses any
 /// tool not advertised, so an injected `bash`/`write_file` call from a hostile diff
 /// cannot run even though the process registry still contains those tools.
+/// Per-session token spend (CP-06b): what the loop has consumed across every turn
+/// of one [`Session`], plus an optional hard cap. An ordinary session has no cap
+/// and only accumulates; a campaign worker session is seeded with the campaign
+/// policy's `max_worker_tokens_per_leaf`, and the loop fails the turn with
+/// [`BudgetExceeded`] the moment the total passes it — the leaf then fails
+/// instead of spending without bound. Sums saturate: a provider's counts can
+/// never overflow the total.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spend {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cap: Option<u64>,
+}
+
+impl Spend {
+    /// `tokens_in + tokens_out`, saturating.
+    pub fn total(&self) -> u64 {
+        self.tokens_in.saturating_add(self.tokens_out)
+    }
+    /// Whether the total has passed the cap (never true without a cap).
+    pub fn exceeded(&self) -> bool {
+        self.cap.is_some_and(|cap| self.total() > cap)
+    }
+    pub(crate) fn add(&mut self, tokens_in: u64, tokens_out: u64) {
+        self.tokens_in = self.tokens_in.saturating_add(tokens_in);
+        self.tokens_out = self.tokens_out.saturating_add(tokens_out);
+    }
+}
+
+/// The loop stopped because the session's [`Spend`] cap was passed. Carried as
+/// the `anyhow::Error` a `Session::send` returns; downcast it with
+/// `err.downcast_ref::<BudgetExceeded>()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetExceeded {
+    pub used: u64,
+    pub cap: u64,
+}
+
+impl std::fmt::Display for BudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "token budget exceeded: used {} of cap {}",
+            self.used, self.cap
+        )
+    }
+}
+
+impl std::error::Error for BudgetExceeded {}
+
 const REVIEW_READONLY_TOOLS: &[&str] = &[
     "read_file",
     "grep",
@@ -5746,6 +5849,223 @@ mod tests {
             Metrics::new(),
             settings(false),
         ))
+    }
+
+    // ---- CP-06b: worker session seeding, Spend cap, worker_model override ----
+
+    /// A scripted response that reports token usage (the spend accounting input).
+    fn turn_with_usage(
+        resp: CompletionResponse,
+        prompt: u32,
+        completion: u32,
+    ) -> CompletionResponse {
+        CompletionResponse {
+            usage: Some(agent_core::Usage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+                ..Default::default()
+            }),
+            ..resp
+        }
+    }
+
+    /// An agent over `provider` whose registry holds a read tool, two mutating
+    /// tools and `forge` — the set a worker session must trim.
+    fn worker_agent(provider: Arc<dyn LlmProvider>) -> Agent {
+        let mut tools = ToolRegistry::new();
+        for name in ["read_file", "bash", "write_file", "forge"] {
+            tools.register(Arc::new(NamedTool(name)));
+        }
+        Agent::new(
+            provider,
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        )
+    }
+
+    /// `worker_session` seeds the leaf's session: implement mode, the worktree as
+    /// the tool cwd, the policy's cap armed, and `forge` withdrawn while the
+    /// mutating tools stay (a worker edits; the protocol opens the PR).
+    #[test]
+    fn positive_worker_session_seeded_for_the_leaf() {
+        let agent = Arc::new(worker_agent(Arc::new(FnProvider::new(
+            |_req: &CompletionRequest| final_turn("ok"),
+        ))));
+        let cwd = std::env::temp_dir().join("leaf-wt");
+        let session = agent.worker_session(
+            agent_core::SessionKey::local("campaign-7"),
+            cwd.clone(),
+            1_000,
+        );
+        assert_eq!(session.current_mode, TaskMode::Implement);
+        assert_eq!(session.tool_ctx.cwd, cwd);
+        assert_eq!(
+            session.spend(),
+            Spend {
+                tokens_in: 0,
+                tokens_out: 0,
+                cap: Some(1_000)
+            }
+        );
+        let names: Vec<&str> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(!names.contains(&"forge"), "forge withdrawn: {names:?}");
+        assert!(
+            names.contains(&"bash")
+                && names.contains(&"write_file")
+                && names.contains(&"read_file"),
+            "the working tools stay: {names:?}"
+        );
+        assert!(session.prompt_context().contains("mode:implement"));
+    }
+
+    /// An ordinary session is untouched by the worker seeding: no cap, the full
+    /// tool set, the default mode.
+    #[test]
+    fn negative_plain_session_has_no_cap_and_keeps_forge() {
+        let agent = Arc::new(worker_agent(Arc::new(FnProvider::new(
+            |_req: &CompletionRequest| final_turn("ok"),
+        ))));
+        let session = agent.session();
+        assert_eq!(session.spend().cap, None);
+        assert!(session.tool_schemas.iter().any(|s| s.name == "forge"));
+        assert_eq!(session.current_mode, TaskMode::default());
+    }
+
+    /// `Spend` arithmetic: saturating sums, and `exceeded` only past a cap.
+    #[rstest]
+    #[case::positive_accumulates(&[(10, 5), (20, 5)], None, 40, false)]
+    #[case::corner_no_cap_never_exceeds(&[(u64::MAX, 1)], None, u64::MAX, false)]
+    #[case::boundary_exact_cap(&[(60, 40)], Some(100), 100, false)]
+    #[case::boundary_one_over(&[(60, 41)], Some(100), 101, true)]
+    #[case::boundary_zero_cap_first_token(&[(0, 1)], Some(0), 1, true)]
+    #[case::adversarial_saturates_no_overflow(&[(u64::MAX, 0), (1, u64::MAX)], Some(u64::MAX), u64::MAX, false)]
+    fn spend_rows(
+        #[case] adds: &[(u64, u64)],
+        #[case] cap: Option<u64>,
+        #[case] total: u64,
+        #[case] exceeded: bool,
+    ) {
+        let mut spend = Spend {
+            cap,
+            ..Spend::default()
+        };
+        for (i, o) in adds {
+            spend.add(*i, *o);
+        }
+        assert_eq!(spend.total(), total);
+        assert_eq!(spend.exceeded(), exceeded);
+    }
+
+    /// The cap fires inside the loop: turn 1 (60 tokens) fits under 100, turn 2
+    /// brings the total to 120 ⇒ the turn fails with a downcastable
+    /// `BudgetExceeded` and the session's spend records what was used.
+    #[tokio::test]
+    async fn boundary_worker_spend_cap_fails_the_turn() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            turn_with_usage(tool_turn(vec![tool_call("t0", "read_file")]), 40, 20),
+            turn_with_usage(final_turn("done"), 40, 20),
+        ]));
+        let agent = Arc::new(worker_agent(provider));
+        let mut session = agent.worker_session(
+            agent_core::SessionKey::local("campaign-1"),
+            std::env::temp_dir(),
+            100,
+        );
+        let err = session
+            .send("do the leaf")
+            .await
+            .expect_err("over the cap must fail the turn");
+        let budget = err
+            .downcast_ref::<BudgetExceeded>()
+            .expect("a BudgetExceeded the worker can downcast");
+        assert_eq!(
+            *budget,
+            BudgetExceeded {
+                used: 120,
+                cap: 100
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "token budget exceeded: used 120 of cap 100"
+        );
+        assert_eq!(session.spend().total(), 120);
+    }
+
+    /// Exactly the cap is not over it: the same two turns under a cap of 120 finish.
+    #[tokio::test]
+    async fn boundary_worker_spend_exact_cap_passes() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            turn_with_usage(tool_turn(vec![tool_call("t0", "read_file")]), 40, 20),
+            turn_with_usage(final_turn("done"), 40, 20),
+        ]));
+        let agent = Arc::new(worker_agent(provider));
+        let mut session = agent.worker_session(
+            agent_core::SessionKey::local("campaign-1"),
+            std::env::temp_dir(),
+            120,
+        );
+        assert_eq!(session.send("do the leaf").await.unwrap(), "done");
+        assert_eq!(
+            session.spend(),
+            Spend {
+                tokens_in: 80,
+                tokens_out: 40,
+                cap: Some(120)
+            }
+        );
+    }
+
+    /// An uncapped session only accumulates — the same spend never fails it.
+    #[tokio::test]
+    async fn corner_plain_session_accumulates_without_cap() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            turn_with_usage(tool_turn(vec![tool_call("t0", "read_file")]), 40, 20),
+            turn_with_usage(final_turn("done"), 40, 20),
+        ]));
+        let agent = Arc::new(worker_agent(provider));
+        let mut session = agent.session();
+        assert_eq!(session.send("go").await.unwrap(), "done");
+        assert_eq!(session.spend().total(), 120);
+        assert_eq!(session.spend().cap, None);
+    }
+
+    /// `[campaign] worker_model` drives worker sessions only: the pinned provider
+    /// answers the worker session, the main provider still answers a plain one.
+    #[tokio::test]
+    async fn positive_worker_model_override_drives_worker_sessions_only() {
+        let main: Arc<dyn LlmProvider> =
+            Arc::new(ScriptedProvider::new(vec![final_turn("from-main")]));
+        let pinned: Arc<dyn LlmProvider> =
+            Arc::new(ScriptedProvider::new(vec![final_turn("from-worker-model")]));
+        let agent = Arc::new(worker_agent(main).with_campaign_worker_provider(pinned));
+        let mut worker = agent.worker_session(
+            agent_core::SessionKey::local("campaign-2"),
+            std::env::temp_dir(),
+            1_000,
+        );
+        assert_eq!(worker.send("leaf").await.unwrap(), "from-worker-model");
+        let mut plain = agent.session();
+        assert_eq!(plain.send("hi").await.unwrap(), "from-main");
+    }
+
+    /// No pin ⇒ the worker getter is the main provider (nothing else is dialed).
+    #[test]
+    fn corner_worker_provider_falls_back_to_main() {
+        let agent = worker_agent(Arc::new(ScriptedProvider::new(vec![final_turn("x")])));
+        assert!(Arc::ptr_eq(
+            &agent.campaign_worker_provider(),
+            &agent.provider
+        ));
     }
 
     #[test]

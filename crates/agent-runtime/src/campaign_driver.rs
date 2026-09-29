@@ -5,23 +5,41 @@
 //!
 //! The poller is the process's `[forge]` backend (`Agent::forge`) behind a
 //! [`ForgePoller`]; with no forge configured the driver runs the [`NoopPoller`]
-//! and warns once, because `in_review` leaves are then never resolved. The
-//! shipped driver still has **no worker exec** (`with_exec(None)`): it reaps,
-//! polls and plans, and its claim phase is off, so `agent campaign run` reports
-//! `claimed 0  dispatched 0` rather than burning attempts on leaves nothing can
-//! execute. The worker body and the subprocess dispatch under `[campaign]
-//! sandbox` land in CP-06b.
+//! and warns once, because `in_review` leaves are then never resolved. The worker
+//! exec follows `[campaign] sandbox` (CP-06b): `"subprocess"` dispatches each leaf
+//! as an `agent --run-task` child under the process `[sandbox]` backend
+//! ([`SubprocessExec`]) — with no sandbox wired the driver **refuses to build**
+//! naming the key rather than fall back to running the leaf in this process;
+//! `"in_process"` runs [`run_leaf`](crate::campaign_worker::run_leaf) here
+//! ([`InProcessExec`]). `run --once` follows the same rule (CP-05 decision 7: one
+//! code path).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_campaign::{
-    Driver, DriverConfig, ForgePoller, NoopPoller, PrPoller, Tenants, TickPlanner,
+    Driver, DriverConfig, ForgePoller, NoopPoller, PrPoller, Tenants, TickPlanner, WorkerExec,
 };
 use agent_core::campaign::{CampaignBackend, Policy, DECOMPOSING_MAX_SECS};
 use agent_core::{Forge, UserId};
 
+use crate::agent::Agent;
+use crate::campaign_worker::{InProcessExec, SubprocessExec, WorkerCfg};
 use crate::config::{CampaignCfg, Config};
+
+/// What the worker exec needs from the process: the built agent (its sandbox,
+/// repo, forge, policy and worker provider), this binary and the config path the
+/// subprocess re-reads, and the worker knobs.
+pub struct WorkerDeps {
+    pub agent: Arc<Agent>,
+    /// `std::env::current_exe()`; `None` refuses the subprocess sandbox.
+    pub agent_bin: Option<PathBuf>,
+    /// `Config::source_path` (the `--config` given); `None` refuses the subprocess
+    /// sandbox.
+    pub config_path: Option<PathBuf>,
+    pub worker: WorkerCfg,
+}
 
 /// The driver knobs from the validated `[campaign]` block. The lease is the
 /// policy default (a claim spans campaigns; the per-campaign lease is the CP-06b
@@ -64,19 +82,55 @@ fn poller_for(forge: Option<Arc<dyn Forge>>) -> Arc<dyn PrPoller> {
     }
 }
 
+/// The worker exec for `[campaign] sandbox`. Fails closed: `"subprocess"` with
+/// no `[sandbox] backend`, no binary path or no config path is an error naming
+/// what is missing — never a silent in-process fallback.
+fn exec_for(cfg: &CampaignCfg, deps: WorkerDeps) -> anyhow::Result<Arc<dyn WorkerExec>> {
+    if cfg.sandbox == "in_process" {
+        return Ok(Arc::new(InProcessExec::new(deps.agent, deps.worker)));
+    }
+    let sandbox = deps.agent.sandbox().ok_or_else(|| {
+        anyhow::anyhow!(
+            "[campaign] sandbox = \"subprocess\" needs a `[sandbox] backend`, and none is \
+             configured (set one, or `[campaign] sandbox = \"in_process\"`)"
+        )
+    })?;
+    let agent_bin = deps.agent_bin.ok_or_else(|| {
+        anyhow::anyhow!(
+            "[campaign] sandbox = \"subprocess\": this binary's path is unknown, so no \
+             worker child can be spawned"
+        )
+    })?;
+    let config_path = deps.config_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "[campaign] sandbox = \"subprocess\": the config path is unknown (`--config`), \
+             so no worker child can re-read it"
+        )
+    })?;
+    Ok(Arc::new(SubprocessExec::new(
+        sandbox,
+        agent_bin,
+        config_path,
+        deps.worker.worker_timeout,
+    )))
+}
+
 /// The shipped driver: config mapped by [`driver_config`], the poller from
-/// `forge` ([`poller_for`]), no exec. `planner` is the CLI's `FactoryPlanner`
-/// over the built agent's planner provider; `forge` is `Agent::forge()`.
+/// `forge` ([`poller_for`]), the exec from `[campaign] sandbox` over `deps`.
+/// `planner` is the CLI's `FactoryPlanner` over the built agent's planner
+/// provider; `forge` is `Agent::forge()`.
 pub fn build_driver(
     cfg: &CampaignCfg,
     backend: Arc<dyn CampaignBackend>,
     tenants: Tenants,
     planner: Arc<dyn TickPlanner>,
     forge: Option<Arc<dyn Forge>>,
-) -> Driver {
-    Driver::new(backend, tenants, driver_config(cfg), planner)
+    deps: WorkerDeps,
+) -> anyhow::Result<Driver> {
+    let exec = exec_for(cfg, deps)?;
+    Ok(Driver::new(backend, tenants, driver_config(cfg), planner)
         .with_poller(poller_for(forge))
-        .with_exec(None)
+        .with_exec(Some(exec)))
 }
 
 #[cfg(test)]
@@ -161,8 +215,38 @@ mod tests {
             plan_per_tick: 2,
             worker_timeout_secs: 120,
             poll_batch: 5,
+            sandbox: "in_process".into(),
             ..CampaignCfg::default()
         }
+    }
+
+    /// A bare agent (no sandbox, no repo, no forge) over a one-turn provider.
+    fn bare_agent() -> Arc<Agent> {
+        Arc::new(crate::campaign_worker::testing::bare_agent(
+            Arc::new(agent_testkit::ScriptedProvider::new(vec![
+                agent_testkit::final_turn("ok"),
+            ])),
+            Arc::new(crate::policy::AutoApprove),
+        ))
+    }
+
+    /// Worker deps over `agent` with a stub binary and config path.
+    fn deps_for(agent: Arc<Agent>) -> WorkerDeps {
+        WorkerDeps {
+            agent,
+            agent_bin: Some(PathBuf::from("/nonexistent/agent")),
+            config_path: Some(PathBuf::from("/nonexistent/agent.toml")),
+            worker: WorkerCfg {
+                worker_timeout: Duration::from_secs(120),
+                forge_dry_run: false,
+                push_policy: "branch".into(),
+                target_branch: "main".into(),
+            },
+        }
+    }
+
+    fn deps() -> WorkerDeps {
+        deps_for(bare_agent())
     }
 
     /// One `in_review` leaf on PR 7 under tenant `acme`, no approval needed.
@@ -183,7 +267,7 @@ mod tests {
     }
 
     // positive: every driver knob comes from its `[campaign]` key; the two the
-    // config does not carry are the seam's defaults; no exec is wired.
+    // config does not carry are the seam's defaults; the exec is wired.
     #[test]
     fn positive_build_driver_from_cfg() {
         let cfg = campaign_cfg();
@@ -207,10 +291,12 @@ mod tests {
             Tenants::Fixed(vec!["acme".into()]),
             Arc::new(IdlePlanner),
             None,
-        );
+            deps(),
+        )
+        .unwrap();
         assert_eq!(*driver.config(), driver_config(&cfg));
         assert_eq!(driver.tenants(), &Tenants::Fixed(vec!["acme".into()]));
-        assert!(!driver.has_exec(), "CP-06a ships no worker: claims are off");
+        assert!(driver.has_exec(), "CP-06b wires the worker: claims are on");
         assert_eq!(driver.global_available(), 9);
         assert_eq!(driver.owner().as_str().len(), 32);
     }
@@ -242,7 +328,9 @@ mod tests {
             Tenants::Discover,
             Arc::new(IdlePlanner),
             None,
-        );
+            deps(),
+        )
+        .unwrap();
         let report = driver.tick().await;
         assert!(report.disabled);
         assert!(report.tenants.is_empty());
@@ -260,7 +348,9 @@ mod tests {
             Tenants::Fixed(vec!["acme".into()]),
             Arc::new(IdlePlanner),
             None,
-        );
+            deps(),
+        )
+        .unwrap();
         let report = driver.tick().await;
         assert!(!report.disabled);
         assert_eq!(report.tenants, ["acme"]);
@@ -282,7 +372,9 @@ mod tests {
             Tenants::Fixed(vec!["acme".into()]),
             Arc::new(IdlePlanner),
             Some(Arc::clone(&forge) as Arc<dyn Forge>),
-        );
+            deps(),
+        )
+        .unwrap();
         let report = driver.tick().await;
         assert_eq!(report.poll().polled, 1);
         assert_eq!(report.poll().merged, 1);
@@ -305,11 +397,106 @@ mod tests {
             Tenants::Fixed(vec!["acme".into()]),
             Arc::new(IdlePlanner),
             None,
-        );
+            deps(),
+        )
+        .unwrap();
         let report = driver.tick().await;
         assert_eq!(report.poll(), agent_campaign::PollReport::default());
         let s = mem.with_tenant("acme").unwrap();
         assert_eq!(s.get(r.task_id).await.unwrap(), r);
+    }
+
+    // positive: `sandbox = "subprocess"` over an agent with a sandbox builds the
+    // subprocess exec; the claim phase is on.
+    #[test]
+    fn positive_build_driver_subprocess_has_exec() {
+        let cfg = CampaignCfg {
+            sandbox: "subprocess".into(),
+            ..campaign_cfg()
+        };
+        let agent = Arc::new(
+            crate::campaign_worker::testing::bare_agent(
+                Arc::new(agent_testkit::ScriptedProvider::new(vec![
+                    agent_testkit::final_turn("ok"),
+                ])),
+                Arc::new(crate::policy::AutoApprove),
+            )
+            .with_sandbox(Some(Arc::new(agent_sandbox::LocalSandbox))),
+        );
+        let backend: Arc<dyn CampaignBackend> = Arc::new(MemCampaigns::new());
+        let driver = build_driver(
+            &cfg,
+            backend,
+            Tenants::Fixed(vec!["acme".into()]),
+            Arc::new(IdlePlanner),
+            None,
+            deps_for(agent),
+        )
+        .unwrap();
+        assert!(driver.has_exec());
+    }
+
+    // positive: `sandbox = "in_process"` needs no sandbox backend.
+    #[test]
+    fn positive_build_driver_in_process_has_exec() {
+        let backend: Arc<dyn CampaignBackend> = Arc::new(MemCampaigns::new());
+        let driver = build_driver(
+            &campaign_cfg(),
+            backend,
+            Tenants::Fixed(vec!["acme".into()]),
+            Arc::new(IdlePlanner),
+            None,
+            deps(),
+        )
+        .unwrap();
+        assert!(driver.has_exec());
+    }
+
+    // negative: `subprocess` without a `[sandbox] backend` / binary / config path
+    // refuses to build, naming what is missing — never an in-process fallback.
+    #[rstest]
+    #[case::negative_subprocess_without_sandbox(false, true, true, "[sandbox] backend")]
+    #[case::negative_subprocess_without_binary(true, false, true, "binary's path is unknown")]
+    #[case::negative_subprocess_without_config_path(true, true, false, "config path is unknown")]
+    fn build_driver_subprocess_refusal_rows(
+        #[case] sandbox: bool,
+        #[case] bin: bool,
+        #[case] config_path: bool,
+        #[case] needle: &str,
+    ) {
+        let cfg = CampaignCfg {
+            sandbox: "subprocess".into(),
+            ..campaign_cfg()
+        };
+        let mut agent = crate::campaign_worker::testing::bare_agent(
+            Arc::new(agent_testkit::ScriptedProvider::new(vec![
+                agent_testkit::final_turn("ok"),
+            ])),
+            Arc::new(crate::policy::AutoApprove),
+        );
+        if sandbox {
+            agent = agent.with_sandbox(Some(Arc::new(agent_sandbox::LocalSandbox)));
+        }
+        let mut d = deps_for(Arc::new(agent));
+        if !bin {
+            d.agent_bin = None;
+        }
+        if !config_path {
+            d.config_path = None;
+        }
+        let backend: Arc<dyn CampaignBackend> = Arc::new(MemCampaigns::new());
+        let err = build_driver(
+            &cfg,
+            backend,
+            Tenants::Fixed(vec!["acme".into()]),
+            Arc::new(IdlePlanner),
+            None,
+            d,
+        )
+        .expect_err("refused");
+        let msg = err.to_string();
+        assert!(msg.contains(needle), "{msg}");
+        assert!(msg.contains("[campaign] sandbox"), "{msg}");
     }
 
     #[rstest]

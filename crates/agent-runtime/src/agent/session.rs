@@ -74,6 +74,13 @@ pub struct Session {
     pub(super) agreed_seq: u64,
     /// The lazily-spawned background distiller for this session.
     pub(super) distiller: Option<crate::distiller::Distiller>,
+    /// Tokens spent across this session's turns, with the cap a worker session is
+    /// seeded with (CP-06b); uncapped for an ordinary session.
+    pub(super) spend: Spend,
+    /// The provider this session's turns run on when it differs from the backend's
+    /// main provider — a campaign worker session pinned by `[campaign] worker_model`.
+    /// `None` = the main provider.
+    pub(super) provider_override: Option<Arc<dyn LlmProvider>>,
 }
 
 impl Session {
@@ -239,6 +246,37 @@ impl Session {
         // full mutating set. An operator's max_tokens is floored in run_loop.
         self.tool_schemas
             .retain(|s| REVIEW_READONLY_TOOLS.contains(&s.name.as_str()));
+    }
+
+    /// Seed this session as a campaign worker (CP-06b): implement mode from the
+    /// first turn, the leaf's worktree as the tool cwd, the `forge` tool withdrawn
+    /// (the PR is opened by the worker protocol after the push, never by the model —
+    /// the goal text says so), the campaign policy's token cap armed on [`Spend`],
+    /// and the `[campaign] worker_model` provider (when pinned) driving every turn.
+    pub(super) fn seed_worker(
+        &mut self,
+        cwd: std::path::PathBuf,
+        token_cap: u64,
+        provider: Option<Arc<dyn LlmProvider>>,
+    ) {
+        self.current_mode = agent_core::TaskMode::Implement;
+        self.tool_ctx = ToolContext { cwd };
+        self.tool_schemas.retain(|s| s.name != "forge");
+        self.spend.cap = Some(token_cap);
+        self.provider_override = provider;
+    }
+
+    /// Tokens this session has spent so far, and its cap if one is armed.
+    pub fn spend(&self) -> Spend {
+        self.spend
+    }
+
+    /// The provider this session's turns run on (the override when seeded with
+    /// one, else the backend's main provider).
+    fn provider(&self) -> Arc<dyn LlmProvider> {
+        self.provider_override
+            .clone()
+            .unwrap_or_else(|| self.agent.provider.clone())
     }
 
     /// Re-select the situational system-fragment message for the current context and
@@ -419,6 +457,7 @@ impl Session {
         }
 
         self.agent.record("goal", Message::user(input)).await;
+        let provider = self.provider();
         let answer = self
             .agent
             .run_loop(
@@ -430,6 +469,8 @@ impl Session {
                 self.current_mode,
                 &self.events,
                 &self.session_metrics,
+                &mut self.spend,
+                &provider,
             )
             .await;
         // Cheap per-turn dimensional summarize (adaptive-cognition 03): file "what

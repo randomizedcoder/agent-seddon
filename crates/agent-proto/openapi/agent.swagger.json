@@ -6936,6 +6936,18 @@
       ],
       "default": "EXEC_ENV_POLICY_INHERIT"
     },
+    "agent.v1.ExecEnvVar": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "description": "One per-exec variable set on the child after the env policy is applied, so it\nsurvives EXEC_ENV_POLICY_SCRUB (the campaign worker's owner token). Names must\nmatch `[A-Za-z_][A-Za-z0-9_]*` and values must be NUL-free; the backend refuses\nthe exec before spawning otherwise. Values are treated as secrets."
+    },
     "agent.v1.ExecNetworkPolicy": {
       "type": "string",
       "enum": [
@@ -6970,6 +6982,14 @@
             "type": "string"
           },
           "description": "When non-empty, run this argv directly (no shell); `command` is ignored."
+        },
+        "envSet": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/agent.v1.ExecEnvVar"
+          },
+          "description": "Applied after `env`; see ExecEnvVar."
         }
       }
     },

@@ -63,6 +63,10 @@ pub mod campaign;
 // selection rule, `build_driver` over the opened backend.
 #[cfg(feature = "campaign")]
 pub mod campaign_driver;
+// The campaign worker (docs/design/campaigns/04-executor.md "Worker protocol",
+// CP-06b): `run_leaf` behind `agent --run-task` and the in-process exec.
+#[cfg(feature = "campaign")]
+pub mod campaign_worker;
 #[cfg(any(
     feature = "auth-postgres",
     feature = "role-postgres",
@@ -101,7 +105,9 @@ mod tenant;
 #[cfg(feature = "scheduler-store")]
 mod scheduler_driver;
 
-pub use agent::{Agent, GrpcTlsSettings, OpenError, Session, SessionManager, Settings};
+pub use agent::{
+    Agent, BudgetExceeded, GrpcTlsSettings, OpenError, Session, SessionManager, Settings, Spend,
+};
 pub use agent_metrics::Metrics;
 pub use builder::{
     build_agent, build_agent_mode, build_agent_with, build_agent_with_mode, BuildMode,
