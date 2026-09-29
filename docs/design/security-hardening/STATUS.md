@@ -34,7 +34,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S20b | Hot reload of client TLS (dialed channels pick up a renewed identity) | deferral | ✅ | #565 |
 | S21 | CLI loopback-redirect login | deferral | ✅ | #566 |
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
-| S23 | Native desktop sign-in via the CLI login | deferral | 🟡 | — |
+| S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 
 ## As-built log
 
@@ -1074,7 +1074,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - `auth-integration` and `portal-auth-e2e` are unchanged; the hermetic widget suite
       covers the page.
 
-- **2026-09-29 — S23: `agent token` and native desktop sign-in.**
+- **2026-09-29 — S23 (#568): `agent token` and native desktop sign-in.**
   - `agent token [--issuer NAME] [--json]` prints a usable agent token from the stored login.
     It refreshes under the token file's lock when stale. Exit codes: 2 not signed in, 3 session
     ended, 1 other.
