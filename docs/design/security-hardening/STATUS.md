@@ -28,7 +28,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S15c | `portal-auth-e2e`: browser sign-in through the hardened edge | testing | ✅ | #549 |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
-| S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | 🟡 | — |
+| S18 | Live verification of S16 on l2 (+ empty-tenant row-policy fix) | S16 verification | ✅ | #559 |
 | S19 | Attribute queued `ReviewNow` / `Approve` to the requester | deferral | ⬜ | — |
 | S20 | Hot reload of TLS material and the signing key | deferral | ⬜ | — |
 | S21 | CLI loopback-redirect login | deferral | ⬜ | — |
