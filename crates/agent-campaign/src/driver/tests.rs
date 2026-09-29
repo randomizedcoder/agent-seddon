@@ -291,6 +291,21 @@ impl Fx {
     }
 }
 
+/// T13 `negative_noop_poller_no_store_calls`: the [`NoopPoller`] never touches
+/// the store, even with an `in_review` leaf waiting.
+#[tokio::test]
+async fn negative_noop_poller_no_store_calls() {
+    let fx = Fx::new();
+    let seed = fx.store("ta");
+    let (_, leaves) = ready_leaves(&*seed, 1).await;
+    agent_testkit::campaign::conformance::in_review(&*seed, leaves[0].task_id, &owner("w1"), 1)
+        .await;
+    let logged = fx.backend.with_tenant("ta").expect("open");
+    let report = NoopPoller.poll(logged, 20).await;
+    assert_eq!(report, PollReport::default());
+    assert!(fx.log_entries().is_empty(), "{:?}", fx.log_entries());
+}
+
 fn cfg(per_tenant_workers: usize, global_workers: usize) -> DriverConfig {
     DriverConfig {
         per_tenant_workers,
