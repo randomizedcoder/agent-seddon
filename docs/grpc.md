@@ -123,6 +123,32 @@ write permission on the socket) — an unauthenticated local peer can't invoke, 
 *across* UIDs, use mTLS on the TCP transport (below) or a `SO_PEERCRED` check (a
 follow-up).
 
+### TCP_NODELAY on accepted sockets (a ~40 ms trap)
+
+We bind with `serve_with_incoming` over our own `TcpListenerStream` (above), and
+that path — unlike tonic's convenience `serve(addr)` — does **not** set
+`TCP_NODELAY` on the sockets it accepts. With Nagle's algorithm left on, the
+server holds a small trailing segment waiting for more data to coalesce, while the
+peer's delayed-ACK holds its ACK: the classic Nagle + delayed-ACK deadlock, worth
+~40 ms per stall. For gRPC this bites the final small **TRAILERS** frame of a
+large unary reply — the frame that tells the client the call is done — so a big
+response can sit ~40 ms after its last DATA frame before the client sees
+completion.
+
+A raw gRPC client that ACKs promptly usually masks it; it surfaced loudly on the
+REST/grpc-web path (see the REST surface docs), where Envoy buffers the whole
+unary reply before emitting a byte and reuses **keep-alive** connections, turning
+the stall into ~40 ms of time-to-first-byte on large reads.
+
+The fix lives in one place — `enable_nodelay` in
+[`crates/agent-grpc/src/transport.rs`](../crates/agent-grpc/src/transport.rs),
+which maps the accepted `TcpListenerStream` and sets `TCP_NODELAY` on each socket
+(best-effort: an accept error flows through untouched so tonic sees it, not a
+panic). Measured on the 34 KB config-read path over keep-alive: **42 ms → 1.2 ms**.
+Because it is applied at the shared transport layer, every TCP-served seam gets it;
+UDS is unaffected (no Nagle) and Envoy already defaults `TCP_NODELAY` on. If you
+ever add another bind path, set nodelay there too.
+
 ### TLS and mTLS
 
 The TCP transport speaks TLS 1.2/1.3 (tonic's rustls, `ring` provider) configured
