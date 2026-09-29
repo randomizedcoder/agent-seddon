@@ -219,6 +219,41 @@ representative unary RPC, and REST latency/throughput against the same RPC throu
 reporting p50/p95 and the overhead delta — plus an operational check on descriptor/config size and
 Envoy load time for 157 RPCs (`nix run .#rest-bench`, opt-in like `loadtest`).
 
+### What the numbers actually said (findings, so they aren't re-litigated)
+
+**Compare like with like, or the bench lies.** The first `rest-bench` reported REST p95 ≈ +12 ms
+over gRPC. That was a **bench artifact, not transcoding cost**: the gRPC leg pooled connections
+(`ghz --connections 8`) while the REST leg used a fresh process + fresh TCP per request
+(`xargs curl`). Two opposite confounds — connection reuse vs. per-request connect — canceled at p50
+and left a spurious tail at p95. Fixed by making both legs pooled (REST leg → `hey`, pinned) and
+adding a small-RPC headline case alongside the large-read witness. **Real cost of JSON↔protobuf
+transcoding, pooled-vs-pooled: ≈ 1–2 ms/call.** Prefer gRPC for hot paths — but the honest number
+is 1–2 ms, not 12.
+
+**The +12 ms hunt found a real bug: a ~40 ms Nagle stall on the agent side.** Our accepted gRPC
+sockets had `TCP_NODELAY` unset (tonic's `serve_with_incoming` doesn't set it), so the final small
+TRAILERS frame of a large unary reply was held against the peer's delayed-ACK. The transcoder path
+exposed it because Envoy buffers the whole unary reply and reuses keep-alive connections. Fixed at
+the transport layer (`enable_nodelay` in `crates/agent-grpc/src/transport.rs`, **42 ms → 1.2 ms** on
+the 34 KB read) — see the "TCP_NODELAY on accepted sockets" section of [`docs/grpc.md`](../../grpc.md).
+This is a seam-wide gRPC property, not REST-specific.
+
+**Compact JSON (`print_options.add_whitespace: false`).** Pretty-printing nearly **doubled** a
+config read on the wire — `GET /v1/config/values` measured **35,078 B pretty → 17,878 B compact
+(≈49% saved)** — for zero machine-client benefit, and it formats attacker-influenced field values
+into extra whitespace. Set compact. `always_print_primitive_fields` stays **`true`**: that is an
+API-shape contract (zero-valued fields remain present), not a formatting toggle — do not conflate
+the two.
+
+**HTTP/2 window tuning is the wrong lever here (deferred, not forgotten).** Flow control is
+*receiver-advertised*. For a response flowing agent → Envoy, **Envoy** is the receiver, so the
+governing window is Envoy's upstream cluster (`http2_protocol_options`), **not** tonic's server
+window — tonic's `initial_stream_window_size` only governs request bodies the agent *receives*
+(tiny). And every current read fits under the default 64 KB stream window, so there is no
+`WINDOW_UPDATE` round-trip to eliminate. Window sizes (Envoy *or* tonic) only matter once a read
+exceeds ~64 KB; revisit then, not speculatively. `STATIC` vs `LOGICAL_DNS`, circuit breakers, and
+trace sampling are likewise marginal on a loopback compat bridge and were considered and deferred.
+
 ## Increments (each a gated PR off `main`, never stacked)
 
 1. **This directory** — design-of-record + `STATUS.md` + `docs/README.md` index entry. Docs only.
