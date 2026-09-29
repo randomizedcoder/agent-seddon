@@ -19,7 +19,11 @@ re-derive.
   mirroring the old `BashTool`) + `capabilities() -> SandboxCapabilities` (a probe:
   binary present, can it enforce network-off / private-tmp, is it content-addressed).
   `ExecSpec` carries the command, cwd, a `NetworkPolicy` (`Off`/`On`/`Loopback`),
-  an `EnvPolicy` (`Inherit`/`Scrub`), and a timeout.
+  an `EnvPolicy` (`Inherit`/`Scrub`), `env_set` (per-exec variables applied
+  **after** the policy, so they survive `Scrub` — the campaign worker's owner
+  token; names must match `[A-Za-z_][A-Za-z0-9_]*`, values must be NUL-free, and
+  the backend refuses the exec before spawning otherwise; values are never echoed),
+  and a timeout.
 - **Impl crate:** [`agent-sandbox`](../../crates/agent-sandbox).
   - **`local`** (`sandbox-local`, default) — today's unconfined spawn, so selecting
     it changes nothing.

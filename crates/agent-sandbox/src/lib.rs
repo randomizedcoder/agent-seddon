@@ -76,6 +76,24 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
             cmd.env("PATH", path);
         }
     }
+    // Per-exec variables land after the policy so they survive Scrub (the campaign
+    // worker's owner token is the first user). Validated before spawn: an invalid
+    // name or a NUL in the value is a hard error, never something `execve` splits or
+    // cuts silently. The value is a secret by default and is never echoed.
+    for (name, value) in &spec.env_set {
+        if !env_name_ok(name) {
+            return Err(Error::Sandbox(format!(
+                "env_set: invalid variable name {:?}",
+                name.chars().take(64).collect::<String>()
+            )));
+        }
+        if value.contains('\0') {
+            return Err(Error::Sandbox(format!(
+                "env_set: the value of {name} contains NUL"
+            )));
+        }
+        cmd.env(name, value);
+    }
     // Capture stdout+stderr with a per-stream byte cap. `cmd.output()` would buffer the
     // child's entire output unbounded — an OOM vector when the program is attacker-influenced
     // (a linter over a hostile repo, the model's `bash`). We pipe both streams and read them
@@ -143,6 +161,24 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
             ..Default::default()
         }),
     }
+}
+
+/// Longest `env_set` name accepted; a POSIX name is short, and the bound keeps a
+/// hostile spec from pushing an arbitrarily large string into the child's environ.
+const MAX_ENV_NAME_LEN: usize = 256;
+
+/// A valid `env_set` variable name: `[A-Za-z_][A-Za-z0-9_]*`, at most
+/// [`MAX_ENV_NAME_LEN`] bytes. Anything else (`=`, whitespace, a leading digit, an
+/// empty name, non-ASCII, NUL) is refused rather than sanitised.
+fn env_name_ok(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_ENV_NAME_LEN {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
+    first_ok && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 const TRUNCATION_MARKER: &[u8] = b"\n[stderr truncated: exceeded 8 MiB capture cap]\n";
@@ -308,6 +344,110 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.stdout.is_empty(), "scrub must keep PATH: got empty");
+    }
+
+    // --- CP-06b: per-exec `env_set` (the campaign worker's owner token) --------
+
+    /// The probe every `env_set` test runs: prints the variable or `__EMPTY__`.
+    const ENV_SET_PROBE: &str = r#"printf '%s' "${AGENT_SANDBOX_ENV_SET_PROBE:-__EMPTY__}""#;
+
+    /// `env_set` is applied after the policy, so the variable is visible under
+    /// `Scrub` (the whole point: the token reaches the child, the host env does
+    /// not) and under `Inherit` alike.
+    #[rstest]
+    #[case::positive_env_set_visible_under_scrub(EnvPolicy::Scrub)]
+    #[case::positive_env_set_visible_under_inherit(EnvPolicy::Inherit)]
+    #[tokio::test]
+    async fn env_set_visible_under_both_policies(#[case] policy: EnvPolicy) {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(
+                &ExecSpec::sh(ENV_SET_PROBE, dir)
+                    .env(policy)
+                    .env_set("AGENT_SANDBOX_ENV_SET_PROBE", "set-per-exec"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "set-per-exec", "env_set must reach the child");
+        assert_eq!(out.exit_code, 0);
+    }
+
+    /// A per-exec value wins over an inherited one of the same name (the child
+    /// sees the spec's value, not the host's).
+    #[tokio::test]
+    async fn corner_env_set_overrides_inherited() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(
+                &ExecSpec::sh(r#"printf '%s' "$HOME""#, dir)
+                    .env(EnvPolicy::Inherit)
+                    .env_set("HOME", "/per-exec-home"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "/per-exec-home");
+    }
+
+    /// Without `env_set` the probe variable is absent under `Scrub` — the control
+    /// for the positive rows (nothing in the ambient env leaks a false positive).
+    #[tokio::test]
+    async fn negative_env_set_absent_when_not_set() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(&ExecSpec::sh(ENV_SET_PROBE, dir).env(EnvPolicy::Scrub))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "__EMPTY__");
+    }
+
+    /// The name rule, table-driven over the pure check.
+    #[rstest]
+    #[case::positive_upper("AGENT_CAMPAIGN_OWNER", true)]
+    #[case::positive_lower_and_digits("abc_123", true)]
+    #[case::positive_leading_underscore("_x", true)]
+    #[case::boundary_single_char("A", true)]
+    #[case::boundary_max_len(&"A".repeat(MAX_ENV_NAME_LEN), true)]
+    #[case::boundary_over_max_len(&"A".repeat(MAX_ENV_NAME_LEN + 1), false)]
+    #[case::adversarial_empty("", false)]
+    #[case::adversarial_equals("A=B", false)]
+    #[case::adversarial_leading_digit("1X", false)]
+    #[case::adversarial_space("A B", false)]
+    #[case::adversarial_nul("A\0B", false)]
+    #[case::adversarial_newline("A\nB=1", false)]
+    #[case::adversarial_dash("LD-PRELOAD", false)]
+    #[case::adversarial_non_ascii("ÄB", false)]
+    fn env_name_rows(#[case] name: &str, #[case] ok: bool) {
+        assert_eq!(env_name_ok(name), ok, "name {name:?}");
+    }
+
+    /// A bad name or a NUL value fails the exec **before** anything is spawned:
+    /// `Err`, not a child that ran with a mangled environment. The value never
+    /// appears in the error (it is a secret by default).
+    #[rstest]
+    #[case::adversarial_env_set_bad_name("A=B", "harmless", "invalid variable name")]
+    #[case::adversarial_env_set_empty_name("", "harmless", "invalid variable name")]
+    #[case::adversarial_env_set_nul_value("OK_NAME", "sec\0ret", "contains NUL")]
+    #[tokio::test]
+    async fn env_set_invalid_refused_before_spawn(
+        #[case] name: &str,
+        #[case] value: &str,
+        #[case] msg: &str,
+    ) {
+        let dir = tempdir();
+        // A command that would leave a marker if it ever ran.
+        let marker = dir.join("ran");
+        let cmd = format!("touch {}", marker.display());
+        let err = LocalSandbox
+            .exec(&ExecSpec::sh(cmd, dir.clone()).env_set(name, value))
+            .await
+            .expect_err("an invalid env_set entry must be an error");
+        let text = err.to_string();
+        assert!(text.contains(msg), "error `{text}` lacks `{msg}`");
+        assert!(
+            !text.contains("harmless") && !text.contains("sec"),
+            "value echoed: {text}"
+        );
+        assert!(!marker.exists(), "the child must not have been spawned");
     }
 
     /// `stdout_bytes` is the exact capture; `stdout` is a lossy view. A non-UTF8

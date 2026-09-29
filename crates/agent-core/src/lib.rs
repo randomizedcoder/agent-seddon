@@ -1417,6 +1417,15 @@ pub struct ExecSpec {
     pub cwd: std::path::PathBuf,
     pub network: NetworkPolicy,
     pub env: EnvPolicy,
+    /// Variables set on the child **after** `env` is applied, so they are visible
+    /// under both `Inherit` and `Scrub` — a per-exec value (the campaign worker's
+    /// owner token is the first user) reaches the child without opening the host
+    /// env to it. Names must match `[A-Za-z_][A-Za-z0-9_]*` (≤ 256 bytes) and
+    /// values must be NUL-free; a backend refuses the exec **before spawning**
+    /// otherwise (fail closed — `A=B` or a NUL would otherwise be split or cut
+    /// silently on the way to `execve`). Values are secrets by default: never
+    /// echoed in errors or logs.
+    pub env_set: Vec<(String, String)>,
     pub timeout_secs: u64,
 }
 
@@ -1430,6 +1439,7 @@ impl ExecSpec {
             cwd: cwd.into(),
             network: NetworkPolicy::On,
             env: EnvPolicy::Inherit,
+            env_set: Vec::new(),
             timeout_secs: 120,
         }
     }
@@ -1447,6 +1457,7 @@ impl ExecSpec {
             cwd: cwd.into(),
             network: NetworkPolicy::On,
             env: EnvPolicy::Inherit,
+            env_set: Vec::new(),
             timeout_secs: 120,
         }
     }
@@ -1456,6 +1467,12 @@ impl ExecSpec {
     }
     pub fn env(mut self, e: EnvPolicy) -> Self {
         self.env = e;
+        self
+    }
+    /// Set one variable on the child regardless of the `env` policy (see
+    /// [`ExecSpec::env_set`] for the name/value rules the backend enforces).
+    pub fn env_set(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_set.push((name.into(), value.into()));
         self
     }
     pub fn timeout(mut self, secs: u64) -> Self {

@@ -89,6 +89,15 @@ enum ExecEnvPolicy {
   EXEC_ENV_POLICY_SCRUB = 1;
 }
 
+// One per-exec variable set on the child after the env policy is applied, so it
+// survives EXEC_ENV_POLICY_SCRUB (the campaign worker's owner token). Names must
+// match `[A-Za-z_][A-Za-z0-9_]*` and values must be NUL-free; the backend refuses
+// the exec before spawning otherwise. Values are treated as secrets.
+message ExecEnvVar {
+  string name = 1;
+  string value = 2;
+}
+
 message ExecRequest {
   string command = 1;
   string cwd = 2;
@@ -97,6 +106,8 @@ message ExecRequest {
   uint64 timeout_secs = 5;
   // When non-empty, run this argv directly (no shell); `command` is ignored.
   repeated string argv = 6;
+  // Applied after `env`; see ExecEnvVar.
+  repeated ExecEnvVar env_set = 7;
 }
 
 message ExecResult {
