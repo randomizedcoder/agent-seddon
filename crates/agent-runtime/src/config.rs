@@ -568,6 +568,10 @@ pub struct CampaignCfg {
     /// the `model` label recorded on every worker attempt.
     #[serde(default)]
     pub worker_model: String,
+    /// The branch a worker's worktree starts from and its pull request targets
+    /// (CP-06b); a git ref fragment of path-safe `/`-segments, `"main"` by default.
+    #[serde(default = "default_campaign_target_branch")]
+    pub target_branch: String,
     /// Nodes one `agent campaign plan` / `run --once` tick decomposes,
     /// [`CampaignCfg::PLAN_PER_TICK`]; `0` plans nothing (a `run --once` then only
     /// reaps).
@@ -709,6 +713,14 @@ impl CampaignCfg {
                 agent_core::campaign::MAX_MODEL
             ));
         }
+        if self.target_branch.chars().count() > agent_core::campaign::MAX_BRANCH
+            || !self.target_branch.split('/').all(agent_core::safe_segment)
+        {
+            return Err(format!(
+                "`[campaign] target_branch` must be a git branch of path-safe `/`-segments, at most {} chars",
+                agent_core::campaign::MAX_BRANCH
+            ));
+        }
         if self.repo_root.chars().any(char::is_control) {
             return Err("`[campaign] repo_root` contains control characters".into());
         }
@@ -775,6 +787,7 @@ impl Default for CampaignCfg {
             pool_max: default_campaign_pool_max(),
             planner_model: String::new(),
             worker_model: String::new(),
+            target_branch: default_campaign_target_branch(),
             plan_per_tick: default_campaign_plan_per_tick(),
             max_repairs: default_campaign_max_repairs(),
             repo_root: String::new(),
@@ -808,6 +821,9 @@ fn default_campaign_global_workers() -> usize {
 }
 fn default_campaign_sandbox() -> String {
     "subprocess".to_string()
+}
+fn default_campaign_target_branch() -> String {
+    "main".to_string()
 }
 fn default_campaign_worker_timeout_secs() -> u64 {
     3_600
@@ -4562,6 +4578,7 @@ mod tests {
         pool_max = 8
         planner_model = "cheap"
         worker_model = "big"
+        target_branch = "release/2026.09"
         plan_per_tick = 8
         max_repairs = 1
         repo_root = "/srv/repo"
@@ -4653,6 +4670,22 @@ mod tests {
         Err("worker_model")
     )]
     #[case::positive_worker_model_empty_ok(r#"worker_model = """#, Ok(()))]
+    #[case::negative_target_branch_empty(r#"target_branch = """#, Err("target_branch"))]
+    #[case::adversarial_target_branch_traversal(
+        r#"target_branch = "../main""#,
+        Err("target_branch")
+    )]
+    #[case::adversarial_target_branch_leading_dash(r#"target_branch = "-x""#, Err("target_branch"))]
+    #[case::adversarial_target_branch_space(r#"target_branch = "main x""#, Err("target_branch"))]
+    #[case::adversarial_target_branch_control(
+        "target_branch = \"main\\u001b\"",
+        Err("target_branch")
+    )]
+    #[case::adversarial_target_branch_trailing_slash(
+        r#"target_branch = "main/""#,
+        Err("target_branch")
+    )]
+    #[case::positive_target_branch_nested(r#"target_branch = "release/2026.09""#, Ok(()))]
     #[case::adversarial_repo_root_control_chars("repo_root = \"/srv\\u0000/x\"", Err("repo_root"))]
     #[case::adversarial_repo_slug_traversal(
         r#"
@@ -4756,6 +4789,7 @@ mod tests {
         assert_eq!(cfg.pool_max, 4);
         assert_eq!(cfg.planner_model, "");
         assert_eq!(cfg.worker_model, "");
+        assert_eq!(cfg.target_branch, "main");
         assert_eq!(cfg.plan_per_tick, 4);
         assert_eq!(cfg.max_repairs, 2);
         assert_eq!(cfg.repo_root, "");

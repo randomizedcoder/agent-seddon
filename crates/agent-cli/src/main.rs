@@ -312,6 +312,8 @@ async fn main() -> Result<()> {
             main_model: config.provider.model.clone(),
             backend,
             tenants: agent_runtime::campaign_driver::tenants_for(&config, args.tenant.as_deref()),
+            worker: agent_runtime::campaign_worker::WorkerCfg::from_config(&config),
+            config_path: config.source_path.clone(),
         });
     }
 
@@ -649,6 +651,8 @@ async fn main() -> Result<()> {
                     main_model,
                     backend,
                     tenants,
+                    worker,
+                    config_path,
                 } = campaign_run.expect("the campaign store is opened before the build");
                 let provider = agent.campaign_planner_provider();
                 let brief: std::sync::Arc<dyn agent_campaign::BriefSource> =
@@ -690,7 +694,13 @@ async fn main() -> Result<()> {
                                     .to_string()]),
                                 planner,
                                 agent.forge(),
-                            );
+                                agent_runtime::campaign_driver::WorkerDeps {
+                                    agent: agent.clone(),
+                                    agent_bin: std::env::current_exe().ok(),
+                                    config_path,
+                                    worker,
+                                },
+                            )?;
                             let mut out = stdout.lock();
                             return campaign_cli::run_driver_once(&ctx, &driver, &mut out)
                                 .await
@@ -704,7 +714,13 @@ async fn main() -> Result<()> {
                             tenants,
                             planner,
                             agent.forge(),
-                        );
+                            agent_runtime::campaign_driver::WorkerDeps {
+                                agent: agent.clone(),
+                                agent_bin: std::env::current_exe().ok(),
+                                config_path,
+                                worker,
+                            },
+                        )?;
                         let every = Duration::from_secs(cfg.tick_secs.max(1));
                         eprintln!(
                             "campaign: ticking every {}s — ^C to stop",
@@ -972,6 +988,11 @@ struct CampaignRun {
     backend: Option<std::sync::Arc<dyn agent_core::campaign::CampaignBackend>>,
     /// The tenants the resident driver serves (`--tenant`, discovery, or `local`).
     tenants: agent_campaign::Tenants,
+    /// The worker knobs (`[campaign] worker_timeout_secs` / `target_branch`,
+    /// `[forge] dry_run`, `[git] push_policy`), captured before `config` moves.
+    worker: agent_runtime::campaign_worker::WorkerCfg,
+    /// The `--config` path a `sandbox = "subprocess"` worker child re-reads.
+    config_path: Option<PathBuf>,
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the

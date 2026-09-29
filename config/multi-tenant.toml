@@ -135,3 +135,4 @@ sandbox = "subprocess"
 worker_timeout_secs = 3600
 poll_batch = 20
 worker_model = ""
+target_branch = "main"

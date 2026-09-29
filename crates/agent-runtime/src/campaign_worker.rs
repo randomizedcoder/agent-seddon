@@ -32,18 +32,24 @@
 //! not validate as a [`PrRef`] fails the leaf. The owner token never appears in any
 //! error or log line. Nothing here writes to the store without the owner.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_campaign::WorkerExec;
 use agent_core::campaign::{
-    clamp_lease, truncate_chars, CampaignError, CampaignStore, Complete, Fail, FailCause, Owner,
-    Policy as CampaignPolicy, PrRef, Task, TaskId, TaskPath, TaskState, TokenUsage, MAX_ERROR,
+    clamp_lease, truncate_chars, CampaignError, CampaignStore, Claimed, Complete, Fail, FailCause,
+    Owner, Policy as CampaignPolicy, PrRef, Task, TaskId, TaskPath, TaskState, TokenUsage,
+    CAMPAIGN_OWNER_ENV, MAX_ERROR,
 };
 use agent_core::{
-    safe_segment, CreatePrRequest, Decision, Revision, SessionKey, ToolCall, WorktreeSpec,
+    safe_segment, CreatePrRequest, Decision, EnvPolicy, ExecOutput, ExecSpec, NetworkPolicy,
+    Revision, Sandbox, SessionKey, ToolCall, WorktreeSpec,
 };
+use async_trait::async_trait;
 
 use crate::agent::{Agent, BudgetExceeded, Spend};
+use crate::config::Config;
 
 /// The PR body cap (`04-executor.md` "≤ 8 KiB"); the trailer always survives.
 pub const PR_BODY_MAX_BYTES: usize = 8 * 1024;
@@ -67,9 +73,22 @@ pub struct WorkerCfg {
     /// `[git] push_policy`: `"never"` ⇒ the leaf fails before any work, naming the
     /// key.
     pub push_policy: String,
-    /// The branch the worktree starts from and the PR targets (`[git] default_branch`
-    /// or the operator's choice).
+    /// The branch the worktree starts from and the PR targets (`[campaign]
+    /// target_branch`).
     pub target_branch: String,
+}
+
+impl WorkerCfg {
+    /// The worker knobs from a loaded config: `[campaign] worker_timeout_secs` /
+    /// `target_branch`, `[forge] dry_run`, `[git] push_policy`.
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            worker_timeout: Duration::from_secs(cfg.campaign.worker_timeout_secs.max(1)),
+            forge_dry_run: cfg.forge.dry_run,
+            push_policy: cfg.git.push_policy.clone(),
+            target_branch: cfg.campaign.target_branch.clone(),
+        }
+    }
 }
 
 /// How a leaf ended, as the `--run-task` exit code the driver maps
@@ -675,6 +694,230 @@ pub fn branch_segments_safe(branch: &str) -> bool {
     !branch.is_empty() && branch.split('/').all(safe_segment)
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch: the two `WorkerExec`s (`04-executor.md` "Dispatch")
+// ---------------------------------------------------------------------------
+
+/// The text the driver fails a leaf with when the worker's own write is the
+/// terminal state (exit `1`): the driver's `settle_failure` then finds the leaf
+/// already `failed` and only logs.
+const WORKER_FAILED: &str = "worker failed the leaf";
+/// Exit `3`: the worker lost (or never had) the lease; the reaper re-queues.
+const WORKER_LEASE_LOST: &str = "worker: lease lost";
+/// How much of a child's stderr an error carries (chars, from the tail).
+pub const STDERR_TAIL_CHARS: usize = 512;
+/// Extra wall clock the sandbox timeout allows past `worker_timeout`, so the
+/// child's own `fail(timeout)` write normally lands before the parent kills it.
+pub const SUBPROCESS_GRACE: Duration = Duration::from_secs(30);
+
+/// `[campaign] sandbox = "subprocess"`: each leaf is an `agent --run-task
+/// --tenant <T> --task <id>` child under the process [`Sandbox`], re-reading the
+/// same `--config`. The owner token travels as a per-exec environment variable
+/// ([`CAMPAIGN_OWNER_ENV`] via `ExecSpec::env_set`), never an argument; the
+/// environment is inherited and the network on, because the child must reach its
+/// provider and the forge. The exit code is mapped by [`map_exit`].
+pub struct SubprocessExec {
+    sandbox: Arc<dyn Sandbox>,
+    agent_bin: PathBuf,
+    config_path: PathBuf,
+    worker_timeout: Duration,
+    grace: Duration,
+}
+
+impl SubprocessExec {
+    pub fn new(
+        sandbox: Arc<dyn Sandbox>,
+        agent_bin: PathBuf,
+        config_path: PathBuf,
+        worker_timeout: Duration,
+    ) -> Self {
+        Self {
+            sandbox,
+            agent_bin,
+            config_path,
+            worker_timeout,
+            grace: SUBPROCESS_GRACE,
+        }
+    }
+
+    /// Override the grace past `worker_timeout` (tests).
+    #[must_use]
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
+    }
+
+    /// The child's argv: fixed flags, the tenant and the id — nothing
+    /// model-authored, so no `--` is needed (the tenant passed `safe_segment` at
+    /// the driver, the id is a number).
+    fn argv(&self, tenant: &str, task: TaskId) -> Vec<String> {
+        vec![
+            self.agent_bin.to_string_lossy().into_owned(),
+            "--config".to_string(),
+            self.config_path.to_string_lossy().into_owned(),
+            "--run-task".to_string(),
+            "--tenant".to_string(),
+            tenant.to_string(),
+            "--task".to_string(),
+            task.0.to_string(),
+        ]
+    }
+}
+
+#[async_trait]
+impl WorkerExec for SubprocessExec {
+    async fn run(
+        &self,
+        tenant: &str,
+        _store: Arc<dyn CampaignStore>,
+        claimed: &Claimed,
+        owner: &Owner,
+    ) -> Result<(), String> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let spec = ExecSpec::argv(self.argv(tenant, claimed.task.task_id), cwd)
+            .env(EnvPolicy::Inherit)
+            .network(NetworkPolicy::On)
+            .env_set(CAMPAIGN_OWNER_ENV, owner.as_str())
+            .timeout((self.worker_timeout + self.grace).as_secs());
+        let out = self
+            .sandbox
+            .exec(&spec)
+            .await
+            .map_err(|e| format!("sandbox: {e}"))?;
+        map_exit(&out, self.worker_timeout)
+    }
+}
+
+/// The child's exit as the driver's `WorkerExec` result: `0` ⇒ `Ok` (the worker
+/// wrote its terminal state), `1` ⇒ the worker wrote `failed`, `3` ⇒ lease lost,
+/// a sandbox timeout ⇒ `timed out`, anything else ⇒ `exited N` with the tail of
+/// stderr (bounded, NUL-free).
+pub fn map_exit(out: &ExecOutput, worker_timeout: Duration) -> Result<(), String> {
+    if out.timed_out {
+        return Err(format!(
+            "worker timed out after {}s",
+            worker_timeout.as_secs()
+        ));
+    }
+    match out.exit_code {
+        0 => Ok(()),
+        1 => Err(WORKER_FAILED.to_string()),
+        3 => Err(WORKER_LEASE_LOST.to_string()),
+        code => Err(format!(
+            "worker exited {code}: {}",
+            stderr_tail(&out.stderr, STDERR_TAIL_CHARS)
+        )),
+    }
+}
+
+/// The last `max` chars of `stderr`, trimmed, NUL dropped.
+fn stderr_tail(stderr: &str, max: usize) -> String {
+    let clean: Vec<char> = stderr.trim().chars().filter(|c| *c != '\0').collect();
+    let start = clean.len().saturating_sub(max);
+    clean[start..].iter().collect()
+}
+
+/// `[campaign] sandbox = "in_process"`: [`run_leaf`] on this process under
+/// `agent_core::scope` with the leaf's [`SessionKey`] (`run --once`, the e2e
+/// test, a single-user install).
+pub struct InProcessExec {
+    agent: Arc<Agent>,
+    cfg: WorkerCfg,
+}
+
+impl InProcessExec {
+    pub fn new(agent: Arc<Agent>, cfg: WorkerCfg) -> Self {
+        Self { agent, cfg }
+    }
+}
+
+#[async_trait]
+impl WorkerExec for InProcessExec {
+    async fn run(
+        &self,
+        tenant: &str,
+        store: Arc<dyn CampaignStore>,
+        claimed: &Claimed,
+        owner: &Owner,
+    ) -> Result<(), String> {
+        let task = claimed.task.task_id;
+        let key = SessionKey::parse(tenant, &leaf_session(task))
+            .map_err(|_| "tenant is not a path-safe segment".to_string())?;
+        let exit = agent_core::scope(
+            key,
+            run_leaf(&self.agent, store, tenant, task, owner, &self.cfg),
+        )
+        .await;
+        match exit {
+            LeafExit::Completed => Ok(()),
+            LeafExit::Failed => Err(WORKER_FAILED.to_string()),
+            LeafExit::LeaseLost => Err(WORKER_LEASE_LOST.to_string()),
+        }
+    }
+}
+
+/// Test-only construction helpers shared with `campaign_driver`'s tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use agent_core::{ContextStrategy, LlmProvider, MemoryStore, ToolRegistry};
+    use agent_metrics::Metrics;
+
+    /// A minimal loop `Settings` (three iterations, no streaming, temp cwd).
+    pub(crate) fn settings() -> crate::agent::Settings {
+        crate::agent::Settings {
+            max_iterations: 3,
+            max_unproductive_iters: 0,
+            max_tokens: 100,
+            temperature: 0.0,
+            context_window: 100_000,
+            reserve_output: 1000,
+            system_prompt: "sys".into(),
+            active_personality: None,
+            stream: false,
+            parallel_tools: false,
+            tool_timeout_secs: 30,
+            recall_limit: 0,
+            cwd: std::env::temp_dir(),
+            fleet_root: None,
+            model: "m".into(),
+            session_id: String::new(),
+            context_prepend: vec![],
+            context_append: vec![],
+            review_in_loop: false,
+            review_context_budget: 24_000,
+            mode_confidence_floor: 0.6,
+            mode_hysteresis: 2,
+            grpc_max_in_flight: 0,
+            fleet_max_total: 0,
+            fleet_max_per_user: 0,
+            fleet_slack_app_token_ref: String::new(),
+            grpc_auth: crate::agent::GrpcAuthSettings::default(),
+            grpc_tls: crate::agent::GrpcTlsSettings::default(),
+            per_tenant: false,
+        }
+    }
+
+    /// An `Agent` over `provider` with no tools, a recording memory, a static
+    /// context, the given policy and no seams bound (add them with `with_*`).
+    pub(crate) fn bare_agent(
+        provider: Arc<dyn LlmProvider>,
+        policy: Arc<dyn agent_core::Policy>,
+    ) -> Agent {
+        let memory: Arc<dyn MemoryStore> = Arc::new(agent_testkit::RecordingMemory::new());
+        let context: Arc<dyn ContextStrategy> = Arc::new(agent_testkit::StaticContext);
+        Agent::new(
+            provider,
+            ToolRegistry::new(),
+            memory,
+            context,
+            policy,
+            Metrics::new(),
+            settings(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,13 +927,12 @@ mod tests {
     use agent_core::{
         BlobContent, Checkpoint, CommitInfo, CompletionRequest, CompletionResponse, DiffResult,
         GrepHit, LlmProvider, ModelCapabilities, Oid, Page, PullRequest, RepoBackend, RepoStatus,
-        ToolRegistry, TreeEntry, WorktreeHandle,
+        TreeEntry, WorktreeHandle,
     };
-    use agent_metrics::Metrics;
     use agent_testkit::campaign::conformance::{
         campaign_with, dave, leaf as mark_leaf, owner, split_with, Harness,
     };
-    use agent_testkit::{final_turn, RecordingMemory, ScriptedProvider, StaticContext};
+    use agent_testkit::{final_turn, ScriptedProvider};
     use async_trait::async_trait;
     use rstest::rstest;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -995,40 +1237,6 @@ mod tests {
         Arc::new(ScriptedProvider::new(vec![turn_with_usage(60, 40)]))
     }
 
-    fn settings() -> crate::agent::Settings {
-        crate::agent::Settings {
-            max_iterations: 3,
-            max_unproductive_iters: 0,
-            max_tokens: 100,
-            temperature: 0.0,
-            context_window: 100_000,
-            reserve_output: 1000,
-            system_prompt: "sys".into(),
-            active_personality: None,
-            stream: false,
-            parallel_tools: false,
-            tool_timeout_secs: 30,
-            recall_limit: 0,
-            cwd: std::env::temp_dir(),
-            fleet_root: None,
-            model: "m".into(),
-            session_id: String::new(),
-            context_prepend: vec![],
-            context_append: vec![],
-            review_in_loop: false,
-            review_context_budget: 24_000,
-            mode_confidence_floor: 0.6,
-            mode_hysteresis: 2,
-            grpc_max_in_flight: 0,
-            fleet_max_total: 0,
-            fleet_max_per_user: 0,
-            fleet_slack_app_token_ref: String::new(),
-            grpc_auth: crate::agent::GrpcAuthSettings::default(),
-            grpc_tls: crate::agent::GrpcTlsSettings::default(),
-            per_tenant: false,
-        }
-    }
-
     /// An agent over `provider` with the given repo / forge bindings and policy.
     fn agent_with(
         provider: Arc<dyn LlmProvider>,
@@ -1036,15 +1244,7 @@ mod tests {
         forge: Option<Arc<ScriptedForge>>,
         policy: Arc<dyn agent_core::Policy>,
     ) -> Arc<Agent> {
-        let mut agent = Agent::new(
-            provider,
-            ToolRegistry::new(),
-            Arc::new(RecordingMemory::new()),
-            Arc::new(StaticContext),
-            policy,
-            Metrics::new(),
-            settings(),
-        );
+        let mut agent = super::testing::bare_agent(provider, policy);
         if let Some(r) = repo {
             agent = agent.with_repo(r);
         }
@@ -1922,5 +2122,226 @@ mod tests {
         let f = fixture(CampaignPolicy::default(), true).await;
         assert_eq!(f.store.tenant(), "acme");
         assert_eq!(f.h.store("acme").tenant(), "acme");
+    }
+
+    // ---- T12: dispatch ------------------------------------------------------
+
+    /// `WorkerCfg::from_config` reads the four keys it owns.
+    #[test]
+    fn positive_worker_cfg_from_config() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.campaign.worker_timeout_secs = 120;
+        cfg.campaign.target_branch = "release/1".into();
+        cfg.forge.dry_run = true;
+        cfg.git.push_policy = "explicit".into();
+        assert_eq!(
+            WorkerCfg::from_config(&cfg),
+            WorkerCfg {
+                worker_timeout: Duration::from_secs(120),
+                forge_dry_run: true,
+                push_policy: "explicit".into(),
+                target_branch: "release/1".into(),
+            }
+        );
+    }
+
+    /// A stub "agent binary": a shell script the local sandbox runs in place of the
+    /// real one. Returns the script's path inside a fresh tempdir.
+    fn stub_bin(dir: &std::path::Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("agent-stub.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn subprocess(dir: &std::path::Path, body: &str, timeout: Duration) -> SubprocessExec {
+        SubprocessExec::new(
+            Arc::new(agent_sandbox::LocalSandbox),
+            stub_bin(dir, body),
+            dir.join("agent.toml"),
+            timeout,
+        )
+        .with_grace(Duration::ZERO)
+    }
+
+    fn claimed_for(f: &Fixture) -> Claimed {
+        Claimed {
+            task: f.leaf.clone(),
+            attempt_id: agent_core::campaign::AttemptId(1),
+        }
+    }
+
+    // subprocess_exit_rows: the child's exit code maps to the driver's result; the
+    // stderr tail rides an unexpected code.
+    #[rstest]
+    #[case::positive_exit_zero_ok("exit 0", Ok(()))]
+    #[case::negative_exit_one_failed("exit 1", Err("worker failed the leaf"))]
+    #[case::negative_exit_three_lease_lost("exit 3", Err("worker: lease lost"))]
+    #[case::corner_exit_seven_stderr_tail("echo boom >&2; exit 7", Err("worker exited 7: boom"))]
+    #[case::corner_exit_four_no_stderr("exit 4", Err("worker exited 4: "))]
+    #[tokio::test]
+    async fn subprocess_exit_rows(#[case] body: &str, #[case] want: Result<(), &str>) {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let dir = agent_testkit::tempdir();
+        let exec = subprocess(&dir, body, Duration::from_secs(5));
+        let got = exec
+            .run("acme", Arc::clone(&f.store), &claimed_for(&f), &f.owner)
+            .await;
+        assert_eq!(got, want.map_err(str::to_string));
+    }
+
+    // boundary_subprocess_timeout: a child that outlives `worker_timeout` (+ grace)
+    // is a `timed out` error, not a hang.
+    #[tokio::test]
+    async fn boundary_subprocess_timeout() {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let dir = agent_testkit::tempdir();
+        let exec = subprocess(&dir, "sleep 30", Duration::from_secs(1));
+        let got = exec
+            .run("acme", Arc::clone(&f.store), &claimed_for(&f), &f.owner)
+            .await;
+        assert_eq!(got, Err("worker timed out after 1s".to_string()));
+    }
+
+    // positive_subprocess_env_set_owner + argv: the child sees the owner token in
+    // `AGENT_CAMPAIGN_OWNER` (its length is reported, never its value) and the
+    // fixed argv with the tenant and the id; the token itself is not in the error.
+    #[tokio::test]
+    async fn positive_subprocess_env_set_owner_and_argv() {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let dir = agent_testkit::tempdir();
+        let exec = subprocess(
+            &dir,
+            "printf 'owner_len=%s argv=%s' \"${#AGENT_CAMPAIGN_OWNER}\" \"$*\" >&2; exit 7",
+            Duration::from_secs(5),
+        );
+        let err = exec
+            .run("acme", Arc::clone(&f.store), &claimed_for(&f), &f.owner)
+            .await
+            .unwrap_err();
+        assert!(err.contains("owner_len=2 "), "{err}");
+        assert!(
+            err.contains(&format!(
+                "argv=--config {} --run-task --tenant acme --task {}",
+                dir.join("agent.toml").display(),
+                f.leaf.task_id.0
+            )),
+            "{err}"
+        );
+        assert!(!err.contains("w1"), "the token must not appear: {err}");
+    }
+
+    // adversarial_subprocess_stderr_bounded: 100 KiB of stderr ⇒ the error carries
+    // at most the 512-char tail.
+    #[tokio::test]
+    async fn adversarial_subprocess_stderr_bounded() {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let dir = agent_testkit::tempdir();
+        let exec = subprocess(
+            &dir,
+            "head -c 102400 /dev/zero | tr '\\0' 'x' >&2; printf 'END' >&2; exit 7",
+            Duration::from_secs(5),
+        );
+        let err = exec
+            .run("acme", Arc::clone(&f.store), &claimed_for(&f), &f.owner)
+            .await
+            .unwrap_err();
+        let prefix = "worker exited 7: ";
+        assert!(err.starts_with(prefix));
+        assert_eq!(err[prefix.len()..].chars().count(), STDERR_TAIL_CHARS);
+        assert!(err.ends_with("END"), "the tail is kept");
+    }
+
+    // map_exit rows over a synthetic output (no process).
+    #[rstest]
+    #[case::positive_zero(0, false, "", Ok(()))]
+    #[case::negative_one(1, false, "ignored", Err("worker failed the leaf"))]
+    #[case::negative_three(3, false, "", Err("worker: lease lost"))]
+    #[case::corner_timed_out(-1, true, "", Err("worker timed out after 9s"))]
+    #[case::adversarial_nul_in_stderr(2, false, "a\0b\n", Err("worker exited 2: ab"))]
+    #[case::adversarial_negative_code(-9, false, "killed", Err("worker exited -9: killed"))]
+    fn map_exit_rows(
+        #[case] code: i32,
+        #[case] timed_out: bool,
+        #[case] stderr: &str,
+        #[case] want: Result<(), &str>,
+    ) {
+        let out = ExecOutput {
+            stdout: String::new(),
+            stdout_bytes: Vec::new(),
+            stderr: stderr.to_string(),
+            exit_code: code,
+            timed_out,
+        };
+        assert_eq!(
+            map_exit(&out, Duration::from_secs(9)),
+            want.map_err(str::to_string)
+        );
+    }
+
+    // positive_in_process_exec: the in-process exec runs the protocol on this
+    // process and maps the exit like the subprocess does.
+    #[rstest]
+    #[case::positive_in_process_completed(true, Ok(()))]
+    #[case::negative_in_process_failed(false, Err("worker failed the leaf"))]
+    #[tokio::test]
+    async fn in_process_exec_rows(#[case] commits: bool, #[case] want: Result<(), &str>) {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let repo = if commits {
+            WorkerRepo::committing()
+        } else {
+            WorkerRepo::clean()
+        };
+        let agent = agent(quick_provider(), repo, ScriptedForge::ok());
+        let exec = InProcessExec::new(agent, cfg());
+        let got = exec
+            .run("acme", Arc::clone(&f.store), &claimed_for(&f), &f.owner)
+            .await;
+        assert_eq!(got, want.map_err(str::to_string));
+        let state = task(&f).await.state;
+        assert_eq!(
+            state,
+            if commits {
+                TaskState::InReview
+            } else {
+                TaskState::Failed
+            }
+        );
+    }
+
+    // negative_in_process_lease_lost / adversarial tenant: mapped before any store
+    // write.
+    #[tokio::test]
+    async fn adversarial_in_process_exec_bad_tenant() {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let before = events(&f).await.len();
+        let agent = agent(
+            quick_provider(),
+            WorkerRepo::committing(),
+            ScriptedForge::ok(),
+        );
+        let exec = InProcessExec::new(agent, cfg());
+        let got = exec
+            .run("../x", Arc::clone(&f.store), &claimed_for(&f), &f.owner)
+            .await;
+        assert_eq!(got, Err("tenant is not a path-safe segment".to_string()));
+        assert_eq!(events(&f).await.len(), before);
+    }
+
+    #[tokio::test]
+    async fn negative_in_process_exec_lease_lost() {
+        let f = fixture(CampaignPolicy::default(), true).await;
+        let agent = agent(
+            quick_provider(),
+            WorkerRepo::committing(),
+            ScriptedForge::ok(),
+        );
+        let exec = InProcessExec::new(agent, cfg());
+        let got = exec
+            .run("acme", Arc::clone(&f.store), &claimed_for(&f), &owner("w2"))
+            .await;
+        assert_eq!(got, Err("worker: lease lost".to_string()));
+        assert_eq!(task(&f).await.state, TaskState::Claimed);
     }
 }
