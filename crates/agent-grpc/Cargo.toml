@@ -30,6 +30,10 @@ base64 = { workspace = true, optional = true }
 # `tls`: TLS / mTLS on the TCP transport (security-hardening S4); `tls-webpki-roots`:
 # an `https://` endpoint with no configured CA trusts the public web roots.
 tonic = { workspace = true, features = ["tls", "tls-webpki-roots"] }
+# The listener's reloadable TLS acceptor (S20): see the workspace comment.
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+arc-swap = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-health = { workspace = true }
 serde_json = { workspace = true }

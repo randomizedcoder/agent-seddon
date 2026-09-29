@@ -21,10 +21,15 @@
 //! Signing keys are P-256 PEM files, PKCS#8 (`PRIVATE KEY`) or SEC1
 //! (`EC PRIVATE KEY`, what `step-cli` writes). `previous_key` stays in the key set
 //! after a rotation so tokens it signed verify until they expire.
+//!
+//! Rotation needs no restart (S20): [`TokenService::reload`] re-reads both key files
+//! and swaps the key set in, keeping the old set on any error.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -361,28 +366,113 @@ pub struct TokenService {
     audience: String,
     ttl_secs: u64,
     leeway_secs: u64,
+    /// The signing key and the previous one. Swapped whole by [`Self::reload`], so a
+    /// mint or verify always sees one consistent pair.
+    keys: ArcSwap<KeySet>,
+    /// The `signing_key` / `previous_key` paths, when loaded from files.
+    key_files: Option<KeyFiles>,
+    clock: Arc<dyn Clock>,
+}
+
+/// The signing key and the one it replaced.
+struct KeySet {
     current: SigningKey,
     previous: Option<SigningKey>,
-    clock: Arc<dyn Clock>,
+}
+
+impl KeySet {
+    /// Refuses a `previous` that is the signing key itself: the rotation was not
+    /// done, and publishing one key twice would hide that.
+    fn new(current: SigningKey, previous: Option<SigningKey>) -> Result<Self, String> {
+        if previous.as_ref().is_some_and(|k| k.kid == current.kid) {
+            return Err("`[auth.token] previous_key` is the same key as `signing_key`".into());
+        }
+        Ok(Self { current, previous })
+    }
+
+    /// The current key, then the previous one.
+    fn iter(&self) -> impl Iterator<Item = &SigningKey> {
+        std::iter::once(&self.current).chain(self.previous.as_ref())
+    }
+}
+
+/// Where the keys were loaded from.
+struct KeyFiles {
+    signing: PathBuf,
+    previous: Option<PathBuf>,
+}
+
+impl KeyFiles {
+    fn from_params(p: &TokenParams) -> Result<Self, String> {
+        let signing = p.signing_key.trim();
+        if signing.is_empty() {
+            return Err("`[auth.token]` needs `signing_key` (a P-256 PEM key path)".into());
+        }
+        Ok(Self {
+            signing: PathBuf::from(signing),
+            previous: match p.previous_key.trim() {
+                "" => None,
+                path => Some(PathBuf::from(path)),
+            },
+        })
+    }
+
+    fn load(&self) -> Result<(SigningKey, Option<SigningKey>), String> {
+        let current = SigningKey::load(&self.signing)
+            .map_err(|e| format!("`[auth.token] signing_key` {e}"))?;
+        let previous = self
+            .previous
+            .as_deref()
+            .map(|path| {
+                SigningKey::load(path).map_err(|e| format!("`[auth.token] previous_key` {e}"))
+            })
+            .transpose()?;
+        Ok((current, previous))
+    }
+}
+
+/// What a successful [`TokenService::reload`] now signs and accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReloadedKeys {
+    /// The `kid` new tokens are signed with.
+    pub current_kid: String,
+    /// The `kid` still accepted from before the rotation, if any.
+    pub previous_kid: Option<String>,
 }
 
 impl TokenService {
     /// Build from `[auth.token]`, loading the key files.
     pub fn from_params(p: &TokenParams, leeway_secs: u64) -> Result<Self, String> {
-        let signing = p.signing_key.trim();
-        if signing.is_empty() {
-            return Err("`[auth.token]` needs `signing_key` (a P-256 PEM key path)".into());
-        }
-        let current = SigningKey::load(Path::new(signing))
-            .map_err(|e| format!("`[auth.token] signing_key` {e}"))?;
-        let previous = match p.previous_key.trim() {
-            "" => None,
-            path => Some(
-                SigningKey::load(Path::new(path))
-                    .map_err(|e| format!("`[auth.token] previous_key` {e}"))?,
-            ),
+        let files = KeyFiles::from_params(p)?;
+        let (current, previous) = files.load()?;
+        let mut service = Self::new(p, leeway_secs, current, previous, Arc::new(SystemClock))?;
+        service.key_files = Some(files);
+        Ok(service)
+    }
+
+    /// Re-read `signing_key` and `previous_key` and use them from now on. A rotation
+    /// is: move the old key to `previous_key`, write the new one to `signing_key`,
+    /// reload. Tokens signed by the old key keep verifying (as the previous key) until
+    /// they expire. On any error — a missing or malformed file, or `previous_key`
+    /// equal to `signing_key` — the current keys stay in use.
+    pub fn reload(&self) -> Result<ReloadedKeys, String> {
+        let files = self
+            .key_files
+            .as_ref()
+            .ok_or("the token service was not loaded from key files; nothing to reload")?;
+        let (current, previous) = files.load()?;
+        let keys = KeySet::new(current, previous)?;
+        let reloaded = ReloadedKeys {
+            current_kid: keys.current.kid.clone(),
+            previous_kid: keys.previous.as_ref().map(|k| k.kid.clone()),
         };
-        Self::new(p, leeway_secs, current, previous, Arc::new(SystemClock))
+        self.keys.store(Arc::new(keys));
+        Ok(reloaded)
+    }
+
+    /// The `kid` new tokens are signed with.
+    pub fn current_kid(&self) -> String {
+        self.keys.load().current.kid.clone()
     }
 
     /// Build with keys and a clock supplied (the test seam). The key paths in `p`
@@ -411,16 +501,14 @@ impl TokenService {
                 ))
             }
         };
-        if previous.as_ref().is_some_and(|k| k.kid == current.kid) {
-            return Err("`[auth.token] previous_key` is the same key as `signing_key`".into());
-        }
+        let keys = KeySet::new(current, previous)?;
         Ok(Self {
             issuer: issuer.to_string(),
             audience: audience.to_string(),
             ttl_secs,
             leeway_secs,
-            current,
-            previous,
+            keys: ArcSwap::from_pointee(keys),
+            key_files: None,
             clock,
         })
     }
@@ -493,8 +581,9 @@ impl TokenService {
         }
         let mut header = Header::new(Algorithm::ES256);
         header.typ = Some(TOKEN_TYP.into());
-        header.kid = Some(self.current.kid.clone());
-        let token = encode(&header, &body, &self.current.encoding)
+        let keys = self.keys.load();
+        header.kid = Some(keys.current.kid.clone());
+        let token = encode(&header, &body, &keys.current.encoding)
             .map_err(|e| format!("signing the agent token: {e}"))?;
         Ok(MintedToken {
             token,
@@ -514,8 +603,9 @@ impl TokenService {
             return Err(());
         }
         let kid = header.kid.ok_or(())?;
-        let key = std::iter::once(&self.current)
-            .chain(self.previous.as_ref())
+        let keys = self.keys.load();
+        let key = keys
+            .iter()
             .find(|k| k.kid == kid)
             .ok_or_else(|| tracing::warn!("rejected agent token: unknown kid"))?;
 
@@ -548,10 +638,7 @@ impl TokenService {
 
     /// The public key set (`{"keys":[…]}`): the current key, then the previous one.
     pub fn jwks_json(&self) -> String {
-        let keys: Vec<Value> = std::iter::once(&self.current)
-            .chain(self.previous.as_ref())
-            .map(SigningKey::jwk)
-            .collect();
+        let keys: Vec<Value> = self.keys.load().iter().map(SigningKey::jwk).collect();
         json!({ "keys": keys }).to_string()
     }
 }

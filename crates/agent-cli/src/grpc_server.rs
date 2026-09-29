@@ -940,14 +940,19 @@ fn auth_layer(
 }
 
 /// The base router every serve entry point seeds its seams onto: admission, the
-/// `[auth]` layer ([`auth_layer`]) and metrics, plus TLS on the listener when
+/// `[auth]` layer ([`auth_layer`]) and metrics, plus the listener's TLS when
 /// [`listener_tls`] says so (security-hardening S4). Logs the transport mode once.
-/// The returned flag says whether the listener serves TLS, so the caller's
-/// "ready" log reports the endpoint a client must actually dial.
+/// The caller passes the returned TLS to `Bound::serve` and uses it to say which
+/// endpoint a client must dial. A SIGHUP reloads the TLS files and the signing keys
+/// ([`crate::reload`], S20).
 async fn serve_base(
     agent: &Agent,
     listen: &Endpoint,
-) -> anyhow::Result<(ServeRouter, agent_grpc::server::HealthHandle, bool)> {
+) -> anyhow::Result<(
+    ServeRouter,
+    agent_grpc::server::HealthHandle,
+    Option<agent_grpc::ServerTls>,
+)> {
     let tls = listener_tls(agent.grpc_tls(), listen)?;
     let mode = match &tls {
         None => "plaintext",
@@ -956,18 +961,17 @@ async fn serve_base(
     };
     tracing::info!(endpoint = ?listen, transport = mode, "gRPC listener transport");
     let auth = auth_layer(agent, listen, tls.is_some())?;
-    let (router, health) = agent_grpc::server::base_router_with_tls(
+    let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
         auth.clone(),
         Some(rpc_observer(agent)),
-        tls.as_ref(),
     )
-    .await
-    .map_err(anyhow::Error::msg)?;
+    .await;
+    crate::reload::watch_sighup(tls.clone(), auth.clone());
     // `[auth.token]` ⇒ this listener also serves `AuthService` (exchange, key set,
     // who-am-I) beside whatever seams the caller adds.
-    Ok((auth.serve_auth_service(router), health, tls.is_some()))
+    Ok((auth.serve_auth_service(router), health, tls))
 }
 
 /// Load the listener's TLS material when [`serves_tls`] says it should.
@@ -1016,11 +1020,13 @@ pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::R
     let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
     tracing::info!(
-        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls.is_some()),
         "session-observe server ready"
     );
     // No self-shutdown: `pending` keeps it alive until the caller drops the future.
-    bound.serve(router, std::future::pending::<()>()).await?;
+    bound
+        .serve(router, tls.as_ref(), std::future::pending::<()>())
+        .await?;
     Ok(())
 }
 
@@ -1072,14 +1078,14 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
     tracing::info!(
-        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls.is_some()),
         "sessions gateway ready (SessionRegistry + driving AgentSession + reaper)"
     );
     let shutdown = async {
         let sig = crate::shutdown::signal().await;
         tracing::info!(signal = sig, "shutting down sessions gateway");
     };
-    bound.serve(router, shutdown).await?;
+    bound.serve(router, tls.as_ref(), shutdown).await?;
     Ok(())
 }
 
@@ -1311,14 +1317,14 @@ pub async fn serve_fleet(
     let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
     tracing::info!(
-        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls.is_some()),
         "review fleet ready (roster control plane + orchestrator + driving AgentSession + reaper)"
     );
     let shutdown = async {
         let sig = crate::shutdown::signal().await;
         tracing::info!(signal = sig, "shutting down review fleet");
     };
-    bound.serve(router, shutdown).await?;
+    bound.serve(router, tls.as_ref(), shutdown).await?;
     Ok(())
 }
 
@@ -1595,14 +1601,14 @@ async fn serve_seams(
     let bound = listen.bind().await?;
     tracing::info!(
         seams = hosted.join(","),
-        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls.is_some()),
         "gRPC seam server ready"
     );
     let shutdown = async {
         let sig = crate::shutdown::signal().await;
         tracing::info!(signal = sig, "shutting down gRPC seam server");
     };
-    bound.serve(router, shutdown).await?;
+    bound.serve(router, tls.as_ref(), shutdown).await?;
     Ok(())
 }
 

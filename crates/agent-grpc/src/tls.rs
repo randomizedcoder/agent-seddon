@@ -6,7 +6,7 @@
 //! - [`ServerTls`] — a listener's certificate + key, plus an optional client CA. A
 //!   client CA makes the listener **mutual**: a peer without a certificate chaining
 //!   to it is refused during the handshake. Handed to
-//!   [`crate::server::base_router_with_tls`].
+//!   [`crate::transport::Bound::serve`], and reloadable in place (S20).
 //! - [`ClientTls`] — what an `https://` dial trusts (the configured CA **only**, or
 //!   the public web roots when none is set), an optional client identity for mTLS,
 //!   and an optional server-name override. Installed process-wide with
@@ -24,51 +24,113 @@
 //! fails at startup, not on the first handshake.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
+use arc_swap::ArcSwap;
+use tokio_rustls::rustls::server::WebPkiClientVerifier;
+use tokio_rustls::rustls::{RootCertStore, ServerConfig};
+use tokio_rustls::TlsAcceptor;
+use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 
 /// Upper bound on one PEM file (cert chain, key, or CA bundle). A real chain is a
 /// few KiB; anything past this is a misconfiguration (or a hostile path such as
 /// `/dev/zero`), refused before it is buffered.
 pub const MAX_PEM_BYTES: u64 = 1 << 20;
 
-/// A listener's TLS material, validated at load.
-#[derive(Clone, Debug)]
+/// A listener's TLS material, validated at load and reloadable in place.
+///
+/// The listener runs its own `tokio_rustls` acceptor
+/// ([`crate::transport::Bound::serve`]), and each handshake takes the config current
+/// at that moment. [`Self::reload`] re-reads the same files and swaps the config in,
+/// so a renewed certificate (or a rotated client CA) is used by new connections
+/// while existing ones keep the session they negotiated (security-hardening S20).
+/// Clones share the swap: the copy the reload trigger holds and the listener's are
+/// one config.
+#[derive(Clone)]
 pub struct ServerTls {
-    config: ServerTlsConfig,
+    config: Arc<ArcSwap<ServerConfig>>,
     mutual: bool,
+    files: Option<Arc<ServerTlsFiles>>,
+}
+
+/// Where a [`ServerTls`] was loaded from, so a reload reads the same paths. Whether
+/// the listener is mutual is fixed by these paths: a reload can rotate the client CA
+/// but never turn client certificates off.
+#[derive(Debug)]
+struct ServerTlsFiles {
+    cert: PathBuf,
+    key: PathBuf,
+    client_ca: Option<PathBuf>,
+}
+
+impl ServerTlsFiles {
+    fn build(&self) -> Result<ServerConfig, String> {
+        let cert = read_pem(&self.cert)?;
+        let key = read_pem(&self.key)?;
+        warn_if_key_is_readable(&self.key);
+        let ca = self.client_ca.as_deref().map(read_pem).transpose()?;
+        server_config(&cert, &key, ca.as_deref())
+    }
+}
+
+impl std::fmt::Debug for ServerTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerTls")
+            .field("mutual", &self.mutual)
+            .field("files", &self.files)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ServerTls {
     /// Load `cert` (leaf first, then any intermediates) + `key`, and — when given —
     /// `client_ca`, which makes client certificates **required**.
     pub fn load(cert: &Path, key: &Path, client_ca: Option<&Path>) -> Result<Self, String> {
-        let cert_pem = read_pem(cert)?;
-        let key_pem = read_pem(key)?;
-        warn_if_key_is_readable(key);
-        let ca_pem = client_ca.map(read_pem).transpose()?;
-        Self::from_pem(cert_pem, key_pem, ca_pem)
+        let files = ServerTlsFiles {
+            cert: cert.to_path_buf(),
+            key: key.to_path_buf(),
+            client_ca: client_ca.map(Path::to_path_buf),
+        };
+        let config = files.build()?;
+        Ok(Self {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            mutual: client_ca.is_some(),
+            files: Some(Arc::new(files)),
+        })
     }
 
-    /// Build from in-memory PEM (tests, and [`Self::load`] after reading).
+    /// Build from in-memory PEM (tests). Such a config has no files, so
+    /// [`Self::reload`] refuses it.
     pub fn from_pem(
         cert: impl AsRef<[u8]>,
         key: impl AsRef<[u8]>,
         client_ca: Option<impl AsRef<[u8]>>,
     ) -> Result<Self, String> {
-        let mut config = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
         let mutual = client_ca.is_some();
-        if let Some(ca) = client_ca {
-            config = config.client_ca_root(Certificate::from_pem(ca));
-        }
-        // Build the acceptor once now purely to validate: a key that does not parse
-        // or match fails here with the file names in hand, not per connection.
-        tonic::transport::Server::builder()
-            .tls_config(config.clone())
-            .map_err(|e| format!("invalid server TLS material: {}", error_chain(&e)))?;
-        Ok(Self { config, mutual })
+        let config = server_config(
+            cert.as_ref(),
+            key.as_ref(),
+            client_ca.as_ref().map(AsRef::as_ref),
+        )?;
+        Ok(Self {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            mutual,
+            files: None,
+        })
+    }
+
+    /// Re-read the files this was loaded from and, if they build a valid config,
+    /// use it for every new handshake. On any error the current config stays in
+    /// use, so a half-written renewal never takes the listener down.
+    pub fn reload(&self) -> Result<(), String> {
+        let files = self
+            .files
+            .as_ref()
+            .ok_or("this TLS listener was not loaded from files; nothing to reload")?;
+        let config = files.build()?;
+        self.config.store(Arc::new(config));
+        Ok(())
     }
 
     /// Whether client certificates are required (a client CA was configured).
@@ -76,10 +138,56 @@ impl ServerTls {
         self.mutual
     }
 
-    /// The tonic server config.
-    pub fn config(&self) -> ServerTlsConfig {
-        self.config.clone()
+    /// An acceptor over the config current now.
+    pub(crate) fn acceptor(&self) -> TlsAcceptor {
+        TlsAcceptor::from(self.config.load_full())
     }
+}
+
+/// Build a rustls server config the way tonic's own acceptor does (the certificate
+/// chain + key, a WebPKI client verifier when a client CA is given, ALPN `h2`), so
+/// running our own acceptor changes nothing on the wire. rustls checks here that the
+/// key belongs to the leaf certificate, so a mismatched pair fails at load (or at
+/// reload), not per connection.
+fn server_config(
+    cert: &[u8],
+    key: &[u8],
+    client_ca: Option<&[u8]>,
+) -> Result<ServerConfig, String> {
+    let invalid =
+        |what: &str, e: &dyn std::fmt::Display| format!("invalid server TLS material: {what}: {e}");
+    let chain = rustls_pemfile::certs(&mut &*cert)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| invalid("certificate", &e))?;
+    if chain.is_empty() {
+        return Err("invalid server TLS material: no certificate in the cert file".into());
+    }
+    let key = rustls_pemfile::private_key(&mut &*key)
+        .map_err(|e| invalid("private key", &e))?
+        .ok_or("invalid server TLS material: no private key in the key file")?;
+    let builder = ServerConfig::builder();
+    let builder = match client_ca {
+        None => builder.with_no_client_auth(),
+        Some(ca) => {
+            let mut roots = RootCertStore::empty();
+            for c in rustls_pemfile::certs(&mut &*ca) {
+                let c = c.map_err(|e| invalid("client CA", &e))?;
+                roots.add(c).map_err(|e| invalid("client CA", &e))?;
+            }
+            if roots.is_empty() {
+                return Err("invalid server TLS material: no certificate in the client CA".into());
+            }
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .map_err(|e| invalid("client CA", &e))?;
+            builder.with_client_cert_verifier(verifier)
+        }
+    };
+    let mut config = builder
+        .with_single_cert(chain, key)
+        .map_err(|e| invalid("certificate and key", &e))?;
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(config)
 }
 
 /// How an `https://` dial authenticates the server (and, for mTLS, itself).
