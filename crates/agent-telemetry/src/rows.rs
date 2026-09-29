@@ -2,6 +2,7 @@
 //! column-for-column. `klickhouse::Row` maps struct fields to columns by name.
 //! `ts` is `DateTime64(3, 'UTC')`, built from a unix-millis timestamp.
 
+use agent_core::campaign::{actor_class, truncate_chars, TaskEvent, TaskId, TaskState};
 use agent_core::MemoryEvent;
 use klickhouse::{DateTime64, Row, Tz};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,6 +67,63 @@ impl EventRow {
             },
             tool_calls,
             tool_call_id: event.message.tool_call_id.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// Cap on a campaign row's `detail` (as JSON text) before it is embedded in
+/// `content`: the store bounds every field it holds (`MAX_ERROR` and friends), so
+/// this is defense in depth against a blob no cap covered. Over it, `detail` is
+/// replaced by `{"truncated": true, "head": <first 8 KiB>}` so `content` stays
+/// valid JSON.
+pub(crate) const CAMPAIGN_DETAIL_MAX: usize = 8 * 1024;
+
+/// Hard cap on a campaign row's `content` after redaction (chars).
+pub(crate) const CAMPAIGN_CONTENT_MAX: usize = 16 * 1024;
+
+impl EventRow {
+    /// The `agent_events` mirror of one committed campaign `task_events` row
+    /// (docs/design/campaigns/04-executor.md §Observability, CP-08): `kind =
+    /// "campaign"`, `session_id = campaign-<campaign id>` so a campaign groups like a
+    /// run, `user` = the tenant (the row policy's key), `role` = the writer's
+    /// **class** word from [`actor_class`] — never the lease token a rendered
+    /// `worker:<owner>` / `driver:<owner>` carries — `content` = the event as JSON
+    /// (`task_id`, `event_id`, `from`, `to`, `version`, `actor`, `detail`) through
+    /// the same secret redaction as every other row and bounded by
+    /// [`CAMPAIGN_DETAIL_MAX`] / [`CAMPAIGN_CONTENT_MAX`], `tool_call_id` = the task
+    /// id (so a task's rows are one `WHERE`), `tool_calls` empty.
+    pub fn from_campaign(tenant: &str, campaign: TaskId, event: &TaskEvent, seq: u32) -> Self {
+        let class = actor_class(&event.actor);
+        let detail_text = event.detail.to_string();
+        let detail = if detail_text.len() > CAMPAIGN_DETAIL_MAX {
+            serde_json::json!({
+                "truncated": true,
+                "head": truncate_chars(&detail_text, CAMPAIGN_DETAIL_MAX),
+            })
+        } else {
+            event.detail.clone()
+        };
+        let body = serde_json::json!({
+            "task_id": event.task_id.0,
+            "event_id": event.event_id.0,
+            "from": event.from_state.map(TaskState::as_str),
+            "to": event.to_state.as_str(),
+            "version": event.version,
+            "actor": class,
+            "detail": detail,
+        });
+        let raw = body.to_string();
+        let redacted = agent_export::apply_redactions(&raw, agent_export::fallback_findings(&raw));
+        Self {
+            session_id: format!("campaign-{}", campaign.0),
+            user: tenant.to_string(),
+            ts: dt64_from_ms(event.at_ms),
+            seq,
+            kind: "campaign".to_string(),
+            role: class.to_string(),
+            content: truncate_chars(&redacted, CAMPAIGN_CONTENT_MAX),
+            tool_calls: String::new(),
+            tool_call_id: event.task_id.0.to_string(),
         }
     }
 }

@@ -45,8 +45,10 @@ CREATE TABLE IF NOT EXISTS agent.agent_events
     user         String,                   -- verified SessionKey.user (tenant); '' outside a scope
     ts           DateTime64(3, 'UTC'),
     seq          UInt32,
-    kind         String,                   -- goal | assistant | tool | usage
-    role         String,                   -- system | user | assistant | tool
+    kind         String,                   -- goal | assistant | tool | usage | campaign
+    role         String,                   -- system | user | assistant | tool; for
+                                           -- kind = 'campaign' the writer's class
+                                           -- (planner | worker | …), never a token
     content      String,                   -- secret-redacted at the sink (C28-3); recall reads this
     tool_calls   String,                   -- JSON array (empty for non-assistant); also redacted
     tool_call_id String,

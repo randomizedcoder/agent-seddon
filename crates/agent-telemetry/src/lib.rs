@@ -20,6 +20,7 @@ mod recall;
 mod rows;
 mod writer;
 
+use agent_core::campaign::{EventSink, TaskEvent, TaskId};
 use agent_core::MemoryEvent;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -179,6 +180,17 @@ impl TelemetryHandle {
         )));
     }
 
+    /// Mirror one committed campaign `task_events` row into `agent_events` as a
+    /// `kind = "campaign"` row (docs/design/campaigns/04-executor.md
+    /// §Observability, CP-08) — see [`rows::EventRow::from_campaign`] for the
+    /// shape. Non-blocking like every recorder: a full channel drops the row.
+    pub fn record_campaign_event(&self, tenant: &str, campaign: TaskId, event: &TaskEvent) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.send(Msg::Event(EventRow::from_campaign(
+            tenant, campaign, event, seq,
+        )));
+    }
+
     pub(crate) fn record_log(&self, row: rows::LogRow) {
         self.send(Msg::Log(row));
     }
@@ -205,6 +217,15 @@ impl TelemetryHandle {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
+    }
+}
+
+/// The campaign stores' after-commit mirror (`with_sink`): every committed
+/// `task_events` row becomes one `agent_events` row, written by whichever process
+/// performed the write (the driver, a CLI verb, an `agent --run-task` child).
+impl EventSink for TelemetryHandle {
+    fn emit(&self, tenant: &str, campaign: TaskId, event: &TaskEvent) {
+        self.record_campaign_event(tenant, campaign, event);
     }
 }
 
@@ -275,6 +296,170 @@ mod auth_event_tests {
         let (handle, rx) = TelemetryHandle::for_test("s");
         for _ in 0..n {
             handle.record_auth_event(AuthEvent::new(AuthEventKind::VerifyFail));
+        }
+        assert_eq!(rx.len(), CHANNEL_CAPACITY);
+        assert!(handle.warned.load(Ordering::Relaxed));
+    }
+}
+
+/// T17, the ClickHouse half (`docs/design/campaigns/06-test-matrix.md`): the
+/// `kind = "campaign"` row a committed `task_events` row becomes.
+#[cfg(test)]
+mod campaign_event_tests {
+    use super::*;
+    use agent_core::campaign::{EventId, TaskState};
+    use rows::{CAMPAIGN_CONTENT_MAX, CAMPAIGN_DETAIL_MAX};
+    use rstest::rstest;
+
+    fn take(rx: &mut mpsc::Receiver<Msg>) -> EventRow {
+        match rx.try_recv() {
+            Ok(Msg::Event(row)) => row,
+            Ok(_) => panic!("expected an event row, got another message"),
+            Err(e) => panic!("expected an event row: {e}"),
+        }
+    }
+
+    fn event(actor: &str, detail: serde_json::Value) -> TaskEvent {
+        TaskEvent {
+            event_id: EventId(42),
+            task_id: TaskId(11),
+            from_state: Some(TaskState::Ready),
+            to_state: TaskState::Decomposing,
+            actor: actor.to_string(),
+            version: 3,
+            detail,
+            at_ms: 1_700_000_000_123,
+        }
+    }
+
+    fn content(row: &EventRow) -> serde_json::Value {
+        serde_json::from_str(&row.content).expect("content is JSON")
+    }
+
+    // desc: the row shape — kind, session grouping, tenant, class role, task id, ts, body.
+    #[rstest]
+    #[case::positive_clickhouse_row_shape()]
+    fn positive_clickhouse_row_shape() {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        handle.emit(
+            "acme",
+            TaskId(7),
+            &event("planner", serde_json::json!({"k": "v"})),
+        );
+        let row = take(&mut rx);
+        assert_eq!(row.kind, "campaign");
+        assert_eq!(row.session_id, "campaign-7");
+        assert_eq!(row.user, "acme");
+        assert_eq!(row.role, "planner");
+        assert_eq!(row.tool_call_id, "11");
+        assert!(row.tool_calls.is_empty());
+        assert_eq!(row.ts.1, 1_700_000_000_123);
+        let body = content(&row);
+        assert_eq!(body["task_id"], 11);
+        assert_eq!(body["event_id"], 42);
+        assert_eq!(body["from"], "ready");
+        assert_eq!(body["to"], "decomposing");
+        assert_eq!(body["version"], 3);
+        assert_eq!(body["actor"], "planner");
+        assert_eq!(body["detail"]["k"], "v");
+        assert!(rx.try_recv().is_err(), "exactly one row");
+    }
+
+    // desc (adversarial): the lease token after `worker:` / `driver:` reaches no column.
+    #[rstest]
+    #[case::adversarial_worker_token("worker")]
+    #[case::adversarial_driver_token("driver")]
+    fn adversarial_clickhouse_actor_token_redacted(#[case] class: &str) {
+        let token = "0123456789abcdef0123456789abcdef";
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        handle.emit(
+            "acme",
+            TaskId(7),
+            &event(&format!("{class}:{token}"), serde_json::json!({})),
+        );
+        let row = take(&mut rx);
+        assert_eq!(row.role, class);
+        for col in [
+            &row.session_id,
+            &row.user,
+            &row.role,
+            &row.content,
+            &row.tool_calls,
+            &row.tool_call_id,
+        ] {
+            assert!(!col.contains(token), "token leaked into {col:?}");
+        }
+    }
+
+    // desc (adversarial): a secret in `detail` (a model-authored error) is redacted.
+    #[rstest]
+    #[case::adversarial_aws_key_in_error("AKIAIOSFODNN7EXAMPLE")]
+    fn adversarial_clickhouse_detail_secret_redacted(#[case] secret: &str) {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        handle.emit(
+            "acme",
+            TaskId(7),
+            &event(
+                "model:9",
+                serde_json::json!({"error": format!("push failed: key = {secret} done")}),
+            ),
+        );
+        let row = take(&mut rx);
+        assert!(!row.content.contains(secret), "{}", row.content);
+        assert!(row.content.contains("push failed"));
+    }
+
+    // desc (adversarial): a huge `detail` is bounded and the body stays valid JSON.
+    #[rstest]
+    #[case::adversarial_huge_detail(100 * 1024)]
+    fn adversarial_clickhouse_content_capped(#[case] n: usize) {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        handle.emit(
+            "acme",
+            TaskId(7),
+            &event("poller", serde_json::json!({"poll_error": "x".repeat(n)})),
+        );
+        let row = take(&mut rx);
+        assert!(row.content.chars().count() <= CAMPAIGN_CONTENT_MAX);
+        let body = content(&row);
+        assert_eq!(body["detail"]["truncated"], true);
+        let head = body["detail"]["head"].as_str().unwrap();
+        assert!(head.chars().count() <= CAMPAIGN_DETAIL_MAX);
+        assert_eq!(body["to"], "decomposing", "the fixed fields survive");
+    }
+
+    // desc (corner): an actor that is not a rendered class becomes `other`, never itself.
+    #[rstest]
+    #[case::corner_unknown_actor_other("root")]
+    #[case::corner_empty_actor_other("")]
+    fn corner_clickhouse_unknown_actor_other(#[case] actor: &str) {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        handle.emit("acme", TaskId(7), &event(actor, serde_json::json!({})));
+        let row = take(&mut rx);
+        assert_eq!(row.role, "other");
+        assert_eq!(content(&row)["actor"], "other");
+    }
+
+    // desc (boundary): rows in one millisecond still order — `seq` advances per row,
+    // shared with the handle's other recorders.
+    #[rstest]
+    #[case::boundary_clickhouse_seq_advances(3)]
+    fn boundary_clickhouse_seq_advances(#[case] n: u32) {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        for _ in 0..n {
+            handle.emit("acme", TaskId(7), &event("rollup", serde_json::json!({})));
+        }
+        let seqs: Vec<u32> = (0..n).map(|_| take(&mut rx).seq).collect();
+        assert_eq!(seqs, (0..n).collect::<Vec<_>>());
+    }
+
+    // desc (negative): a full channel drops rather than blocks the store's commit path.
+    #[rstest]
+    #[case::negative_flood_never_blocks(CHANNEL_CAPACITY + 10)]
+    fn negative_clickhouse_drops_on_overflow(#[case] n: usize) {
+        let (handle, rx) = TelemetryHandle::for_test("s");
+        for _ in 0..n {
+            handle.emit("acme", TaskId(7), &event("reaper", serde_json::json!({})));
         }
         assert_eq!(rx.len(), CHANNEL_CAPACITY);
         assert!(handle.warned.load(Ordering::Relaxed));
