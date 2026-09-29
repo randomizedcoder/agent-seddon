@@ -289,6 +289,12 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-28 | CP-05 step 7: `nix flake check "git+file://…/wt-cp05?ref=refs/heads/campaigns/cp-05"` on the committed ref `252610b6` (docs + verification rows on top of `84b618d6`; no code change after the local suites) | green — `all checks passed!`, 72 `checks.x86_64-linux.*` derivations checked (incl. `test`, `leak`, `bench`, `feature-matrix`, `pg-*` contracts, `config-roundtrip`, `cli-help`, `cargo-audit`), first run, no rebuild needed |
 | 2026-09-28 | CP-05 close-out (`docs/cp-05-closeout` @ `db41ab50`, docs only): `nix flake check` on the committed ref | green — `all checks passed!`, 72 checks, first pass (code outputs cached from the #553 gate) |
 | 2026-09-28 | #531 refused by GitHub (conflicts): `main` advanced by #524–#530 (S12 `agent login` / `logout` / `whoami`, S13a, rest-03g1–g4); `git merge origin/main` into `campaigns/cp-04` (`6503044`), five additive hunks in `crates/agent-cli/src/main.rs` resolved by keeping both sides; `cargo fmt --check`, `clippy -p agent-cli -D warnings`, `cargo test -p agent-cli` (223 bin + 22 e2e), then the full gate on the merged ref | green first pass, `all checks passed!` |
+| 2026-09-28 | CP-06a step 5 (`campaigns/cp-06a` @ `e2780c87`): `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo machete`, `cargo test -p agent-campaign --all-features` (340), `-p agent-runtime campaign` (75), `-p agent-cli` (268 bin + 28 e2e), `-p agent-testkit review_note` (4), `cargo check -p agent-runtime --no-default-features --features campaign`; `cargo test -p agent-campaign -- --list \| grep poller::tests` (14 fns: the 13 T13 row ids + `corner_forge_error_logged_continues`) | green (fmt, clippy, machete clean; the lean `campaign` build clean) |
+| 2026-09-28 | CP-06a step 5: `CONTAINER_RUNTIME=podman nix run .#pg-integration` on the committed tree | green (`PASS: …`); campaign pg suite 173/173 (169 + the 4 new t7 `review_note` rows), 117 s |
+| 2026-09-28 | CP-06a: `nix flake check "git+file://…/wt-cp06a?ref=refs/heads/campaigns/cp-06a"` (@ `e2780c87`), first pass, concurrently with the pg-integration compile and another session's full gate (load ≈ 34) | red in `leak` only: `agent-memory` `summarize_step_does_not_leak` — `live blocks grew (leak?): 18 -> 27` against a `+8` budget. Not from this branch (`agent-memory`, `agent-providers` and `Cargo.lock` are byte-identical to `main`); the same test passes 3/3 locally in 0.1 s. See Open questions |
+| 2026-09-28 | CP-06a: `checks.x86_64-linux.leak` rebuilt alone on the same ref, still beside the other session's gate | red in a **different** test: `agent-providers` `tests/branch_leak.rs` `fork_cancel_cycle_does_not_leak` — `live heap grew across 30 fork/cancel cycles: 6404 -> 18000 bytes` after its 5 s settle poll; `agent-memory` green this pass. The test's own comment names it a recurring gate flake under load (aborted-task teardown sampled mid-release). Locally 2/3 under the same load (the one failure `2553 -> 9267`, never converged in 5 s); see Open questions |
+| 2026-09-28 | CP-06a: `checks.x86_64-linux.leak` rebuilt alone on the same ref (`nix build --no-link "git+file://…/wt-cp06a?ref=refs/heads/campaigns/cp-06a#checks.x86_64-linux.leak"`) after waiting for the other session's gate to leave the host (load 5.4 at start) | green on the first quiet-host attempt — same derivation `f4pnz9g8…-agent-seddon-leak-0.1.0.drv`, every crate's dhat test incl. `branch_leak` and `agent-memory` `summarize_step_does_not_leak` |
+| 2026-09-28 | CP-06a: `nix flake check "git+file://…/wt-cp06a?ref=refs/heads/campaigns/cp-06a"` (@ `e2780c87`), second pass on the quiet host (`leak` from the green build above; the remaining checks the aborted first pass never reached, incl. the per-crate `test` derivations, `nix-fmt`, `review-toolbox`) | green: `all checks passed!` |
 
 ## Open questions / blockers
 
@@ -375,6 +381,21 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   `agent-cli`), and fails the same way on `main` at `9e83247d`, so it is not from CP-05. The
   neighbouring issuer rows already carry `#[cfg(feature = "auth")]`; this one should too — a
   one-line hygiene change on `main`, not folded into this PR.
+- Flaky gate tests in `checks.x86_64-linux.leak` under host load (CP-06a gate, load ≈ 34 with
+  another session's full gate on the host): `agent-providers` `tests/branch_leak.rs`
+  `fork_cancel_cycle_does_not_leak` (`6404 -> 18000` bytes in the gate, `2553 -> 9267` once in
+  three local runs — the aborted branch's teardown had not run inside the test's 5 s settle poll)
+  and, once, `agent-memory` `tests/leak.rs` `summarize_step_does_not_leak` (`18 -> 27` live
+  blocks against `+8`; a single measured window, no warm-up beyond one call). Neither crate nor
+  `Cargo.lock` changes on this branch; both pass on a quiet host. `branch_leak` already documents
+  itself as a recurring gate flake (#446 lengthened the settle poll; the identical test binary
+  still fails 4/10 locally at load ≈ 27). Root cause is in the engine, not the test:
+  `branching.rs` calls `tasks.abort_all()` and then drops the `JoinSet` without draining it, so
+  the cancelled laggard's teardown runs whenever a worker next polls it — under load that can be
+  later than any timed settle. Candidate hygiene change on `main`: drain the set after the abort
+  (`while tasks.join_next().await.is_some() {}`), which makes "everything cancelled is freed" a
+  property the call guarantees and lets the test drop its 5 s poll; and move `agent-memory`'s
+  test to the `agent-tools` two-window flatness pattern that fixed the tantivy flake in #545.
 - A gated level is approved twice, once as a task and once again when it becomes a leaf
   (`decomposing → awaiting_approval (as kind = leaf)`; the CP-04 live smoke). Recorded here from
   the CP-04 as-built entry as a UX observation; CP-05 did not change it (the driver claims only
