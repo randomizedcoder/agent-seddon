@@ -130,6 +130,12 @@ message ReviewSummary {
   uint32 additions = 9;
   uint32 deletions = 10;
   string status = 11;
+  // Who asked for this review (security-hardening S19): `tenant/subject` of each
+  // ReviewNow caller, at most 8; empty when the forge poller or Slack watcher started it.
+  repeated string requested_by = 12;
+  // Who approved the post (`tenant/subject`); empty until posted, or on a server
+  // without auth.
+  string approved_by = 13;
 }
 
 // List persisted review drafts (review-fleet C14). All filters are optional AND-ed

@@ -112,6 +112,7 @@ impl SlackWatch {
                 sink.enqueue(FleetTrigger {
                     session_id: sub.session_id.clone(),
                     pr_number,
+                    requested_by: Vec::new(),
                 });
                 emitted += 1;
             }
@@ -268,6 +269,7 @@ mod tests {
             &[FleetTrigger {
                 session_id: "acme:web-pr".into(),
                 pr_number: 5,
+                requested_by: Vec::new(),
             }],
             "the trigger carries the session id and PR number"
         );
@@ -323,11 +325,13 @@ mod tests {
         let got = sink.got.lock().unwrap();
         assert!(got.contains(&FleetTrigger {
             session_id: "s-web".into(),
-            pr_number: 1
+            pr_number: 1,
+            requested_by: Vec::new(),
         }));
         assert!(got.contains(&FleetTrigger {
             session_id: "s-api".into(),
-            pr_number: 2
+            pr_number: 2,
+            requested_by: Vec::new(),
         }));
     }
 
@@ -356,6 +360,7 @@ mod tests {
             &[FleetTrigger {
                 session_id: "acme:web-pr".into(),
                 pr_number: 12,
+                requested_by: Vec::new(),
             }],
             "exactly the one watched-channel, matching-repo link triggered a review"
         );

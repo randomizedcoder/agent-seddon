@@ -187,6 +187,8 @@ fn record_from_summary(s: pb::ReviewSummary) -> ReviewDraftRecord {
         deletions: s.deletions,
         draft_path: String::new(),
         status: s.status,
+        requested_by: s.requested_by,
+        approved_by: s.approved_by,
     }
 }
 

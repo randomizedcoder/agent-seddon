@@ -973,6 +973,9 @@ pub use request_scope::*;
 // The authentication audit trail (S11) — see audit.rs.
 mod audit;
 pub use audit::*;
+// Who asked for a fleet review and who approved it (S19) — see requester.rs.
+mod requester;
+pub use requester::*;
 
 mod forge_card;
 pub use forge_card::*;
@@ -3294,6 +3297,11 @@ pub struct FleetTrigger {
     pub session_id: String,
     /// The pull/merge-request number to review.
     pub pr_number: u64,
+    /// Who asked for this review ([`requester_label`]s, security-hardening S19). Filled
+    /// by `ReviewNow` from the caller's verified principal; empty for the forge poller,
+    /// the Slack watcher and an unauthenticated server. Coalesced triggers merge theirs
+    /// ([`merge_requesters`]). Attribution only: the review still runs as the fleet.
+    pub requested_by: Vec<String>,
 }
 
 /// Whether a [`FleetTrigger`] was queued or folded into one already pending.
@@ -6131,6 +6139,15 @@ pub struct ReviewDraftRecord {
     pub draft_path: String,
     /// One of [`draft_status`].
     pub status: String,
+    /// Who asked for this review round ([`requester_label`]s, S19); empty when the
+    /// forge poller or Slack watcher started it. Carried onto every later row of the
+    /// same `review_id` (supersede, post).
+    #[serde(default)]
+    pub requested_by: Vec<String>,
+    /// Who approved the post ([`requester_label`], S19); set on the `posted` row, empty
+    /// before then and on an unauthenticated server.
+    #[serde(default)]
+    pub approved_by: String,
 }
 
 impl ReviewDraftRecord {
@@ -6170,6 +6187,8 @@ impl ReviewDraftRecord {
             deletions,
             draft_path: draft_path.into(),
             status: status.into(),
+            requested_by: Vec::new(),
+            approved_by: String::new(),
         }
     }
 }
@@ -6233,6 +6252,8 @@ pub struct DraftRequest {
     pub workspace: std::path::PathBuf,
     /// Prior-round open items to render a "prior feedback status" section (inc 6b).
     pub prior: Vec<Feedback>,
+    /// Who asked for this round (S19), copied onto the draft record.
+    pub requested_by: Vec<String>,
 }
 
 /// Renders a finished review into a redacted `.md` and persists its
@@ -6567,7 +6588,9 @@ pub trait FleetApprover: Send + Sync {
     /// posted, post its rendered `.md` to the row's forge and persist `status = "posted"`.
     /// `review_id` is untrusted wire input; the impl looks it up (bound query arg) rather
     /// than turning it into a path.
-    async fn approve(&self, review_id: &str) -> Result<ApproveOutcome>;
+    /// `approved_by` is the caller's [`requester_label`] (S19), or `None` on an
+    /// unauthenticated server; it is stored on the `posted` row.
+    async fn approve(&self, review_id: &str, approved_by: Option<&str>) -> Result<ApproveOutcome>;
 }
 
 /// The outcome of a durable, atomic attempt to claim the exclusive right to POST a

@@ -2321,6 +2321,12 @@ async fn fleet_review_now_reaches_the_sink(#[case] transport: Transport) {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].session_id, "web");
     assert_eq!(seen[0].pr_number, 42);
+    // No auth on this server ⇒ no verified caller to attribute (S19).
+    assert!(
+        seen[0].requested_by.is_empty(),
+        "{:?}",
+        seen[0].requested_by
+    );
 }
 
 // A coalesced trigger reports `accepted = false` (folded into a pending/in-flight one) —
@@ -2515,7 +2521,11 @@ struct RecordingApprover {
 }
 #[async_trait]
 impl agent_core::FleetApprover for RecordingApprover {
-    async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
+    async fn approve(
+        &self,
+        review_id: &str,
+        _approved_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::ApproveOutcome> {
         self.seen.lock().unwrap().push(review_id.to_string());
         Ok(self.outcome.clone())
     }
@@ -2526,7 +2536,11 @@ impl agent_core::FleetApprover for RecordingApprover {
 struct ErrApprover;
 #[async_trait]
 impl agent_core::FleetApprover for ErrApprover {
-    async fn approve(&self, _review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
+    async fn approve(
+        &self,
+        _review_id: &str,
+        _approved_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::ApproveOutcome> {
         Err(agent_core::Error::Fleet("post failed".into()))
     }
 }
@@ -2704,6 +2718,8 @@ fn c14_rec(review_id: &str, repo: &str, pr: u64, status: &str) -> agent_core::Re
         // A server-side path that must NEVER cross the wire (the summary omits it).
         draft_path: "/w/runpod/host/reviews/pr-7.md".into(),
         status: status.into(),
+        requested_by: Vec::new(),
+        approved_by: String::new(),
     }
 }
 
@@ -2718,7 +2734,11 @@ async fn positive_fleet_list_reviews_round_trip(#[case] transport: Transport) {
     let history = Arc::new(RecordingHistory {
         drafts: vec![
             c14_rec("r1", "runpod__host", 7, "drafted"),
-            c14_rec("r2", "runpod__host", 8, "posted"),
+            agent_core::ReviewDraftRecord {
+                requested_by: vec!["acme/user:kc/alice".into(), "acme/user:kc/bob".into()],
+                approved_by: "acme/user:kc/carol".into(),
+                ..c14_rec("r2", "runpod__host", 8, "posted")
+            },
         ],
         seen: std::sync::Mutex::new(Vec::new()),
     });
@@ -2743,6 +2763,13 @@ async fn positive_fleet_list_reviews_round_trip(#[case] transport: Transport) {
     assert_eq!(got[0].repo, "runpod__host");
     assert_eq!(got[0].pr_number, 7);
     assert_eq!(got[1].status, "posted");
+    // S19 attribution crosses the wire both ways; an unattributed draft stays empty.
+    assert!(got[0].requested_by.is_empty() && got[0].approved_by.is_empty());
+    assert_eq!(
+        got[1].requested_by,
+        ["acme/user:kc/alice", "acme/user:kc/bob"]
+    );
+    assert_eq!(got[1].approved_by, "acme/user:kc/carol");
     assert!(
         got.iter().all(|r| r.draft_path.is_empty()),
         "the server-minted draft_path is never exposed on the wire"

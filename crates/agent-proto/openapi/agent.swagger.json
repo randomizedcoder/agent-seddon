@@ -9798,6 +9798,17 @@
         },
         "status": {
           "type": "string"
+        },
+        "requestedBy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Who asked for this review (security-hardening S19): `tenant/subject` of each\nReviewNow caller, at most 8; empty when the forge poller or Slack watcher started it."
+        },
+        "approvedBy": {
+          "type": "string",
+          "description": "Who approved the post (`tenant/subject`); empty until posted, or on a server\nwithout auth."
         }
       },
       "description": "One persisted review draft's METADATA (review-fleet C14). Mirrors the non-body\nfields of `agent_core::ReviewDraftRecord` — the `.md` body is fetched separately\nvia `GetReview` (it is large + LLM-authored, so it is never bundled into a list).\n`repo` is the roster repo key (`owner__name`); `status` is one of drafted |\napproved | posted | superseded."

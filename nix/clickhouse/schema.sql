@@ -208,10 +208,19 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_drafts
     additions     UInt32,
     deletions     UInt32,
     draft_path    String,                          -- path to the rendered C13 .md
-    status        String                           -- drafted | approved | posted | superseded
+    status        String,                          -- drafted | approved | posted | superseded
+    requested_by  Array(String),                   -- S19: tenant/subject of each ReviewNow caller (≤ 8)
+    approved_by   String                           -- S19: tenant/subject of the approver; '' until posted
 )
 ENGINE = MergeTree
 ORDER BY (user, repo, pr_number, head_sha);
+
+-- S19 added requested_by / approved_by. Unlike the older additive columns above, these
+-- are added in place, so re-applying this file (`clickhouse-up`, `clickhouse-migrate`)
+-- upgrades an existing volume; old rows read as empty. Run it before starting an agent
+-- that writes them, or its draft inserts fail on the unknown columns.
+ALTER TABLE agent.agent_review_drafts ADD COLUMN IF NOT EXISTS requested_by Array(String) AFTER status;
+ALTER TABLE agent.agent_review_drafts ADD COLUMN IF NOT EXISTS approved_by  String        AFTER requested_by;
 
 -- One row per review-feedback item, carried across rounds (review-fleet C15/C16).
 -- review_id/repo/pr_number are the persisting round's context; the rest is the item's

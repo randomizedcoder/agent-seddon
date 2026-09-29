@@ -78,6 +78,7 @@ pub async fn poll_session(
             sink.enqueue(FleetTrigger {
                 session_id: session_id.to_string(),
                 pr_number: pr.number,
+                requested_by: Vec::new(),
             });
             report.emitted += 1;
         }
