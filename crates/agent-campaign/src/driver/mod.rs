@@ -32,8 +32,9 @@
 //! swallowed with a warning).
 
 use agent_core::campaign::{
-    truncate_chars, CampaignBackend, CampaignResult, CampaignStore, ClaimRequest, Claimed, Fail,
-    FailCause, Owner, Policy, Task, TaskId, TaskState, TokenUsage, DECOMPOSING_MAX_SECS, MAX_ERROR,
+    truncate_chars, AttemptKind, CampaignBackend, CampaignResult, CampaignStore, ClaimRequest,
+    Claimed, Fail, FailCause, Owner, Policy, Task, TaskId, TaskState, TokenUsage,
+    DECOMPOSING_MAX_SECS, MAX_ERROR,
 };
 use agent_core::{safe_segment, SessionKey};
 use async_trait::async_trait;
@@ -118,6 +119,9 @@ pub struct PlanReport {
     /// The queue in `plannable` order with each node's outcome; an `Err` is a store
     /// failure counted in `summary.failures`.
     pub nodes: Vec<(Task, CampaignResult<Planned>)>,
+    /// The planner's model label (`task_attempts.model`), so an observer can
+    /// attribute the tick's plan attempts per model (CP-08); `""` when unknown.
+    pub model: String,
 }
 
 /// The plan phase seam: plan up to `limit` nodes of `store`. Never fails.
@@ -145,6 +149,7 @@ impl TickPlanner for FactoryPlanner {
         };
         report.summary.selected = queue.len();
         let planner = (self.0)(store);
+        report.model = planner.model().to_string();
         for task in queue {
             let planned = planner.plan_node(task.task_id).await;
             match &planned {
@@ -252,6 +257,13 @@ pub struct Settled {
     pub tenant: String,
     pub task: TaskId,
     pub outcome: WorkerOutcome,
+    /// The spend of the leaf's latest `work` attempt, read back from the store
+    /// after settling (the worker — possibly another process — wrote it there);
+    /// zero when no attempt row could be read. Untrusted numbers: clamp before a
+    /// metric (`TokenUsage::clamped`).
+    pub tokens: TokenUsage,
+    /// The same attempt's `model` label; `""` when none could be read.
+    pub model: String,
 }
 
 /// One tenant's phases in one tick.
@@ -360,11 +372,23 @@ pub struct Driver {
     planner: Arc<dyn TickPlanner>,
     poller: Arc<dyn PrPoller>,
     exec: Option<Arc<dyn WorkerExec>>,
+    observer: Option<Arc<dyn TickObserver>>,
     global: Arc<Semaphore>,
     per_tenant: Mutex<HashMap<String, Arc<Semaphore>>>,
     workers: tokio::sync::Mutex<JoinSet<Settled>>,
     /// Rotates the tenant order each tick so no tenant's position starves it.
     rr_cursor: AtomicUsize,
+}
+
+/// What the driver tells the process about each tick and drain, for metrics
+/// (`04-executor.md` §Observability, CP-08): the report as returned plus the
+/// tick's wall time. Called synchronously at the end of [`Driver::tick`] (never
+/// for a disabled driver) and [`Driver::drain`]; an implementation must not
+/// block. The driver stays free of any metrics crate: `agent-runtime` bridges
+/// the report to `agent-metrics`, the way the scheduler's `RunObserver` does.
+pub trait TickObserver: Send + Sync {
+    fn on_tick(&self, report: &TickReport, elapsed: Duration);
+    fn on_drain(&self, report: &DrainReport);
 }
 
 impl std::fmt::Debug for Driver {
@@ -396,6 +420,7 @@ impl Driver {
             planner,
             poller: Arc::new(NoopPoller),
             exec: None,
+            observer: None,
             global,
             per_tenant: Mutex::new(HashMap::new()),
             workers: tokio::sync::Mutex::new(JoinSet::new()),
@@ -413,6 +438,13 @@ impl Driver {
     #[must_use]
     pub fn with_exec(mut self, exec: Option<Arc<dyn WorkerExec>>) -> Self {
         self.exec = exec;
+        self
+    }
+
+    /// Report every tick and drain to `observer` (CP-08 metrics).
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn TickObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -446,9 +478,15 @@ impl Driver {
         if !self.cfg.enabled {
             return TickReport::disabled();
         }
-        self.tick_inner()
+        let started = std::time::Instant::now();
+        let report = self
+            .tick_inner()
             .instrument(tracing::info_span!("campaign.tick"))
-            .await
+            .await;
+        if let Some(observer) = &self.observer {
+            observer.on_tick(&report, started.elapsed());
+        }
+        report
     }
 
     async fn tick_inner(&self) -> TickReport {
@@ -665,7 +703,11 @@ impl Driver {
         } else {
             0
         };
-        DrainReport { settled, aborted }
+        let report = DrainReport { settled, aborted };
+        if let Some(observer) = &self.observer {
+            observer.on_drain(&report);
+        }
+        report
     }
 }
 
@@ -728,10 +770,41 @@ async fn run_worker(
         }
     };
     tracing::info!(tenant, task = %task, outcome = ?outcome, "campaign.worker: settled");
+    let (tokens, model) = latest_work_attempt(&*store, task).await;
     Settled {
         tenant,
         task,
         outcome,
+        tokens,
+        model,
+    }
+}
+
+/// The spend and model label of `task`'s latest `work` attempt (by start time,
+/// then id), for the settled report: the worker that ran the leaf — in this
+/// process or an `agent --run-task` child — closed that row with what it spent.
+/// A read failure or no row is `(zero, "")` with a warn; never an error, the
+/// leaf is already settled.
+async fn latest_work_attempt(store: &dyn CampaignStore, task: TaskId) -> (TokenUsage, String) {
+    match store.attempts(task).await {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|a| a.kind == AttemptKind::Work)
+            .max_by_key(|a| (a.started_at_ms, a.attempt_id.0))
+            .map(|a| {
+                (
+                    TokenUsage {
+                        tokens_in: i64::try_from(a.tokens_in).unwrap_or(i64::MAX),
+                        tokens_out: i64::try_from(a.tokens_out).unwrap_or(i64::MAX),
+                    },
+                    a.model,
+                )
+            })
+            .unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(task = %task, error = %e, "campaign.worker: could not read the attempt after settling");
+            (TokenUsage::default(), String::new())
+        }
     }
 }
 

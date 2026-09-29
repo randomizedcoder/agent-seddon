@@ -30,9 +30,11 @@ use iai_callgrind::{
 // (triggers/reviews/progress/approvals/approval_latency/post_failures); ~1.42M after
 // Phase 3's three `agent_transport_*` health families (posts/post_seconds/ratelimit);
 // ~1.451M after Phase 4's six config-plane families (config_store_ops/op_seconds,
-// auth_verify, authz_decisions, grpc_server_rpc/rpc_seconds); ~1.14x headroom.
+// auth_verify, authz_decisions, grpc_server_rpc/rpc_seconds); ~1.547M after
+// campaigns CP-08's nine `agent_campaign_*` families (tick_seconds/tick_errors +
+// nodes/attempts/tokens/claims/leases_lost/plans_released/polls); ~1.13x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_650_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_750_000u64)])))]
 fn new_registry() -> Metrics {
     black_box(Metrics::new())
 }
@@ -49,9 +51,10 @@ fn new_registry() -> Metrics {
 // control-plane families; ~2.24M after the observability track's six
 // `agent_fleet_*` families; ~2.34M after Phase 3's three `agent_transport_*`
 // health families (the histogram's bucket series add encode cost); ~2.35M after
-// Phase 4's six config-plane families; ~1.13x headroom.
+// Phase 4's six config-plane families; ~2.50M after campaigns CP-08's nine
+// `agent_campaign_*` families (one more histogram's buckets); ~1.13x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 2_660_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 2_830_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

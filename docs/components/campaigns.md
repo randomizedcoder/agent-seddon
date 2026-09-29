@@ -4,9 +4,10 @@ An **objective** (a gap id, an issue, a feature) as a hierarchical task tree the
 agent plans one node at a time and farms out to workers and pull requests. Design
 track: [`docs/design/campaigns/`](../design/campaigns/README.md) (status in
 [`STATUS.md`](../design/campaigns/STATUS.md)). This doc covers what is **shipped**
-(CP-01–CP-06): the seam, the stores, the planner, the `agent campaign …` CLI, the
-driver tick, the PR poller and the worker (`agent --run-task`: worktree → Implement
-session → push → draft PR). Metrics and the gRPC service are later increments.
+(CP-01–CP-06, CP-08): the seam, the stores, the planner, the `agent campaign …` CLI, the
+driver tick, the PR poller, the worker (`agent --run-task`: worktree → Implement
+session → push → draft PR), and the observability that comes with them (metrics and
+the ClickHouse event mirror). The gRPC service is a later increment (CP-09).
 
 ## Shape
 
@@ -254,6 +255,72 @@ state string never moves the leaf: the first three are recorded on it as a bound
 `poll_error` event (`agent campaign show` lists events), the last is only counted.
 The approval gate is enforced here, not in the store.
 
+## Observability
+
+Two views, both fed by what already exists (CP-08,
+[`04-executor.md` §Observability](../design/campaigns/04-executor.md#observability-cp-08)):
+
+**Metrics** are recorded by the **driver process** from its own tick report
+(`agent_runtime::campaign_metrics::MetricsObserver`, the driver's `TickObserver`,
+wired by `build_driver`), never by a worker: an `agent --run-task` child's
+Prometheus registry dies with it, so the driver reads the attempt row the worker
+closed and counts that. Families (labels in braces; `tenant` is the tick's tenant,
+`safe_segment`-validated and bounded by the shared tenant LRU like the
+config-plane families):
+
+| Family | Labels | Incremented by |
+|---|---|---|
+| `agent_campaign_tick_seconds` | — | every enabled tick (wall time; health, label-less) |
+| `agent_campaign_tick_errors_total` | — | the tick's error count (tenant discovery + store / planner failures) |
+| `agent_campaign_claims_total` | `tenant` | leaves claimed for dispatch |
+| `agent_campaign_leases_lost_total` | `tenant` | expired claims the reaper returned to `ready` |
+| `agent_campaign_plans_released_total` | `tenant` | stale `decomposing` nodes the reaper released |
+| `agent_campaign_polls_total` | `tenant`, `outcome` = `merged` \| `closed` \| `awaiting` \| `error` | the poll phase |
+| `agent_campaign_attempts_total` | `tenant`, `kind` = `decompose` \| `work`, `outcome`, `model` | one per planned node (`outcome` = the planner's label `execute` \| `split` \| `needs_info` \| `reject` \| `blocked` \| `error` \| `not_ready` \| `already_applied` \| `conflict`, or `failure` when the store failed on the node; `model` = `planner_model`) and one per settled worker (`ok` \| `error` \| `timeout` \| `panic`; `model` = the attempt row's) |
+| `agent_campaign_tokens_total` | `tenant`, `kind`, `direction` = `in` \| `out` | the planner's summed usage per node; the worker's attempt row (hostile counts clamped to ≥ 0 before the add) |
+| `agent_campaign_nodes_total` | `tenant`, `kind` = `objective` \| `task` \| `leaf`, `state` | the plan phase only: the node each outcome left behind (a split's parent as `decomposed`, its children as `kind="task", state="created"`) |
+
+`model` folds to `other` unless it is at most 64 chars of `[A-Za-z0-9._:/-]`, and
+to `unknown` when the attempt row carries none — which today is every `work`
+attempt (the worker does not label its row yet; the planner labels its
+`decompose` rows with `planner_model`). A zero count mints no series, so an
+idle driver leaves the exposition as it was. The question the design parked —
+"measure the rate of `failed` leaves per planner model first" — is one query:
+
+```promql
+sum by (model) (rate(agent_campaign_attempts_total{kind="decompose",outcome="error"}[1h]))
+  / sum by (model) (rate(agent_campaign_attempts_total{kind="decompose"}[1h]))
+```
+
+**The ClickHouse mirror.** Every committed `task_events` row is also an
+`agent_events` row (`nix/clickhouse/schema.sql`) with `kind = 'campaign'` — the
+stores emit it through the `EventSink` seam after the transaction commits (a
+rolled-back write mirrors nothing), and the process that performed the write owns
+the row: a CLI verb's `approve`, the driver's `claim` / `reap`, the worker child's
+`start` / `complete` / `fail` each go through that process's `TelemetryHandle`
+(`[telemetry] enabled`; off, the stores mirror nothing; a store-only verb flushes
+the handle before it exits, since it returns before the end-of-run flush). Row shape: `session_id =
+campaign-<campaign id>` (a campaign groups like a run), `user` = the tenant (the
+row policy's key), `role` = the writer's **class** (`user` \| `model` \| `planner`
+\| `driver` \| `worker` \| `reaper` \| `poller` \| `rollup`) — never the lease token
+a rendered `worker:<owner>` carries — `tool_call_id` = the task id, `content` = the
+event as JSON (`task_id`, `event_id`, `from`, `to`, `version`, `actor`, `detail`)
+through the same secret redaction as every other row, `detail` bounded at 8 KiB
+(replaced by `{"truncated": true, "head": …}` so the body stays valid JSON) and the
+row at 16 KiB. A campaign's timeline:
+
+```sql
+SELECT ts, role, tool_call_id AS task, JSONExtractString(content, 'to') AS state, content
+FROM agent.agent_events
+WHERE kind = 'campaign' AND session_id = 'campaign-1883'
+ORDER BY ts, seq
+```
+
+What is **not** observable this way: a worker's own loop families
+(`agent_tokens_total{session,user}` and friends) under `sandbox = "subprocess"`,
+which live and die in the child; the campaign families above are the durable
+account.
+
 ## Security
 
 The model, the operator's typed text and every stored value are untrusted:
@@ -308,7 +375,10 @@ poller over `MemCampaigns` and a scripted forge that
 answers a PR, an error or a hang per number, `agent-campaign`; the `review_note`
 seam has T7 conformance rows on both tiers), T14–T15 (Postgres protocols and
 invariants, live), T16 (CLI arguments,
-`agent-cli`), plus run-level CLI tests over `MemCampaigns` and an in-process `add →
+`agent-cli`), T17 (observability: the `EventSink` mirror as conformance rows on
+both tiers, the ClickHouse row in `agent-telemetry` over the un-spawned handle, the
+metric families in `agent-metrics`, and the bridge over hand-built and real tick
+reports in `agent-runtime` with `MetricsProbe`), plus run-level CLI tests over `MemCampaigns` and an in-process `add →
 run --once → plan → show` path with a scripted provider through the driver. **End
 to end**: `crates/agent-runtime/tests/campaign_e2e.rs` runs the shipped driver,
 planner, poller and in-process worker over a real `git` checkout with a bare origin
@@ -332,6 +402,7 @@ duplicate PR a leaf can open when `complete` loses its lease after `create_pr`
 branch (CP-10); per-repo forge and git bindings (the worker and the poller use the
 one process `[forge]` / `[git]` backend, and the git root is the process cwd, until
 RK-02's `repos` table carries the cards); CP-07 the repo-knowledge brief and
-`node_key` touches; CP-08
-metrics and the observability section of this doc; CP-09 the gRPC
+`node_key` touches; a metered decorator over the campaign store (per-op latency and
+error rate on the Postgres tier, the `metered.rs` pattern) once the pg tier raises a
+latency question the tick families cannot answer; CP-09 the gRPC
 `CampaignService`; RK-02 the `repos` table (replacing `[campaign.repos]`).

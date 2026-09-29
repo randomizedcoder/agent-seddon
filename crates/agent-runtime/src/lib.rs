@@ -67,6 +67,10 @@ pub mod campaign_driver;
 // CP-06b): `run_leaf` behind `agent --run-task` and the in-process exec.
 #[cfg(feature = "campaign")]
 pub mod campaign_worker;
+// The campaign observability bridge (04-executor.md §Observability, CP-08): the
+// driver's tick report → the `agent_campaign_*` metric families.
+#[cfg(feature = "campaign")]
+pub mod campaign_metrics;
 #[cfg(any(
     feature = "auth-postgres",
     feature = "role-postgres",

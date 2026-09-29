@@ -216,6 +216,7 @@ impl TickPlanner for CountingPlanner {
                 ..TickSummary::default()
             },
             nodes: Vec::new(),
+            model: "counting".into(),
         };
         for t in queue {
             let d = split(&*store, t.task_id, 1).await;
@@ -374,7 +375,149 @@ fn tenants(list: &[&str]) -> Tenants {
     Tenants::Fixed(list.iter().map(|s| (*s).to_string()).collect())
 }
 
+/// Starts and completes the leaf with a known spend, like a worker that opened
+/// PR 7 (`TokenUsage::new(60, 40)`), so the settled report has an attempt to read.
+fn complete_exec() -> Option<Arc<dyn WorkerExec>> {
+    Some(Arc::new(ClosureExec(
+        |_, store: Arc<dyn CampaignStore>, claimed: Claimed, owner: Owner| async move {
+            store
+                .start(claimed.task.task_id, &owner)
+                .await
+                .map_err(|e| e.to_string())?;
+            store
+                .complete(Complete {
+                    task: claimed.task.task_id,
+                    owner,
+                    pr: pr(7),
+                    tokens: TokenUsage::new(60, 40),
+                    session_id: Some("s1".into()),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        },
+    )))
+}
+
+/// A [`TickObserver`] that keeps every report it was handed (CP-08 T11 rows).
+#[derive(Default)]
+struct RecordingObserver {
+    ticks: Mutex<Vec<(TickReport, Duration)>>,
+    drains: Mutex<Vec<DrainReport>>,
+}
+
+impl TickObserver for RecordingObserver {
+    fn on_tick(&self, report: &TickReport, elapsed: Duration) {
+        self.ticks.lock().unwrap().push((report.clone(), elapsed));
+    }
+    fn on_drain(&self, report: &DrainReport) {
+        self.drains.lock().unwrap().push(report.clone());
+    }
+}
+
 // -- T11 rows ------------------------------------------------------------------
+
+/// The observer is handed the tick's report (the same value the caller gets, the
+/// planner's model label included) with its wall time, and the drain's report
+/// with every settled worker.
+#[tokio::test]
+async fn positive_observer_sees_tick_and_elapsed() {
+    let fx = Fx::new();
+    let a = fx.store("ta");
+    let (_, leaves) = ready_leaves(&*a, 1).await;
+    let root = campaign(&*a, "to plan").await;
+    let obs = Arc::new(RecordingObserver::default());
+    let driver = fx
+        .driver(tenants(&["ta"]), cfg(2, 8))
+        .with_exec(ok_exec())
+        .with_observer(Arc::clone(&obs) as Arc<dyn TickObserver>);
+    let report = driver.tick().await;
+    {
+        let ticks = obs.ticks.lock().unwrap();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].0, report);
+        assert_eq!(
+            ticks[0].0.dispatched,
+            vec![("ta".to_string(), leaves[0].task_id)]
+        );
+        let plan = ticks[0].0.per_tenant[0].plan.as_ref().unwrap();
+        assert_eq!(plan.model, "counting");
+        assert!(plan.nodes.iter().any(|(t, _)| t.task_id == root.task_id));
+    }
+    let drained = driver.drain(Duration::from_secs(5)).await;
+    let drains = obs.drains.lock().unwrap();
+    assert_eq!(drains.len(), 1);
+    assert_eq!(drains[0], drained);
+    assert_eq!(drains[0].settled.len(), 1);
+    assert_eq!(drains[0].settled[0].outcome, WorkerOutcome::Ok);
+    assert_eq!(obs.ticks.lock().unwrap().len(), 1, "a drain is not a tick");
+}
+
+/// A disabled driver reports nothing to its observer (nothing ran).
+#[tokio::test]
+async fn corner_observer_silent_when_disabled() {
+    let fx = Fx::new();
+    let a = fx.store("ta");
+    ready_leaves(&*a, 1).await;
+    let obs = Arc::new(RecordingObserver::default());
+    let driver = fx
+        .driver(
+            tenants(&["ta"]),
+            DriverConfig {
+                enabled: false,
+                ..cfg(2, 8)
+            },
+        )
+        .with_exec(ok_exec())
+        .with_observer(Arc::clone(&obs) as Arc<dyn TickObserver>);
+    assert!(driver.tick().await.disabled);
+    assert!(obs.ticks.lock().unwrap().is_empty());
+    let drained = driver.drain(Duration::from_secs(1)).await;
+    assert_eq!(drained, DrainReport::default());
+    assert_eq!(obs.drains.lock().unwrap().len(), 1, "a drain still reports");
+}
+
+/// The settled report carries the spend and model the worker closed its attempt
+/// with — read back from the store, so a subprocess worker's numbers count too.
+#[tokio::test]
+async fn positive_settled_carries_work_attempt() {
+    let fx = Fx::new();
+    let a = fx.store("ta");
+    let (_, leaves) = ready_leaves(&*a, 1).await;
+    let driver = fx
+        .driver(tenants(&["ta"]), cfg(2, 8))
+        .with_exec(complete_exec());
+    driver.tick().await;
+    let drained = driver.drain(Duration::from_secs(5)).await;
+    assert_eq!(drained.settled.len(), 1);
+    let s = &drained.settled[0];
+    assert_eq!(s.outcome, WorkerOutcome::Ok);
+    assert_eq!(s.tokens, TokenUsage::new(60, 40));
+    let attempts = work_attempts(&*a, leaves[0].task_id).await;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].outcome, AttemptOutcome::Pr);
+    assert_eq!(s.model, attempts[0].model);
+    assert_eq!(a.get(s.task).await.unwrap().state, TaskState::InReview);
+}
+
+/// No `work` attempt to read (only a planner attempt, or no task at all) is a
+/// zero spend and an empty label — never an error after the leaf is settled.
+#[tokio::test]
+async fn corner_settled_without_attempt_zero() {
+    let fx = Fx::new();
+    let a = fx.store("ta");
+    let root = campaign(&*a, "planned only").await;
+    split(&*a, root.task_id, 1).await;
+    assert!(!a.attempts(root.task_id).await.unwrap().is_empty());
+    assert_eq!(
+        latest_work_attempt(&*a, root.task_id).await,
+        (TokenUsage::default(), String::new())
+    );
+    assert_eq!(
+        latest_work_attempt(&*a, TaskId(999_999)).await,
+        (TokenUsage::default(), String::new())
+    );
+}
 
 /// Per tenant: reap, reap_decomposing, poll, plan (`plannable`), claim — in that order.
 #[tokio::test]
@@ -693,19 +836,19 @@ async fn adversarial_worker_panics() {
     assert_eq!(report.dispatched.len(), 1);
     let drained = driver.drain(Duration::from_secs(5)).await;
     assert_eq!(drained.aborted, 0);
-    assert_eq!(
-        drained.settled,
-        vec![Settled {
-            tenant: "ta".into(),
-            task: leaves[0].task_id,
-            outcome: WorkerOutcome::Panic,
-        }]
-    );
+    assert_eq!(drained.settled.len(), 1);
+    let s = &drained.settled[0];
+    assert_eq!((s.tenant.as_str(), s.task), ("ta", leaves[0].task_id));
+    assert_eq!(s.outcome, WorkerOutcome::Panic);
     let t = a.get(leaves[0].task_id).await.unwrap();
     assert_eq!(t.state, TaskState::Failed);
     let attempts = work_attempts(&*a, t.task_id).await;
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].outcome, AttemptOutcome::Error);
+    // The settled report read the closed attempt back (the driver's own `fail`
+    // spent nothing).
+    assert_eq!(s.tokens, TokenUsage::default());
+    assert_eq!(s.model, attempts[0].model);
     let err = attempts[0].error.clone().unwrap();
     assert!(err.starts_with("worker panicked: boom"), "{err}");
     assert!(err.chars().count() <= MAX_ERROR);

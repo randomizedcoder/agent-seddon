@@ -25,6 +25,7 @@ use agent_core::campaign::{CampaignBackend, Policy, DECOMPOSING_MAX_SECS};
 use agent_core::{Forge, UserId};
 
 use crate::agent::Agent;
+use crate::campaign_metrics::MetricsObserver;
 use crate::campaign_worker::{InProcessExec, SubprocessExec, WorkerCfg};
 use crate::config::{CampaignCfg, Config};
 
@@ -127,10 +128,12 @@ pub fn build_driver(
     forge: Option<Arc<dyn Forge>>,
     deps: WorkerDeps,
 ) -> anyhow::Result<Driver> {
+    let metrics = deps.agent.metrics();
     let exec = exec_for(cfg, deps)?;
     Ok(Driver::new(backend, tenants, driver_config(cfg), planner)
         .with_poller(poller_for(forge))
-        .with_exec(Some(exec)))
+        .with_exec(Some(exec))
+        .with_observer(Arc::new(MetricsObserver(metrics))))
 }
 
 #[cfg(test)]
@@ -382,6 +385,50 @@ mod tests {
         let s = mem.with_tenant("acme").unwrap();
         assert_eq!(state(&s, r.task_id).await, TaskState::Done);
         assert_eq!(*forge.0.lock().unwrap(), vec![7]);
+    }
+
+    // positive (T17): the shipped driver reports to the agent's metrics — one
+    // tick over a claimable leaf moves the claims counter and times the tick.
+    #[tokio::test]
+    async fn positive_build_driver_wires_metrics_observer() {
+        let mem = MemCampaigns::new();
+        let s = mem.with_tenant("acme").unwrap();
+        agent_testkit::campaign::conformance::ready_leaves(&s, 1).await;
+        let agent = bare_agent();
+        let metrics = agent.metrics();
+        let probe = agent_testkit::observe::MetricsProbe::new(&metrics);
+        let backend: Arc<dyn CampaignBackend> = Arc::new(mem.clone());
+        let driver = build_driver(
+            &campaign_cfg(),
+            backend,
+            Tenants::Fixed(vec!["acme".into()]),
+            Arc::new(IdlePlanner),
+            None,
+            deps_for(agent),
+        )
+        .unwrap();
+        let report = driver.tick().await;
+        assert_eq!(report.claimed(), 1);
+        assert_eq!(
+            probe.delta(
+                &metrics,
+                "agent_campaign_claims_total",
+                Some("tenant=\"acme\"")
+            ),
+            1.0
+        );
+        assert_eq!(
+            probe.delta(&metrics, "agent_campaign_tick_seconds_count", None),
+            1.0
+        );
+        driver.drain(Duration::from_secs(5)).await;
+        assert!(
+            probe.delta(
+                &metrics,
+                "agent_campaign_attempts_total",
+                Some("kind=\"work\"")
+            ) >= 1.0
+        );
     }
 
     // corner: without a forge the poller is the noop — the leaf stays

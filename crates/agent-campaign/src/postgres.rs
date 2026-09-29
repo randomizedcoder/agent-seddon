@@ -36,9 +36,9 @@ use agent_core::campaign::{
     allowed, check_deps, check_len, check_list, check_max, clamp_lease, plan_detail, rollup,
     screen, truncate_chars, Actor, ActorClass, AttemptId, AttemptKind, AttemptOutcome, BlockReason,
     CampaignBackend, CampaignError, CampaignResult, CampaignStore, ClaimRequest, Claimed, Complete,
-    Decomposed, Decomposition, EstSize, EventId, Fail, IdemKey, ListFilter, MarkLeaf, NewCampaign,
-    Owner, PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped, ReviewNote,
-    ReviewOutcome, Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState,
+    Decomposed, Decomposition, EstSize, EventId, EventSink, Fail, IdemKey, ListFilter, MarkLeaf,
+    NewCampaign, Owner, PlanAttempt, PlanClose, PlanCloseOutcome, PlanStart, Policy, Reaped,
+    ReviewNote, ReviewOutcome, Task, TaskAttempt, TaskEvent, TaskId, TaskKind, TaskPath, TaskState,
     CLARIFICATION_HEADER, LIVE_STATES, MAX_ACCEPTANCE, MAX_ACCEPTANCE_ITEM, MAX_ANSWER,
     MAX_CHILDREN, MAX_ERROR, MAX_GOAL, MAX_QUESTION, MAX_REASON, MAX_SESSION_ID, MAX_TOUCH,
     MAX_TOUCHES,
@@ -69,6 +69,8 @@ pub struct PgCampaigns {
     pool: PgPool,
     tenant: String,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The after-commit mirror of every event (CP-08); `None` emits nothing.
+    sink: Option<Arc<dyn EventSink>>,
 }
 
 impl std::fmt::Debug for PgCampaigns {
@@ -311,7 +313,18 @@ impl PgCampaigns {
             pool,
             tenant: UserId::LOCAL.to_string(),
             now_ms: Arc::new(wall_clock_ms),
+            sink: None,
         }
+    }
+
+    /// Mirror every committed event into `sink` (CP-08 observability): called once
+    /// per `task_events` row after the transaction that wrote it committed, in
+    /// write order — never for a rolled-back write. Shared by every tenant view
+    /// derived from this one.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// The same pool and clock under `tenant`; refuses anything that is not a
@@ -326,6 +339,7 @@ impl PgCampaigns {
             pool: self.pool.clone(),
             tenant: tenant.to_string(),
             now_ms: Arc::clone(&self.now_ms),
+            sink: self.sink.clone(),
         })
     }
 
@@ -388,6 +402,8 @@ impl PgCampaigns {
             conn,
             tenant: self.tenant.clone(),
             now: (self.now_ms)(),
+            sink: self.sink.clone(),
+            pending: Vec::new(),
         })
     }
 
@@ -410,16 +426,34 @@ struct WorkPatch {
     session_id: Option<String>,
 }
 
-/// One protocol's transaction: the connection, the tenant and the transaction's `now`.
+/// One protocol's transaction: the connection, the tenant and the transaction's `now`,
+/// plus the events it wrote, mirrored to the sink by [`Tx::commit`] once the commit
+/// succeeded (a rolled-back transaction drops them with the connection).
 struct Tx {
     conn: Transaction<'static, Postgres>,
     tenant: String,
     now: u64,
+    sink: Option<Arc<dyn EventSink>>,
+    /// `(campaign_id, event)` in write order.
+    pending: Vec<(TaskId, TaskEvent)>,
 }
 
 impl Tx {
     async fn commit(self) -> CampaignResult<()> {
-        self.conn.commit().await.map_err(map_db)
+        let Tx {
+            conn,
+            tenant,
+            sink,
+            pending,
+            ..
+        } = self;
+        conn.commit().await.map_err(map_db)?;
+        if let Some(sink) = sink {
+            for (campaign, event) in &pending {
+                sink.emit(&tenant, *campaign, event);
+            }
+        }
+        Ok(())
     }
 
     /// The row without a lock (a `NotFound` probe before the lock order starts).
@@ -536,8 +570,13 @@ impl Tx {
             .map_err(map_db)
     }
 
+    /// Insert one `task_events` row and remember it (with the row's `campaign`) for
+    /// the sink at commit. `campaign` is the caller's `Task.campaign_id` — every
+    /// writer has the row in hand, or (the two reapers) selects it alongside.
+    #[allow(clippy::too_many_arguments)]
     async fn event(
         &mut self,
+        campaign: TaskId,
         task_id: TaskId,
         from: Option<TaskState>,
         to: TaskState,
@@ -546,7 +585,7 @@ impl Tx {
         detail: Value,
     ) -> CampaignResult<()> {
         let now = ms(self.now);
-        sqlx::query(sql::INSERT_EVENT)
+        let row = sqlx::query(sql::INSERT_EVENT)
             .bind(&self.tenant)
             .bind(task_id.0)
             .bind(from.map(TaskState::as_str))
@@ -555,9 +594,23 @@ impl Tx {
             .bind(ver(version))
             .bind(detail.to_string())
             .bind(now)
-            .execute(&mut *self.conn)
+            .fetch_one(&mut *self.conn)
             .await
             .map_err(map_db)?;
+        let event_id: i64 = col(&row, "event_id")?;
+        self.pending.push((
+            campaign,
+            TaskEvent {
+                event_id: EventId(event_id),
+                task_id,
+                from_state: from,
+                to_state: to,
+                actor: actor.render(),
+                version,
+                detail,
+                at_ms: self.now,
+            },
+        ));
         Ok(())
     }
 
@@ -593,8 +646,16 @@ impl Tx {
         )
         .await?
         .ok_or_else(|| CampaignError::Conflict("version: concurrent write".to_string()))?;
-        self.event(id, Some(t.state), to, actor, task.version, detail)
-            .await?;
+        self.event(
+            t.campaign_id,
+            id,
+            Some(t.state),
+            to,
+            actor,
+            task.version,
+            detail,
+        )
+        .await?;
         Ok(task)
     }
 
@@ -807,8 +868,16 @@ impl CampaignStore for PgCampaigns {
         if injection {
             detail["injection"] = json!(true);
         }
-        tx.event(task.task_id, None, state, &principal, 1, detail)
-            .await?;
+        tx.event(
+            task.campaign_id,
+            task.task_id,
+            None,
+            state,
+            &principal,
+            1,
+            detail,
+        )
+        .await?;
         tx.commit().await?;
         Ok(task)
     }
@@ -957,8 +1026,16 @@ impl CampaignStore for PgCampaigns {
             )
             .await?
             .ok_or_else(|| backend("child insert returned no row"))?;
-            tx.event(child.task_id, None, state, &by, 1, json!({}))
-                .await?;
+            tx.event(
+                child.campaign_id,
+                child.task_id,
+                None,
+                state,
+                &by,
+                1,
+                json!({}),
+            )
+            .await?;
             ids.push(child.task_id);
         }
         // 7. `depends_on` ordinals → sibling ids.
@@ -1219,6 +1296,7 @@ impl CampaignStore for PgCampaigns {
         let mut out = Vec::with_capacity(tasks.len());
         for (seq, task) in tasks.into_iter().enumerate() {
             tx.event(
+                task.campaign_id,
                 task.task_id,
                 Some(TaskState::Ready),
                 TaskState::Claimed,
@@ -1282,11 +1360,12 @@ impl CampaignStore for PgCampaigns {
                 parse_col("from_state", &from, TaskState::parse)?,
                 Owner::parse(&owner).map_err(|e| backend(&format!("column lost_owner: {e}")))?,
                 unsigned(col(row, "version")?),
+                TaskId(col(row, "cid")?),
             ));
         }
         reaped.sort_by_key(|r| r.0);
         let mut out = Vec::with_capacity(reaped.len());
-        for (task_id, from_state, lost_owner, version) in reaped {
+        for (task_id, from_state, lost_owner, version, campaign) in reaped {
             if !allowed(
                 from_state,
                 TaskState::Ready,
@@ -1299,6 +1378,7 @@ impl CampaignStore for PgCampaigns {
                 )));
             }
             tx.event(
+                campaign,
                 task_id,
                 Some(from_state),
                 TaskState::Ready,
@@ -1347,12 +1427,17 @@ impl CampaignStore for PgCampaigns {
             .map_err(map_db)?;
         let mut released = Vec::with_capacity(rows.len());
         for row in &rows {
-            released.push((TaskId(col(row, "task_id")?), unsigned(col(row, "version")?)));
+            released.push((
+                TaskId(col(row, "task_id")?),
+                unsigned(col(row, "version")?),
+                TaskId(col(row, "cid")?),
+            ));
         }
         released.sort_by_key(|r| r.0);
         let mut out = Vec::with_capacity(released.len());
-        for (task_id, version) in released {
+        for (task_id, version, campaign) in released {
             tx.event(
+                campaign,
                 task_id,
                 Some(TaskState::Decomposing),
                 TaskState::Ready,
@@ -1498,6 +1583,7 @@ impl CampaignStore for PgCampaigns {
         }
         let detail = note.detail();
         tx.event(
+            t.campaign_id,
             task,
             Some(TaskState::InReview),
             TaskState::InReview,
@@ -1523,6 +1609,7 @@ impl CampaignStore for PgCampaigns {
             // PR approval is an event, not a state change.
             cas(&t, expected_version, TaskState::InReview)?;
             tx.event(
+                t.campaign_id,
                 task,
                 Some(TaskState::InReview),
                 TaskState::InReview,
@@ -1643,6 +1730,7 @@ impl CampaignStore for PgCampaigns {
         )
         .await?;
         tx.event(
+            campaign,
             campaign,
             Some(task.state),
             task.state,

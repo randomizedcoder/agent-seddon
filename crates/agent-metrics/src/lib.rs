@@ -304,6 +304,69 @@ pub struct Metrics {
     reference_resolve_seconds: Histogram,
     reference_refs: IntCounterVec,
     reference_blocked: IntCounter,
+
+    // --- campaign (the CampaignStore driver, CP-08) -------------------------
+    // What one driver process observes of its ticks
+    // (docs/design/campaigns/04-executor.md §Observability). `tick_seconds` /
+    // `tick_errors` are driver health (label-less); the rest are "who did work /
+    // who spent" families under a `tenant` label read from the driver's tick
+    // report — `safe_segment`-validated at the funnel and admitted into the shared
+    // tenant LRU (`TenantSeries::Campaign`). `kind` / `state` / `outcome` /
+    // `direction` are fixed words from the seam's enums; `model` is the planner's
+    // or worker's configured label, folded to `other` unless short and plain.
+    campaign_tick_seconds: Histogram,
+    campaign_tick_errors: IntCounter,
+    campaign_nodes: IntCounterVec,
+    campaign_attempts: IntCounterVec,
+    campaign_tokens: IntCounterVec,
+    campaign_claims: IntCounterVec,
+    campaign_leases_lost: IntCounterVec,
+    campaign_plans_released: IntCounterVec,
+    campaign_polls: IntCounterVec,
+}
+
+/// One tenant-labelled campaign family (the `TenantSeries::Campaign` discriminator),
+/// so an evicted tenant's series are removed from the right vec with the labels
+/// that were admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum CampaignFamily {
+    /// `agent_campaign_nodes_total{tenant, kind, state}`.
+    Nodes,
+    /// `agent_campaign_attempts_total{tenant, kind, outcome, model}`.
+    Attempts,
+    /// `agent_campaign_tokens_total{tenant, kind, direction}`.
+    Tokens,
+    /// `agent_campaign_claims_total{tenant}`.
+    Claims,
+    /// `agent_campaign_leases_lost_total{tenant}`.
+    LeasesLost,
+    /// `agent_campaign_plans_released_total{tenant}`.
+    PlansReleased,
+    /// `agent_campaign_polls_total{tenant, outcome}`.
+    Polls,
+}
+
+/// The bound on a campaign `model` label: at most this many chars of
+/// `[A-Za-z0-9._:/-]` (`openai/gpt-4o:2025` passes); anything else — control
+/// characters, spaces, a runaway string — folds to [`MODEL_OTHER`], and an empty
+/// label (no attempt row could be read) to [`MODEL_UNKNOWN`].
+const MAX_MODEL_LABEL: usize = 64;
+const MODEL_OTHER: &str = "other";
+const MODEL_UNKNOWN: &str = "unknown";
+
+/// Fold a configured model label to a bounded, plain label value.
+fn fold_model_label(model: &str) -> &str {
+    if model.is_empty() {
+        return MODEL_UNKNOWN;
+    }
+    let plain = model
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'));
+    if plain && model.len() <= MAX_MODEL_LABEL {
+        model
+    } else {
+        MODEL_OTHER
+    }
 }
 
 impl Metrics {
@@ -1411,7 +1474,84 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- campaign (CP-08) ---
+        let campaign_tick_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_campaign_tick_seconds",
+            "Campaign driver tick wall time in seconds (reap, poll, plan, claim, dispatch) — driver health, un-tenanted",
+        ))
+        .unwrap();
+        let campaign_tick_errors = IntCounter::new(
+            "agent_campaign_tick_errors_total",
+            "Campaign driver tick errors (tenant discovery + every tenant's store / planner failures) — driver health, un-tenanted",
+        )
+        .unwrap();
+        let campaign_nodes = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_nodes_total",
+                "Campaign nodes the plan phase handed back, by tenant, kind (objective|task|leaf) and the state they were left in (a split's children count as kind=task, state=created)",
+            ),
+            &["tenant", "kind", "state"],
+        )
+        .unwrap();
+        let campaign_attempts = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_attempts_total",
+                "Campaign attempts the driver observed, by tenant, kind (decompose|work), outcome (the planner's label: execute|split|needs_info|reject|blocked|error|…; the worker's: ok|error|timeout|panic) and model",
+            ),
+            &["tenant", "kind", "outcome", "model"],
+        )
+        .unwrap();
+        let campaign_tokens = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_tokens_total",
+                "Campaign tokens spent, by tenant, kind (decompose|work) and direction (in|out); hostile counts clamped to >= 0 before the add",
+            ),
+            &["tenant", "kind", "direction"],
+        )
+        .unwrap();
+        let campaign_claims = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_claims_total",
+                "Campaign leaves claimed for dispatch, by tenant",
+            ),
+            &["tenant"],
+        )
+        .unwrap();
+        let campaign_leases_lost = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_leases_lost_total",
+                "Campaign leases the reaper returned to ready (a worker that stopped heartbeating), by tenant",
+            ),
+            &["tenant"],
+        )
+        .unwrap();
+        let campaign_plans_released = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_plans_released_total",
+                "Stale decomposing nodes the reaper returned to ready (a planner that died mid-plan), by tenant",
+            ),
+            &["tenant"],
+        )
+        .unwrap();
+        let campaign_polls = IntCounterVec::new(
+            Opts::new(
+                "agent_campaign_polls_total",
+                "Campaign PR poll outcomes, by tenant and outcome (merged|closed|awaiting|error)",
+            ),
+            &["tenant", "outcome"],
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
+            Box::new(campaign_tick_seconds.clone()),
+            Box::new(campaign_tick_errors.clone()),
+            Box::new(campaign_nodes.clone()),
+            Box::new(campaign_attempts.clone()),
+            Box::new(campaign_tokens.clone()),
+            Box::new(campaign_claims.clone()),
+            Box::new(campaign_leases_lost.clone()),
+            Box::new(campaign_plans_released.clone()),
+            Box::new(campaign_polls.clone()),
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
             Box::new(tokens.clone()),
@@ -1728,6 +1868,15 @@ impl Metrics {
             reference_resolve_seconds,
             reference_refs,
             reference_blocked,
+            campaign_tick_seconds,
+            campaign_tick_errors,
+            campaign_nodes,
+            campaign_attempts,
+            campaign_tokens,
+            campaign_claims,
+            campaign_leases_lost,
+            campaign_plans_released,
+            campaign_polls,
         }
     }
 
@@ -2608,6 +2757,116 @@ impl Metrics {
             .observe(secs);
     }
 
+    // --- campaign (the CampaignStore driver, CP-08) ---------------------------
+    //
+    // Recorded by the driver process from its tick report (`agent-runtime`'s
+    // `MetricsObserver` over `agent_campaign::TickObserver`), so a worker that ran
+    // as an `agent --run-task` child is still counted here — its spend is read
+    // back from the attempt row it closed. Every recorder is a funnel: the tenant
+    // (from the store, attacker-influenced in principle) is `safe_segment`-validated
+    // and a malformed one drops the sample; the fixed words come from the seam's
+    // enums; the model label is folded by `fold_model_label`; token counts arrive
+    // as `u64` (the caller clamps the store's `i64`s with `TokenUsage::clamped`).
+
+    fn campaign_vec(&self, family: CampaignFamily) -> &IntCounterVec {
+        match family {
+            CampaignFamily::Nodes => &self.campaign_nodes,
+            CampaignFamily::Attempts => &self.campaign_attempts,
+            CampaignFamily::Tokens => &self.campaign_tokens,
+            CampaignFamily::Claims => &self.campaign_claims,
+            CampaignFamily::LeasesLost => &self.campaign_leases_lost,
+            CampaignFamily::PlansReleased => &self.campaign_plans_released,
+            CampaignFamily::Polls => &self.campaign_polls,
+        }
+    }
+
+    /// Add `by` to one campaign series. `labels[0]` is the tenant (validated
+    /// here); the rest are the caller's bounded words. A zero add records nothing,
+    /// so an idle tick never mints series.
+    fn campaign_add(&self, family: CampaignFamily, labels: &[&str], by: u64) {
+        if by == 0 {
+            return;
+        }
+        let Some(tenant) = labels.first() else {
+            return;
+        };
+        if !agent_core::safe_segment(tenant) {
+            return;
+        }
+        self.admit_config_plane_tenant(
+            tenant,
+            TenantSeries::Campaign {
+                family,
+                labels: labels.iter().map(|l| (*l).to_string()).collect(),
+            },
+        );
+        self.campaign_vec(family)
+            .with_label_values(labels)
+            .inc_by(by);
+    }
+
+    /// One driver tick: its wall time (a hostile/NaN/negative `seconds` is clamped
+    /// to `0.0`) and the tick's error count. Driver health, un-tenanted.
+    pub fn on_campaign_tick(&self, seconds: f64, errors: u64) {
+        let secs = if seconds.is_finite() && seconds >= 0.0 {
+            seconds
+        } else {
+            0.0
+        };
+        self.campaign_tick_seconds.observe(secs);
+        if errors > 0 {
+            self.campaign_tick_errors.inc_by(errors);
+        }
+    }
+
+    /// `n` nodes the plan phase left in `state` under `tenant`, by `kind`.
+    pub fn on_campaign_node(&self, tenant: &str, kind: &str, state: &str, n: u64) {
+        self.campaign_add(CampaignFamily::Nodes, &[tenant, kind, state], n);
+    }
+
+    /// One attempt of `kind` (`decompose` | `work`) with `outcome` under `model`.
+    pub fn on_campaign_attempt(&self, tenant: &str, kind: &str, outcome: &str, model: &str) {
+        let model = fold_model_label(model);
+        self.campaign_add(CampaignFamily::Attempts, &[tenant, kind, outcome, model], 1);
+    }
+
+    /// Tokens spent by `kind` (`decompose` | `work`), in and out.
+    pub fn add_campaign_tokens(&self, tenant: &str, kind: &str, tokens_in: u64, tokens_out: u64) {
+        self.campaign_add(CampaignFamily::Tokens, &[tenant, kind, "in"], tokens_in);
+        self.campaign_add(CampaignFamily::Tokens, &[tenant, kind, "out"], tokens_out);
+    }
+
+    /// `n` leaves claimed for dispatch.
+    pub fn on_campaign_claims(&self, tenant: &str, n: u64) {
+        self.campaign_add(CampaignFamily::Claims, &[tenant], n);
+    }
+
+    /// What the reapers returned to `ready`: `leases` expired claims, `plans`
+    /// stale decompositions.
+    pub fn on_campaign_reaped(&self, tenant: &str, leases: u64, plans: u64) {
+        self.campaign_add(CampaignFamily::LeasesLost, &[tenant], leases);
+        self.campaign_add(CampaignFamily::PlansReleased, &[tenant], plans);
+    }
+
+    /// The poll phase's outcomes for one tenant.
+    pub fn on_campaign_polls(
+        &self,
+        tenant: &str,
+        merged: u64,
+        closed: u64,
+        awaiting: u64,
+        errors: u64,
+    ) {
+        for (outcome, n) in [
+            ("merged", merged),
+            ("closed", closed),
+            ("awaiting", awaiting),
+            ("error", errors),
+        ] {
+            self.campaign_add(CampaignFamily::Polls, &[tenant, outcome], n);
+        }
+    }
+
     /// Count one bearer-token verification `{outcome}` at the auth layer (`ok`|`error`),
     /// bridged via the `AuthObserver` callback so `agent-grpc` keeps no `agent-metrics`
     /// dependency. No tenant here — a failed verify has no trustworthy tenant, and a
@@ -2760,6 +3019,10 @@ impl Metrics {
                             &point,
                             &evicted_tenant,
                         ]);
+                    }
+                    TenantSeries::Campaign { family, labels } => {
+                        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                        let _ = self.campaign_vec(family).remove_label_values(&refs);
                     }
                 }
             }
@@ -3012,6 +3275,12 @@ enum TenantSeries {
     HookDispatch {
         hook: String,
         point: String,
+    },
+    /// One of the `agent_campaign_*` tenant-labelled families (CP-08), with the
+    /// full label vector as admitted (`labels[0]` is the tenant).
+    Campaign {
+        family: CampaignFamily,
+        labels: Vec<String>,
     },
 }
 
@@ -4456,5 +4725,279 @@ mod tests {
                 "PR leaked into a config-plane label: {line}"
             );
         }
+    }
+
+    // --- CP-08: campaign families (docs/design/campaigns/06-test-matrix.md T17) ----
+    //
+    // The recorders are funnels over the driver's tick report: the tenant is
+    // re-validated, the model label folded, token counts already clamped by the
+    // caller. `tick_seconds` / `tick_errors` are driver health and stay label-less.
+
+    const CAMPAIGN_FAMILIES: [&str; 9] = [
+        "agent_campaign_tick_seconds",
+        "agent_campaign_tick_errors_total",
+        "agent_campaign_nodes_total",
+        "agent_campaign_attempts_total",
+        "agent_campaign_tokens_total",
+        "agent_campaign_claims_total",
+        "agent_campaign_leases_lost_total",
+        "agent_campaign_plans_released_total",
+        "agent_campaign_polls_total",
+    ];
+
+    /// The sample value of the one line for `family` whose labels all match `wants`.
+    fn value_with(text: &str, family: &str, wants: &[(&str, &str)]) -> Option<f64> {
+        line_with(text, family, wants)
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+    }
+
+    #[test]
+    // desc: every family the design names (plus the three the report makes free)
+    // is registered, so a scrape lists them from the first tick.
+    fn positive_campaign_families_registered() {
+        // A vec family with no series is omitted from the exposition (and from
+        // `gather()`), so touch each one once, then every family must be typed.
+        let m = Metrics::new();
+        m.on_campaign_tick(0.01, 1);
+        m.on_campaign_node("acme", "leaf", "ready", 1);
+        m.on_campaign_attempt("acme", "work", "ok", "m");
+        m.add_campaign_tokens("acme", "work", 1, 1);
+        m.on_campaign_claims("acme", 1);
+        m.on_campaign_reaped("acme", 1, 1);
+        m.on_campaign_polls("acme", 1, 0, 0, 0);
+        let text = m.encode_text();
+        for family in CAMPAIGN_FAMILIES {
+            assert!(
+                text.contains(&format!("# TYPE {family} ")),
+                "{family} not registered:\n{text}"
+            );
+        }
+    }
+
+    /// One expected sample: `(family, labels, value)`.
+    type Sample<'a> = (&'a str, &'a [(&'a str, &'a str)], f64);
+
+    #[test]
+    // desc: each tenant-labelled recorder lands its sample under the right labels.
+    fn positive_campaign_tenant_recorders() {
+        let m = Metrics::new();
+        m.on_campaign_node("acme", "objective", "decomposed", 1);
+        m.on_campaign_node("acme", "task", "created", 3);
+        m.on_campaign_attempt("acme", "decompose", "split", "kimi-k3");
+        m.on_campaign_attempt("acme", "work", "ok", "kimi-k3");
+        m.add_campaign_tokens("acme", "work", 60, 40);
+        m.on_campaign_claims("acme", 2);
+        m.on_campaign_reaped("acme", 1, 4);
+        m.on_campaign_polls("acme", 1, 2, 3, 4);
+        let text = m.encode_text();
+        let t = ("tenant", "acme");
+        let rows: &[Sample<'_>] = &[
+            (
+                "agent_campaign_nodes_total",
+                &[t, ("kind", "objective"), ("state", "decomposed")],
+                1.0,
+            ),
+            (
+                "agent_campaign_nodes_total",
+                &[t, ("kind", "task"), ("state", "created")],
+                3.0,
+            ),
+            (
+                "agent_campaign_attempts_total",
+                &[
+                    t,
+                    ("kind", "decompose"),
+                    ("outcome", "split"),
+                    ("model", "kimi-k3"),
+                ],
+                1.0,
+            ),
+            (
+                "agent_campaign_attempts_total",
+                &[t, ("kind", "work"), ("outcome", "ok"), ("model", "kimi-k3")],
+                1.0,
+            ),
+            (
+                "agent_campaign_tokens_total",
+                &[t, ("kind", "work"), ("direction", "in")],
+                60.0,
+            ),
+            (
+                "agent_campaign_tokens_total",
+                &[t, ("kind", "work"), ("direction", "out")],
+                40.0,
+            ),
+            ("agent_campaign_claims_total", &[t], 2.0),
+            ("agent_campaign_leases_lost_total", &[t], 1.0),
+            ("agent_campaign_plans_released_total", &[t], 4.0),
+            (
+                "agent_campaign_polls_total",
+                &[t, ("outcome", "merged")],
+                1.0,
+            ),
+            (
+                "agent_campaign_polls_total",
+                &[t, ("outcome", "closed")],
+                2.0,
+            ),
+            (
+                "agent_campaign_polls_total",
+                &[t, ("outcome", "awaiting")],
+                3.0,
+            ),
+            (
+                "agent_campaign_polls_total",
+                &[t, ("outcome", "error")],
+                4.0,
+            ),
+        ];
+        for (family, labels, want) in rows {
+            assert_eq!(
+                value_with(&text, family, labels),
+                Some(*want),
+                "{family} {labels:?}:\n{text}"
+            );
+        }
+    }
+
+    #[rstest]
+    // desc (boundary): an empty tenant is not a safe segment → every recorder drops it.
+    #[case::boundary_empty_tenant("")]
+    // desc (adversarial): traversal, a separator, a leading dash, a runaway length → dropped.
+    #[case::adversarial_traversal("../x")]
+    #[case::adversarial_separator("a/b")]
+    #[case::adversarial_leading_dash("-x")]
+    #[case::adversarial_space("a b")]
+    #[case::adversarial_huge(&"t".repeat(200))]
+    fn adversarial_campaign_tenant_unsafe_dropped(#[case] tenant: &str) {
+        let m = Metrics::new();
+        m.on_campaign_node(tenant, "leaf", "ready", 1);
+        m.on_campaign_attempt(tenant, "work", "ok", "m");
+        m.add_campaign_tokens(tenant, "work", 1, 1);
+        m.on_campaign_claims(tenant, 1);
+        m.on_campaign_reaped(tenant, 1, 1);
+        m.on_campaign_polls(tenant, 1, 1, 1, 1);
+        let text = m.encode_text();
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("agent_campaign_") && l.contains("tenant=")),
+            "a hostile tenant became a label:\n{text}"
+        );
+    }
+
+    #[rstest]
+    // desc: a plain configured label is kept as is.
+    #[case::positive_plain("kimi-k3", "kimi-k3")]
+    // desc: provider-qualified labels with `/` and `:` are plain too.
+    #[case::positive_qualified("openai/gpt-4o:2025", "openai/gpt-4o:2025")]
+    // desc (corner): no attempt row could be read → `unknown`, never an empty label.
+    #[case::corner_empty_unknown("", "unknown")]
+    // desc (boundary): exactly the cap is kept; one over folds.
+    #[case::boundary_at_cap(&"m".repeat(MAX_MODEL_LABEL), &"m".repeat(MAX_MODEL_LABEL))]
+    #[case::boundary_over_cap(&"m".repeat(MAX_MODEL_LABEL + 1), "other")]
+    // desc (adversarial): control characters, spaces, unicode → `other`.
+    #[case::adversarial_control("x\u{1b}[31m", "other")]
+    #[case::adversarial_space("gpt 4", "other")]
+    #[case::adversarial_unicode("modèle", "other")]
+    #[case::adversarial_huge(&"z".repeat(10_000), "other")]
+    fn adversarial_campaign_model_label_folded(#[case] model: &str, #[case] want: &str) {
+        assert_eq!(fold_model_label(model), want);
+        let m = Metrics::new();
+        m.on_campaign_attempt("acme", "work", "ok", model);
+        let text = m.encode_text();
+        assert!(
+            line_with(
+                &text,
+                "agent_campaign_attempts_total",
+                &[("tenant", "acme"), ("model", want)]
+            )
+            .is_some(),
+            "expected model={want:?}:\n{text}"
+        );
+    }
+
+    #[test]
+    // desc (boundary): a tenant past the shared cap is evicted from every campaign
+    // family it recorded into, precisely (the admitted label tuples are replayed).
+    fn boundary_campaign_tenant_lru_evicts() {
+        let m = Metrics::new();
+        m.set_config_plane_tenant_cap(1);
+        m.on_campaign_claims("t1", 1);
+        m.on_campaign_attempt("t1", "work", "ok", "m");
+        m.on_campaign_polls("t1", 1, 0, 0, 0);
+        m.add_campaign_tokens("t1", "decompose", 5, 5);
+        assert!(m.encode_text().contains("tenant=\"t1\""));
+        m.on_campaign_claims("t2", 1);
+        let text = m.encode_text();
+        assert!(
+            !text.contains("tenant=\"t1\""),
+            "evicted tenant t1 left a stale series:\n{text}"
+        );
+        assert!(line_with(&text, "agent_campaign_claims_total", &[("tenant", "t2")]).is_some());
+    }
+
+    #[test]
+    // desc (negative_seam_health_families_stay_label_less): the tick families carry
+    // no tenant / user / session label — driver health, not attribution.
+    fn negative_campaign_tick_families_label_less() {
+        let m = Metrics::new();
+        m.on_campaign_tick(0.25, 2);
+        for line in m
+            .encode_text()
+            .lines()
+            .filter(|l| l.starts_with("agent_campaign_tick_"))
+        {
+            assert!(
+                !line.contains("tenant=") && !line.contains("user=") && !line.contains("session="),
+                "a tick health metric leaked a label: {line}"
+            );
+        }
+    }
+
+    #[rstest]
+    // desc: a finite tick time is observed; the error count adds.
+    #[case::positive_finite(0.5, 3, 1.0, 3.0)]
+    // desc (boundary): zero errors adds nothing but the tick is still observed.
+    #[case::boundary_zero_errors(0.0, 0, 1.0, 0.0)]
+    // desc (adversarial): NaN / negative / +inf tick times are clamped to 0.0 before observe.
+    #[case::adversarial_nan(f64::NAN, 0, 1.0, 0.0)]
+    #[case::adversarial_negative(-3.0, 0, 1.0, 0.0)]
+    #[case::adversarial_inf(f64::INFINITY, 0, 1.0, 0.0)]
+    fn corner_campaign_tick_clamped(
+        #[case] seconds: f64,
+        #[case] errors: u64,
+        #[case] want_count: f64,
+        #[case] want_errors: f64,
+    ) {
+        let m = Metrics::new();
+        m.on_campaign_tick(seconds, errors);
+        let text = m.encode_text();
+        let count = value_with(&text, "agent_campaign_tick_seconds_count", &[]).unwrap();
+        assert_eq!(count, want_count);
+        let sum = value_with(&text, "agent_campaign_tick_seconds_sum", &[]).unwrap();
+        assert!(sum.is_finite() && sum >= 0.0, "sum {sum}");
+        let errs = value_with(&text, "agent_campaign_tick_errors_total", &[]).unwrap();
+        assert_eq!(errs, want_errors);
+    }
+
+    #[test]
+    // desc (corner): a zero add mints no series, so an idle tick leaves the
+    // exposition as it was (no `tenant=` line appears for nothing).
+    fn corner_campaign_zero_adds_no_series() {
+        let m = Metrics::new();
+        m.on_campaign_node("acme", "leaf", "ready", 0);
+        m.add_campaign_tokens("acme", "work", 0, 0);
+        m.on_campaign_claims("acme", 0);
+        m.on_campaign_reaped("acme", 0, 0);
+        m.on_campaign_polls("acme", 0, 0, 0, 0);
+        let text = m.encode_text();
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("agent_campaign_") && l.contains("tenant=")),
+            "a zero add minted a series:\n{text}"
+        );
     }
 }

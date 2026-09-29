@@ -156,11 +156,31 @@ any high-cardinality dimension) that is useful for triage goes on the **span**, 
   `agent_prompt_fragments_selected_total`, `agent_verifier_verdicts_total`,
   `agent_reference_*` (3), `agent_grpc_overload_shed_total`.
 
+## G. Campaign families — **new, +tenant** (campaigns CP-08 ✅ built)
+
+The campaign driver's view of its own ticks
+([`docs/components/campaigns.md` §Observability](../../components/campaigns.md#observability)),
+recorded by the driver process from the tick report (`agent_runtime::campaign_metrics`), never
+by a worker child. The `tenant` label is the tick's tenant, `safe_segment`-validated at the
+recorder and admitted into the shared config-plane `TenantLru` (`TenantSeries::Campaign`
+remembers the exact label tuple for eviction). `model` is a configured label folded to `other`
+unless ≤ 64 chars of `[A-Za-z0-9._:/-]` (`unknown` when unread). PR is never a label.
+
+| Family | Labels | Decision |
+|---|---|---|
+| `agent_campaign_tick_seconds`, `agent_campaign_tick_errors_total` | — | **health** (driver, label-less) |
+| `agent_campaign_claims_total`, `agent_campaign_leases_lost_total`, `agent_campaign_plans_released_total` | `tenant` | **+tenant** (who did work) |
+| `agent_campaign_polls_total` | `tenant`, `outcome` | **+tenant** |
+| `agent_campaign_attempts_total` | `tenant`, `kind`, `outcome`, `model` | **+tenant** (`model` bounded by fold) |
+| `agent_campaign_tokens_total` | `tenant`, `kind`, `direction` | **+tenant** (who spent; counts clamped ≥ 0) |
+| `agent_campaign_nodes_total` | `tenant`, `kind`, `state` | **+tenant** (plan-phase outcomes only) |
+
 ## Summary
 
-- **+tenant:** subset A (already) + D (new config-plane) + the E promotions.
+- **+tenant:** subset A (already) + D (new config-plane) + the E promotions + G (campaigns).
 - **+repo:** subset B (new fleet families) only. PR is never a label anywhere.
-- **health (label-less):** subset F — the majority — guarded by
-  `negative_seam_health_families_stay_label_less`.
+- **health (label-less):** subset F — the majority — plus the two campaign tick families,
+  guarded by `negative_seam_health_families_stay_label_less` /
+  `negative_campaign_tick_families_label_less`.
 - Every repo/PR dimension that matters for triage but is too high-cardinality for a label lands on a
   **span attribute** instead (see [02-span-census.md](02-span-census.md)).

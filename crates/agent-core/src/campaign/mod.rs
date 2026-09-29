@@ -1017,6 +1017,46 @@ pub trait CampaignBackend: Send + Sync {
     fn with_tenant(&self, tenant: &str) -> CampaignResult<Arc<dyn CampaignStore>>;
 }
 
+// ---------------------------------------------------------------------------
+// Event sink (CP-08 observability)
+// ---------------------------------------------------------------------------
+
+/// A mirror of every committed `task_events` row (`04-executor.md` §Observability:
+/// each row is also an `agent_events` row in ClickHouse with `kind = 'campaign'`).
+///
+/// A store that was given a sink (`with_sink`) calls [`EventSink::emit`] once per
+/// event **after** the transaction that wrote it committed — a rolled-back write
+/// emits nothing — in the order the events were written, with the row's
+/// `campaign_id` beside it so a consumer can group a campaign without a lookup.
+/// The call is synchronous on the store's write path: an implementation must
+/// return promptly and never fail (drop rather than block; the store cannot undo
+/// the commit). `event.actor` is [`Actor::render`]'s text, which for a driver or a
+/// worker **carries the lease token** (`worker:<owner>`) — a sink that persists
+/// rows must keep only the class ([`actor_class`]), never the token.
+pub trait EventSink: Send + Sync {
+    fn emit(&self, tenant: &str, campaign: TaskId, event: &TaskEvent);
+}
+
+/// The class word of a rendered actor (`user:dave` → `user`, `worker:<owner>` →
+/// `worker`, `planner` → `planner`), or `other` for anything that is not one of
+/// [`Actor::render`]'s fixed prefixes. Never returns the text after the colon, so a
+/// consumer that labels or stores by class cannot leak a principal or a lease token
+/// and the label set stays bounded.
+pub fn actor_class(actor: &str) -> &'static str {
+    let head = actor.split(':').next().unwrap_or_default();
+    match head {
+        "user" => "user",
+        "model" => "model",
+        "planner" => "planner",
+        "driver" => "driver",
+        "worker" => "worker",
+        "reaper" => "reaper",
+        "poller" => "poller",
+        "rollup" => "rollup",
+        _ => "other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,6 +1274,43 @@ mod tests {
     #[test]
     fn corner_actor_from_scope_defaults_to_local() {
         assert_eq!(Actor::from_scope(), Actor::User(UserId::local()));
+    }
+
+    // -- actor_class (the class word a sink may persist) --------------------------
+
+    #[rstest]
+    // desc: every rendered actor folds to its class word.
+    #[case::positive_user("user:dave", "user")]
+    #[case::positive_model_principal("model:gpt", "model")]
+    #[case::positive_attempt_is_model("model:9", "model")]
+    #[case::positive_planner("planner", "planner")]
+    #[case::positive_driver("driver:0123456789abcdef0123456789abcdef", "driver")]
+    #[case::positive_worker("worker:0123456789abcdef0123456789abcdef", "worker")]
+    #[case::positive_reaper("reaper", "reaper")]
+    #[case::positive_poller("poller", "poller")]
+    #[case::positive_rollup("rollup", "rollup")]
+    // desc (corner): a bare prefix with an empty tail is still its class.
+    #[case::corner_empty_tail("worker:", "worker")]
+    // desc (adversarial): text that is not a rendered actor never becomes a label.
+    #[case::adversarial_garbage_other("root", "other")]
+    #[case::adversarial_empty_other("", "other")]
+    #[case::adversarial_case_variant_other("Worker:abc", "other")]
+    #[case::adversarial_leading_colon_other(":worker", "other")]
+    #[case::adversarial_control_chars_other("user\u{1b}[31m:x", "other")]
+    #[case::adversarial_huge_other(&"w".repeat(10_000), "other")]
+    fn actor_class_rows(#[case] rendered: &str, #[case] want: &str) {
+        assert_eq!(actor_class(rendered), want);
+    }
+
+    /// The token after `worker:` / `driver:` is never part of the answer.
+    #[rstest]
+    #[case::adversarial_worker_token("worker")]
+    #[case::adversarial_driver_token("driver")]
+    fn adversarial_actor_class_token_not_returned(#[case] prefix: &str) {
+        let token = "deadbeefdeadbeefdeadbeefdeadbeef";
+        let class = actor_class(&format!("{prefix}:{token}"));
+        assert_eq!(class, prefix);
+        assert!(!class.contains(token));
     }
 
     #[tokio::test]

@@ -230,6 +230,14 @@ async fn main() -> Result<()> {
     } else {
         (None, String::new())
     };
+    // The campaign stores' event mirror (docs/design/campaigns/04-executor.md
+    // §Observability, CP-08): every committed `task_events` row this process
+    // writes — a CLI verb's, the driver's, an `--run-task` child's — becomes an
+    // `agent_events` row when telemetry is on; off, the stores mirror nothing.
+    let campaign_sink: Option<std::sync::Arc<dyn agent_core::campaign::EventSink>> =
+        telemetry.clone().map(|handle| {
+            std::sync::Arc::new(handle) as std::sync::Arc<dyn agent_core::campaign::EventSink>
+        });
 
     // OTLP tracing (opt-in, independent of the ClickHouse sink): enabled by a
     // non-empty `otlp_endpoint`. Tag spans with the run's session id when we have one.
@@ -330,6 +338,7 @@ async fn main() -> Result<()> {
             agent_runtime::campaign::CampaignOpen {
                 tenant: args.tenant.as_deref(),
                 apply_migrations: true,
+                sink: campaign_sink.clone(),
             },
         )
         .await
@@ -344,21 +353,33 @@ async fn main() -> Result<()> {
         };
         if !args.cmd.needs_planner() {
             let identity = agent_core::SessionKey::local(uuid::Uuid::new_v4().to_string());
-            return agent_core::scope(identity, async {
+            let result = agent_core::scope(identity, async {
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
                 campaign_cli::run(&ctx, &args.cmd, &mut out).await
             })
             .await;
+            // The verb's own event rows (`create`, `approve`, `cancel`, …) are
+            // mirrored through the telemetry handle by the store's sink (CP-08);
+            // this path returns before the end-of-run flush, so flush here or the
+            // batch writer dies with the process and the rows never land.
+            if let Some(handle) = &telemetry {
+                handle.shutdown().await;
+            }
+            return result;
         }
         // The driver verbs also need the backend (every tenant's view); the store
         // above already applied the schema, so this open never migrates.
         let backend = if args.cmd.needs_driver() {
             Some(
-                agent_runtime::campaign::open_campaign_backend(&config, false)
-                    .await
-                    .context("[campaign] store")?
-                    .context("agent campaign run: no campaign store is configured")?,
+                agent_runtime::campaign::open_campaign_backend(
+                    &config,
+                    false,
+                    campaign_sink.clone(),
+                )
+                .await
+                .context("[campaign] store")?
+                .context("agent campaign run: no campaign store is configured")?,
             )
         } else {
             None
@@ -392,6 +413,7 @@ async fn main() -> Result<()> {
             agent_runtime::campaign::CampaignOpen {
                 tenant: Some(tenant),
                 apply_migrations: false,
+                sink: campaign_sink.clone(),
             },
         )
         .await
@@ -496,6 +518,7 @@ async fn main() -> Result<()> {
             agent_runtime::campaign::CampaignOpen {
                 tenant: None,
                 apply_migrations: false,
+                sink: None,
             },
         )
         .await

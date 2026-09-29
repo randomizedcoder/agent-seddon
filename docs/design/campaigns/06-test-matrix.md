@@ -527,3 +527,52 @@ rows on both tiers: `positive_review_note_awaiting_once`, `positive_review_note_
 | `adversarial_id_traversal` | `show ../1` | rejected by the id parser |
 | `adversarial_repo_slug` | `--repo ../x` | `safe_segment` rejects |
 | `adversarial_source_ref_injection` | `--source-ref` with newline and injection | rejected |
+
+## T17 Observability (CP-08 mem + pg conformance; telemetry `for_test`; `MetricsProbe`)
+
+| case | input / description | expected |
+|---|---|---|
+| `positive_sink_every_write` | create → split(2) → leaves → claim | the sink saw exactly the stored rows, in write order, each under the tenant and the root's campaign |
+| `positive_sink_after_commit_only` | a refused `approve` / `start` | nothing emitted; version untouched |
+| `positive_sink_reap_carries_campaign` | reap an expired claim; release a stale plan | the reap rows name the leaf's campaign (the root); the stale root is its own |
+| `positive_sink_event_ids_match` | create, then `plan_start` | the emitted row equals `events(task)` id for id (pg `RETURNING event_id`) |
+| `positive_sink_multi_task_write_in_order` | a `fail` that blocks a dependent / rolls up | every row of the one transaction, in id order, after the one commit |
+| `adversarial_sink_cross_tenant_isolated` | tenants A and B create; open `../ta` | A's rows under `ta`, B's under `tb`; a refused tenant mirrors nothing |
+| `positive_clickhouse_row_shape` | one event, tenant `acme`, campaign 7 | `kind=campaign`, `session_id=campaign-7`, `user=acme`, `role=planner`, `tool_call_id=<task>`, `ts=at_ms`, JSON body |
+| `adversarial_clickhouse_actor_token_redacted` | actor `worker:<32 hex>` / `driver:…` | `role` is the class; the token is in no column |
+| `adversarial_clickhouse_detail_secret_redacted` | an AWS key in `detail.error` | redacted in `content` |
+| `adversarial_clickhouse_content_capped` | 100 KiB `detail` | `detail` replaced by `{truncated, head ≤ 8 KiB}`; row ≤ 16 KiB; still JSON |
+| `corner_clickhouse_unknown_actor_other` | actor `root` / `""` | `role=other` |
+| `boundary_clickhouse_seq_advances` | 3 events | `seq` 0, 1, 2 |
+| `negative_clickhouse_drops_on_overflow` | channel + 10 events | drops, never blocks; warned once |
+| `positive_campaign_families_registered` | touch each family once | all nine typed in the exposition |
+| `positive_campaign_tenant_recorders` | one call per recorder | each sample under its labels and value |
+| `adversarial_campaign_tenant_unsafe_dropped` | `""`, `../x`, `a/b`, `-x`, `a b`, 200 chars | no `agent_campaign_*` line with `tenant=` |
+| `adversarial_campaign_model_label_folded` | control chars, spaces, unicode, 65+ / 10 000 chars; `""` | `other`; `unknown`; plain and qualified labels kept |
+| `boundary_campaign_tenant_lru_evicts` | cap 1, `t1` in four families, then `t2` | no `tenant="t1"` series left |
+| `negative_campaign_tick_families_label_less` | `on_campaign_tick` | no `tenant` / `user` / `session` label |
+| `corner_campaign_tick_clamped` | NaN, −3, +inf seconds | observed as 0.0; count 1; sum finite |
+| `corner_campaign_zero_adds_no_series` | every recorder with 0 | no series minted |
+| `positive_tick_claims_and_seconds` | one real tick over mem with a claimable leaf | `claims_total{tenant="ta"}` +1, `tick_seconds_count` +1; the drain records `attempts{kind="work",outcome="ok"}` |
+| `corner_disabled_tick_records_nothing` | `enabled = false` | no delta |
+| `positive_plan_outcomes_nodes_and_attempts` | split(2) + execute + a store `Err` | `nodes` (objective/decomposed 1, task/created 2, leaf/ready 1); `attempts{decompose}` split / execute / failure under `model`; tokens summed |
+| `positive_work_settled_tokens_and_model` | a harvested `Ok` with 60/40 tokens | `attempts{work,ok,model}` +1; `tokens{work,in}` +60, `{out}` +40 |
+| `positive_reap_and_polls` | reaped 2, released 1, poll 1/1/1/1 | `leases_lost` +2, `plans_released` +1, `polls{outcome}` +1 each |
+| `positive_drain_settled_recorded` | `on_drain` with a `Timeout` | `attempts{work,timeout,model="unknown"}` +1; zero tokens mint nothing |
+| `boundary_tick_errors_counter` | `errors = 3` | `tick_errors_total` +3 |
+| `adversarial_tokens_negative_clamped` | `Settled.tokens = {-5, -7}` | no panic, no token series; the attempt still counted |
+| `adversarial_tenant_unsafe_no_series` | tenant `../x`, `a/b`, `""` in every phase | no `tenant=` line; the tick is still timed |
+| `adversarial_model_label_folded` | a control-char, 300-char model on the planner and the worker | `model="other"` for both kinds |
+| `positive_build_driver_wires_metrics_observer` | `build_driver` + one tick + drain | the agent's registry moved |
+| `positive_observer_sees_tick_and_elapsed` (T11) | tick + drain with an observer | the same report the caller got, the planner's `model`, the drain's settled set |
+| `corner_observer_silent_when_disabled` (T11) | disabled driver | no `on_tick`; a drain still reports |
+| `positive_settled_carries_work_attempt` (T11) | an exec that completes with 60/40 | `Settled.tokens` / `model` from the attempt row |
+| `corner_settled_without_attempt_zero` (T11) | a planner-only node; a missing task | zero spend, empty label, no error |
+
+**As built in CP-08**: the sink rows are `agent_testkit::campaign::conformance::t17`, stamped into
+both tiers by `campaign_conformance_suite!` (`mem::t17::…`, `pg::t17::…`) through the harness's
+`RecordingSink`; the ClickHouse rows are `agent-telemetry`'s `campaign_event_tests` over
+`TelemetryHandle::for_test`; the family rows live in `agent-metrics`'s test module; the bridge
+rows in `agent_runtime::campaign_metrics::tests` (hand-built `TickReport`s, plus a real `Driver`
+over `MemCampaigns` with a closure exec for the tick / disabled rows) and the wiring row in
+`campaign_driver.rs`; the four T11 additions in `agent-campaign`'s `driver/tests.rs`.
