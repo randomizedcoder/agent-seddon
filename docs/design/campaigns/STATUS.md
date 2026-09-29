@@ -16,7 +16,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ✅ | #553 |
 | CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ✅ | #561 (poller), #569 (worker, `SubprocessExec` / `InProcessExec`, `campaign-e2e`) |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |
-| CP-08 | Metrics, ClickHouse events, component doc | — | 🟡 | #NNN |
+| CP-08 | Metrics, ClickHouse events, component doc | — | 🟡 | #574 |
 | CP-09 | gRPC `CampaignService` (`scoped`), mt-audit, constants | — | ⬜ | — |
 | CP-10 | Merge webhook, re-run on "changes requested", fleet auto-review | — | ⬜ | — |
 
