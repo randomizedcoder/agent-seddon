@@ -353,12 +353,20 @@ async fn main() -> Result<()> {
         };
         if !args.cmd.needs_planner() {
             let identity = agent_core::SessionKey::local(uuid::Uuid::new_v4().to_string());
-            return agent_core::scope(identity, async {
+            let result = agent_core::scope(identity, async {
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
                 campaign_cli::run(&ctx, &args.cmd, &mut out).await
             })
             .await;
+            // The verb's own event rows (`create`, `approve`, `cancel`, …) are
+            // mirrored through the telemetry handle by the store's sink (CP-08);
+            // this path returns before the end-of-run flush, so flush here or the
+            // batch writer dies with the process and the rows never land.
+            if let Some(handle) = &telemetry {
+                handle.shutdown().await;
+            }
+            return result;
         }
         // The driver verbs also need the backend (every tenant's view); the store
         // above already applied the schema, so this open never migrates.
