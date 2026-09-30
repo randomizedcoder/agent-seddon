@@ -9,19 +9,21 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-02 in progress (#585), on top of RK-01 (#582, gate green on `a023635a`).** Building
-`PgRepoGraph` (lane A): migration 0001, `with_tenant`, the `UNNEST` bulk write with the collision
-check, every read verb; the `#[ignore]` live-Postgres suite reruns the R3 rows through
-`repo_graph_conformance_suite!` unchanged; a `nix/pg-integration.nix` step. Depends on RK-01 only.
+**RK-02 merged (#585, gate green on `0d61ff52`).** `PgRepoGraph` is durable (lane A):
+migration 0001, `with_tenant`, the `UNNEST` bulk write with the collision check, every read verb,
+diff / retention / shape; the `#[ignore]` live-Postgres suite reruns the R3 rows through
+`repo_graph_conformance_suite!` unchanged (46 rows) plus 11 R4 pg-only rows, run by a
+`nix/pg-integration.nix` leg. Lane A is closed.
 
-Still runnable in parallel:
+Next, runnable in parallel:
 
 - **RK-03 — extractors `rust-syn` / `cargo` / `docs`** (lane B): the fixture workspace, the
   `repo-graph-rust.nix` determinism check (index twice ⇒ equal hash), the iai bench with an Ir
   ceiling and the dhat leak test. Depends on RK-01 only; fills the `agent-repo-graph` skeleton with
   the `Extractor` impls.
-
-RK-06 (`Indexer`, lane C) unblocks once RK-02 **and** RK-03 have both landed.
+- **RK-06 — `Indexer`, `[repo_graph]` config, `agent repo …` CLI, retention, metrics** (lane C):
+  now that RK-02 has landed, unblocks as soon as RK-03 also lands (needs both the store and an
+  extractor).
 
 ## Decisions (RK-01)
 
