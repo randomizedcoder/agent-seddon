@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
 | RK-00 | This track, the self-improvement gap analysis, index links | — | ✅ | #495 |
-| RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | 🟡 | #582 |
+| RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | ✅ | #582 |
 | RK-02 | `PgRepoGraph`, migration 0001, `with_tenant`, bulk write, read verbs, live suite | SI-1, SI-3 | ⬜ | — |
 | RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace; determinism check; bench + leak | SI-2 | ⬜ | — |
 | RK-04 | Go mapping from the helper JSON + `_test.go` scan | SI-2 | ⬜ | — |
@@ -34,3 +34,13 @@ Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments
   [`gap-analysis/self-improvement.md`](../../gap-analysis/self-improvement.md). Decisions D1–D10
   recorded in [`README.md`](README.md). No code. The `docs/components/repo-graph.md` stub is
   written in RK-08 with the tool, not here.
+- **2026-09-29 — RK-01 (#582).** The pure core landed: the `RepoGraphStore` seam (Repos /
+  Snapshots / Reads groups), `NodeKey` grammar + closed kind enums, `node_id_for` / `name_tokens`,
+  `GraphBuilder` (validation, cfg-dup suffixing, deterministic `graph_hash`, unforgeable
+  `RepoGraph`), the `Extractor` contract, and the `MemRepoGraph` double + conformance suite. **All
+  pure code lives in `agent_core::repo_graph`, not `agent-repo-graph`** (deviation D1: testkit
+  cannot depend on the impl crate; `agent-repo-graph` is a re-exporting skeleton that RK-02 / RK-03
+  fill). Tests R1 (key grammar) + R2 (builder) in `agent-core`, R3 conformance + mem-only rows in
+  `agent-testkit` ([`08-test-matrix.md`](08-test-matrix.md)). Gate green on `a023635a`
+  ([`PROGRESS.md`](PROGRESS.md)). Unblocks RK-02 (Postgres, lane A) and RK-03 (extractors, lane B),
+  runnable in parallel.
