@@ -1,0 +1,22 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/component: sessions
+    app.kubernetes.io/name: sessions
+    app.kubernetes.io/part-of: agent-seddon
+  name: sessions
+  namespace: agent-seddon
+spec:
+  ports:
+    - name: grpc
+      port: 50080
+      targetPort: grpc
+    - name: metrics
+      port: 9630
+      targetPort: metrics
+  selector:
+    app.kubernetes.io/name: sessions

@@ -1,0 +1,29 @@
+---
+apiVersion: v1
+data:
+  agent.toml: |
+    # fleet role — rendered by nix/k8s/components/fleet.nix.
+    # Do not edit by hand; run `nix run .#k8s-render-manifests`.
+
+    [grpc.fleet]
+    listen = "0.0.0.0:50086"
+
+    # rustls mTLS from the cert-manager Secret `tls-fleet` (kubernetes.io/tls),
+    # mounted read-only at /etc/agent/tls. Cilium must never terminate this.
+    [grpc.tls]
+    cert = "/etc/agent/tls/tls.crt"
+    key = "/etc/agent/tls/tls.key"
+    client_ca = "/etc/agent/tls/ca.crt"
+
+    [metrics]
+    listen = "0.0.0.0:9636"
+kind: ConfigMap
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/component: fleet
+    app.kubernetes.io/name: fleet
+    app.kubernetes.io/part-of: agent-seddon
+  name: fleet-config
+  namespace: agent-seddon
