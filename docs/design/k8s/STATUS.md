@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 |
-| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ⬜ | |
+| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | `[grpc.gateway] exclude` |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
@@ -108,3 +108,33 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 - **Pending live acceptance (K2's second half):** `nix run .#k8s-images -- --import` on l2, then
   `crictl images` lists `agent-seddon/agent:pjhcdr1v75r8a0z1xpznr7qjzi0gfz28`. Needs sudo on l2;
   runs after this merges (the gate half — the image builds and the smoke check passes — is done).
+
+### K3 — being landed in slices (2026-09-29)
+
+K3 is large (renderer infra, components, PKI, policy, `rendered/k3s/`, three gate checks, the
+secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR.
+
+- **Slice 1 — `[grpc.gateway] exclude` (the Rust prerequisite).** [08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)'s
+  hard precondition: `--serve-all` hosts the exec seams (`sandbox`/`pty`/`forge`) whenever their
+  impls exist, which is fine on loopback but must be excludable before a gateway runs as a cluster
+  Service. Landed entirely in-repo (no cluster needed):
+  - New `[grpc.gateway] exclude` (a `Vec<String>` of seam short names) on `GrpcGatewayCfg` in
+    [`config.rs`](../../../crates/agent-runtime/src/config.rs) (`gateway` changed from `GrpcSeamCfg`
+    to a dedicated `GrpcGatewayCfg` so a gateway-only field doesn't leak onto every seam). Carried
+    to the runtime as `Settings::grpc_gateway_exclude` ([`agent.rs`](../../../crates/agent-runtime/src/agent.rs),
+    [`builder.rs`](../../../crates/agent-runtime/src/builder.rs)).
+  - The seam table lives in `agent-cli`, not the runtime `Config`, so validation lives there too:
+    `gateway_excluded_seams` ([`grpc_server.rs`](../../../crates/agent-cli/src/grpc_server.rs)) runs
+    at the `main.rs` config-load choke point — every mode, including `--check-config` — and an
+    **unknown name is a config-load error**, not a silently-hosted exec seam. `serve_all` then
+    filters `ALL_SEAMS` via `included_seams`, so an excluded seam gets no listener, no router entry
+    and never reports SERVING.
+  - Tests (table-driven, with the mandatory `adversarial_` rows): `from_name`, `included_seams`
+    drops the excluded / empty hosts all / an unknown name never widens the set, and
+    `resolve_excluded_seams` refuses an unknown/typo/empty name.
+  - Native leaves `exclude` empty — byte-identical to today. Documented in
+    [`config/agent.toml`](../../../config/agent.toml).
+- **Still to land in K3:** `nix/k8s/{default,lib,helm,constants}.nix` renderer infra; components
+  (gateway/sessions/fleet) + PKI + policy; `targets/k3s.nix`; `rendered/k3s/`; the
+  `k8s-render-manifests` app; the `k8s-rendered` / `k8s-render-tests` / `k8s-kubeconform` checks;
+  the `k8s-secrets` and `k8s-status` apps.

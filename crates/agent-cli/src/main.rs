@@ -502,6 +502,12 @@ async fn main() -> Result<()> {
         (!l.is_empty()).then(|| agent_grpc::Endpoint::parse(l))
     };
 
+    // docs/design/k8s/08: the `--serve-all` gateway must never host the exec seams
+    // (sandbox/pty/forge) in a cluster. `[grpc.gateway] exclude` names the seams to drop;
+    // resolve them now so an unknown name is a config-load error for EVERY mode (including
+    // `--check-config`), not silently ignored at serve time. Native leaves it empty.
+    grpc_server::gateway_excluded_seams(&config).context("[grpc.gateway] exclude")?;
+
     let sessions_dir = session_store::default_dir();
     tracing::info!(session_id = %session_id, "starting agent");
 

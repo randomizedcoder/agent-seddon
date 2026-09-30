@@ -404,6 +404,11 @@ impl Seam {
         SEAMS.iter().find(|s| s.flag == flag).map(|s| s.seam)
     }
 
+    /// Match a seam short name (as in `agent --help` / `[grpc.gateway] exclude`).
+    pub fn from_name(name: &str) -> Option<Seam> {
+        SEAMS.iter().find(|s| s.name == name).map(|s| s.seam)
+    }
+
     pub fn name(self) -> &'static str {
         self.info().name
     }
@@ -795,7 +800,61 @@ pub async fn serve(agent: &Agent, seam: Seam, listen: Endpoint) -> anyhow::Resul
 /// build/config are skipped with a warning rather than failing the process — a
 /// gateway that refuses to start because one optional seam is off is not useful.
 pub async fn serve_all(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
-    serve_seams(agent, ALL_SEAMS, listen, /* skip_unavailable */ true).await
+    // `[grpc.gateway] exclude` (docs/design/k8s/08): seams the gateway must not host,
+    // so a cluster gateway keeps the exec seams (sandbox/pty/forge) off the network.
+    // The names were validated at config load (`gateway_excluded_seams`); resolve them
+    // again here and skip any that no longer match rather than fail a running server.
+    let names = agent.grpc_gateway_exclude();
+    let seams = included_seams(names);
+    if seams.len() != ALL_SEAMS.len() {
+        tracing::info!(
+            excluded = names.join(","),
+            "serve-all: excluding seams per [grpc.gateway] exclude"
+        );
+    }
+    serve_seams(agent, &seams, listen, /* skip_unavailable */ true).await
+}
+
+/// `ALL_SEAMS` minus the names in `[grpc.gateway] exclude`. A name that no longer
+/// matches a seam is ignored here (the load-time `gateway_excluded_seams` already
+/// rejected an unknown name). Because `serve_seams` only marks the seams it is given
+/// as SERVING and only routes those, a seam left out of this list gets no listener,
+/// no router entry and never reports SERVING (docs/design/k8s/08).
+fn included_seams(excluded_names: &[String]) -> Vec<Seam> {
+    let excluded: Vec<Seam> = excluded_names
+        .iter()
+        .filter_map(|n| Seam::from_name(n))
+        .collect();
+    ALL_SEAMS
+        .iter()
+        .copied()
+        .filter(|s| !excluded.contains(s))
+        .collect()
+}
+
+/// Resolve `[grpc.gateway] exclude` to seams, erroring on an unknown name so a typo is
+/// a config-load failure rather than a silently-hosted exec seam (docs/design/k8s/08).
+/// Called on every startup path (before serve, and by `--check-config`), so the seam
+/// table — which lives here in `agent-cli`, not in the runtime `Config` — is the single
+/// source of truth for what a valid name is.
+pub fn gateway_excluded_seams(cfg: &Config) -> anyhow::Result<Vec<Seam>> {
+    resolve_excluded_seams(&cfg.grpc.gateway.exclude)
+}
+
+/// The pure core of [`gateway_excluded_seams`]: map each name to its seam, erroring on
+/// an unknown one. Split out so it is testable without building a whole `Config`.
+fn resolve_excluded_seams(names: &[String]) -> anyhow::Result<Vec<Seam>> {
+    names
+        .iter()
+        .map(|n| {
+            Seam::from_name(n).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[grpc.gateway] exclude: {n:?} is not a known seam (one of: {})",
+                    Seam::flag_names()
+                )
+            })
+        })
+        .collect()
 }
 
 /// Host **only** the `AgentSessionService` on `listen`, to observe a *running*
@@ -1723,6 +1782,84 @@ mod tests {
     #[case::adversarial_prefix_only("--serve-", None)]
     fn from_flag_cases(#[case] flag: &str, #[case] want: Option<Seam>) {
         assert_eq!(Seam::from_flag(flag), want);
+    }
+
+    // --- `[grpc.gateway] exclude` (docs/design/k8s/08) ------------------------------
+
+    #[rstest]
+    #[case::positive_sandbox("sandbox", Some(Seam::Sandbox))]
+    #[case::positive_pty("pty", Some(Seam::Pty))]
+    #[case::positive_forge("forge", Some(Seam::Forge))]
+    #[case::positive_provider("provider", Some(Seam::Provider))]
+    #[case::negative_unknown("nope", None)]
+    #[case::negative_flag_not_name("--serve-sandbox", None)]
+    #[case::adversarial_empty("", None)]
+    #[case::adversarial_whitespace(" sandbox", None)]
+    #[case::adversarial_uppercase("Sandbox", None)]
+    fn from_name_cases(#[case] name: &str, #[case] want: Option<Seam>) {
+        assert_eq!(Seam::from_name(name), want);
+    }
+
+    /// The core contract: a seam named in `exclude` is dropped from the list
+    /// `serve_all` hands to `serve_seams` — which is what keeps it out of the router
+    /// and off SERVING — while every other seam stays.
+    #[test]
+    fn positive_included_seams_drops_the_excluded() {
+        let excluded = vec![
+            "sandbox".to_string(),
+            "pty".to_string(),
+            "forge".to_string(),
+        ];
+        let got = included_seams(&excluded);
+        for gone in [Seam::Sandbox, Seam::Pty, Seam::Forge] {
+            assert!(
+                !got.contains(&gone),
+                "{gone:?} must be excluded from serve-all"
+            );
+        }
+        // Nothing else is lost.
+        assert_eq!(got.len(), ALL_SEAMS.len() - 3);
+        assert!(got.contains(&Seam::Provider) && got.contains(&Seam::Fleet));
+    }
+
+    #[test]
+    fn corner_empty_exclude_hosts_every_seam() {
+        assert_eq!(included_seams(&[]).len(), ALL_SEAMS.len());
+    }
+
+    /// An unknown name in `exclude` is ignored by the filter (defence in depth), so a
+    /// typo can never *accidentally widen* what is hosted — but see the load-time check
+    /// below, which refuses it outright.
+    #[test]
+    fn corner_unknown_name_never_widens_the_hosted_set() {
+        let got = included_seams(&["nope".to_string()]);
+        assert_eq!(got.len(), ALL_SEAMS.len());
+    }
+
+    #[test]
+    fn positive_resolve_excluded_seams_maps_known_names() {
+        let names = vec![
+            "sandbox".to_string(),
+            "pty".to_string(),
+            "forge".to_string(),
+        ];
+        let got = resolve_excluded_seams(&names).expect("known names resolve");
+        assert_eq!(got, vec![Seam::Sandbox, Seam::Pty, Seam::Forge]);
+    }
+
+    /// The adversarial row from the design: an unknown seam name is *refused at config
+    /// load*, not silently ignored, so a misconfigured cluster gateway fails to start
+    /// rather than quietly hosting an exec seam.
+    #[rstest]
+    #[case::adversarial_unknown(vec!["sandbox".into(), "wat".into()])]
+    #[case::adversarial_typo(vec!["sandboxx".into()])]
+    #[case::adversarial_empty_name(vec![String::new()])]
+    fn adversarial_resolve_excluded_seams_refuses_unknown(#[case] names: Vec<String>) {
+        let err = resolve_excluded_seams(&names).expect_err("unknown name must be refused");
+        assert!(
+            err.to_string().contains("not a known seam"),
+            "error should name the problem, got: {err}"
+        );
     }
 
     #[rstest]

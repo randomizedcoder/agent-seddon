@@ -2906,10 +2906,12 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub sessions: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
-    /// seam's service in one process. Only `listen` is meaningful — a client
-    /// dials an individual seam's service, not the gateway as a whole.
+    /// seam's service in one process. A client dials an individual seam's service,
+    /// not the gateway as a whole. `listen` is the bind; `exclude` names seams the
+    /// gateway must NOT host (docs/design/k8s/08 — the cluster gateway keeps the
+    /// exec seams `sandbox`/`pty`/`forge` off the network).
     #[serde(default)]
-    pub gateway: GrpcSeamCfg,
+    pub gateway: GrpcGatewayCfg,
     /// TLS / mTLS on TCP listeners and `https://` dials (`[grpc.tls]`,
     /// security-hardening S4). Checked at load by [`GrpcTlsCfg::validate`].
     #[serde(default)]
@@ -3803,6 +3805,26 @@ pub struct GrpcSeamCfg {
     /// Address a `--serve-<seam>` listener binds. Empty ⇒ `127.0.0.1:<default port>`.
     #[serde(default)]
     pub listen: String,
+}
+
+/// The `agent --serve-all` gateway (`[grpc.gateway]`). Not a seam: it hosts every
+/// enabled seam's service in one process. `listen` is the bind; `exclude` is the
+/// list of seam short names (as in `agent --help`) `--serve-all` must NOT host, so a
+/// cluster gateway keeps the exec seams off the network (docs/design/k8s/08). Native
+/// leaves `exclude` empty — today's behaviour. An unknown name is refused at config
+/// load, not ignored (validated in `agent-cli`, where the seam table lives).
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct GrpcGatewayCfg {
+    /// Address the `--serve-all` gateway binds. Empty ⇒ `127.0.0.1:<default port>`.
+    #[serde(default)]
+    pub listen: String,
+    /// Seam short names the gateway must not host (e.g. `["sandbox", "pty", "forge"]`).
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// External MCP (Model Context Protocol) servers whose tools are discovered at
