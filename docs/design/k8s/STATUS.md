@@ -8,7 +8,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 |---|---|---|---|---|
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
-| K2 | Nix-built images + `k8s-images` | agent-seddon | ⬜ | |
+| K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #PR |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ⬜ | |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
@@ -69,3 +69,42 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
   are excluded (`--test '!l7,!dns-only,!fqdn,!pod-to-world,!check-log-errors'`). The
   [`toFQDNs` egress follow-up](10-increments.md#follow-ups-not-scheduled) needs the DNS proxy, and
   so `l7Proxy` back on. That is a trade to decide then; until then, egress stays CIDR-based.
+
+### K2 — Nix-built images (2026-09-29)
+
+- [`nix/k8s/images.nix`](../../../nix/k8s/images.nix): one `streamLayeredImage` image,
+  `agent-seddon/agent`, serving every agent role (gateway, sessions, fleet, sandbox) — the role is
+  the command and the ConfigMap, not the image. Contents: the wrapped `agent` binary, a uid-10001
+  no-shell passwd/group tree, CA certificates, `tzdata`, and (Linux) `bubblewrap` for the sandbox
+  role. `config` runs as `10001:10001`, entrypoint `/bin/agent`. `tag = null`, so the tag is the
+  content hash; the stream (`$out`) writes the docker-archive to stdout — no tarball in the store.
+- [`nix/k8s/image-tags.nix`](../../../nix/k8s/image-tags.nix): the committed content-addressed tag
+  (`agent = "pjhcdr1v75r8a0z1xpznr7qjzi0gfz28"`), written only by `nix run .#k8s-images` so an
+  unrelated Rust PR never churns it. K3's renderer/drift check will read it.
+- [`nix/k8s/k8s-images.nix`](../../../nix/k8s/k8s-images.nix) → `nix run .#k8s-images`: default
+  rewrites the committed tags (the release cut); `--import` pipes the stream into
+  `k3s ctr -n k8s.io images import -` on the host; `--push <registry>` `skopeo copy`s it to the
+  registry (full-k8s, K9). The stream and the written tag are always the same image.
+- [`nix/checks/k8s-image-smoke.nix`](../../../nix/checks/k8s-image-smoke.nix) → the
+  `k8s-image-smoke` gate: streams the real image, unpacks the archive, and asserts non-root uid
+  10001, entrypoint `/bin/agent`, no shell on a guessable path (`/bin/sh`, `/bin/bash`,
+  `/usr/bin/*`), the `agent-seddon/agent:<hash>` tag, and that `/bin/agent --help` runs out of the
+  image root. Verified green: `agent-seddon/agent:pjhcdr1v75r8a0z1xpznr7qjzi0gfz28`.
+- Wired into [`nix/default.nix`](../../../nix/default.nix): `packages.agent-image`, the
+  `k8s-images` app, and the `k8s-image-smoke` check.
+- Deviations from [03](03-images-and-registry.md), decided while building it:
+  - **No `--version`.** The agent CLI's hand-rolled parser has `--help` (exit 0, reads no config)
+    but no `--version`; the smoke check runs `--help`. Doc 03 updated.
+  - **`no shell present` is `no shell on PATH`.** The wrapped agent still carries a `bash` at its
+    own store path (makeWrapper's launcher), which is not on `PATH`; the check asserts `/bin/sh`,
+    `/bin/bash` and `/usr/bin/*` are absent, which is the reachable-shell property the design means.
+  - **`k8s-image-tags-fresh` is not a flake check.** A `nix flake check` target can only pass or
+    fail, and a stale tag is neither. Freshness is instead `nix run .#k8s-images`: it rewrites the
+    tags idempotently, so a non-empty `git diff nix/k8s/image-tags.nix` is exactly "stale". Verified
+    the diff is empty at this tag.
+  - **portal-web and Envoy images are deferred to K6.** portal-web is not hermetically buildable
+    today (its Flutter web SDK downloads at build time), and K3 needs only the agent image; both
+    edge images are built at K6, next to where the edge is deployed.
+- **Pending live acceptance (K2's second half):** `nix run .#k8s-images -- --import` on l2, then
+  `crictl images` lists `agent-seddon/agent:pjhcdr1v75r8a0z1xpznr7qjzi0gfz28`. Needs sudo on l2;
+  runs after this merges (the gate half — the image builds and the smoke check passes — is done).

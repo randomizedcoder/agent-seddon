@@ -336,6 +336,18 @@ in
   # go red against a fake portal/agent/edge that breaks it (security-hardening S15c).
   # The live run (headless Chromium, the Envoy bridge container) is in `.#integration`.
   portal-auth-e2e-tests = import ./portal-auth-e2e-tests.nix { inherit pkgs; };
+  # The k8s agent image's security posture (k8s track K2, docs/design/k8s/03):
+  # streams the real `streamLayeredImage` artifact, unpacks it, and asserts non-root
+  # uid 10001, the agent entrypoint, no shell on PATH, the content-addressed tag, and
+  # that `/bin/agent --help` runs out of the image root. Offline (no daemon/registry).
+  k8s-image-smoke = import ./k8s-image-smoke.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.
