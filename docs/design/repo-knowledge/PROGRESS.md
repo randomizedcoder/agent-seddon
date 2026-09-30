@@ -9,9 +9,15 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-01 — `RepoGraphStore` seam, key grammar, `GraphBuilder`, `MemRepoGraph`.** In progress.
-Lane A. On merge, RK-02 (Postgres, lane A) and RK-03 (extractors, lane B) become runnable in
-parallel.
+**RK-01 merged (#582, gate green on `a023635a`).** Two increments are now runnable in parallel:
+
+- **RK-02 — `PgRepoGraph`** (lane A): migration 0001, `with_tenant`, `UNNEST` bulk write with the
+  collision check, every read verb; the `#[ignore]` live-Postgres suite reruns the R3 rows through
+  `repo_graph_conformance_suite!` unchanged; a `nix/pg-integration.nix` step. Depends on RK-01 only.
+- **RK-03 — extractors `rust-syn` / `cargo` / `docs`** (lane B): the fixture workspace, the
+  `repo-graph-rust.nix` determinism check (index twice ⇒ equal hash), the iai bench with an Ir
+  ceiling and the dhat leak test. Depends on RK-01 only; fills the `agent-repo-graph` skeleton with
+  the `Extractor` impls.
 
 ## Decisions (RK-01)
 
