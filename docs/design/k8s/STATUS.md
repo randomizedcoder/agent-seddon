@@ -165,8 +165,20 @@ secrets/status apps). It is landing as small PRs in the K1/K2 style rather than 
 - **Deviation:** the ArgoCD `Application` per component lives only in `apps/application-<c>.yaml`
   (the app-of-apps the root syncs), not also duplicated inside the component dir; `directory.exclude:
   application.yaml` stays as a harmless guard. Doc 04's layout showed it in both places.
-- **Still to land in K3:** the `sessions` and `fleet` components; the `pki` component (CA chain +
-  per-role Certificates — K3 ships behind K5's PKI); the `k8s-render-tests` (Python table tests over
-  the rendered objects, incl. the adversarial rows) and `k8s-kubeconform` (vendored CRD schemas)
-  checks; the `k8s-secrets` and `k8s-status` apps. `helm.nix` is only needed if a component pulls a
-  third-party chart (none on the application side today).
+- **Slice 3 — the `sessions` and `fleet` components.** The other two agent roles, on the same
+  helpers as the gateway (sync wave 4 — they come up after the gateway and exchange a `svc:` token
+  with it):
+  - [`sessions.nix`](../../../nix/k8s/components/sessions.nix) — `agent --serve-sessions` (the
+    portal-driven SessionRegistry + driving AgentSessionService + reaper), `:50080`,
+    `[grpc.sessions] listen`, mTLS from `tls-sessions`.
+  - [`fleet.nix`](../../../nix/k8s/components/fleet.nix) — `agent --serve-fleet` (the review-fleet
+    roster control plane + orchestrator + reconcile), `:50086`, `[grpc.fleet] listen`, mTLS from
+    `tls-fleet`. Forge credentials (a Secret, the `k8s-secrets` slice) and a dedicated checkout
+    workspace are later refinements; for now the read-only rootfs's writable `/tmp` serves.
+  - `rendered/k3s/{sessions,fleet}/` committed + their `apps/application-*.yaml`; all six new objects
+    pass `kubeconform -strict`, and `k8s-rendered` stays green.
+- **Still to land in K3:** the `pki` component (CA chain + per-role Certificates — K3 ships behind
+  K5's PKI); the `k8s-render-tests` (Python table tests over the rendered objects, incl. the
+  adversarial rows) and `k8s-kubeconform` (vendored CRD schemas) checks; the `k8s-secrets` and
+  `k8s-status` apps. `helm.nix` is only needed if a component pulls a third-party chart (none on the
+  application side today).

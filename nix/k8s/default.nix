@@ -27,10 +27,12 @@ let
     k3s = import ./targets/k3s.nix;
   };
 
-  # Every component function, in wave order. sessions/fleet/pki land in later K3
-  # slices; edge/portal-web are K6.
+  # Every component function, in wave order. pki (CA chain + Certificates) lands in
+  # a later K3 slice; edge/portal-web are K6.
   components = [
     ./components/gateway.nix
+    ./components/sessions.nix
+    ./components/fleet.nix
   ];
 
   # One target → its flat, name-sorted manifest list [{ name; content; }].

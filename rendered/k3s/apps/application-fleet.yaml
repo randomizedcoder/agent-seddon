@@ -1,0 +1,28 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  labels:
+    app.kubernetes.io/component: fleet
+    app.kubernetes.io/name: fleet
+    app.kubernetes.io/part-of: agent-seddon
+  name: fleet
+  namespace: argocd
+spec:
+  destination:
+    namespace: agent-seddon
+    server: "https://kubernetes.default.svc"
+  project: default
+  source:
+    directory:
+      exclude: application.yaml
+    path: rendered/k3s/fleet
+    repoURL: "https://github.com/randomizedcoder/agent-seddon"
+    targetRevision: main
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true

@@ -1,0 +1,29 @@
+---
+apiVersion: v1
+data:
+  agent.toml: |
+    # sessions role — rendered by nix/k8s/components/sessions.nix.
+    # Do not edit by hand; run `nix run .#k8s-render-manifests`.
+
+    [grpc.sessions]
+    listen = "0.0.0.0:50080"
+
+    # rustls mTLS from the cert-manager Secret `tls-sessions` (kubernetes.io/tls),
+    # mounted read-only at /etc/agent/tls. Cilium must never terminate this.
+    [grpc.tls]
+    cert = "/etc/agent/tls/tls.crt"
+    key = "/etc/agent/tls/tls.key"
+    client_ca = "/etc/agent/tls/ca.crt"
+
+    [metrics]
+    listen = "0.0.0.0:9630"
+kind: ConfigMap
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/component: sessions
+    app.kubernetes.io/name: sessions
+    app.kubernetes.io/part-of: agent-seddon
+  name: sessions-config
+  namespace: agent-seddon
