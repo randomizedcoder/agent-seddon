@@ -1472,6 +1472,9 @@ pub async fn build_agent_with_mode(
         // Multi-tenant deployment (`[tenancy] per_tenant`); arms the C29 ConfigService
         // operator-config write guard on the serve path. `false` = Tier-0 (unchanged).
         per_tenant: cfg.tenancy.per_tenant,
+        // `[grpc.gateway] exclude`: seams `--serve-all` must not host (k8s/08). Empty
+        // (native default) hosts every enabled seam; validated in agent-cli.
+        grpc_gateway_exclude: cfg.grpc.gateway.exclude.clone(),
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool

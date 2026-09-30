@@ -193,6 +193,7 @@ mod tests {
             grpc_auth: crate::agent::GrpcAuthSettings::default(),
             grpc_tls: crate::agent::GrpcTlsSettings::default(),
             per_tenant: false,
+            grpc_gateway_exclude: Vec::new(),
         }
     }
 

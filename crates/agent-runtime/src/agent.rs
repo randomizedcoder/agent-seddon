@@ -96,6 +96,12 @@ pub struct Settings {
     /// per-tenant store routing (builder) and the C29 operator-config write guard on the
     /// served `ConfigService`. Tier-0 (`false`) is byte-identical single-operator behaviour.
     pub per_tenant: bool,
+    /// Seam short names the `--serve-all` gateway must NOT host (`[grpc.gateway] exclude`,
+    /// docs/design/k8s/08). Empty (native default) ⇒ every enabled seam is hosted. The
+    /// serve-all path filters `ALL_SEAMS` by this list so the exec seams
+    /// (`sandbox`/`pty`/`forge`) get no network listener on a cluster gateway. Names are
+    /// resolved + validated in `agent-cli` (where the seam table lives).
+    pub grpc_gateway_exclude: Vec<String>,
 }
 
 /// Runtime view of `[auth]` (config C33/B1), flattened from `AuthCfg`. Held codec-free
@@ -1770,6 +1776,13 @@ impl Agent {
     /// unbounded. Read by the serve path when building the router.
     pub fn grpc_max_in_flight(&self) -> usize {
         self.settings.grpc_max_in_flight
+    }
+
+    /// Seam short names the `--serve-all` gateway must not host (`[grpc.gateway]
+    /// exclude`, docs/design/k8s/08). Read by the serve-all path to filter
+    /// `ALL_SEAMS`; empty (native default) hosts every enabled seam.
+    pub fn grpc_gateway_exclude(&self) -> &[String] {
+        &self.settings.grpc_gateway_exclude
     }
 
     /// The OIDC/JWT authentication settings for served seams (`[auth]`, config
@@ -5175,6 +5188,7 @@ mod tests {
             grpc_auth: GrpcAuthSettings::default(),
             grpc_tls: GrpcTlsSettings::default(),
             per_tenant: false,
+            grpc_gateway_exclude: Vec::new(),
         }
     }
 
