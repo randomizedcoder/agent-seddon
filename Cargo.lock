@@ -468,6 +468,12 @@ name = "agent-repo-graph"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-testkit",
+ "async-trait",
+ "rstest",
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]

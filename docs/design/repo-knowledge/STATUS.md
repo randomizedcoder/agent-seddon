@@ -10,7 +10,7 @@ Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments
 |---|---|---|---|---|
 | RK-00 | This track, the self-improvement gap analysis, index links | — | ✅ | #495 |
 | RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | ✅ | #582 |
-| RK-02 | `PgRepoGraph`, migration 0001, `with_tenant`, bulk write, read verbs, live suite | SI-1, SI-3 | ⬜ | — |
+| RK-02 | `PgRepoGraph`, migration 0001, `with_tenant`, bulk write, read verbs, live suite | SI-1, SI-3 | 🟡 | #585 |
 | RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace; determinism check; bench + leak | SI-2 | ⬜ | — |
 | RK-04 | Go mapping from the helper JSON + `_test.go` scan | SI-2 | ⬜ | — |
 | RK-05 | SCIP spike report + `extract-scip` extractor (resolved calls / references / tests) | SI-2 | ⬜ | — |

@@ -215,3 +215,34 @@ is the first tier and RK-02 adds `PgRepoGraph`, both run through the R3 conforma
 - **`snapshot_begin` identity** is `(repo, sha, extractor_version)`: a `building` / `ready` one
   conflicts, a `failed` one is replaced. **Retention** keeps the newest `keep` `ready` snapshots,
   deletes the rest and every `failed` one, and sweeps bodies no retained version references.
+
+## As-built (RK-02 — `PgRepoGraph`)
+
+`crates/agent-repo-graph/src/postgres.rs` + `postgres/sql.rs`, behind `repo-graph-postgres`. Every
+statement lives in `sql.rs` (parameterised `$n` only; the file never builds SQL from strings) and
+runs through the runtime-checked `sqlx::query` (never the compile-time `query!`), so the gate
+type-checks and lints the tier under `clippy --all-features` with no database. As-built specifics:
+
+- **Writes are one transaction, all-or-nothing.** `snapshot_write` re-reads the snapshot `FOR UPDATE`
+  (must be `building`, else `Conflict`), guards the node / edge counts against `MAX_SNAPSHOT_NODES` /
+  `MAX_SNAPSHOT_EDGES`, then bulk-inserts bodies, versions and edges via `UNNEST` of per-column bind
+  arrays (a handful of params regardless of row count), chunked at `WRITE_CHUNK` (10 000 rows) inside
+  the one transaction. Bodies use `ON CONFLICT (tenant, repo_id, node_id) DO NOTHING` (shared, reused
+  as-is); the **collision check** — `JOIN`ing the bound `(id, key)` pairs against stored
+  `graph_nodes` where `node_key` differs — turns a distinct-key/same-`node_id` write into
+  `Conflict("node id collision")` and rolls the whole write back (the content-addressed id means
+  same-key ⇒ same-id, so the only collision left for the store to catch is distinct-key against a
+  previously-stored body). `COPY` is noted as a future optimisation, not RK-02.
+- **Reads clamp in Rust, then run the recursive CTEs.** Each read does a **scope preflight**
+  (`SELECT 1 FROM graph_snapshots WHERE tenant/repo_id/snapshot_id`) — an absent scope is `NotFound`,
+  which is how every cross-repo / cross-tenant read returns `NotFound` without echoing a foreign row.
+  `neighbors` / `blast_radius` / `tests_covering` are `WITH RECURSIVE` walks inbound on `dst_id`
+  (min depth via `GROUP BY … min(depth)`, ordered `(depth, node_key)`); `path_between` recurses
+  outbound on `src_id` with the `NOT (dst = ANY(path))` cycle guard and maps id-arrays back to
+  `NodeKey`s. `references` is excluded from the walks; `blast_radius` / `neighbors` exclude the seed
+  ids to match `MemRepoGraph` exactly.
+- **`snapshot_diff` is computed in Rust** (fetch each snapshot's versions and edges, classify
+  added / removed / `sig_changed` / `body_changed` and the edge sets, sort, cap `MAX_DIFF`) rather
+  than a full-outer-join in SQL, to guarantee byte-for-byte parity with the `mem` tier the R3 rows
+  pin. A corrupt stored row (an unknown `kind` / `lang`, an unparseable JSON `attrs`) is a `Backend`
+  fault, never a panic — the store is treated as untrusted on read.

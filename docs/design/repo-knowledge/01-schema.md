@@ -306,3 +306,29 @@ CREATE POLICY tenant_isolation ON graph_nodes
 
 and the store issues `SET LOCAL app.tenant = $1` at the top of each transaction. The app-side
 `WHERE tenant = $1` stays; RLS is defence in depth.
+
+## As-built (RK-02)
+
+Migration `crates/agent-repo-graph/migrations/0001_repo_graph.sql` is this schema verbatim, applied
+by the versioned runner in `crates/agent-repo-graph/src/postgres.rs` (copied from `PgDigests`: one
+transaction under a transaction-scoped advisory lock, recorded in a `_repo_graph_migrations` ledger,
+`sqlx::raw_sql` per unapplied version — no `sqlx::migrate!`, whose `macros` feature drags in
+`sqlx-mysql` → `rsa`, RUSTSEC-2023-0071). Confirmed as-built:
+
+- **`CREATE TABLE IF NOT EXISTS` throughout, leading with `tenants`** so the tier installs on a
+  database that never had the config store, and re-runs inertly. The advisory lock key is `"agrepogr"`
+  folded to an `i64`, distinct from the digest / campaign / config-store keys so concurrent starters
+  across tiers never contend.
+- **UNIQUE constraints are NAMED** (`repos_slug_key`, `graph_snapshots_identity_key`,
+  `graph_nodes_key_key`) so `map_db` keys a typed error on the rule, not the row: a duplicate
+  `graph_snapshots_identity_key` is `Conflict("duplicate snapshot identity")` (drives
+  `snapshot_begin`), any other unique is `Conflict`, and FK / NOT NULL / CHECK map to
+  `Invalid("constraint: <name>")`. The message text and DSN are never echoed.
+- **`name_tokens` is written comma-joined** into a `text[]` (tokens are `[a-z0-9]` only, so a comma
+  never occurs inside one) and split back with `string_to_array`; **`attrs` (node + edge) is bound as
+  `text` and cast `::jsonb` per row** in the `UNNEST` `SELECT`, so `sqlx` needs no `json` feature.
+- **The `graph_node_versions → graph_nodes` FK is deliberately non-CASCADE** (the versions →
+  snapshots and edges → snapshots FKs *are* `ON DELETE CASCADE`): deleting a snapshot clears its
+  versions and edges, but a shared body row outlives them, so retention **sweeps** `graph_nodes` rows
+  that no surviving version references (`NOT EXISTS`) as an explicit step. Covered by
+  `corner_retention_sweeps_orphan_bodies` ([`08-test-matrix.md`](08-test-matrix.md) R4).

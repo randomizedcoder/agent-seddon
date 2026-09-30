@@ -6,8 +6,10 @@ for every untrusted input (repo content, model-supplied node keys, tenant string
 below maps to one named `rstest` case; the harness legend at the foot explains the store tier
 stamps.
 
-Owned by RK-01: **R1** (key grammar), **R2** (the builder), **R3** (store conformance). Later
-increments add their own tables here (extractors R4 in RK-03, the tool R5 in RK-08, …).
+Owned by RK-01: **R1** (key grammar), **R2** (the builder), **R3** (store conformance). Owned by
+RK-02: **P1** (the `PgRepoGraph` in-gate units — the pure helpers and the tenant handle, no DB) and
+**R4** (the `PgRepoGraph` pg-only rows). Later increments add their own tables here (the extractor
+tables in RK-03, the tool R5 in RK-08, …).
 
 ## R1 — key grammar, ids, tokens
 
@@ -74,8 +76,52 @@ Mem-only rows (`agent-testkit/src/repo_graph/tests.rs`): `adversarial_tenant_uns
 `positive_tenant_handles_share_state`, `positive_clock_stamps_rows`, and the suite stamp
 `repo_graph_conformance_suite!(mem, Harness::mem())`.
 
+## P1 — `PgRepoGraph` in-gate units (no DB)
+
+Behind `repo-graph-postgres`; run by `nix/checks/repo-graph.nix` (`cargo test --features
+repo-graph-postgres`, **not** `--ignored`), so the pure helpers and the tenant handle are exercised
+in `nix flake check` with no server. The pure-helper rows live in `crates/agent-repo-graph/src/postgres/sql.rs`;
+the handle / `map_db` rows in `crates/agent-repo-graph/src/postgres/tests.rs`.
+
+| case | scenario | expected |
+|---|---|---|
+| `positive_with_tenant_valid` / `_clone_shares_pool` | `with_tenant` on a lazily-connecting pool (no connection opened) | `Ok`, `tenant()` set; clone is a cheap `Arc` share |
+| `adversarial_tenant_refused_before_any_statement` (`../x`, `a b`, `a/b`, `-x`, `..`, empty) | unsafe tenant on the lazy pool | `Invalid`, **before any statement** (provably synchronous) |
+| `boundary_tenant_128_ok_129_refused` | 128- vs 129-char tenant | `Ok` / `Invalid` |
+| `clamp_hops_rows` (0/99/mid × neighbor/radius/path max) | `clamp_hops` | `1` / the tier max / passthrough |
+| `clamp_cap_rows` / `clamp_keep_rows` (0 / over / mid) | `clamp_cap` (`MAX_RESULT`), `clamp_keep` (`MAX_RETAIN`) | `1` / cap / passthrough |
+| `boundary_ms_u64_max` / `boundary_unsigned_i64_negative` / `boundary_i32_of_saturates` | the `ms` / `unsigned` / `i32_of` binds | clamped, no panic/overflow |
+| `positive_node_arrays_aligned` / `positive_edge_arrays_aligned` | `node_arrays` / `edge_arrays` on `fixture_v1` | every column `Vec` equal length; `ids[i] == node_id_for(keys[i])`; kinds are the enum `as_str`; default weight `1.0` |
+| `positive_attrs_serialize_roundtrip` | node/edge `attrs` → JSON text column | each element parses back to the same `serde_json` object |
+| `corner_empty_graph_arrays` | the array builders on an empty graph | all `Vec`s empty, no panic |
+| `chunk_ranges` rows (`boundary_write_chunking` 25k/10k, exact-multiple, under-one-chunk, zero-len, `corner_chunk_zero_size_floored_to_one`) | `chunk_ranges(len, chunk)` | N batches covering every row exactly once; a zero chunk floors to one |
+| `positive_map_db_row_not_found` / `negative_map_db_other_is_backend` | `map_db` on `RowNotFound` / a non-`Database` error | `NotFound` / `Backend(_)` carrying **no** DSN/password |
+
+## R4 — `PgRepoGraph` pg-only rows (live; `#[ignore]`)
+
+Not expressible against `MemRepoGraph`; `crates/agent-repo-graph/src/postgres/tests.rs`, gated on
+`AGENT_REPO_GRAPH_TEST_DSN`, run via `nix run .#pg-integration`.
+
+| case | scenario | expected |
+|---|---|---|
+| `positive_migration_idempotent` | `run_migrations` twice on a fresh DB | 2nd run no-ops; `_repo_graph_migrations` holds version 1 exactly once |
+| `positive_shared_body_row_count` | write two snapshots of v1 | `graph_nodes` count = one body per key; `graph_node_versions` duplicated per snapshot |
+| `negative_write_id_collision_leaves_building` | 2nd graph forces a new key onto a stored `node_id` | `Conflict`; snapshot still `building`; zero versions written (tx rolled back) |
+| `adversarial_concurrent_begin_duplicate_identity` | two tasks race the same `(repo, sha, extractor_version)` | exactly one `Ok`, one `Conflict` (the identity unique) |
+| `adversarial_cross_tenant_reads_return_nothing` | write under `ta`; every read verb + `repos`/`repo_get` under `tb` | `NotFound` / empty / `None`; no foreign row echoed |
+| `corner_retention_sweeps_orphan_bodies` | keep newest of v1 (has `S`) + v2 (drops `S`) | snapshot 1 deleted; `S`'s orphaned body swept; still-referenced bodies kept |
+| `adversarial_connect_bad_dsn_does_not_echo` | `connect` to a bad DSN carrying a password | `Err`; the error string contains neither the password nor the DSN |
+| `corner_decode_corrupt_row_is_backend` | hand-corrupt a stored `lang`, then read | `Backend` fault (row rejected), never a panic |
+| `negative_map_db_check_is_invalid` | a `commit_sha` that fails the DDL CHECK | `map_db` → `Invalid` |
+| `boundary_diff_capped` | a diff exceeding `MAX_DIFF` (10 000) | lists truncated to 10 000, `truncated = true` |
+
+Every R3 row also runs on `pg` with `after = assert_invariants` (edge endpoints present in-scope; each
+`ready` snapshot's `node_count`/`edge_count` equals its stored rows).
+
 ## Harness legend
 
 `repo_graph_conformance_suite!(<tier>, <harness expr>)` stamps every R3 row as
-`<tier>::r3::<row>`. RK-01 instantiates `mem`; RK-02 adds `pg` (with `after =` / `ignore =` for
-the live-Postgres gate) with zero row changes — the same rows are the contract both stores meet.
+`<tier>::r3::<row>`. RK-01 instantiates `mem`; RK-02 adds `pg` (with `after = assert_invariants` /
+`ignore =` for the live-Postgres gate) with zero row changes — the same rows are the contract both
+stores meet. The `pg` tier additionally carries its own **P1** (in-gate, no DB) and **R4** (pg-only,
+`#[ignore]`) tables above.

@@ -76,6 +76,11 @@ pkgs.writeShellApplication {
     # table; its own versioned runner creates `tasks` / `task_events` /
     # `task_attempts`, and its suite truncates only those three.
     export AGENT_CAMPAIGN_TEST_DSN="$AGENT_CONFIG_STORE_TEST_DSN"
+    # The repo-graph store (repo-knowledge RK-02) shares the server and the
+    # `tenants` table; its own versioned runner (distinct advisory-lock key)
+    # creates `repos` / `graph_snapshots` / `graph_nodes` / `graph_node_versions`
+    # / `graph_edges`, and its suite truncates only those five.
+    export AGENT_REPO_GRAPH_TEST_DSN="$AGENT_CONFIG_STORE_TEST_DSN"
 
     echo "==> pg-integration: running the ignored config-store postgres suite"
     set +e
@@ -218,6 +223,22 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport + digest + campaign suites green."
+    # The repo-graph store (repo-knowledge RK-02): `PgRepoGraph` proves the
+    # RepoGraphStore contract over the real server — the shared R3 conformance rows
+    # (each followed by `assert_invariants`) plus the R4 pg-only rows (migration
+    # idempotence, shared bodies, the id-collision rollback, concurrent
+    # duplicate-identity, cross-tenant isolation, orphan-body sweep, corrupt-row
+    # decode, a CHECK -> Invalid, the diff cap). Its own versioned runner creates
+    # the graph tables; the suite truncates only those five.
+    echo "==> pg-integration: running the ignored repo-graph postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-repo-graph --features repo-graph-postgres \
+      -- --ignored --test-threads=1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport + digest + campaign + repo-graph suites green."
   '';
 }

@@ -14,13 +14,25 @@ license.workspace = true
 
 [features]
 # Postgres tier — `PgRepoGraph`, the durable store behind migration 0001 (RK-02). Off by
-# default so a normal build stays DB-free; not hermetic (needs a live server), its tests are
-# `#[ignore]`-gated. Deliberately NO `sqlx/migrate` / `sqlx/macros` (they pull `sqlx-mysql` →
-# `rsa`, RUSTSEC-2023-0071); the in-crate versioned runner over `migrations/` stands in.
-repo-graph-postgres = []
+# default so a normal build stays DB-free; not hermetic (needs a live server), its conformance
+# tests are `#[ignore]`-gated (run under `nix run .#pg-integration`). Deliberately NO
+# `sqlx/migrate` / `sqlx/macros` (they pull `sqlx-mysql` → `rsa`, RUSTSEC-2023-0071); the
+# in-crate versioned runner over `migrations/` stands in. The feature also gates `async-trait`
+# (the `#[async_trait] impl RepoGraphStore`) and `serde_json` (JSON attrs / profile), so the
+# default build is `agent-core` alone. The pure, DB-free unit tables (`with_tenant` refusals,
+# clamps, the `UNNEST` array builders, `map_db`) run in the gate via `nix/checks/repo-graph.nix`.
+repo-graph-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]
 
 [dependencies]
 agent-core.workspace = true
+async-trait = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+agent-testkit.workspace = true
+rstest.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

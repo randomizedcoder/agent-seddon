@@ -84,6 +84,13 @@ in
   # DB dep). The dedicated, feature-scoped check that runs them in the gate — the
   # config-architecture A1 twin of fleet-sqlite. docs/design/config/09-increments.md.
   config-store-sqlite = craneCheck ./config-store-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the `PgRepoGraph` tier's DB-free unit tables (feature
+  # `repo-graph-postgres`, off by default so the standard build stays `agent-core`-only
+  # and DB-free): the `with_tenant` refusals, the read clamps, the `UNNEST` array
+  # builders and `map_db` (repo-knowledge RK-02, tier P1). The conformance reuse (R3)
+  # and pg-only (R4) rows are `#[ignore]`-gated and run under `nix run .#pg-integration`;
+  # clippy `--all-features` lints the tier in-gate. docs/design/repo-knowledge/06-increments.md.
+  repo-graph = craneCheck ./repo-graph.nix { inherit cargoArtifacts; };
   # Executes the shared-store `ProviderRegistry` backend (`StoreRegistry`) matrix
   # over the in-memory config store (feature `registry-store`, off by default so
   # the main `test` check never builds the store dep). The config-architecture A3
