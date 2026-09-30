@@ -7,7 +7,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | # | Increment | Where | State | PR |
 |---|---|---|---|---|
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
-| K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | 🟡 | #TBD (`rendered/k3s/apps` root) |
+| K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | 🟡 | #577 (`rendered/k3s/apps` root) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ⬜ | |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ⬜ | |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
