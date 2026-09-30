@@ -133,6 +133,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -460,6 +461,13 @@ dependencies = [
  "prost-reflect",
  "rstest",
  "tokio",
+]
+
+[[package]]
+name = "agent-repo-graph"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
 ]
 
 [[package]]

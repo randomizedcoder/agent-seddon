@@ -2,13 +2,14 @@
 
 Legend: ✅ merged · 🟡 in progress · ⬜ not started · ❌ dropped
 
-Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments.md) · source:
+Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments.md) · journal:
+[`PROGRESS.md`](PROGRESS.md) · tests: [`08-test-matrix.md`](08-test-matrix.md) · source:
 [self-improvement gap analysis](../../gap-analysis/self-improvement.md).
 
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
 | RK-00 | This track, the self-improvement gap analysis, index links | — | ✅ | #495 |
-| RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | ⬜ | — |
+| RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | 🟡 | #582 |
 | RK-02 | `PgRepoGraph`, migration 0001, `with_tenant`, bulk write, read verbs, live suite | SI-1, SI-3 | ⬜ | — |
 | RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace; determinism check; bench + leak | SI-2 | ⬜ | — |
 | RK-04 | Go mapping from the helper JSON + `_test.go` scan | SI-2 | ⬜ | — |

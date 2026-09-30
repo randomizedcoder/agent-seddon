@@ -1,10 +1,11 @@
 # Repo knowledge: a persisted, deterministic code graph + a cited inventory (design of record)
 
-> **Status:** design / pre-implementation, opened 2026-09-26 from the
-> [self-improvement gap analysis](../../gap-analysis/self-improvement.md). Nothing in this track
-> is built yet; [`STATUS.md`](STATUS.md) is the tracker and [`06-increments.md`](06-increments.md)
-> the build sequence. Every claim below carries a `path:line` against `main` `5ddcda7` so it can
-> be re-verified.
+> **Status:** implementation under way, opened 2026-09-26 from the
+> [self-improvement gap analysis](../../gap-analysis/self-improvement.md). The track is landing
+> increment by increment: [`STATUS.md`](STATUS.md) is the tracker, [`06-increments.md`](06-increments.md)
+> the build sequence, [`PROGRESS.md`](PROGRESS.md) the working journal (why the as-built code
+> differs from these docs), and [`08-test-matrix.md`](08-test-matrix.md) the test tables. Every
+> design claim below carries a `path:line` against `main` `5ddcda7` so it can be re-verified.
 
 ## Why this exists
 

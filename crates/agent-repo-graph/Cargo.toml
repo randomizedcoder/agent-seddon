@@ -1,0 +1,26 @@
+[package]
+name = "agent-repo-graph"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Repo knowledge (docs/design/repo-knowledge): the `RepoGraphStore` seam, the node-key
+# grammar, the value types and the pure `GraphBuilder` live in `agent_core::repo_graph` so the
+# in-memory double in `agent-testkit` and the Postgres tier here share one source of truth. This
+# crate re-exports the seam and, increment by increment, adds what only a consumer needs:
+# `PgRepoGraph` (feature `repo-graph-postgres`, RK-02), the extractors (RK-03) and the indexer
+# (RK-06). Until then it is a doc-only skeleton so every commit in the workspace builds.
+
+[features]
+# Postgres tier — `PgRepoGraph`, the durable store behind migration 0001 (RK-02). Off by
+# default so a normal build stays DB-free; not hermetic (needs a live server), its tests are
+# `#[ignore]`-gated. Deliberately NO `sqlx/migrate` / `sqlx/macros` (they pull `sqlx-mysql` →
+# `rsa`, RUSTSEC-2023-0071); the in-crate versioned runner over `migrations/` stands in.
+repo-graph-postgres = []
+
+[dependencies]
+agent-core.workspace = true
+
+[lints]
+workspace = true

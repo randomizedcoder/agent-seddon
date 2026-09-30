@@ -195,3 +195,23 @@ agent repo brief   --repo <slug> --goal "<text>" [--crates a,b] [--print]   # RK
 ```
 
 `repo add` is required before `index`; nothing creates a repo row from model-supplied input.
+
+## As-built (RK-01)
+
+The `RepoGraphStore` trait ships in `agent_core::repo_graph`; `MemRepoGraph` (in `agent-testkit`)
+is the first tier and RK-02 adds `PgRepoGraph`, both run through the R3 conformance suite
+([`08-test-matrix.md`](08-test-matrix.md)). Confirmed:
+
+- **Tenancy is the handle's (D2).** Reads take `Scope { repo, snapshot }` (Copy); the tenant is
+  bound by `with_tenant` (fail-closed on `safe_segment`), never a per-call argument. A snapshot
+  not under `scope.repo` — and every cross-tenant / cross-repo access — is `NotFound`, never an
+  error that echoes the input.
+- **Only three seam groups (D3):** Repos, Snapshots and Reads. The Inventory group lands with
+  migration 0002 (RK-10) and the Facts group with 0003 (RK-15).
+- **Clamps.** hops → `MAX_NEIGHBOR_HOPS` (4) / `MAX_RADIUS_HOPS` (3) / `MAX_PATH_HOPS` (6);
+  paths → `MAX_PATHS` (32); rows → `MAX_RESULT` (500); batched keys / files → `MAX_KEYS` (64);
+  `snapshots` list → `MAX_SNAPSHOT_LIST` (200); diff lists → `MAX_DIFF` (10 000); retention `keep`
+  → `1..=MAX_RETAIN` (1 000). Unknown or hostile keys / names return empty, not an error.
+- **`snapshot_begin` identity** is `(repo, sha, extractor_version)`: a `building` / `ready` one
+  conflicts, a `failed` one is replaced. **Retention** keeps the newest `keep` `ready` snapshots,
+  deletes the rest and every `failed` one, and sweeps bodies no retained version references.

@@ -168,3 +168,22 @@ symbols and edges, bounds on every string, closed kind sets. Applied at `GraphBu
 | Edge endpoint missing | edge dropped, `dropped_edges += 1` |
 | Kind not in the closed set | dropped, counted (programming error, also a unit test) |
 | `node_id` collision between distinct keys | snapshot `failed`, `reason = "id collision"` |
+
+## As-built (RK-01)
+
+The `GraphBuilder`, the `Extractor` / `ExtractBudget` / `ExtractReport` contract and the value
+types ship in **`agent_core::repo_graph`** (deviation D1; see [`PROGRESS.md`](PROGRESS.md)), not
+in `agent-repo-graph`. Confirmed behaviour, exercised by the R2 rows in
+[`08-test-matrix.md`](08-test-matrix.md):
+
+- **Path checks are lexical here.** The builder validates `file:` / `doc:` keys and
+  `NodeVersion.file` with `repo_relative` (rejects absolute, `..`, `.`, empty components,
+  backslash, NUL, control, `> 512 B`). `confine` needs a real root and is applied by the RK-03
+  file walk before each file is opened.
+- **cfg-duplicate suffixing is in the builder.** Same key + a different sorted `cfg` ⇒ the later
+  node is `Suffixed(key@<sha8>)` with `attrs.dup = true` and `attrs.cfg`; same key + same cfg ⇒
+  `finish()` fails with `BuildError::DuplicateKey`.
+- **`RepoGraph` is unforgeable.** Its fields are private and it is constructible only by
+  `finish()`; a `#[doc(hidden)] with_id_fn` swaps the id function for the collision tests.
+- No extractor is implemented in RK-01 — the contract only. RK-03 adds `rust-syn` / `cargo` /
+  `docs`.
