@@ -637,11 +637,34 @@ mod tests {
             ));
         }
         // Edges out of order and of two kinds.
-        b.edge(EdgeKind::Calls, &fn_key("alpha"), &fn_key("gamma"), 1.0, json!({}));
-        b.edge(EdgeKind::Calls, &fn_key("alpha"), &fn_key("beta"), 1.0, json!({}));
-        b.edge(EdgeKind::Contains, &fn_key("beta"), &fn_key("gamma"), 1.0, json!({}));
+        b.edge(
+            EdgeKind::Calls,
+            &fn_key("alpha"),
+            &fn_key("gamma"),
+            1.0,
+            json!({}),
+        );
+        b.edge(
+            EdgeKind::Calls,
+            &fn_key("alpha"),
+            &fn_key("beta"),
+            1.0,
+            json!({}),
+        );
+        b.edge(
+            EdgeKind::Contains,
+            &fn_key("beta"),
+            &fn_key("gamma"),
+            1.0,
+            json!({}),
+        );
         let built = b.finish().expect("valid graph");
-        let keys: Vec<&str> = built.graph.nodes().iter().map(|r| r.node.key.as_str()).collect();
+        let keys: Vec<&str> = built
+            .graph
+            .nodes()
+            .iter()
+            .map(|r| r.node.key.as_str())
+            .collect();
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted);
@@ -659,7 +682,11 @@ mod tests {
     fn build_two_nodes(order: [&str; 2], body_a: &str, sig_a: &str) -> String {
         let mut b = GraphBuilder::default();
         for name in order {
-            let (body, sig) = if name == "a" { (body_a, sig_a) } else { ("bb", "bs") };
+            let (body, sig) = if name == "a" {
+                (body_a, sig_a)
+            } else {
+                ("bb", "bs")
+            };
             b.node(
                 NodeSpec::new(fn_key(name), name)
                     .with_body(body)
@@ -697,7 +724,11 @@ mod tests {
     fn corner_hash_ignores_attrs_and_lines() {
         let base = {
             let mut b = GraphBuilder::default();
-            b.node(NodeSpec::new(fn_key("a"), "a").with_sig("s").with_body("bod"));
+            b.node(
+                NodeSpec::new(fn_key("a"), "a")
+                    .with_sig("s")
+                    .with_body("bod"),
+            );
             b.finish().unwrap().graph.graph_hash().to_string()
         };
         let varied = {
@@ -765,7 +796,13 @@ mod tests {
     fn negative_dangling_edge_dropped() {
         let mut b = GraphBuilder::default();
         b.node(NodeSpec::new(fn_key("a"), "a"));
-        b.edge(EdgeKind::Calls, &fn_key("a"), &fn_key("ghost"), 1.0, json!({}));
+        b.edge(
+            EdgeKind::Calls,
+            &fn_key("a"),
+            &fn_key("ghost"),
+            1.0,
+            json!({}),
+        );
         let built = b.finish().unwrap();
         assert!(built.graph.edges().is_empty());
         assert_eq!(built.report.dropped_edges, 1);
@@ -902,7 +939,13 @@ mod tests {
         let mut b = GraphBuilder::default();
         b.node(NodeSpec::new(fn_key("a"), "a"));
         b.node(NodeSpec::new(fn_key("b"), "b"));
-        b.edge(EdgeKind::Calls, &fn_key("a"), &fn_key("b"), weight, json!({}));
+        b.edge(
+            EdgeKind::Calls,
+            &fn_key("a"),
+            &fn_key("b"),
+            weight,
+            json!({}),
+        );
         let built = b.finish().unwrap();
         assert_eq!(built.graph.edges()[0].weight, 1.0);
     }

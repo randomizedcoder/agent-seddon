@@ -314,7 +314,10 @@ impl NodeKey {
         let base = match s.rfind('@') {
             Some(at) => {
                 let suffix = &s[at + 1..];
-                let good = suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+                let good = suffix.len() == 8
+                    && suffix
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
                 if !good || s[..at].contains('@') {
                     return Err(RepoGraphError::Invalid("node_key: bad @ suffix".into()));
                 }
@@ -425,7 +428,10 @@ impl NodeKey {
         check_ident(krate, "crate")?;
         check_mod_path(mod_path)?;
         check_ident(name, "name")?;
-        Self::parse(&format!("rust:{prefix}:{}", join_path(krate, mod_path, name)))
+        Self::parse(&format!(
+            "rust:{prefix}:{}",
+            join_path(krate, mod_path, name)
+        ))
     }
 
     /// `rust:impl:<crate>::<mod path>::<SelfType>#<TraitPath|->`.
@@ -612,7 +618,10 @@ pub fn repo_relative(path: &str) -> bool {
     if path.starts_with('/') {
         return false;
     }
-    if path.bytes().any(|b| b == b'\\' || b == 0 || b.is_ascii_control()) {
+    if path
+        .bytes()
+        .any(|b| b == b'\\' || b == 0 || b.is_ascii_control())
+    {
         return false;
     }
     path.split('/')
@@ -663,7 +672,8 @@ fn split_camel(word: &str, out: &mut Vec<String>) {
     for i in 1..chars.len() {
         let prev = chars[i - 1];
         let cur = chars[i];
-        let lower_to_upper = (prev.is_ascii_lowercase() || prev.is_ascii_digit()) && cur.is_ascii_uppercase();
+        let lower_to_upper =
+            (prev.is_ascii_lowercase() || prev.is_ascii_digit()) && cur.is_ascii_uppercase();
         let acronym_end = prev.is_ascii_uppercase()
             && cur.is_ascii_uppercase()
             && i + 1 < chars.len()
@@ -724,7 +734,8 @@ fn check_feature(s: &str) -> RepoGraphResult<()> {
     let ok = !s.is_empty()
         && s.len() <= 128
         && !s.starts_with('-')
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     ok.then_some(())
         .ok_or_else(|| RepoGraphError::Invalid("feature".into()))
 }
@@ -834,21 +845,54 @@ mod tests {
     #[case::rust_feature(NodeKey::rust_feature("agent_digest", "postgres"), NodeKind::Feature)]
     #[case::rust_mod(NodeKey::rust_mod("agent_core", "security"), NodeKind::Module)]
     #[case::rust_mod_root(NodeKey::rust_mod("agent_core", ""), NodeKind::Module)]
-    #[case::rust_fn(NodeKey::rust_item(NodeKind::Fn, "agent_core", "security", "confine"), NodeKind::Fn)]
-    #[case::rust_struct(NodeKey::rust_item(NodeKind::Struct, "agent_ast", "graph", "Graph"), NodeKind::Struct)]
-    #[case::rust_impl_trait(NodeKey::rust_impl("agent_digest", "postgres", "PgDigests", Some("DigestStore")), NodeKind::Impl)]
-    #[case::rust_impl_inherent(NodeKey::rust_impl("agent_ast", "graph", "Graph", None), NodeKind::Impl)]
-    #[case::rust_method(NodeKey::rust_method("agent_digest", "postgres", "PgDigests", Some("DigestStore"), "put"), NodeKind::Method)]
-    #[case::rust_test(NodeKey::rust_test("agent_tools", "edit::tests", "rejects", Some("adversarial_dotdot")), NodeKind::Test)]
-    #[case::rust_test_no_case(NodeKey::rust_test("agent_tools", "edit", "helper", None), NodeKind::Test)]
+    #[case::rust_fn(
+        NodeKey::rust_item(NodeKind::Fn, "agent_core", "security", "confine"),
+        NodeKind::Fn
+    )]
+    #[case::rust_struct(
+        NodeKey::rust_item(NodeKind::Struct, "agent_ast", "graph", "Graph"),
+        NodeKind::Struct
+    )]
+    #[case::rust_impl_trait(
+        NodeKey::rust_impl("agent_digest", "postgres", "PgDigests", Some("DigestStore")),
+        NodeKind::Impl
+    )]
+    #[case::rust_impl_inherent(
+        NodeKey::rust_impl("agent_ast", "graph", "Graph", None),
+        NodeKind::Impl
+    )]
+    #[case::rust_method(
+        NodeKey::rust_method("agent_digest", "postgres", "PgDigests", Some("DigestStore"), "put"),
+        NodeKind::Method
+    )]
+    #[case::rust_test(
+        NodeKey::rust_test("agent_tools", "edit::tests", "rejects", Some("adversarial_dotdot")),
+        NodeKind::Test
+    )]
+    #[case::rust_test_no_case(
+        NodeKey::rust_test("agent_tools", "edit", "helper", None),
+        NodeKind::Test
+    )]
     #[case::go_package(NodeKey::go_package("example.com/m/pkg"), NodeKind::Package)]
-    #[case::go_func(NodeKey::go_item(NodeKind::Fn, "example.com/m/pkg", "Serve"), NodeKind::Fn)]
-    #[case::go_interface(NodeKey::go_item(NodeKind::Trait, "example.com/m/pkg", "Store"), NodeKind::Trait)]
-    #[case::go_method(NodeKey::go_method("example.com/m/pkg", "Server", "Close"), NodeKind::Method)]
+    #[case::go_func(
+        NodeKey::go_item(NodeKind::Fn, "example.com/m/pkg", "Serve"),
+        NodeKind::Fn
+    )]
+    #[case::go_interface(
+        NodeKey::go_item(NodeKind::Trait, "example.com/m/pkg", "Store"),
+        NodeKind::Trait
+    )]
+    #[case::go_method(
+        NodeKey::go_method("example.com/m/pkg", "Server", "Close"),
+        NodeKind::Method
+    )]
     #[case::go_test(NodeKey::go_test("example.com/m/pkg", "TestServe"), NodeKind::Test)]
     #[case::proto_service(NodeKey::proto_service("agent.v1", "Search"), NodeKind::ProtoService)]
     #[case::proto_rpc(NodeKey::proto_rpc("agent.v1", "Search", "Query"), NodeKind::ProtoRpc)]
-    #[case::proto_message(NodeKey::proto_message("agent.v1", "SearchRequest"), NodeKind::ProtoMessage)]
+    #[case::proto_message(
+        NodeKey::proto_message("agent.v1", "SearchRequest"),
+        NodeKind::ProtoMessage
+    )]
     #[case::sql_table(NodeKey::sql_table("digests", "digests"), NodeKind::Table)]
     #[case::cfg(NodeKey::cfg("review", "nearby"), NodeKind::ConfigKey)]
     #[case::metric(NodeKey::metric("agent_repo_graph_index_seconds"), NodeKind::Metric)]
@@ -881,7 +925,10 @@ mod tests {
     #[case::rust_colon_only("rust:")]
     #[case::bare_word("confine")]
     fn negative_reject(#[case] key: &str) {
-        assert!(NodeKey::parse(key).is_err(), "expected rejection for {key:?}");
+        assert!(
+            NodeKey::parse(key).is_err(),
+            "expected rejection for {key:?}"
+        );
     }
 
     // -- corner: Go word → node kind ---------------------------------------
@@ -896,10 +943,7 @@ mod tests {
 
     #[test]
     fn corner_go_func_is_fn() {
-        assert_eq!(
-            NodeKey::parse("go:func:p.F").unwrap().kind(),
-            NodeKind::Fn
-        );
+        assert_eq!(NodeKey::parse("go:func:p.F").unwrap().kind(), NodeKind::Fn);
     }
 
     // -- boundaries --------------------------------------------------------
@@ -913,7 +957,10 @@ mod tests {
 
     #[test]
     fn boundary_key_513() {
-        let key = format!("metric:{}", "a".repeat(MAX_NODE_KEY_LEN - "metric:".len() + 1));
+        let key = format!(
+            "metric:{}",
+            "a".repeat(MAX_NODE_KEY_LEN - "metric:".len() + 1)
+        );
         assert_eq!(key.len(), MAX_NODE_KEY_LEN + 1);
         assert!(matches!(
             NodeKey::parse(&key),
@@ -948,7 +995,10 @@ mod tests {
     #[case::empty_component("file:a//b")]
     #[case::dotdot_inner("doc:a/../b")]
     fn adversarial_file_path(#[case] key: &str) {
-        assert!(NodeKey::parse(key).is_err(), "expected rejection for {key:?}");
+        assert!(
+            NodeKey::parse(key).is_err(),
+            "expected rejection for {key:?}"
+        );
     }
 
     #[rstest]
@@ -1030,7 +1080,10 @@ mod tests {
     #[test]
     fn boundary_tokens_16() {
         // 17 distinct parts collapse to the first 16.
-        let name = (0..17).map(|i| format!("w{i}")).collect::<Vec<_>>().join("_");
+        let name = (0..17)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join("_");
         assert_eq!(name_tokens(&name).len(), MAX_NAME_TOKENS);
     }
 

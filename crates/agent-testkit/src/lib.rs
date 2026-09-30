@@ -29,6 +29,7 @@
 pub mod bench;
 pub mod campaign;
 pub mod observe;
+pub mod repo_graph;
 
 /// Re-exported for the `campaign_conformance_suite!` macro (`#[$crate::tokio::test]`),
 /// so a tier's crate need not name `tokio` itself.

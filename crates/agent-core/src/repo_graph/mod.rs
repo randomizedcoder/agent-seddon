@@ -215,7 +215,8 @@ impl RepoSpec {
         }
         match &self.profile {
             serde_json::Value::Object(m) => {
-                if serde_json::to_vec(m).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_PROFILE_BYTES {
+                if serde_json::to_vec(m).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_PROFILE_BYTES
+                {
                     return Err(RepoGraphError::TooLong("profile".into()));
                 }
             }
@@ -336,7 +337,7 @@ pub struct Snapshot {
 }
 
 /// A reference to an edge by kind and endpoint keys (used in [`GraphDiff`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EdgeRef {
     pub kind: EdgeKind,
     pub src: NodeKey,
@@ -424,15 +425,19 @@ pub trait RepoGraphStore: Send + Sync {
         report: &ExtractReport,
     ) -> RepoGraphResult<()>;
     /// The newest `ready` snapshot for a `(repo, sha)`.
-    async fn snapshot_find(&self, repo: RepoId, commit_sha: &str)
-        -> RepoGraphResult<Option<Snapshot>>;
+    async fn snapshot_find(
+        &self,
+        repo: RepoId,
+        commit_sha: &str,
+    ) -> RepoGraphResult<Option<Snapshot>>;
     /// The newest `ready` snapshot for a repo.
     async fn snapshot_latest(&self, repo: RepoId) -> RepoGraphResult<Option<Snapshot>>;
     /// Snapshots for a repo, newest first, every status, `limit` clamped to `1..=MAX_SNAPSHOT_LIST`.
     async fn snapshots(&self, repo: RepoId, limit: usize) -> RepoGraphResult<Vec<Snapshot>>;
     /// Keep the newest `keep` `ready` snapshots, delete the rest and every `failed` one, and
     /// sweep bodies no retained version references. Returns the number deleted.
-    async fn snapshot_delete_older_than(&self, repo: RepoId, keep: usize) -> RepoGraphResult<usize>;
+    async fn snapshot_delete_older_than(&self, repo: RepoId, keep: usize)
+        -> RepoGraphResult<usize>;
     /// The difference between two snapshots of one repo of this tenant.
     async fn snapshot_diff(&self, a: SnapshotId, b: SnapshotId) -> RepoGraphResult<GraphDiff>;
 
