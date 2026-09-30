@@ -9,15 +9,19 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-01 merged (#582, gate green on `a023635a`).** Two increments are now runnable in parallel:
+**RK-02 in progress (#NNN), on top of RK-01 (#582, gate green on `a023635a`).** Building
+`PgRepoGraph` (lane A): migration 0001, `with_tenant`, the `UNNEST` bulk write with the collision
+check, every read verb; the `#[ignore]` live-Postgres suite reruns the R3 rows through
+`repo_graph_conformance_suite!` unchanged; a `nix/pg-integration.nix` step. Depends on RK-01 only.
 
-- **RK-02 — `PgRepoGraph`** (lane A): migration 0001, `with_tenant`, `UNNEST` bulk write with the
-  collision check, every read verb; the `#[ignore]` live-Postgres suite reruns the R3 rows through
-  `repo_graph_conformance_suite!` unchanged; a `nix/pg-integration.nix` step. Depends on RK-01 only.
+Still runnable in parallel:
+
 - **RK-03 — extractors `rust-syn` / `cargo` / `docs`** (lane B): the fixture workspace, the
   `repo-graph-rust.nix` determinism check (index twice ⇒ equal hash), the iai bench with an Ir
   ceiling and the dhat leak test. Depends on RK-01 only; fills the `agent-repo-graph` skeleton with
   the `Extractor` impls.
+
+RK-06 (`Indexer`, lane C) unblocks once RK-02 **and** RK-03 have both landed.
 
 ## Decisions (RK-01)
 
@@ -33,6 +37,18 @@ learns *why* the as-built code differs from the design docs.
 | D8 | The seam is ~20 methods, all clamping hops / caps / list lengths and returning empty for unknown or hostile keys without echoing them; typed `RepoGraphError { NotFound, Conflict, Invalid, TooLong, Backend }` → `Error::RepoGraph`. | `03-queries.md` method table + hop / cap limits; README threat model. |
 | D9 | The `Extractor` contract (`ExtractBudget`, `ExtractReport`) lives in core too — `snapshot_finish` takes the report — but no extractor is implemented in RK-01. | `02-extraction.md`; RK-03 fills it. |
 | D10/D11 | `MemRepoGraph` + a conformance harness + fixtures `fixture_v1()` / `fixture_v2()` + `repo_graph_conformance_suite!` live in `agent-testkit`; RK-02 adds the `pg` tier with zero row changes. | The campaign conformance precedent. |
+
+## Decisions (RK-02)
+
+| # | Decision | Why |
+|---|---|---|
+| E1 | `PgRepoGraph` lives in `crates/agent-repo-graph/src/postgres.rs` + `postgres/sql.rs` + `postgres/tests.rs`, gated `#[cfg(feature = "repo-graph-postgres")]`; `lib.rs` re-exports it. The pure seam stays in `agent_core::repo_graph` (D1). | The `PgCampaigns` / `PgDigests` layout: impl behind the feature, one source of truth for the seam. |
+| E2 | Feature `repo-graph-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]` (all optional), **no `sqlx/macros` / `sqlx/migrate`**; dev-deps `agent-testkit` / `rstest` / `tokio`. | Default build stays `agent-core`-only + DB-free; avoids `sqlx-mysql`→`rsa` (RUSTSEC-2023-0071); reuses the pinned workspace sqlx (no new version). |
+| E3 | Struct `PgRepoGraph { pool, tenant, now_ms }` — `Clone`, hand-written `Debug` (tenant only, never pool/DSN), **no sink** (repo-graph emits no events). `with_tenant` fail-closed on `safe_segment` before any statement; `#[doc(hidden)] with_clock`. | Mirrors the two Pg precedents; the injectable clock drives the conformance rows deterministically. |
+| E4 | Migration runner copied from `PgDigests`: ledger `_repo_graph_migrations`, `MIGRATION_LOCK_KEY = 0x6167_7265_706f_6772` (`"agrepogr"`, distinct per tier), one-tx `pg_advisory_xact_lock`, `raw_sql` per version. | Exactly-once versioned schema without `sqlx::migrate!`. |
+| E5 | Migration 0001 = the `01-schema.md` DDL with **named** UNIQUE constraints (`repos_slug_key`, `graph_snapshots_identity_key`, `graph_nodes_key_key`) and `CREATE TABLE IF NOT EXISTS` throughout; leads with `tenants`. | The identity constraint drives `snapshot_begin` conflicts; named constraints let `map_db` name the rule, not the row. |
+| E6 | `map_db` keyed on constraint name + `ErrorKind`: identity unique → `Conflict("duplicate snapshot identity")`; other unique → `Conflict`; FK/NotNull/Check → `Invalid("constraint: …")`; `RowNotFound` → `NotFound`; else `Backend("… sqlstate <code>")`. Never message text or DSN. | The `PgCampaigns` `map_db` shape; fail-closed, never echo. |
+| E13′ | **Beneficial deviation from the plan's E13:** RK-02 adds `nix/checks/repo-graph.nix` (feature-scoped, non-`--ignored`) so the **P1 in-gate unit tables** (`with_tenant` refusals, clamps, `UNNEST` array builders, `map_db`) run in `nix flake check`. The plan said "no new checks entry", but the general `test` check uses default features and pg-integration runs only `--ignored`, so without this the P1 rows would run nowhere in the gate. The pattern of `config-store-sqlite.nix`. | The units are behind the non-default feature; a dedicated hermetic check is the only way to execute them in the gate (the R3/R4 rows stay `#[ignore]` for `.#pg-integration`). |
 
 ## Deferred (out of RK-01 scope)
 

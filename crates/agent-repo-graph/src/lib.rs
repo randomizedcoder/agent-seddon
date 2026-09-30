@@ -21,3 +21,8 @@
 
 pub use agent_core::repo_graph;
 pub use agent_core::repo_graph::*;
+
+#[cfg(feature = "repo-graph-postgres")]
+pub mod postgres;
+#[cfg(feature = "repo-graph-postgres")]
+pub use postgres::PgRepoGraph;
