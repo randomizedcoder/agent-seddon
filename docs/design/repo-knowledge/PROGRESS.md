@@ -9,7 +9,7 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-02 in progress (#NNN), on top of RK-01 (#582, gate green on `a023635a`).** Building
+**RK-02 in progress (#585), on top of RK-01 (#582, gate green on `a023635a`).** Building
 `PgRepoGraph` (lane A): migration 0001, `with_tenant`, the `UNNEST` bulk write with the collision
 check, every read verb; the `#[ignore]` live-Postgres suite reruns the R3 rows through
 `repo_graph_conformance_suite!` unchanged; a `nix/pg-integration.nix` step. Depends on RK-01 only.
