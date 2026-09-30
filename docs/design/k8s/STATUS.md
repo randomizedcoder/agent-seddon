@@ -134,7 +134,39 @@ secrets/status apps). It is landing as small PRs in the K1/K2 style rather than 
     `resolve_excluded_seams` refuses an unknown/typo/empty name.
   - Native leaves `exclude` empty — byte-identical to today. Documented in
     [`config/agent.toml`](../../../config/agent.toml).
-- **Still to land in K3:** `nix/k8s/{default,lib,helm,constants}.nix` renderer infra; components
-  (gateway/sessions/fleet) + PKI + policy; `targets/k3s.nix`; `rendered/k3s/`; the
-  `k8s-render-manifests` app; the `k8s-rendered` / `k8s-render-tests` / `k8s-kubeconform` checks;
-  the `k8s-secrets` and `k8s-status` apps.
+- **Slice 2 — the renderer foundation + the gateway component.** The vertical MVP of the renderer:
+  it renders one real role end to end and drift-gates it.
+  - [`nix/k8s/lib.nix`](../../../nix/k8s/lib.nix) — the `k8sLib`: a **pure-Nix, structured-attrset →
+    YAML emitter** (`toYAML`) plus the manifest helpers that bake in the hardened defaults once
+    (`deployment`, `service`, `configMapFromToml`, `grpcProbe`, `application`, `namespace`,
+    `syncWave`, `labels`). The emitter is deterministic (sorted keys), emits `|` block scalars for
+    the embedded `agent.toml` (so the ConfigMap stays readable/diffable), and quotes scalars only
+    where YAML would mis-type them — no import-from-derivation, so the gate's eval never realises a
+    derivation to know the bytes. `deployment` gives every workload the design's securityContext
+    (`runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`,
+    `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`), gRPC readiness/liveness/startup
+    probes on the role port, memory-limited resource requests, and the `part-of` label.
+  - [`nix/k8s/components/gateway.nix`](../../../nix/k8s/components/gateway.nix) — the `gateway` role
+    (`agent --serve-all`, :50100, wave 3). Its rendered `agent.toml` sets
+    `[grpc.gateway] exclude = ["sandbox", "pty", "forge"]` (the cluster half of slice 1) and mTLS
+    from the `tls-gateway` Secret; ports come from `nix/constants.nix`.
+  - [`nix/k8s/targets/k3s.nix`](../../../nix/k8s/targets/k3s.nix) — the k3s-on-l2 target (namespace
+    `agent-seddon`, one replica, GitOps `repoURL`/`revision` matching the l2 root Application).
+  - [`nix/k8s/default.nix`](../../../nix/k8s/default.nix) — assembles components per target into the
+    hermetic `tree` derivation and the [`k8s-render-manifests`](../../../nix/k8s/default.nix) app
+    (`nix run .#k8s-render-manifests`, `-- --check` fails on drift; preserves the hand-maintained
+    `apps/README.md`).
+  - [`rendered/k3s/`](../../../rendered/k3s) — the committed output: `gateway/{configmap,deployment,
+    service}-gateway.yaml` + `apps/application-gateway.yaml`. Validated with `kubeconform -strict`.
+  - [`nix/checks/k8s-rendered.nix`](../../../nix/checks/k8s-rendered.nix) → the **`k8s-rendered`**
+    gate: the committed tree must equal a fresh render (catches an edited component or a bumped
+    image tag), and no orphaned generated `*.yaml` may linger. Verified: passes on match, fails on a
+    one-line drift.
+- **Deviation:** the ArgoCD `Application` per component lives only in `apps/application-<c>.yaml`
+  (the app-of-apps the root syncs), not also duplicated inside the component dir; `directory.exclude:
+  application.yaml` stays as a harmless guard. Doc 04's layout showed it in both places.
+- **Still to land in K3:** the `sessions` and `fleet` components; the `pki` component (CA chain +
+  per-role Certificates — K3 ships behind K5's PKI); the `k8s-render-tests` (Python table tests over
+  the rendered objects, incl. the adversarial rows) and `k8s-kubeconform` (vendored CRD schemas)
+  checks; the `k8s-secrets` and `k8s-status` apps. `helm.nix` is only needed if a component pulls a
+  third-party chart (none on the application side today).

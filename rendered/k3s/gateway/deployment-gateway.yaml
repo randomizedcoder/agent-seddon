@@ -1,0 +1,84 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: agent-seddon
+  name: gateway
+  namespace: agent-seddon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/name: gateway
+        app.kubernetes.io/part-of: agent-seddon
+    spec:
+      containers:
+        - args:
+            - "--serve-all"
+            - "--config"
+            - /etc/agent/agent.toml
+          image: "agent-seddon/agent:pjhcdr1v75r8a0z1xpznr7qjzi0gfz28"
+          livenessProbe:
+            failureThreshold: 3
+            grpc:
+              port: 50100
+            periodSeconds: 10
+          name: agent
+          ports:
+            - containerPort: 50100
+              name: grpc
+            - containerPort: 9700
+              name: metrics
+          readinessProbe:
+            failureThreshold: 3
+            grpc:
+              port: 50100
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          startupProbe:
+            failureThreshold: 12
+            grpc:
+              port: 50100
+            periodSeconds: 5
+          volumeMounts:
+            - mountPath: /etc/agent
+              name: config
+              readOnly: true
+            - mountPath: /etc/agent/tls
+              name: tls
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp
+      volumes:
+        - configMap:
+            name: gateway-config
+          name: config
+        - name: tls
+          secret:
+            secretName: tls-gateway
+        - emptyDir: {}
+          name: tmp

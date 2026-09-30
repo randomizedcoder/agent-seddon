@@ -20,6 +20,9 @@
   go-graph,
   review-toolbox,
   reviewGoCorpus,
+  src,
+  k8sRenderedTree,
+  k8sTargetNames,
 }:
 
 let
@@ -347,6 +350,15 @@ in
       versions
       agent
       ;
+  };
+  # The committed rendered/ tree must equal a fresh render (k8s track K3,
+  # docs/design/k8s/04): editing a component or bumping an image tag without
+  # re-rendering fails the gate. The hermetic twin of
+  # `nix run .#k8s-render-manifests -- --check`.
+  k8s-rendered = import ./k8s-rendered.nix {
+    inherit pkgs lib src;
+    tree = k8sRenderedTree;
+    targetNames = k8sTargetNames;
   };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
