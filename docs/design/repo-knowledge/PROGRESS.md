@@ -40,7 +40,7 @@ parallel.
 
 | When | Ref | Result |
 |---|---|---|
-| _pending_ | | first full `nix flake check` on the committed ref |
+| 2026-09-29 | `a023635a` | `nix flake check` on the committed ref — **all checks passed** (clippy `-D warnings`, rustfmt, tests, cargo-audit, buf, bench, leak, mt-audit, constants-sync). First full gate for the track. |
 
 ## Open questions
 
