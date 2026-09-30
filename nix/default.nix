@@ -493,11 +493,24 @@ let
     inherit (k8sImages) images tags;
   };
 
+  # The manifest renderer (k8s track K3, docs/design/k8s/04-manifests-and-gitops.md).
+  # Turns each component's structured manifests into the committed rendered/ tree
+  # ArgoCD applies. `nix run .#k8s-render-manifests` rewrites it (`-- --check` fails
+  # on drift); the `k8s-rendered` check gates it hermetically. Image tags come from
+  # the separately-committed image-tags.nix so an unrelated Rust PR never churns it.
+  k8sRender = import ./k8s/default.nix {
+    inherit pkgs lib;
+    constants = import ./constants.nix;
+    imageTags = import ./k8s/image-tags.nix;
+  };
+  k8s-render-manifests = k8sRender.render-manifests;
+
   # Static analysis + tests.
   checks = import ./checks {
     inherit
       pkgs
       lib
+      src
       craneLib
       commonArgs
       cargoArtifacts
@@ -511,6 +524,8 @@ let
       review-toolbox
       reviewGoCorpus
       ;
+    k8sRenderedTree = k8sRender.tree;
+    k8sTargetNames = k8sRender.targetNames;
   };
 
   # Dev shell. `go-ast` (review call-graph helper) + `go-graph` (AstBackend Go engine)
@@ -753,6 +768,7 @@ in
         gen-openapi
         buf-image
         k8s-images
+        k8s-render-manifests
         e2e-live
         e2e-expect
         e2e-multi

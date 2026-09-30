@@ -1,0 +1,22 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: agent-seddon
+  name: gateway
+  namespace: agent-seddon
+spec:
+  ports:
+    - name: grpc
+      port: 50100
+      targetPort: grpc
+    - name: metrics
+      port: 9700
+      targetPort: metrics
+  selector:
+    app.kubernetes.io/name: gateway

@@ -1,0 +1,28 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: agent-seddon
+  name: gateway
+  namespace: argocd
+spec:
+  destination:
+    namespace: agent-seddon
+    server: "https://kubernetes.default.svc"
+  project: default
+  source:
+    directory:
+      exclude: application.yaml
+    path: rendered/k3s/gateway
+    repoURL: "https://github.com/randomizedcoder/agent-seddon"
+    targetRevision: main
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true
