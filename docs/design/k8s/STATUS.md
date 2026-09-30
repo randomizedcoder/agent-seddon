@@ -7,7 +7,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | # | Increment | Where | State | PR |
 |---|---|---|---|---|
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
-| K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | 🟡 | #577 (`rendered/k3s/apps` root) |
+| K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ⬜ | |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ⬜ | |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
@@ -30,7 +30,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
   gateway runs as a cluster Service ([08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)).
   Scheduled into K3, ahead of the first cluster gateway.
 
-### K1 — k3s platform on l2 (in progress)
+### K1 — k3s platform on l2 (2026-09-29)
 
 - `~/nixos/desktop/l2/k3s.nix`, imported from l2's `configuration.nix`:
   - k3s 1.36.4 (nixpkgs), with flannel, network policy, kube-proxy, traefik and servicelb off, and
@@ -52,3 +52,20 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
   - l2's `resolv.conf` starts with its loopback pdns-recursor, which k3s rejects in favour of
     8.8.8.8. `--resolv-conf` points pod DNS at hp4 (172.16.50.232) instead.
   - l2 has no crowdsec; the firewall is the NixOS default (iptables).
+- **Live acceptance on l2, 2026-09-29:**
+  - node `l2` Ready (v1.36.4+k3s1, containerd 2.3.4); all 12 pods managed by Cilium;
+  - `cilium status` OK (KubeProxyReplacement True on `enp1s0`, WireGuard, Hubble relay OK);
+  - `cilium connectivity test` passes all 50 tests (155 actions) with the L7 tests excluded;
+  - `cmctl check api` ready;
+  - the ArgoCD root `agent-seddon` is Synced and Healthy at `bb0900d0`;
+  - a pod resolves both cluster and public names, and CoreDNS forwards upstream to hp4
+    (`172.16.50.232:53`), as seen in Hubble;
+  - the pod reaches a host port (Prometheus `:9090`); after a DNS-only `CiliumNetworkPolicy` the same
+    request times out, and Hubble records `Policy denied DROPPED`;
+  - the host's own services (llama `:8095`, Grafana, pdns, the podman stack) are unaffected.
+- **Found in acceptance:** with `l7Proxy=false`, Cilium rejects any policy with an L7 section,
+  including DNS rules and `toFQDNs` ("L7 policy is not supported since L7 proxy is not enabled").
+  The full connectivity test therefore fails its 11 L7, DNS-proxy and FQDN tests by design, so they
+  are excluded (`--test '!l7,!dns-only,!fqdn,!pod-to-world,!check-log-errors'`). The
+  [`toFQDNs` egress follow-up](10-increments.md#follow-ups-not-scheduled) needs the DNS proxy, and
+  so `l7Proxy` back on. That is a trade to decide then; until then, egress stays CIDR-based.
