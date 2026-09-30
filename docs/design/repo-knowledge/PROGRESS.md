@@ -70,6 +70,8 @@ RK-06 (`Indexer`, lane C) unblocks once RK-02 **and** RK-03 have both landed.
 | When | Ref | Result |
 |---|---|---|
 | 2026-09-29 | `a023635a` | `nix flake check` on the committed ref — **all checks passed** (clippy `-D warnings`, rustfmt, tests, cargo-audit, buf, bench, leak, mt-audit, constants-sync). First full gate for the track. |
+| 2026-09-30 | `0d61ff52` | `nix flake check` on the committed ref (RK-02) — **all checks passed**, including the new `repo-graph` check (the P1 in-gate units under `repo-graph-postgres`). `clippy --all-features -D warnings`, `cargo machete` and `cargo deny check bans` clean; no new `sqlx` version, no `rsa`/RUSTSEC-2023-0071. |
+| 2026-09-30 | `0d61ff52` | `nix run .#pg-integration` (podman) — **PASS**, all tiers green incl. `repo-graph`: the 46 R3 conformance rows rerun on `PgRepoGraph` (`after = assert_invariants`) + the 11 R4 pg-only rows (57 ignored rows, 0 failed). Postgres torn down on the EXIT trap. |
 
 ## Open questions
 
