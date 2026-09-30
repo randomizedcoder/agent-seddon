@@ -81,6 +81,11 @@ pub enum Error {
     /// gRPC service in CP-09 maps the typed variants, not this string).
     #[error("campaign error: {0}")]
     Campaign(String),
+    /// Repo-knowledge seam (`docs/design/repo-knowledge/`): the rendered form of a
+    /// [`repo_graph::RepoGraphError`] for callers that speak the shared `Error` (the gRPC
+    /// service in RK-13 maps the typed variants, not this string).
+    #[error("repo graph error: {0}")]
+    RepoGraph(String),
 }
 
 // The shared message vocabulary — see message.rs (re-exported below).
@@ -985,6 +990,11 @@ pub use forge_card::*;
 // glob re-export: the names (`Task`, `Policy`, `TaskState`) would collide with the
 // tracker / policy seams above. See docs/design/campaigns/.
 pub mod campaign;
+
+// Repo knowledge: the `RepoGraphStore` seam, the node-key grammar, the value types and the
+// pure `GraphBuilder`. A namespaced module (`Node`, `Edge`, `Scope` would collide with the
+// graph / tracker seams). See docs/design/repo-knowledge/.
+pub mod repo_graph;
 
 mod message_transport;
 pub use message_transport::*;

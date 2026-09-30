@@ -224,6 +224,21 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
             tonic::Status::internal(format!("campaign: {m}"))
         }
         Error::Campaign(m) => tonic::Status::invalid_argument(format!("campaign: {m}")),
+        // Repo-knowledge seam (docs/design/repo-knowledge/): an absent / cross-tenant row is
+        // NotFound, a state / identity / id-collision conflict is FailedPrecondition (re-read
+        // and retry), a store fault is Internal, and a rejected or oversized field is a bad
+        // request. The RK-13 `RepoGraphService` maps the typed variants directly; this keeps
+        // the shared bridge exhaustive until then.
+        Error::RepoGraph(m) if m.starts_with("not found") => {
+            tonic::Status::not_found(format!("repo graph: {m}"))
+        }
+        Error::RepoGraph(m) if m.starts_with("conflict") => {
+            tonic::Status::failed_precondition(format!("repo graph: {m}"))
+        }
+        Error::RepoGraph(m) if m.starts_with("backend") => {
+            tonic::Status::internal(format!("repo graph: {m}"))
+        }
+        Error::RepoGraph(m) => tonic::Status::invalid_argument(format!("repo graph: {m}")),
         // Overload is a "slow down", not a fault: RESOURCE_EXHAUSTED is in the
         // client's retryable set, so it backs off + retries rather than failing.
         Error::Overloaded(m) => tonic::Status::resource_exhausted(format!("overloaded: {m}")),
@@ -4773,6 +4788,7 @@ pub fn snapshot_event(s: agent_core::StatusSnapshot) -> pb::SessionEvent {
 mod tests {
     use super::*;
     use agent_core::campaign::CampaignError;
+    use agent_core::repo_graph::RepoGraphError;
     use rstest::rstest;
 
     fn msg_with_calls() -> agent_core::Message {
@@ -5337,6 +5353,27 @@ mod tests {
     fn status_from_campaign_prefix_only(#[case] msg: &str, #[case] want: tonic::Code) {
         let s = status_from_error(&agent_core::Error::Campaign(msg.to_string()));
         assert_eq!(s.code(), want, "wrong code for {msg:?}");
+    }
+
+    // A `RepoGraph` error carries a rendered `RepoGraphError`; its `Display` prefix picks the
+    // code. Built from the typed error so a renamed prefix fails here, not on the wire.
+    #[rstest]
+    #[case::positive_not_found(RepoGraphError::NotFound, tonic::Code::NotFound)]
+    #[case::positive_conflict(
+        RepoGraphError::Conflict("node id collision".into()),
+        tonic::Code::FailedPrecondition
+    )]
+    #[case::positive_backend(RepoGraphError::Backend("pool".into()), tonic::Code::Internal)]
+    #[case::positive_invalid(
+        RepoGraphError::Invalid("node_key: whitespace".into()),
+        tonic::Code::InvalidArgument
+    )]
+    #[case::positive_too_long(RepoGraphError::TooLong("node_key".into()), tonic::Code::InvalidArgument)]
+    fn status_from_repo_graph_error(#[case] err: RepoGraphError, #[case] want: tonic::Code) {
+        let shared: agent_core::Error = err.into();
+        let s = status_from_error(&shared);
+        assert_eq!(s.code(), want, "wrong code for {shared:?}");
+        assert!(s.message().starts_with("repo graph: "), "{}", s.message());
     }
 
     // A `ConvertError` (a malformed inbound message) is a client bad request.
