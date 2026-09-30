@@ -476,6 +476,23 @@ let
     '';
   };
 
+  # k8s container images (k8s track K2, docs/design/k8s/03-images-and-registry.md).
+  # One agent image serves every role; `nix run .#k8s-images` imports/pushes it and
+  # rewrites the committed nix/k8s/image-tags.nix that the renderer (K3) reads. The
+  # `k8s-image-smoke` check (nix/checks) gates its security posture.
+  k8sImages = import ./k8s/images.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
+  k8s-images = import ./k8s/k8s-images.nix {
+    inherit pkgs lib;
+    inherit (k8sImages) images tags;
+  };
+
   # Static analysis + tests.
   checks = import ./checks {
     inherit
@@ -703,6 +720,8 @@ in
       go-graph
       review-toolbox
       ;
+    # The k8s agent image (streamLayeredImage stream script). k8s track K2.
+    agent-image = k8sImages.images.agent;
     inherit (versions)
       promptfoo
       swebench
@@ -733,6 +752,7 @@ in
         gen-constants
         gen-openapi
         buf-image
+        k8s-images
         e2e-live
         e2e-expect
         e2e-multi

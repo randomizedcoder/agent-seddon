@@ -27,8 +27,11 @@ So the tags live in **`nix/k8s/image-tags.nix`**, and only the release step writ
 (`nix run .#k8s-images`). The drift check compares `rendered/` against the renderer given the
 committed tags. A PR that changes code but does not release leaves `rendered/` alone.
 
-A second check, `k8s-image-tags-fresh`, reports (it does not fail) when the committed tag differs
-from the current build. It is a reminder, not a gate: releasing is a decision.
+Freshness is not a separate flake check: a `nix flake check` target can only pass or fail, and a
+tag being stale is neither — releasing is a decision. Re-running `nix run .#k8s-images` is the
+freshness probe instead: it rewrites `image-tags.nix` from the current build, so a non-empty
+`git diff nix/k8s/image-tags.nix` is exactly "the committed tag is stale". (The K3 drift check does
+gate: it fails if `rendered/` disagrees with the renderer given the *committed* tags.)
 
 ## Getting images onto nodes
 
@@ -54,9 +57,13 @@ already there when the merge lands.
 ## Gate
 
 - The images build as part of `nix flake check`.
-- The `k8s-image-smoke` check loads the agent image's config JSON and asserts:
-  - the user is non-root;
-  - the entrypoint is the agent binary;
-  - no shell is present.
+- The `k8s-image-smoke` check streams the real image, unpacks its docker-archive, and asserts:
+  - the user is non-root (uid 10001);
+  - the entrypoint is the agent binary (`/bin/agent`);
+  - no shell sits on a guessable path (`/bin/sh`, `/bin/bash`, `/usr/bin/*`). The wrapped agent
+    still carries a bash at its own store path — makeWrapper's launcher — but it is not on `PATH`.
+  - the archive is tagged `agent-seddon/agent:<hash>`.
 
-  It also runs the binary out of the image root with `--version`.
+  It also runs the binary out of the unpacked image root: the agent CLI has no `--version`, so it
+  uses `--help` (exit 0, reads no config, calls nothing), which also proves the interpreter and
+  loader resolve.
