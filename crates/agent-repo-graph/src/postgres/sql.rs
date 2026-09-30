@@ -247,10 +247,16 @@ pub const REPO_UPSERT: &str = "INSERT INTO repos
        forge = EXCLUDED.forge, remote_url = EXCLUDED.remote_url,
        default_branch = EXCLUDED.default_branch, profile = EXCLUDED.profile
      RETURNING repo_id";
-pub const REPO_GET: &str =
-    concat!("SELECT ", repo_cols!(), " FROM repos WHERE tenant = $1 AND slug = $2");
-pub const REPOS: &str =
-    concat!("SELECT ", repo_cols!(), " FROM repos WHERE tenant = $1 ORDER BY slug");
+pub const REPO_GET: &str = concat!(
+    "SELECT ",
+    repo_cols!(),
+    " FROM repos WHERE tenant = $1 AND slug = $2"
+);
+pub const REPOS: &str = concat!(
+    "SELECT ",
+    repo_cols!(),
+    " FROM repos WHERE tenant = $1 ORDER BY slug"
+);
 
 // -- snapshots: begin / write / finish ------------------------------------------
 
@@ -286,7 +292,8 @@ pub const NODES_INSERT: &str = "INSERT INTO graph_nodes
 
 /// A distinct key mapped onto a stored `node_id` (a collision the content-addressed id forbids):
 /// `$3` ids, `$4` keys. `> 0` ⇒ `Conflict`.
-pub const COLLISION_CHECK: &str = "SELECT count(*) FROM UNNEST($3::bigint[], $4::text[]) AS b(node_id, node_key)
+pub const COLLISION_CHECK: &str =
+    "SELECT count(*) FROM UNNEST($3::bigint[], $4::text[]) AS b(node_id, node_key)
      JOIN graph_nodes n ON n.tenant = $1 AND n.repo_id = $2 AND n.node_id = b.node_id
      WHERE n.node_key <> b.node_key";
 
@@ -628,7 +635,10 @@ mod tests {
         // default weight is 1.0; kinds are the enum's wire spelling.
         assert!(a.weights.iter().all(|w| (*w - 1.0).abs() < f32::EPSILON));
         for k in &a.kinds {
-            assert!(EdgeKind::parse(k).is_some(), "kind {k:?} is a wire spelling");
+            assert!(
+                EdgeKind::parse(k).is_some(),
+                "kind {k:?} is a wire spelling"
+            );
         }
     }
 

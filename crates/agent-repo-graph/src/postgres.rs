@@ -98,9 +98,7 @@ fn map_db(e: sqlx::Error) -> RepoGraphError {
                 ErrorKind::UniqueViolation if name == "graph_snapshots_identity_key" => {
                     RepoGraphError::Conflict("duplicate snapshot identity".to_string())
                 }
-                ErrorKind::UniqueViolation => {
-                    RepoGraphError::Conflict(format!("unique: {name}"))
-                }
+                ErrorKind::UniqueViolation => RepoGraphError::Conflict(format!("unique: {name}")),
                 ErrorKind::ForeignKeyViolation
                 | ErrorKind::NotNullViolation
                 | ErrorKind::CheckViolation => {
@@ -217,15 +215,16 @@ fn row_to_noderow(row: &PgRow) -> RepoGraphResult<NodeRow> {
     let kind_text: String = col(row, "kind")?;
     let lang_text: String = col(row, "lang")?;
     let attrs_text: String = col(row, "attrs")?;
-    let attrs = serde_json::from_str(&attrs_text)
-        .map_err(|e| backend(&format!("column attrs: {e}")))?;
+    let attrs =
+        serde_json::from_str(&attrs_text).map_err(|e| backend(&format!("column attrs: {e}")))?;
     let line_start: i32 = col(row, "line_start")?;
     let line_end: i32 = col(row, "line_end")?;
     Ok(NodeRow {
         node: Node {
             key,
             id: NodeId(col(row, "node_id")?),
-            kind: NodeKind::parse(&kind_text).ok_or_else(|| backend("column kind: unknown value"))?,
+            kind: NodeKind::parse(&kind_text)
+                .ok_or_else(|| backend("column kind: unknown value"))?,
             lang: parse_lang(&lang_text)?,
             name: col(row, "name")?,
             name_tokens: col(row, "name_tokens")?,
@@ -247,7 +246,11 @@ impl PgRepoGraph {
     /// Connect a pool to `dsn` (max `pool_max` connections, clamped to ≥1) bound to the `local`
     /// tenant and, when `migrate_on_start`, apply the embedded migrations. The DSN is never echoed
     /// on error (it carries a password).
-    pub async fn connect(dsn: &str, pool_max: u32, migrate_on_start: bool) -> RepoGraphResult<Self> {
+    pub async fn connect(
+        dsn: &str,
+        pool_max: u32,
+        migrate_on_start: bool,
+    ) -> RepoGraphResult<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(pool_max.max(1))
             .connect(dsn)
@@ -503,7 +506,9 @@ impl RepoGraphStore for PgRepoGraph {
         let repo_id: i64 = col(&row, "repo_id")?;
         let status: String = col(&row, "status")?;
         if status != "building" {
-            return Err(RepoGraphError::Conflict("snapshot not building".to_string()));
+            return Err(RepoGraphError::Conflict(
+                "snapshot not building".to_string(),
+            ));
         }
 
         for r in sql::chunk_ranges(na.ids.len(), sql::WRITE_CHUNK) {
@@ -596,7 +601,9 @@ impl RepoGraphStore for PgRepoGraph {
             .ok_or(RepoGraphError::NotFound)?;
         let cur: String = col(&row, "status")?;
         if cur != "building" {
-            return Err(RepoGraphError::Conflict("snapshot not building".to_string()));
+            return Err(RepoGraphError::Conflict(
+                "snapshot not building".to_string(),
+            ));
         }
         let built_at_ms: i64 = col(&row, "built_at_ms")?;
         let duration = now.saturating_sub(sql::unsigned(built_at_ms));
@@ -1010,7 +1017,8 @@ impl RepoGraphStore for PgRepoGraph {
             .map_err(map_db)?
         {
             let kind_text: String = col(row, "kind")?;
-            let kind = NodeKind::parse(&kind_text).ok_or_else(|| backend("column kind: unknown value"))?;
+            let kind =
+                NodeKind::parse(&kind_text).ok_or_else(|| backend("column kind: unknown value"))?;
             let c: i64 = col(row, "c")?;
             nodes_by_kind.insert(kind, usize::try_from(c).unwrap_or(0));
         }
@@ -1115,67 +1123,4 @@ fn cap_vec<T>(v: &mut Vec<T>, truncated: &mut bool) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rstest::rstest;
-
-    /// A handle over a lazily-connecting pool: the DSN parses but no connection is ever opened, so
-    /// the `with_tenant` refusals are provably synchronous (no database needed). `connect_lazy`
-    /// itself needs a Tokio context (the pool spawns a reaper), so the callers are `#[tokio::test]`
-    /// — but no statement is ever issued, so no server is required.
-    fn lazy() -> PgRepoGraph {
-        PgRepoGraph::connect_lazy("postgres://u:p@localhost:5432/db", 1).expect("valid DSN parses")
-    }
-
-    #[tokio::test]
-    async fn positive_with_tenant_valid() {
-        let s = lazy().with_tenant("ta").expect("safe tenant");
-        assert_eq!(s.tenant(), "ta");
-    }
-
-    #[tokio::test]
-    async fn positive_with_tenant_clone_shares_pool() {
-        let s = lazy().with_tenant("ta").unwrap();
-        let c = s.clone();
-        assert_eq!(c.tenant(), "ta");
-    }
-
-    #[rstest]
-    #[case::traversal("../x")]
-    #[case::space("a b")]
-    #[case::slash("a/b")]
-    #[case::dash("-x")]
-    #[case::dotdot("..")]
-    #[case::empty("")]
-    #[tokio::test]
-    async fn adversarial_tenant_refused_before_any_statement(#[case] tenant: &str) {
-        // The lazy pool never connected; a refusal here is therefore synchronous, before SQL.
-        let err = lazy().with_tenant(tenant).expect_err("unsafe tenant refused");
-        assert!(matches!(err, RepoGraphError::Invalid(_)));
-    }
-
-    #[tokio::test]
-    async fn boundary_tenant_128_ok_129_refused() {
-        assert!(lazy().with_tenant(&"a".repeat(128)).is_ok());
-        assert!(lazy().with_tenant(&"a".repeat(129)).is_err());
-    }
-
-    #[test]
-    fn positive_map_db_row_not_found() {
-        assert_eq!(map_db(sqlx::Error::RowNotFound), RepoGraphError::NotFound);
-    }
-
-    #[test]
-    fn negative_map_db_other_is_backend() {
-        // A non-`Database` error maps to `Backend` and never carries a DSN/password.
-        let err = map_db(sqlx::Error::PoolClosed);
-        match err {
-            RepoGraphError::Backend(msg) => {
-                assert!(msg.starts_with("repo-graph postgres:"));
-                assert!(!msg.contains("localhost"));
-                assert!(!msg.contains("password"));
-            }
-            other => panic!("expected Backend, got {other:?}"),
-        }
-    }
-}
+mod tests;
