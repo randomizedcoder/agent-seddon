@@ -1,0 +1,13 @@
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/component: selfsigned-bootstrap
+    app.kubernetes.io/name: selfsigned-bootstrap
+    app.kubernetes.io/part-of: agent-seddon
+  name: selfsigned-bootstrap
+spec:
+  selfSigned: {}

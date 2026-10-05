@@ -1,0 +1,14 @@
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/component: agent-seddon-ca
+    app.kubernetes.io/name: agent-seddon-ca
+    app.kubernetes.io/part-of: agent-seddon
+  name: agent-seddon-ca
+spec:
+  ca:
+    secretName: agent-seddon-ca
