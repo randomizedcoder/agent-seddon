@@ -22,6 +22,9 @@ this repo; its STATUS row records the commit there.
 - `nixosModules.agent-seddon`: the native roles as hardened systemd units ([01](01-deployment-targets.md)).
 - ArgoCD `PreSync` migration Jobs ([09](09-edge-and-observability.md)).
 - trust-manager root-rotation bundle ([05](05-identity-and-pki.md)).
+- cert-manager approver-policy (`CertificateRequestPolicy`) to constrain which SPIFFE SANs each
+  requester may obtain from the CA issuer, so SAN forgery is bounded by policy and not only by RBAC
+  ([05](05-identity-and-pki.md#ca-chain-wave-0)).
 - `toFQDNs` egress ([06](06-network-policy.md)).
 - external-secrets or sops ([07](07-secrets.md)).
 - cgroup-v2 delegation for sandbox limits, and a Tier-2 runtime class ([08](08-sandbox.md)).

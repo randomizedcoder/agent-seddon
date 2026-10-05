@@ -20,6 +20,14 @@
 # principal (`spiffe://<trust-domain>/svc/<role>`); the `[auth.mtls] bindings` that
 # map those SANs to tenants and roles are rendered into the role configs at K5.
 # Short 24h lifetimes keep the K4 reload path exercised every day.
+#
+# Security note (SAN forgery): a cert-manager CA issuer signs whatever SAN a
+# `Certificate` asks for, so the right to create a `Certificate` that references
+# `agent-seddon-ca` is the right to mint any role identity. The control today is
+# cluster RBAC — only the operator and ArgoCD may create `Certificate` resources;
+# the agent pods cannot. Constraining *which* SANs a requester may obtain needs
+# cert-manager approver-policy (`CertificateRequestPolicy`), tracked as a K5 /
+# hardening follow-up in 05-identity-and-pki.md and 10-increments.md.
 {
   lib,
   k8sLib,
@@ -130,6 +138,10 @@ in
       };
       spec = {
         isCA = true;
+        # The chain is root → leaf only: this CA issues end-entity role certs and
+        # must never be usable to sign a sub-CA. A zero path-length constraint
+        # (basicConstraints pathLenConstraint=0) pins that into the root itself.
+        maxPathLen = 0;
         commonName = caName;
         secretName = caName;
         privateKey = {

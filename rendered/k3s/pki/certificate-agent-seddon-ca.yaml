@@ -18,6 +18,7 @@ spec:
     group: cert-manager.io
     kind: ClusterIssuer
     name: selfsigned-bootstrap
+  maxPathLen: 0
   privateKey:
     algorithm: ECDSA
     size: 256
