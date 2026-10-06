@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 |
-| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | `[grpc.gateway] exclude` |
+| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | #580, #581, #583, #587 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
@@ -177,8 +177,35 @@ secrets/status apps). It is landing as small PRs in the K1/K2 style rather than 
     workspace are later refinements; for now the read-only rootfs's writable `/tmp` serves.
   - `rendered/k3s/{sessions,fleet}/` committed + their `apps/application-*.yaml`; all six new objects
     pass `kubeconform -strict`, and `k8s-rendered` stays green.
-- **Still to land in K3:** the `pki` component (CA chain + per-role Certificates — K3 ships behind
-  K5's PKI); the `k8s-render-tests` (Python table tests over the rendered objects, incl. the
-  adversarial rows) and `k8s-kubeconform` (vendored CRD schemas) checks; the `k8s-secrets` and
-  `k8s-status` apps. `helm.nix` is only needed if a component pulls a third-party chart (none on the
-  application side today).
+- **Slice 4 — the in-cluster PKI (`pki` component).** The deployments already mount `tls-gateway`,
+  `tls-sessions` and `tls-fleet`, but nothing issued them; this slice renders the cert-manager chain
+  that does, all at sync-wave 0 (before any workload). Per [05](05-identity-and-pki.md):
+  - [`nix/k8s/components/pki.nix`](../../../nix/k8s/components/pki.nix) emits the CA chain —
+    `ClusterIssuer selfsigned-bootstrap` (selfSigned) → `Certificate agent-seddon-ca` (isCA, ECDSA
+    P-256, 10 years, its Secret in the **`cert-manager`** namespace so the CA `ClusterIssuer` can
+    read it) → `ClusterIssuer agent-seddon-ca` (`ca.secretName`) — and one `Certificate` per mTLS
+    role (gateway/sessions/fleet): ECDSA P-256 `rotationPolicy: Always`, 24h duration renewed 8h out,
+    the SPIFFE URI SAN `spiffe://agent.l2/svc/<role>` plus the in-cluster DNS names, issued by the CA
+    into `tls-<role>`. The exec seams never run as a cluster Service, so they get no certificate.
+  - The component reuses the renderer's `labels`/`syncWave`/`application`/`toYAML` (no cert-manager
+    knowledge leaked into `lib.nix`); it is registered first in [`default.nix`](../../../nix/k8s/default.nix)'s
+    component list, ahead of the workloads.
+  - [`rendered/k3s/pki/`](../../../rendered/k3s/pki) (six objects) + `apps/application-pki.yaml`
+    committed; `nix run .#k8s-render-manifests -- --check` and the `k8s-rendered` gate are green.
+  - **Scope held tight:** the `[auth.mtls] bindings` that consume these SANs are K5, not here; the
+    `k8s-kubeconform` gate (which needs the vendored cert-manager CRD schemas) is a later K3 slice,
+    so these CRDs are not schema-validated by the gate yet.
+  - **Security review (commit-time):** the chain is root → leaf (the root is the only `isCA` cert,
+    role certs are leaves). cert-manager's `Certificate` has **no path-length field** — an earlier
+    `maxPathLen: 0` was dropped because it is not part of the CRD (the API prunes unknown fields and
+    `kubeconform -strict` rejects it), so it constrained nothing; the leaf-only shape holds
+    structurally and is asserted by `k8s-render-tests`. SAN forgery via the CA issuer is bounded by
+    cluster RBAC today (only operator/ArgoCD may create `Certificate` resources, not the agent pods);
+    the proper per-requester constraint — cert-manager approver-policy `CertificateRequestPolicy`,
+    which also gates who may request an `isCA` cert — is a K5 / hardening follow-up in
+    [05](05-identity-and-pki.md) and [10](10-increments.md).
+- **Still to land in K3:** the `k8s-render-tests` (Python table tests over the rendered objects,
+  incl. the adversarial rows) and `k8s-kubeconform` (vendored CRD schemas) checks; the `k8s-secrets`
+  and `k8s-status` apps. Then the live acceptance on l2 (ArgoCD syncs, the three roles Ready,
+  `k8s-status` green) and the STATUS → ✅ close-out. `helm.nix` is only needed if a component pulls a
+  third-party chart (none on the application side today).

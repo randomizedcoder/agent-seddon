@@ -27,9 +27,10 @@ let
     k3s = import ./targets/k3s.nix;
   };
 
-  # Every component function, in wave order. pki (CA chain + Certificates) lands in
-  # a later K3 slice; edge/portal-web are K6.
+  # Every component function, in wave order. pki (the CA chain + per-role
+  # Certificates) applies at wave 0, before the workloads; edge/portal-web are K6.
   components = [
+    ./components/pki.nix
     ./components/gateway.nix
     ./components/sessions.nix
     ./components/fleet.nix

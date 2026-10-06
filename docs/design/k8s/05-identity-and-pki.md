@@ -49,6 +49,18 @@ ClusterIssuer selfsigned-bootstrap
 
 - The root is distributed to pods as the `ca.crt` key in every issued Secret. The agent uses it as
   both `[grpc.tls] client_ca` and `[grpc.tls.client] ca`.
+- The chain is root → leaf: the CA issues end-entity role certs, never a sub-CA. cert-manager's
+  `Certificate` has no path-length field (`maxPathLen`/basicConstraints are not part of the spec, and
+  the CRD prunes unknown fields), so this is not pinned into the cert. It holds structurally — the
+  root is the only `isCA` certificate and every role cert is a leaf — and who may request an `isCA`
+  cert is constrained by RBAC today and by approver-policy (`CertificateRequestPolicy`) in K5 (below).
+- **SAN forgery is bounded by RBAC, not by the issuer.** A cert-manager CA issuer signs whatever SAN
+  a `Certificate` requests, so holding the right to create a `Certificate` that references
+  `agent-seddon-ca` is the right to mint any role identity (e.g. `spiffe://agent.l2/svc/gateway`).
+  Today only the operator and ArgoCD have that RBAC; the agent pods do not. Constraining *which* SANs
+  a given requester may obtain needs cert-manager **approver-policy** (`CertificateRequestPolicy`),
+  one policy per role keyed to the requesting ServiceAccount/namespace — a K5 / hardening follow-up
+  ([10](10-increments.md#follow-ups-not-scheduled)), not a property of the CA issuer itself.
 - **Root rotation** is a planned event, not automatic: issue the new root, trust both during the
   overlap, then remove the old one. A later increment adds trust-manager to publish a bundle holding
   both.
