@@ -139,9 +139,14 @@ in
       spec = {
         isCA = true;
         # The chain is root → leaf only: this CA issues end-entity role certs and
-        # must never be usable to sign a sub-CA. A zero path-length constraint
-        # (basicConstraints pathLenConstraint=0) pins that into the root itself.
-        maxPathLen = 0;
+        # must never sign a sub-CA. cert-manager's Certificate has no field for a
+        # path-length constraint (no `maxPathLen`/basicConstraints on the spec), so
+        # that is not pinned into the cert itself. It holds structurally instead:
+        # the root is the only `isCA` cert, every role cert is a leaf (isCA unset),
+        # and who may request an `isCA` cert is gated by RBAC today and by
+        # approver-policy (CertificateRequestPolicy) in K5. The k8s-render-tests
+        # gate asserts the leaf-only shape; k8s-kubeconform would reject a stray
+        # `maxPathLen` as an unknown CRD field.
         commonName = caName;
         secretName = caName;
         privateKey = {

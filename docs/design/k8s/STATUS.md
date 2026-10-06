@@ -195,11 +195,15 @@ secrets/status apps). It is landing as small PRs in the K1/K2 style rather than 
   - **Scope held tight:** the `[auth.mtls] bindings` that consume these SANs are K5, not here; the
     `k8s-kubeconform` gate (which needs the vendored cert-manager CRD schemas) is a later K3 slice,
     so these CRDs are not schema-validated by the gate yet.
-  - **Security review (commit-time):** the root CA now pins `maxPathLen: 0` (root → leaf only, no
-    sub-CAs). SAN forgery via the CA issuer is bounded by cluster RBAC today (only operator/ArgoCD
-    may create `Certificate` resources, not the agent pods); the proper per-requester SAN constraint
-    (cert-manager approver-policy `CertificateRequestPolicy`) is recorded as a K5 / hardening
-    follow-up in [05](05-identity-and-pki.md) and [10](10-increments.md).
+  - **Security review (commit-time):** the chain is root → leaf (the root is the only `isCA` cert,
+    role certs are leaves). cert-manager's `Certificate` has **no path-length field** — an earlier
+    `maxPathLen: 0` was dropped because it is not part of the CRD (the API prunes unknown fields and
+    `kubeconform -strict` rejects it), so it constrained nothing; the leaf-only shape holds
+    structurally and is asserted by `k8s-render-tests`. SAN forgery via the CA issuer is bounded by
+    cluster RBAC today (only operator/ArgoCD may create `Certificate` resources, not the agent pods);
+    the proper per-requester constraint — cert-manager approver-policy `CertificateRequestPolicy`,
+    which also gates who may request an `isCA` cert — is a K5 / hardening follow-up in
+    [05](05-identity-and-pki.md) and [10](10-increments.md).
 - **Still to land in K3:** the `k8s-render-tests` (Python table tests over the rendered objects,
   incl. the adversarial rows) and `k8s-kubeconform` (vendored CRD schemas) checks; the `k8s-secrets`
   and `k8s-status` apps. Then the live acceptance on l2 (ArgoCD syncs, the three roles Ready,
