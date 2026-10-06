@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 |
-| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | #580, #581, #583, #587 |
+| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | #580, #581, #583, #587, #589 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
@@ -113,7 +113,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 
 K3 is large (renderer infra, components, PKI, policy, `rendered/k3s/`, three gate checks, the
 secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR. Slices 1–4
-are below; the remaining slices (5–9) are outlined in [Remaining K3 slices](#remaining-k3-slices).
+are below; the remaining slices (6–9) are outlined in [Remaining K3 slices](#remaining-k3-slices).
 
 - **Slice 1 — `[grpc.gateway] exclude` (the Rust prerequisite).** [08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)'s
   hard precondition: `--serve-all` hosts the exec seams (`sandbox`/`pty`/`forge`) whenever their
@@ -205,15 +205,39 @@ are below; the remaining slices (5–9) are outlined in [Remaining K3 slices](#r
     the proper per-requester constraint — cert-manager approver-policy `CertificateRequestPolicy`,
     which also gates who may request an `isCA` cert — is a K5 / hardening follow-up in
     [05](05-identity-and-pki.md) and [10](10-increments.md).
+- **Slice 5 — the `k8s-render-tests` gate.** `k8s-rendered` proves the committed tree equals a fresh
+  render; this proves it is *correct*. The renderer emits YAML from structured attrsets, so the tests
+  walk the structure ([04](04-manifests-and-gitops.md)):
+  - [`test/k8s-render/render_checks.py`](../../../test/k8s-render/render_checks.py) — one
+    `check_*(manifests) -> [Finding]` per invariant over `rendered/k3s/`: the hardened
+    securityContext on every workload, no privilege anywhere (the sandbox sidecar is K7), gRPC
+    readiness/liveness probes, the three `app.kubernetes.io` labels, string sync waves in the right
+    order (pki 0 · config/service 2 · gateway 3 · sessions/fleet 4), the gateway's exec-seam
+    `exclude`, no sandbox/pty/forge port on a Service or container, the SPIFFE SAN shape
+    `spiffe://agent.l2/svc/<role>`, the `tls-<role>` Secret ↔ Certificate bijection, the full CA
+    chain (bootstrap → root `isCA` in `cert-manager`, the only CA, → CA issuer → leaf role certs),
+    the component ↔ Application wiring, and no secret-looking ConfigMap material.
+  - [`test/k8s-render/test_render.py`](../../../test/k8s-render/test_render.py) — the four case
+    classes plus the mandatory `adversarial_` **check-the-checks** rows: each mutates a copy of a real
+    manifest (flip `runAsNonRoot`, drop `forge` from the exclude, expose `:50066`, forge a non-SPIFFE
+    SAN, mark a role cert `isCA`, plant a PEM key in a ConfigMap, …) and asserts the matching check fires,
+    so an always-green assertion fails the build. Verified at the nix level too: hand-breaking a
+    committed manifest makes `nix build .#checks.x86_64-linux.k8s-render-tests` fail.
+  - [`nix/checks/k8s-render-tests.nix`](../../../nix/checks/k8s-render-tests.nix) → the
+    **`k8s-render-tests`** gate (`python3 -m unittest`, PyYAML via `withPackages`), registered in
+    [`nix/checks/default.nix`](../../../nix/checks/default.nix) beside `k8s-rendered`.
+  - **Deferred, on purpose:** the `[auth.mtls] binding ↔ Certificate` cross-ref is K5 (no
+    `[auth.mtls]` section renders yet); the `CiliumNetworkPolicy`/default-deny rows wait on the
+    policy component (no such objects render yet). Both are noted in the suite so the gap is explicit.
 
 #### Remaining K3 slices
 
-The rest of K3 lands as one small PR per slice, in order. `helm.nix` is only needed if a component
-pulls a third-party chart (none on the application side today), so it is not scheduled here.
+The rest of K3 lands as one small PR per slice, in order. Slice 5 (`k8s-render-tests`) is above.
+`helm.nix` is only needed if a component pulls a third-party chart (none on the application side
+today), so it is not scheduled here.
 
 | Slice | Component / check | Scope | Acceptance |
 |---|---|---|---|
-| 5 | `k8s-render-tests` | Python table suite walking `rendered/k3s/`: hardened securityContext, probes, sync waves, labels, the gateway exec-seam `exclude`, no sandbox/pty/forge exposure, SPIFFE SAN shape, the CA chain + `tls-<role>` Secret cross-references, and no secret-looking ConfigMap material — four case classes plus the mandatory `adversarial_` check-the-checks rows | the gate is green on `rendered/`, and a deliberately-mutated manifest makes it fail |
 | 6 | `k8s-kubeconform` | `kubeconform -strict` over every rendered object, **including the cert-manager CRs from slice 4** (the vendored cert-manager and ArgoCD CRD schemas) | the gate schema-validates all kinds, incl. `Certificate`/`ClusterIssuer`/`Application` |
 | 7 | `k8s-secrets` app | the token signing-key and forge-credential Secrets (from local files, [07](07-secrets.md)) the fleet role needs — not in git, not in the store | rendered + the gate stays green |
 | 8 | `k8s-status` app | the green/red cluster-health rollup the live acceptance reads | rendered + the gate stays green |
