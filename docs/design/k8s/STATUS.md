@@ -112,7 +112,8 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 ### K3 — being landed in slices (2026-09-29)
 
 K3 is large (renderer infra, components, PKI, policy, `rendered/k3s/`, three gate checks, the
-secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR.
+secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR. Slices 1–4
+are below; the remaining slices (5–9) are outlined in [Remaining K3 slices](#remaining-k3-slices).
 
 - **Slice 1 — `[grpc.gateway] exclude` (the Rust prerequisite).** [08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)'s
   hard precondition: `--serve-all` hosts the exec seams (`sandbox`/`pty`/`forge`) whenever their
@@ -204,8 +205,21 @@ secrets/status apps). It is landing as small PRs in the K1/K2 style rather than 
     the proper per-requester constraint — cert-manager approver-policy `CertificateRequestPolicy`,
     which also gates who may request an `isCA` cert — is a K5 / hardening follow-up in
     [05](05-identity-and-pki.md) and [10](10-increments.md).
-- **Still to land in K3:** the `k8s-render-tests` (Python table tests over the rendered objects,
-  incl. the adversarial rows) and `k8s-kubeconform` (vendored CRD schemas) checks; the `k8s-secrets`
-  and `k8s-status` apps. Then the live acceptance on l2 (ArgoCD syncs, the three roles Ready,
-  `k8s-status` green) and the STATUS → ✅ close-out. `helm.nix` is only needed if a component pulls a
-  third-party chart (none on the application side today).
+
+#### Remaining K3 slices
+
+The rest of K3 lands as one small PR per slice, in order. `helm.nix` is only needed if a component
+pulls a third-party chart (none on the application side today), so it is not scheduled here.
+
+| Slice | Component / check | Scope | Acceptance |
+|---|---|---|---|
+| 5 | `k8s-render-tests` | Python table suite walking `rendered/k3s/`: hardened securityContext, probes, sync waves, labels, the gateway exec-seam `exclude`, no sandbox/pty/forge exposure, SPIFFE SAN shape, the CA chain + `tls-<role>` Secret cross-references, and no secret-looking ConfigMap material — four case classes plus the mandatory `adversarial_` check-the-checks rows | the gate is green on `rendered/`, and a deliberately-mutated manifest makes it fail |
+| 6 | `k8s-kubeconform` | `kubeconform -strict` over every rendered object, **including the cert-manager CRs from slice 4** (the vendored cert-manager and ArgoCD CRD schemas) | the gate schema-validates all kinds, incl. `Certificate`/`ClusterIssuer`/`Application` |
+| 7 | `k8s-secrets` app | the token signing-key and forge-credential Secrets (from local files, [07](07-secrets.md)) the fleet role needs — not in git, not in the store | rendered + the gate stays green |
+| 8 | `k8s-status` app | the green/red cluster-health rollup the live acceptance reads | rendered + the gate stays green |
+| 9 | Live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | on l2, then flip the K3 row → ✅ and close out |
+
+The `[auth.mtls] bindings` that consume the SPIFFE SANs, and the cert-manager approver-policy that
+would constrain which SANs a requester may obtain, are **K5**, not remaining K3 work. The policy /
+Namespace objects (and the `CiliumNetworkPolicy` and default-deny render-test rows that would cover
+them) land with their own component, tracked separately.
