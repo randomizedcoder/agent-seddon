@@ -93,7 +93,7 @@ compiler, so the model only learns an edit was wrong on the *next* `cargo`/`tsc`
   `SearchBackend` rejects an unsupported `SearchMode`) rather than hanging.
 - **gRPC + reflection** — add `proto/agent/v1/lsp.proto`, a `build.rs` entry, and a
   server/client in `agent-grpc` fronted by `--serve-lsp` and
-  [`with_reflection`](../../crates/agent-grpc/src/server.rs); commit the
+  [`with_reflection`](../../crates/agent-grpc/src/server/mod.rs); commit the
   `buf.image.binpb` bump. The dispatch pattern (local impl vs. `= "grpc"` client)
   is `agent-cli/src/grpc_server.rs`'s `Seam` match.
 - **Transport double** — the JSON-RPC-over-stdio client is the risky part; test it
@@ -376,7 +376,7 @@ the wire, matching the existing per-seam round-trip style), and a
   (`SearchBackend` / `SearchCapabilities` as the seam template, § Seam 6),
   [`crates/agent-testkit/src/lib.rs`](../../crates/agent-testkit/src/lib.rs)
   (`mcp::ScriptedTransport` — the model for `lsp::ScriptedLspTransport`),
-  [`crates/agent-grpc/src/server.rs`](../../crates/agent-grpc/src/server.rs)
+  [`crates/agent-grpc/src/server/mod.rs`](../../crates/agent-grpc/src/server/mod.rs)
   (`with_reflection`),
   [`crates/agent-cli/src/grpc_server.rs`](../../crates/agent-cli/src/grpc_server.rs)
   (`--serve-<seam>` `Seam` dispatch),

@@ -156,6 +156,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-doc-links"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "rstest",
+]
+
+[[package]]
 name = "agent-egress"
 version = "0.1.0"
 dependencies = [

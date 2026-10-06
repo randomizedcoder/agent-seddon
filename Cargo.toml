@@ -49,6 +49,7 @@ members = [
     "crates/agent-runtime",
     "crates/agent-cli",
     "crates/agent-testkit",
+    "crates/agent-doc-links",
 ]
 
 [workspace.package]
