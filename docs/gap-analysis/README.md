@@ -657,20 +657,34 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
 
 ### 9.1 Reachability from `README.md`
 
+> **Update (closed by #593).** A `doc-orphans` gate now fails `nix flake check` on any first-party
+> (git-tracked) doc that is not reachable from `README.md` by following in-repo Markdown links
+> (`nix run .#doc-orphans` reports; same binary backs both). All the git-tracked orphans below were
+> fixed by *linking* them from an index, not by exempting them, so the allowlist
+> [`test/doc-links/orphans.allow`](../../test/doc-links/orphans.allow) ships empty; a stale exemption
+> also fails, so it cannot drift. The stray `cat_walking_dog_poem.md` is untracked and so outside the
+> gate's git-tracked universe. Same binary + governance shape as the §9.2 gate — see
+> [components/doc-links.md](../components/doc-links.md).
+
 A breadth-first walk over the Markdown link graph from `README.md` (262 in-scope `.md` files):
 252 reachable, 213 within two hops, **10 orphans**:
 
 - `cat_walking_dog_poem.md` (stray, untracked)
-- `docs/graph-arena.md`
-- `docs/design/review-fleet/01-*.md`, `02-*.md`, `04-*.md`, `05-*.md`, `06-*.md`, `PROGRESS.md`
-- `docs/design/review-analysis-depth/STATUS.md`
-- `docs/design/prompts/06-personality-comparison-results.md` (untracked)
+- ~~`docs/graph-arena.md`~~ **linked**
+- ~~`docs/design/review-fleet/01-*.md`, `02-*.md`, `04-*.md`, `05-*.md`, `06-*.md`, `PROGRESS.md`~~ **linked** (phase-doc index)
+- ~~`docs/design/review-analysis-depth/STATUS.md`~~ **linked**
+- ~~`docs/design/prompts/06-personality-comparison-results.md`~~ **linked** (now tracked)
 
 Reachable only at depth 3: components `consensus`, `digest`, `instant-compaction`, `graph`; config
 `02-auth-and-rbac`, `03`, `04`, `05`, `10` (the auth design is three hops from the README); parity
 01–10; adaptive-cognition STATUS.
 
 ### 9.2 Broken links
+
+> **Update (closed by #590).** A `doc-links` gate now fails `nix flake check` on any broken
+> intra-repo doc link (`nix run .#doc-links` reports). The four rows below were fixed; the
+> peer-clone `../../../codex` / `../../../pi` citations are classified `External` and never
+> followed, keeping the gate hermetic. See [components/doc-links.md](../components/doc-links.md).
 
 | Source | Target | Problem |
 |---|---|---|
@@ -736,8 +750,9 @@ Reachable only at depth 3: components `consensus`, `digest`, `instant-compaction
 | components/runtime.md | 2026-09-17 | 30 |
 | components/tools.md | 2026-07-21 | 28 |
 
-**Recommendation.** A link-check + orphan gate in `nix flake check` (same governance shape as
-`mt-audit`); a config reference generated from the `ConfigService` schema; an operator guide
+**Recommendation.** ~~A link-check + orphan gate in `nix flake check` (same governance shape as
+`mt-audit`)~~ **done — #590 (`doc-links`) + #593 (`doc-orphans`)**; a config reference generated from
+the `ConfigService` schema; an operator guide
 "multi-tenant deployment" that walks §2.1's knobs; index the missing entries; every track README
 links its own sub-docs.
 
@@ -809,4 +824,5 @@ links its own sub-docs.
 
 **P3 — docs**
 
-- Index and link fixes, the §9.6 drift table, the operator guide, a link-check gate.
+- Index and link fixes, the §9.6 drift table, the operator guide, ~~a link-check gate~~ **(done:
+  #590 / #593)**.
