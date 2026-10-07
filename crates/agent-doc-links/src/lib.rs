@@ -27,6 +27,7 @@
 //! a path that escapes the root (→ `external`), never an out-of-tree read or a panic. See the
 //! `adversarial_` cases.
 
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -289,6 +290,146 @@ pub fn find_broken_links(repo_root: &Path) -> Vec<Finding> {
     }
     findings.sort();
     findings
+}
+
+// --- orphan gate ---------------------------------------------------------------------------
+//
+// The companion half of docs/gap-analysis/README.md §9. §9.2 (broken links) is `find_broken_links`
+// above; §9.1 (discoverability) is here: a first-party doc nobody links to is an orphan — it exists
+// but no reader walking out from `README.md` will ever find it. The gate recomputes that reachability
+// walk and fails on any tracked orphan that is not deliberately allowlisted, so a new design doc that
+// is never linked into its track README cannot silently rot out of reach.
+
+/// The root of the discoverability graph: reachability is measured as a walk out from here, the way
+/// a reader (or the gap-analysis sweep) starts at the repo's front door.
+pub const DISCOVERY_ROOT: &str = "README.md";
+
+/// Repo-relative path of the committed allowlist of *intentional* orphans (governance data, read at
+/// runtime so the same binary audits any tree — the `test/mt-audit/manifest.toml` shape). Missing =
+/// empty allowlist.
+pub const ORPHAN_ALLOWLIST: &str = "test/doc-links/orphans.allow";
+
+/// Reachability + allowlist verdict for the in-scope docs under a tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanReport {
+    /// Tracked in-scope `.md` files not reachable from [`DISCOVERY_ROOT`] and not allowlisted —
+    /// the findings the gate fails on. Sorted.
+    pub orphans: Vec<String>,
+    /// Allowlist entries that are no longer orphans (now reachable, or the file is gone). A stale
+    /// exemption is itself a finding so the allowlist cannot quietly drift out of sync. Sorted.
+    pub stale_allow: Vec<String>,
+}
+
+impl OrphanReport {
+    /// True when the tree is clean: no un-allowlisted orphan and no stale exemption.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.orphans.is_empty() && self.stale_allow.is_empty()
+    }
+}
+
+/// Parse the allowlist text: one repo-relative path per line; `#` starts a comment (whole-line or a
+/// trailing reason), blank lines ignored. Paths are returned verbatim (forward-slash, repo-relative).
+#[must_use]
+pub fn parse_allowlist(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Load and parse [`ORPHAN_ALLOWLIST`] from `repo_root`, or an empty set if it is absent.
+#[must_use]
+pub fn load_allowlist(repo_root: &Path) -> BTreeSet<String> {
+    let repo_root = abs_normalized(repo_root);
+    match std::fs::read(repo_root.join(ORPHAN_ALLOWLIST)) {
+        Ok(bytes) => parse_allowlist(&String::from_utf8_lossy(&bytes)),
+        Err(_) => BTreeSet::new(),
+    }
+}
+
+/// The repo-relative paths of in-scope `.md` files reachable from [`DISCOVERY_ROOT`] by following
+/// relative in-repo Markdown links (a breadth-first walk of the link graph).
+///
+/// Only `.md` targets that resolve [`Class::Present`] inside the in-scope universe are followed;
+/// links to code, directories, external peer clones or out-of-scope trees are terminal. The root
+/// itself is always included when it exists.
+#[must_use]
+pub fn reachable_docs(repo_root: &Path) -> BTreeSet<String> {
+    let repo_root = abs_normalized(repo_root);
+    let universe: BTreeSet<String> = iter_markdown(&repo_root)
+        .iter()
+        .map(|p| rel_str(&repo_root, p))
+        .collect();
+
+    let mut seen = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    if universe.contains(DISCOVERY_ROOT) {
+        seen.insert(DISCOVERY_ROOT.to_string());
+        queue.push_back(DISCOVERY_ROOT.to_string());
+    }
+
+    while let Some(rel) = queue.pop_front() {
+        let md = repo_root.join(&rel);
+        let Ok(bytes) = std::fs::read(&md) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        for (_, raw_target) in extract_links(&text) {
+            let Some(norm) = normalize_target(&raw_target) else {
+                continue;
+            };
+            let (class, resolved) = classify(&repo_root, &md, &norm);
+            // Follow only in-scope docs we have not visited; everything else is terminal.
+            if class == Class::Present
+                && universe.contains(&resolved)
+                && seen.insert(resolved.clone())
+            {
+                queue.push_back(resolved);
+            }
+        }
+    }
+    seen
+}
+
+/// Audit docs discoverability under `repo_root` against the committed allowlist (§9.1).
+#[must_use]
+pub fn find_orphans(repo_root: &Path) -> OrphanReport {
+    let repo_root = abs_normalized(repo_root);
+    let universe: BTreeSet<String> = iter_markdown(&repo_root)
+        .iter()
+        .map(|p| rel_str(&repo_root, p))
+        .collect();
+    let reachable = reachable_docs(&repo_root);
+    let allow = load_allowlist(&repo_root);
+
+    let orphans: Vec<String> = universe
+        .iter()
+        .filter(|f| !reachable.contains(*f) && !allow.contains(*f))
+        .cloned()
+        .collect();
+    // An allowlist entry earns its keep only while it is still a real orphan: gone from the tree, or
+    // reachable again, means the exemption is stale and must be removed.
+    let stale_allow: Vec<String> = allow
+        .iter()
+        .filter(|f| !universe.contains(*f) || reachable.contains(*f))
+        .cloned()
+        .collect();
+
+    OrphanReport {
+        orphans,
+        stale_allow,
+    }
+}
+
+/// Repo-relative, forward-slash string for an absolute in-repo path (falls back to the absolute
+/// path if `p` is somehow not under `repo_root`).
+fn rel_str(repo_root: &Path, p: &Path) -> String {
+    p.strip_prefix(repo_root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -556,5 +697,168 @@ mod tests {
         );
         // Only the huge in-repo path is a real break; the empties/anchor are skipped.
         assert_eq!(broken_targets(&root), vec![format!("{huge}.md")]);
+    }
+
+    // --- parse_allowlist ---------------------------------------------------------------
+
+    #[test]
+    fn positive_allowlist_paths() {
+        let got = parse_allowlist("docs/a.md\ndocs/b.md\n");
+        assert_eq!(
+            got,
+            BTreeSet::from(["docs/a.md".to_string(), "docs/b.md".to_string()])
+        );
+    }
+
+    #[test]
+    fn corner_allowlist_comments_and_trailing_reason() {
+        let text = "# header\n\ndocs/a.md  # a standalone log\n   # indented comment\n";
+        assert_eq!(
+            parse_allowlist(text),
+            BTreeSet::from(["docs/a.md".to_string()])
+        );
+    }
+
+    #[test]
+    fn boundary_allowlist_empty() {
+        assert!(parse_allowlist("").is_empty());
+        assert!(parse_allowlist("# only comments\n\n").is_empty());
+    }
+
+    // --- reachable_docs ----------------------------------------------------------------
+
+    #[test]
+    fn positive_follows_link_chain() {
+        // README -> index -> leaf; all three reachable.
+        let root = tempdir();
+        write(&root, "README.md", "see [index](docs/README.md)\n");
+        write(&root, "docs/README.md", "and [leaf](leaf.md)\n");
+        write(&root, "docs/leaf.md", "# leaf");
+        assert_eq!(
+            reachable_docs(&root),
+            BTreeSet::from([
+                "README.md".to_string(),
+                "docs/README.md".to_string(),
+                "docs/leaf.md".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn corner_does_not_follow_code_or_external_targets() {
+        // A link to a .rs file (not a doc) and to a peer clone are both terminal: neither
+        // becomes a reachable doc, and neither crashes the walk.
+        let root = tempdir();
+        write(&root, "crates/x/src/lib.rs", "// code");
+        write(
+            &root,
+            "README.md",
+            "[code](crates/x/src/lib.rs) and [peer](../../../codex/x.md)\n",
+        );
+        assert_eq!(
+            reachable_docs(&root),
+            BTreeSet::from(["README.md".to_string()])
+        );
+    }
+
+    #[test]
+    fn boundary_no_readme_means_nothing_reachable() {
+        let root = tempdir();
+        write(&root, "docs/a.md", "# orphaned by construction");
+        assert!(reachable_docs(&root).is_empty());
+    }
+
+    // --- find_orphans (check-the-checks) -----------------------------------------------
+    // The gate must ACCEPT a fully-linked tree AND REJECT one with an unreachable doc — an
+    // always-clean orphan gate is a broken gate.
+
+    #[test]
+    fn positive_clean_tree_has_no_orphans() {
+        let root = tempdir();
+        write(&root, "README.md", "[docs](docs/README.md)\n");
+        write(&root, "docs/README.md", "[a](a.md)\n");
+        write(&root, "docs/a.md", "# a");
+        let report = find_orphans(&root);
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[test]
+    fn negative_detects_unlinked_doc() {
+        let root = tempdir();
+        write(&root, "README.md", "[docs](docs/README.md)\n");
+        write(&root, "docs/README.md", "# index, links nothing else\n");
+        write(&root, "docs/orphan.md", "# nobody links me");
+        let report = find_orphans(&root);
+        assert_eq!(report.orphans, vec!["docs/orphan.md".to_string()]);
+        assert!(report.stale_allow.is_empty());
+    }
+
+    #[test]
+    fn corner_allowlist_suppresses_a_real_orphan() {
+        let root = tempdir();
+        write(&root, "README.md", "# front door, links nothing\n");
+        write(&root, "docs/standalone.md", "# deliberately standalone");
+        write(
+            &root,
+            "test/doc-links/orphans.allow",
+            "# intentional\ndocs/standalone.md  # a standalone artifact\n",
+        );
+        let report = find_orphans(&root);
+        assert!(
+            report.is_clean(),
+            "allowlisted orphan should be suppressed: {report:?}"
+        );
+    }
+
+    #[test]
+    fn boundary_stale_allowlist_entry_is_reported() {
+        // The allowlisted doc is now reachable → the exemption is stale and must be flagged,
+        // so the allowlist cannot drift out of sync with the tree.
+        let root = tempdir();
+        write(&root, "README.md", "[a](docs/a.md)\n");
+        write(&root, "docs/a.md", "# now linked");
+        write(&root, "test/doc-links/orphans.allow", "docs/a.md\n");
+        let report = find_orphans(&root);
+        assert!(report.orphans.is_empty());
+        assert_eq!(report.stale_allow, vec!["docs/a.md".to_string()]);
+    }
+
+    #[test]
+    fn boundary_stale_allowlist_entry_for_missing_file() {
+        let root = tempdir();
+        write(&root, "README.md", "# links nothing\n");
+        write(&root, "test/doc-links/orphans.allow", "docs/gone.md\n");
+        let report = find_orphans(&root);
+        assert_eq!(report.stale_allow, vec!["docs/gone.md".to_string()]);
+    }
+
+    #[test]
+    fn adversarial_hostile_links_and_allowlist_do_not_crash() {
+        // A doc-authored link graph is untrusted: a self-link, a traversal escape, a huge
+        // target and an allowlist full of junk must neither panic nor read out of tree.
+        let root = tempdir();
+        let huge = "a".repeat(5000);
+        write(
+            &root,
+            "README.md",
+            &format!("[self](README.md) [esc](../../../../etc/passwd) [big]({huge}.md)\n"),
+        );
+        write(&root, "docs/real-orphan.md", "# unreachable");
+        write(
+            &root,
+            "test/doc-links/orphans.allow",
+            "../../../etc/passwd\n#\n   \n/absolute/nonsense\n",
+        );
+        let report = find_orphans(&root);
+        // The real orphan is still found; the junk allowlist entries are all stale (not in the
+        // universe), reported rather than silently trusted.
+        assert_eq!(report.orphans, vec!["docs/real-orphan.md".to_string()]);
+        assert_eq!(
+            report.stale_allow,
+            vec![
+                "../../../etc/passwd".to_string(),
+                "/absolute/nonsense".to_string(),
+            ]
+        );
     }
 }

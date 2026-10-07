@@ -1,0 +1,15 @@
+# doc-links orphan allowlist — the checked-in set of docs that are INTENTIONALLY not
+# reachable from README.md (docs/gap-analysis/README.md §9.1). The governance shape of
+# test/mt-audit/manifest.toml: `nix run .#doc-orphans` reconciles the tree against this file.
+#
+# One repo-relative path per line; `#` starts a comment (whole-line or a trailing reason);
+# blank lines are ignored. Add an entry ONLY for a doc that is deliberately standalone — a
+# reader should never need to walk to it from the front door. Prefer linking the doc from its
+# track README or docs/README.md instead; that is the real discoverability fix, and the gate's
+# failure message says so.
+#
+# An entry that is no longer an orphan (now reachable, or the file is gone) is reported as a
+# STALE allowlist entry and fails the gate, so this file cannot quietly drift out of sync with
+# the tree — remove the line when you remove the reason for it.
+#
+# Today every first-party doc is reachable from README.md, so there are no active entries.

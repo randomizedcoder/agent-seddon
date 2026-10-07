@@ -335,6 +335,14 @@ let
     }
   );
 
+  # `nix run .#doc-orphans` — the discoverability half of the doc gate (§9.1): report every
+  # first-party doc not reachable from README.md, plus any stale allowlist entry. The SAME
+  # `doc-links` binary in `--orphans` mode (one entrypoint, report + gate — the constants-sync
+  # duality); a thin exec shim so it folds into `mkApps` like any other app.
+  doc-orphans = pkgs.writeShellScriptBin "doc-orphans" ''
+    exec ${doc-links}/bin/doc-links --orphans "$@"
+  '';
+
   # `nix run .#pki-dev` — offline dev PKI (step-cli) for gRPC TLS/mTLS: root CA,
   # token-signer, per-service leaves + the matching `[grpc.tls]` block (security-
   # hardening S4). nix/pki-dev.nix + test/pki-dev/pki_dev.py (tested by `pki-dev-tests`).
@@ -794,6 +802,7 @@ in
         fleet-measure
         mt-audit
         doc-links
+        doc-orphans
         pki-dev
         auth-e2e
         fleet-redeploy
