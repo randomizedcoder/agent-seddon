@@ -532,11 +532,13 @@ Two structural facts:
   doubles). It cannot be the `[agent] provider`, cannot be a router upstream, and a role cannot route
   to a pool (registry.rs:478-1154, 787, 865, 930). It is used only for mode votes, review summaries
   and digests (builder.rs:952, 1153, 1211). One `[pool]` per process.
-- **Bug: streamed calls under-count load.** `InFlightGuard` wraps `op(...).await`, which returns when
+- **Bug: streamed calls under-count load.** ~~`InFlightGuard` wraps `op(...).await`, which returns when
   the stream is *set up*, not when it ends (task_router.rs:308-311; same pattern in
-  `metered.rs:956`). The live fleet runs `stream = true`
-  (`.fleet-demo/agent-fleet-runpod-host.toml` (local, untracked):28), so least-loaded
-  sees Kimi as idle while it is generating. Confirmed by reading.
+  `metered.rs:956`).~~ **Fixed (§8.7 item 2).** `InFlightGuard` is now owned (`'static`, `Arc`
+  handles) and the streamed path moves it *into* the returned `ChunkStream`, so the slot releases on
+  drain / drop, not at setup. The live fleet runs `stream = true`
+  (`.fleet-demo/agent-fleet-runpod-host.toml` (local, untracked):28), so previously least-loaded
+  saw Kimi as idle while it was generating. Confirmed by reading; regression-tested.
 
 **The production fleet uses none of the routing layers.** Its config is `provider = "openai-compat"`
 with a single Kimi `[provider]` and a one-member `[pool]` for the MI50 (agent-fleet-runpod-host.toml:16,
@@ -622,8 +624,9 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
 
 1. **Put the fleet on the router:** `[agent] provider = "task-router"`, `[route] source = "registry"`,
    cards for Kimi / GLM / cloud, a `role = review` rule with least-loaded ordering.
-2. **Fix streamed in-flight accounting:** move `InFlightGuard` into the returned `ChunkStream` so it
-   drops on stream end (task_router.rs:308-311, metered.rs:956).
+2. ~~**Fix streamed in-flight accounting:** move `InFlightGuard` into the returned `ChunkStream` so it
+   drops on stream end (task_router.rs:308-311, metered.rs:956).~~ **Done** — the guard is owned and
+   moved into the returned stream; released on drain / drop, regression-tested in `task_router.rs`.
 3. **Hard capacity on the router path:** per-upstream permits plus `Saturation { shed | wait | spill }`,
    reusing `pool.rs`'s `Saturation` and `wait_for_capacity`.
 4. **Process-wide `AdmissionController` decorator** (next to `RoleScoped` and `metered::provider` in
@@ -789,7 +792,7 @@ links its own sub-docs.
 
 **P1 — routing / scale, cheap and high leverage**
 
-- Fix streamed in-flight accounting (§8.7 item 2).
+- ~~Fix streamed in-flight accounting (§8.7 item 2).~~ **Done.**
 - Fleet on the task-router with registry cards (item 1).
 - Hard per-upstream capacity + process-wide admission queue with role / tenant priority (items 3–5).
 - Card-fed `PriceTable` so cost is real (item 7); Grafana panels for router / pool / cost (item 16).
