@@ -319,6 +319,22 @@ let
   # by the `mt-audit-tests` check).
   mt-audit = import ./mt-audit.nix { inherit pkgs; };
 
+  # The `doc-links` binary (from crates/agent-doc-links): the first-party documentation
+  # link checker. Scoped to its own crate (`-p agent-doc-links`) so it builds just this
+  # leaf tool off the shared `cargoArtifacts`, not the whole workspace. `doCheck = false`
+  # because its rstest tables (four-class + adversarial) already run in the default `test`
+  # check (a workspace run). The SAME binary backs both `nix run .#doc-links` (report) and
+  # the `doc-links` gate — the constants-sync / buf duality. docs/gap-analysis/README.md §9.2.
+  doc-links = craneLib.buildPackage (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      pname = "doc-links";
+      cargoExtraArgs = "-p agent-doc-links";
+      doCheck = false;
+    }
+  );
+
   # `nix run .#pki-dev` — offline dev PKI (step-cli) for gRPC TLS/mTLS: root CA,
   # token-signer, per-service leaves + the matching `[grpc.tls]` block (security-
   # hardening S4). nix/pki-dev.nix + test/pki-dev/pki_dev.py (tested by `pki-dev-tests`).
@@ -523,6 +539,7 @@ let
       go-graph
       review-toolbox
       reviewGoCorpus
+      doc-links
       ;
     k8sRenderedTree = k8sRender.tree;
     k8sTargetNames = k8sRender.targetNames;
@@ -734,6 +751,7 @@ in
       go-ast
       go-graph
       review-toolbox
+      doc-links
       ;
     # The k8s agent image (streamLayeredImage stream script). k8s track K2.
     agent-image = k8sImages.images.agent;
@@ -775,6 +793,7 @@ in
         fleet-e2e
         fleet-measure
         mt-audit
+        doc-links
         pki-dev
         auth-e2e
         fleet-redeploy
