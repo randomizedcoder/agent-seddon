@@ -112,8 +112,8 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 ### K3 — being landed in slices (2026-09-29)
 
 K3 is large (renderer infra, components, PKI, policy, `rendered/k3s/`, three gate checks, the
-secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR. Slices 1–6
-are below; the remaining slices (7–9) are outlined in [Remaining K3 slices](#remaining-k3-slices).
+secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR. Slices 1–7
+are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#remaining-k3-slices).
 
 - **Slice 1 — `[grpc.gateway] exclude` (the Rust prerequisite).** [08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)'s
   hard precondition: `--serve-all` hosts the exec seams (`sandbox`/`pty`/`forge`) whenever their
@@ -257,16 +257,45 @@ are below; the remaining slices (7–9) are outlined in [Remaining K3 slices](#r
   - **Deferred, on purpose:** no Cilium CRD schemas are vendored — no `CiliumNetworkPolicy` renders at
     K3; that pin arrives with the policy component.
 
+- **Slice 7 — the `k8s-secrets` deploy tool.** The fleet role's forge credential and the token
+  signing key are Secrets, and a Secret's whole point is that its value must **never** reach git or
+  the Nix store — so, unlike every other object, these are *not* rendered into `rendered/k3s/`. This
+  slice adds the operator-run tool that reads the secret material from local files at apply time and
+  pipes freshly-built `Secret` manifests straight into the cluster. [07](07-secrets.md) sketched this
+  as a Python script; it is built in **Rust** (`agent-k8s-secrets`) to match the rest of the repo —
+  the same four-class + `adversarial_` `rstest` tables as the renderer, gated like any crate.
+  - [`crates/agent-k8s-secrets`](../../../crates/agent-k8s-secrets) → a pure library (manifest parse,
+    fail-closed source validation, `Secret` construction, redaction) plus a thin `k8s-secrets` binary
+    that only parses args, reads the manifest, and drives `kubectl apply --server-side -f -` over a
+    pipe. Run via [`nix run .#k8s-secrets`](../../../nix/default.nix), which puts `kubectl` on PATH.
+  - **The manifest, not the model, is the trust boundary.** The operator writes a mode-0600
+    `~/.config/agent-seddon/k8s-secrets.toml` mapping each `Secret`'s keys to local file paths (and an
+    `allowed_roots` allowlist); no LLM is in this loop. The tool still **fails closed** on every
+    source: canonicalize (a missing file errors), containment inside `allowed_roots` (a symlink
+    escaping the roots is refused), refuse any group/world-readable file (`mode & 0o077`), a size cap,
+    and a safe-key check on the `Secret` data key. One bad source aborts the whole batch.
+  - **Redaction is tested, not asserted.** No secret byte ever reaches an `Error` string or the
+    `--dry-run` summary (which prints only `Secret` names and their keys); an `adversarial_` row plants
+    a marker value and greps the entire error/summary surface for it. The built YAML (base64 data) goes
+    only to `kubectl`'s stdin — never a temp file, never a store path — and failures surface only
+    kubectl's exit status, never the payload.
+  - [`nix/checks/k8s-secrets.nix`](../../../nix/checks/k8s-secrets.nix) → the **`k8s-secrets`** gate
+    (`cargoTest -p agent-k8s-secrets`, 24 cases), registered in
+    [`nix/checks/default.nix`](../../../nix/checks/default.nix) beside `k8s-kubeconform` — the
+    `k8s-render-tests` twin for the deploy tool's core.
+  - The `k8s-secrets` binary is deliberately kept **out of the agent image** (the image wraps only
+    `agent`): it is an operator tool on the deployer's workstation, not something the in-cluster agent
+    ever runs.
+
 #### Remaining K3 slices
 
-The rest of K3 lands as one small PR per slice, in order. Slices 5 (`k8s-render-tests`) and 6
-(`k8s-kubeconform`) are above.
+The rest of K3 lands as one small PR per slice, in order. Slices 5 (`k8s-render-tests`), 6
+(`k8s-kubeconform`) and 7 (`k8s-secrets`) are above.
 `helm.nix` is only needed if a component pulls a third-party chart (none on the application side
 today), so it is not scheduled here.
 
 | Slice | Component / check | Scope | Acceptance |
 |---|---|---|---|
-| 7 | `k8s-secrets` app | the token signing-key and forge-credential Secrets (from local files, [07](07-secrets.md)) the fleet role needs — not in git, not in the store | rendered + the gate stays green |
 | 8 | `k8s-status` app | the green/red cluster-health rollup the live acceptance reads | rendered + the gate stays green |
 | 9 | Live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | on l2, then flip the K3 row → ✅ and close out |
 

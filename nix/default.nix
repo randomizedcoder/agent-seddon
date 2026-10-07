@@ -170,12 +170,13 @@ let
       }
       ''
         mkdir -p "$out/bin"
-        for bin in "${agent-unwrapped}"/bin/*; do
-          makeWrapper "$bin" "$out/bin/$(basename "$bin")" \
-            --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
-            --set-default AGENT_ADVISORY_DB ${advisory-db} \
-            --set-default AGENT_NIXPKGS_FLAKEREF "${nixpkgsFlakeRef}"
-        done
+        # Wrap only the `agent` binary. The workspace also builds the `k8s-secrets`
+        # deploy tool (crates/agent-k8s-secrets), but that is an operator-host tool,
+        # not part of the agent runtime/image — it is wrapped separately below.
+        makeWrapper "${agent-unwrapped}/bin/agent" "$out/bin/agent" \
+          --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
+          --set-default AGENT_ADVISORY_DB ${advisory-db} \
+          --set-default AGENT_NIXPKGS_FLAKEREF "${nixpkgsFlakeRef}"
       '';
 
   # The stdlib-only Go call-graph helper (crates/../helpers/go-ast), invoked by the
@@ -511,6 +512,21 @@ let
   };
   k8s-render-manifests = k8sRender.render-manifests;
 
+  # The `nix run .#k8s-secrets` deploy step (k8s track K3, docs/design/k8s/07-secrets.md).
+  # Builds `Secret`s from local files on the deploying host and pipes them into `kubectl
+  # apply --server-side` — secret material never enters git or the store, so (unlike the
+  # other components) nothing is rendered. The Rust logic lives in crates/agent-k8s-secrets
+  # (fail-closed validation + redaction, gated by the `k8s-secrets` check); this wraps its
+  # binary with `kubectl` on PATH. The binary is built with the workspace but deliberately
+  # kept out of the agent runtime/image (see the `agent` wrapper above).
+  k8s-secrets = pkgs.writeShellApplication {
+    name = "k8s-secrets";
+    runtimeInputs = [ pkgs.kubectl ];
+    text = ''
+      exec ${agent-unwrapped}/bin/k8s-secrets "$@"
+    '';
+  };
+
   # Static analysis + tests.
   checks = import ./checks {
     inherit
@@ -775,6 +791,7 @@ in
         buf-image
         k8s-images
         k8s-render-manifests
+        k8s-secrets
         e2e-live
         e2e-expect
         e2e-multi

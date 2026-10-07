@@ -26,17 +26,25 @@ TLS keys are **not** in this list. cert-manager writes them into Secrets in the 
 
 ## Flow
 
-`nix run .#k8s-secrets -- --target k3s` runs `test/k8s/k8s_secrets.py`, with a bash shim only. It:
+`nix run .#k8s-secrets -- --target k3s` runs the `agent-k8s-secrets` crate's `k8s-secrets` binary
+(a Rust library + a thin binary, matching the rest of the repo; a nix wrapper puts `kubectl` on
+PATH). It:
 1. reads a local manifest (`~/.config/agent-seddon/k8s-secrets.toml`, mode `0600`, outside the repo)
-   that maps each Secret key to a file path;
-2. refuses a source file that is group- or world-readable, or larger than a cap;
+   that maps each Secret's keys to file paths, with an `allowed_roots` allowlist;
+2. fails closed on every source — canonicalizes the path (a missing file errors), refuses one that
+   escapes `allowed_roots` via a symlink, refuses a group- or world-readable file (`mode & 0o077`) or
+   one larger than a cap, and rejects an unsafe Secret data key;
 3. builds each `Secret` in memory and pipes it to `kubectl apply --server-side -f -`, so no temp file
    and no store path is involved;
 4. labels them `app.kubernetes.io/part-of=agent-seddon` and
    `agent-seddon.io/managed-by=k8s-secrets`, and gives them **no** ArgoCD tracking annotation, so
-   `prune` never deletes them;
-5. restarts the Deployments that mount a changed Secret (`kubectl rollout restart`), except where
-   the file-poll reload covers the change ([05](05-identity-and-pki.md)).
+   `prune` never deletes them.
+
+`--dry-run` validates the manifest and prints only the Secret names and their keys — never a value,
+and never contacting a cluster. Restarting the Deployments that mount a changed Secret
+(`kubectl rollout restart`, except where the file-poll reload covers it, [05](05-identity-and-pki.md))
+is a follow-up: no Deployment mounts one of these app Secrets yet — that wiring lands with the
+`[forge]`/signing-key config, alongside the mount.
 
 **In the pods:**
 - Secrets are mounted as files (`defaultMode: 0400`), never as environment variables.
