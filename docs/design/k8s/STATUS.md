@@ -207,25 +207,33 @@ are below; the remaining slices (6–9) are outlined in [Remaining K3 slices](#r
     [05](05-identity-and-pki.md) and [10](10-increments.md).
 - **Slice 5 — the `k8s-render-tests` gate.** `k8s-rendered` proves the committed tree equals a fresh
   render; this proves it is *correct*. The renderer emits YAML from structured attrsets, so the tests
-  walk the structure ([04](04-manifests-and-gitops.md)):
-  - [`test/k8s-render/render_checks.py`](../../../test/k8s-render/render_checks.py) — one
-    `check_*(manifests) -> [Finding]` per invariant over `rendered/k3s/`: the hardened
+  walk the structure ([04](04-manifests-and-gitops.md)). Written in Rust (`rstest` table-driven), like
+  the rest of the workspace, not Python:
+  - [`crates/agent-k8s-render/src/lib.rs`](../../../crates/agent-k8s-render/src/lib.rs) — one
+    `check_*(&[Manifest]) -> Vec<Finding>` per invariant over `rendered/k3s/`: the hardened
     securityContext on every workload, no privilege anywhere (the sandbox sidecar is K7), gRPC
     readiness/liveness probes, the three `app.kubernetes.io` labels, string sync waves in the right
     order (pki 0 · config/service 2 · gateway 3 · sessions/fleet 4), the gateway's exec-seam
     `exclude`, no sandbox/pty/forge port on a Service or container, the SPIFFE SAN shape
     `spiffe://agent.l2/svc/<role>`, the `tls-<role>` Secret ↔ Certificate bijection, the full CA
     chain (bootstrap → root `isCA` in `cert-manager`, the only CA, → CA issuer → leaf role certs),
-    the component ↔ Application wiring, and no secret-looking ConfigMap material.
-  - [`test/k8s-render/test_render.py`](../../../test/k8s-render/test_render.py) — the four case
-    classes plus the mandatory `adversarial_` **check-the-checks** rows: each mutates a copy of a real
-    manifest (flip `runAsNonRoot`, drop `forge` from the exclude, expose `:50066`, forge a non-SPIFFE
-    SAN, mark a role cert `isCA`, plant a PEM key in a ConfigMap, …) and asserts the matching check fires,
-    so an always-green assertion fails the build. Verified at the nix level too: hand-breaking a
-    committed manifest makes `nix build .#checks.x86_64-linux.k8s-render-tests` fail.
+    the component ↔ Application wiring, and no secret-looking ConfigMap material. Two correctness
+    hardenings came in with the Rust rewrite: the exec-seam `exclude` is read by **parsing**
+    `agent.toml` as TOML (not a regex over its text), so a seam named only in a comment can't satisfy
+    the invariant; and the no-secret scan also **base64-decodes and inspects `binaryData`**, not just
+    plaintext `data`.
+  - The `#[cfg(test)] mod tests` at the end of that file holds the four case classes plus the mandatory
+    `adversarial_` **check-the-checks** table: each case mutates a clone of a real manifest (flip
+    `runAsNonRoot`, drop `forge` from the exclude — or leave it only in a comment, expose `:50066`,
+    forge a non-SPIFFE SAN, mark a role cert `isCA`, plant a PEM key in a ConfigMap `data` or
+    `binaryData`, …) and asserts the matching check fires, so an always-green assertion fails the build.
+    Verified at the nix level too: hand-breaking a committed manifest makes
+    `nix build .#checks.x86_64-linux.k8s-render-tests` fail.
   - [`nix/checks/k8s-render-tests.nix`](../../../nix/checks/k8s-render-tests.nix) → the
-    **`k8s-render-tests`** gate (`python3 -m unittest`, PyYAML via `withPackages`), registered in
-    [`nix/checks/default.nix`](../../../nix/checks/default.nix) beside `k8s-rendered`.
+    **`k8s-render-tests`** gate (`craneLib.cargoTest -p agent-k8s-render`), registered in
+    [`nix/checks/default.nix`](../../../nix/checks/default.nix) beside `k8s-rendered`. The crate's tests
+    read the tree via `CARGO_MANIFEST_DIR/../../rendered/k3s`, so `rendered/k3s/*.yaml` is whitelisted
+    into the crane source filter ([`nix/default.nix`](../../../nix/default.nix)).
   - **Deferred, on purpose:** the `[auth.mtls] binding ↔ Certificate` cross-ref is K5 (no
     `[auth.mtls]` section renders yet); the `CiliumNetworkPolicy`/default-deny rows wait on the
     policy component (no such objects render yet). Both are noted in the suite so the gap is explicit.

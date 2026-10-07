@@ -79,6 +79,12 @@ let
         # that dir so unrelated JSON can't sweep in and rebuild deps.)
         || (lib.hasInfix "/agent-proto/openapi/" path)
         || (lib.hasInfix "/tests/fixtures/" path)
+        # `agent-k8s-render`'s tests walk the committed rendered manifests
+        # (`rendered/k3s/*.yaml`) via `env!("CARGO_MANIFEST_DIR")/../../rendered/k3s`
+        # (the `k8s-render-tests` check), so the YAML must survive the filter or those
+        # tests can't find the tree in the crane sandbox. (Scoped to that dir so other
+        # rendered targets don't sweep in and rebuild deps.)
+        || (lib.hasInfix "/rendered/k3s/" path)
         || (craneLib.filterCargoSources path type)
       );
     name = "source";

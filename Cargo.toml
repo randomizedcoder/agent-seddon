@@ -49,6 +49,7 @@ members = [
     "crates/agent-runtime",
     "crates/agent-cli",
     "crates/agent-testkit",
+    "crates/agent-k8s-render",
 ]
 
 [workspace.package]
@@ -91,6 +92,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # URL parsing for the SSRF guard (robust host/scheme extraction; already in-tree via reqwest).
 url = "2"
 toml = "0.8"
+# Maintained, pure-Rust (libyaml-safer, no `unsafe-libyaml`) fork of the archived
+# `serde_yaml`, used only by `agent-k8s-render` to walk the rendered k8s manifests
+# in the `k8s-render-tests` check. Multi-document aware (`Deserializer::from_str`).
+serde_yaml_ng = "0.10"
 # Format- and comment-preserving TOML editing for the ConfigStore write-back
 # (portal settings): applies a sparse patch to `config/agent.toml` in place so
 # the annotated reference file keeps its comments. Already in-tree via `toml`.

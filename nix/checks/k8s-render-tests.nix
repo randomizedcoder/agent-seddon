@@ -1,32 +1,28 @@
-# nix/checks/k8s-render-tests.nix — the `k8s-render-tests` gate (k8s track K3).
+# nix/checks/k8s-render-tests.nix
 #
-# A table-driven Python suite that walks the committed `rendered/k3s/` tree and pins the
-# renderer's invariants (hardened securityContext, probes, sync waves, labels, the
-# gateway exec-seam exclude, no exec-seam exposure, SPIFFE SAN shape, the CA chain and
-# tls-Secret cross-references, no secret-looking ConfigMap material) plus the mandatory
-# `adversarial_` check-the-checks rows. Sits beside `k8s-rendered`, which proves the
-# committed tree equals a fresh render; this one proves it is *correct*.
+# Correctness gate for the rendered Kubernetes manifests (k8s track K3, Slice 5). Where
+# `k8s-rendered` proves the committed tree equals a fresh render, this proves the tree is
+# *correct*: hardened securityContext, probes, waves, labels, exec-seam exclude (parsed,
+# not regex-scraped), no exec-seam exposure, SPIFFE SAN shape, CA chain + tls-Secret
+# bijection, and no secret-looking ConfigMap material (plaintext `data` AND base64
+# `binaryData`). The invariants and their `adversarial_` check-the-checks live in the
+# `agent-k8s-render` crate; this runs that crate's test binary.
 #
-# Sources live in test/k8s-render/ (repo convention: one dir per check, python3 -m
-# unittest). PyYAML is the one non-stdlib dep, brought in hermetically via withPackages.
+# The crate's tests read the committed tree via `env!("CARGO_MANIFEST_DIR")/../../rendered/k3s`,
+# so the rendered YAML is whitelisted into the crane source filter (see nix/default.nix).
+# The workspace-wide `test` check also exercises these tests under default features; this
+# dedicated, crate-scoped check is the named Slice-5 gate (and the one the "hand-break a
+# manifest → gate fails" meta-check targets).
 {
-  pkgs,
-  src,
+  craneLib,
+  commonArgs,
+  cargoArtifacts,
 }:
-let
-  python = pkgs.python3.withPackages (p: [ p.pyyaml ]);
-in
-pkgs.runCommand "k8s-render-tests"
-  {
-    nativeBuildInputs = [ python ];
+
+craneLib.cargoTest (
+  commonArgs
+  // {
+    inherit cargoArtifacts;
+    cargoTestExtraArgs = "-p agent-k8s-render";
   }
-  ''
-    export HOME="$(mktemp -d)"
-    export AGENT_RENDERED_K3S=${src}/rendered/k3s
-    cp -r ${../../test/k8s-render} k8s-render
-    chmod -R u+w k8s-render
-    cd k8s-render
-    echo "k8s-render-tests: invariant tables + check-the-checks fixtures ..."
-    python3 -m unittest test_render -v
-    touch "$out"
-  ''
+)

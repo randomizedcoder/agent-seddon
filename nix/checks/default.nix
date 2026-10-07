@@ -367,12 +367,11 @@ in
     tree = k8sRenderedTree;
     targetNames = k8sTargetNames;
   };
-  # Correctness (not just drift) of the rendered objects: a table-driven Python suite
-  # over rendered/k3s/ pinning the renderer's hardening/identity/GitOps invariants plus
-  # the adversarial check-the-checks rows (k8s track K3, docs/design/k8s/04).
-  k8s-render-tests = import ./k8s-render-tests.nix {
-    inherit pkgs src;
-  };
+  # Correctness (not just drift) of the rendered objects: the `agent-k8s-render` crate's
+  # table-driven rstest suite over rendered/k3s/ pinning the renderer's
+  # hardening/identity/GitOps invariants plus the adversarial check-the-checks rows
+  # (k8s track K3, docs/design/k8s/04).
+  k8s-render-tests = craneCheck ./k8s-render-tests.nix { inherit cargoArtifacts; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.
