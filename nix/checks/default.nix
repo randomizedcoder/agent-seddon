@@ -372,6 +372,11 @@ in
   # hardening/identity/GitOps invariants plus the adversarial check-the-checks rows
   # (k8s track K3, docs/design/k8s/04).
   k8s-render-tests = craneCheck ./k8s-render-tests.nix { inherit cargoArtifacts; };
+  # Schema-validity (not just drift/invariants) of every rendered object:
+  # `kubeconform -strict` over rendered/k3s, incl. the cert-manager and ArgoCD
+  # custom resources, against schemas vendored + pinned here (no network, no
+  # missing-schema skips) (k8s track K3, docs/design/k8s/04).
+  k8s-kubeconform = import ./k8s-kubeconform.nix { inherit pkgs lib src; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.
