@@ -68,6 +68,20 @@ is phased across increments 0–8; see [`STATUS.md`](STATUS.md). For the cross-c
 implementation touch map (every crate/file affected, blast radius, order of operations, risk),
 see [`IMPLEMENTATION.md`](IMPLEMENTATION.md) — the reference for later per-phase planning.
 
+The per-increment design docs:
+
+- [`00-components.md`](00-components.md) — component catalogue
+- [`01-workspace-isolation.md`](01-workspace-isolation.md) — worktree-per-review isolation
+- [`02-pr-checkout.md`](02-pr-checkout.md) — PR discovery + checkout
+- [`03-fleet-core.md`](03-fleet-core.md) — the fleet orchestrator core
+- [`04-triggers.md`](04-triggers.md) — trigger sources (poll / chat)
+- [`05-review-skill.md`](05-review-skill.md) — the review skill the fleet runs
+- [`06-draft-persist-approve.md`](06-draft-persist-approve.md) — draft → persist → human approval
+- [`07-observability.md`](07-observability.md) — metrics + spans
+- [`08-child-sessions.md`](08-child-sessions.md) — child sessions (deferred)
+
+A running build log sits in [`PROGRESS.md`](PROGRESS.md).
+
 ## What already exists (reused, not rebuilt)
 
 Grounded against the tree as of this design (file:line anchors in `00-components.md`):

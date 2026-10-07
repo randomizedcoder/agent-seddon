@@ -1,8 +1,9 @@
 # Review static-analysis depth: nix-provisioned tools, condensed locally in parallel, before the LLM
 
 **Status:** design-of-record. Increment 0 (this doc). Increments 1–5 to follow, each a gated
-PR off `main`. Follows the [fleet-grounding](../fleet-grounding/README.md) track, which put the
-collectors on the real per-review worktree (#382) and made grounding measurable (#381, #386).
+PR off `main`; current state is tracked in [`STATUS.md`](STATUS.md). Follows the
+[fleet-grounding](../fleet-grounding/README.md) track, which put the collectors on the real
+per-review worktree (#382) and made grounding measurable (#381, #386).
 
 ## Why
 

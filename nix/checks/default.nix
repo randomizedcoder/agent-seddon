@@ -391,4 +391,13 @@ in
     inherit pkgs;
     doc-links-bin = doc-links;
   };
+
+  # The docs-discoverability gate: the same `doc-links` binary in `--orphans` mode fails the
+  # build on any first-party doc not reachable from README.md and not on the committed allowlist
+  # (test/doc-links/orphans.allow), plus any stale allowlist entry. The §9.1 companion to the
+  # §9.2 link gate above; report side: `nix run .#doc-orphans`.
+  doc-orphans = import ./doc-orphans.nix {
+    inherit pkgs;
+    doc-links-bin = doc-links;
+  };
 }

@@ -122,6 +122,8 @@ below is the service flag / `[grpc.<seam>]` block that hosts them.
 |---|---|
 | Testing conventions | [`testing.md`](components/testing.md) |
 | Benchmarking and leak gate | [`benchmarking.md`](components/benchmarking.md) |
+| Doc-link + discoverability gate | [`doc-links.md`](components/doc-links.md) |
+| Cognition-graph value harness (`nix run .#graph-arena`) | [`graph-arena.md`](graph-arena.md) |
 
 ## Gap analysis
 
