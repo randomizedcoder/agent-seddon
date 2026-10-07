@@ -1,0 +1,26 @@
+[package]
+name = "agent-doc-links"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "First-party documentation link checker + gate (docs/gap-analysis §9.2)."
+
+# A leaf tool crate: no dependency on any other agent-* crate. The pure logic lives in the
+# lib (four-class + adversarial rstest tables, run by the default `test` check); `src/main.rs`
+# is the `doc-links` bin that backs both `nix run .#doc-links` (report) and the `doc-links`
+# gate. See docs/components/doc-links.md.
+
+[[bin]]
+name = "doc-links"
+path = "src/main.rs"
+
+[dependencies]
+# Markdown link extraction (inline/image + reference-definition patterns). Already in-tree.
+regex = { workspace = true }
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true

@@ -23,6 +23,7 @@
   src,
   k8sRenderedTree,
   k8sTargetNames,
+  doc-links,
 }:
 
 let
@@ -383,5 +384,24 @@ in
   mt-audit = import ./mt-audit.nix {
     inherit pkgs;
     src = commonArgs.src;
+  };
+  # The first-party documentation link gate: runs the `doc-links` binary (`--gate`) over
+  # the whole tree, failing on any relative link whose in-repo target is missing (the rot a
+  # rename leaves behind). docs/gap-analysis/README.md §9.2. Peer-clone citations that escape
+  # the repo root are external and never fail. Report side: `nix run .#doc-links`. The
+  # checker's OWN correctness (four-class + adversarial rstest tables in agent-doc-links)
+  # runs in the default `test` check — no separate tests check needed.
+  doc-links = import ./doc-links.nix {
+    inherit pkgs;
+    doc-links-bin = doc-links;
+  };
+
+  # The docs-discoverability gate: the same `doc-links` binary in `--orphans` mode fails the
+  # build on any first-party doc not reachable from README.md and not on the committed allowlist
+  # (test/doc-links/orphans.allow), plus any stale allowlist entry. The §9.1 companion to the
+  # §9.2 link gate above; report side: `nix run .#doc-orphans`.
+  doc-orphans = import ./doc-orphans.nix {
+    inherit pkgs;
+    doc-links-bin = doc-links;
   };
 }

@@ -67,7 +67,7 @@ Round 2 deliberately keeps **no direct SQL client in the agent** for remote cata
 backend and rides the **grpc** wire; it does **not** add a postgres/mariadb client to the
 agent.
 
-**sqlite** ([`crates/agent-prompt/src/sqlite.rs`](../../../crates/agent-prompt/src/sqlite.rs)),
+**sqlite** ([`crates/agent-prompt/src/store.rs`](../../../crates/agent-prompt/src/store.rs)),
 extending the [`05-storage.md`](05-storage.md) schema:
 
 ```sql

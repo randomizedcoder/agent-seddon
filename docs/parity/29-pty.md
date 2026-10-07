@@ -86,7 +86,7 @@ surface is server-streaming (like `Reindex`) rather than a unary call.
   `SearchService.Reindex` is server-streaming in the proto
   ([`search.proto`](../../crates/agent-proto/proto/agent/v1/search.proto):
   `rpc Reindex(ReindexRequest) returns (stream ReindexProgress);`) and its server
-  impl in [`server.rs`](../../crates/agent-grpc/src/server.rs) (~line 561:
+  impl in [`server/search.rs`](../../crates/agent-grpc/src/server/search.rs) (~line 82:
   `type ReindexStream = Pin<Box<dyn Stream<Item = Result<pb::ReindexProgress,
   Status>> + Send>>;`, backed by a `tokio_stream` `UnboundedReceiverStream`). A
   `pty.proto` output stream is *the same shape* — bounded frames pushed onto a
@@ -343,7 +343,7 @@ idempotent-close, and metered-session/bytes assertions that have no peer analogu
   (`Open`/`Write`/`Resize`/`Close`/`List`/`Get` unary + `rpc Output(...) returns
   (stream PtyOutput)` **server-streaming, mirroring `SearchService.Reindex`**) +
   `build.rs` entry + server/client in `agent-grpc` (the streaming server modelled on
-  [`server.rs`](../../crates/agent-grpc/src/server.rs) `ReindexStream`, backed by a
+  [`server/search.rs`](../../crates/agent-grpc/src/server/search.rs) `ReindexStream`, backed by a
   bounded `tokio_stream` receiver) + `--serve-pty` + reflection; commit the
   `buf.image.binpb` bump (`nix run .#buf-image`); add the endpoint to
   `nix/constants.nix` → `nix run .#gen-constants`.
@@ -370,7 +370,7 @@ idempotent-close, and metered-session/bytes assertions that have no peer analogu
 - **agent-seddon:**
   [`crates/agent-tools/src/core.rs`](../../crates/agent-tools/src/core.rs) (`BashTool` — the one-shot shell this seam supersedes; `parallel_safe`, `BASH_TIMEOUT_SECS`),
   [`crates/agent-proto/proto/agent/v1/search.proto`](../../crates/agent-proto/proto/agent/v1/search.proto) (`rpc Reindex(...) returns (stream ReindexProgress)` — the server-streaming precedent),
-  [`crates/agent-grpc/src/server.rs`](../../crates/agent-grpc/src/server.rs) (`ReindexStream` impl ~line 561 — the stream-server pattern to mirror),
+  [`crates/agent-grpc/src/server/search.rs`](../../crates/agent-grpc/src/server/search.rs) (`ReindexStream` impl ~line 82 — the stream-server pattern to mirror),
   [`crates/agent-runtime/src/registry.rs`](../../crates/agent-runtime/src/registry.rs) (`register_builtins`),
   [`crates/agent-runtime/src/metered.rs`](../../crates/agent-runtime/src/metered.rs) (metered-seam pattern),
   [`crates/agent-metrics/src/lib.rs`](../../crates/agent-metrics/src/lib.rs) (gauges/counters to extend),
