@@ -520,6 +520,14 @@ impl LlmProvider for BranchingProvider {
         // cancelled — `any`/`quorum` racing, or stragglers at the deadline.
         let cancelled = !tasks.is_empty();
         tasks.abort_all();
+        // Structured teardown: reap the cancelled branches before returning, so
+        // their captured provider `Arc`s, request clones, and any in-flight
+        // provider buffers are freed on *this* call rather than at the scheduler's
+        // leisure. `abort_all` cancels each task at its next await point, so this
+        // drain is bounded — a laggard mid-sleep is dropped, never awaited to
+        // completion. Without it, abandoned branches stay live past the return and
+        // the heap grows across fork/cancel cycles.
+        while tasks.join_next().await.is_some() {}
         for (idx, fate) in fates.iter_mut().enumerate() {
             if fate.is_none() && !arrivals.iter().any(|a| a.idx == idx) {
                 *fate = Some(if timed_out {
@@ -637,6 +645,7 @@ mod tests {
     use agent_core::Error;
     use rstest::rstest;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn resp(text: &str) -> CompletionResponse {
@@ -669,6 +678,33 @@ mod tests {
         async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
             tokio::time::sleep(self.1).await;
             Ok(resp(self.0))
+        }
+    }
+
+    /// A laggard whose in-flight future bumps a counter **when it is dropped**, so
+    /// a test can prove a cancelled branch was actually reaped (its future dropped)
+    /// before `complete` returned — not merely abandoned to teardown later.
+    struct DropCounting {
+        delay: Duration,
+        dropped: Arc<AtomicUsize>,
+    }
+    struct DropFlag(Arc<AtomicUsize>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[async_trait]
+    impl LlmProvider for DropCounting {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+        async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+            // The guard lives in the future's state; aborting the task mid-sleep
+            // drops it (and bumps the counter) exactly when the strand is reaped.
+            let _flag = DropFlag(self.dropped.clone());
+            tokio::time::sleep(self.delay).await;
+            Ok(resp("late"))
         }
     }
 
@@ -922,6 +958,44 @@ mod tests {
         assert_eq!(report.merge_outcome, "single_survivor");
         assert_eq!(fate_of(&report, "quick"), "won");
         assert_eq!(fate_of(&report, "slow"), "cancelled");
+    }
+
+    /// adversarial: a losing branch must be **reaped before `complete` returns**,
+    /// not left running to tear down at the scheduler's leisure — otherwise an
+    /// abandoned branch's captured provider `Arc` + request clone + in-flight
+    /// buffers accumulate across fork/cancel cycles (the `branch_leak` gate). The
+    /// drop-counter proves the cancelled strand's future was actually dropped by
+    /// the time control returns. Check-the-check: against the old fire-and-forget
+    /// `abort_all()` (no drain) the counter still reads 0 at return, so this fails
+    /// on the pre-fix code and passes once the `JoinSet` is drained.
+    #[tokio::test(start_paused = true)]
+    async fn adversarial_cancelled_branch_is_reaped_before_return() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let loser = Arc::new(DropCounting {
+            delay: Duration::from_secs(600),
+            dropped: dropped.clone(),
+        });
+        let p = BranchingProvider::new(
+            "s",
+            Arc::new(Fixed("base")),
+            vec![
+                spec("quick", "", Arc::new(Fixed("quick answer"))),
+                spec("slow", "", loser),
+            ],
+        )
+        .with_cfg(BranchCfg {
+            policy: JoinPolicy::Any,
+            ..BranchCfg::default()
+        });
+
+        let out = p.complete(req()).await.unwrap();
+        assert_eq!(out.message.content_text(), "quick answer");
+        // The one losing branch was cancelled AND reaped synchronously on return.
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the cancelled branch's future must be dropped before complete() returns"
+        );
     }
 
     #[tokio::test(start_paused = true)]
