@@ -89,8 +89,13 @@ root-only local file on l2. That is a deploy key with read-only scope.
 2. `nix run .#k8s-render-manifests`: regenerate `rendered/`.
 3. Open a PR. The diff shows the tag bump and every manifest change. The gate runs.
 4. Merge. ArgoCD syncs within its poll interval, or at once with `argocd app sync`.
-5. `nix run .#k8s-status`: ArgoCD health, plus a `grpc.health.v1` check per Service through
-   `kubectl port-forward`.
+5. `nix run .#k8s-status`: grades every ArgoCD Application (`Synced` + `Healthy`) and each role
+   Deployment's readiness (`readyReplicas` ≥ desired *and* the `Available` condition `True`), prints
+   a green/red rollup and exits non-zero when anything is unhealthy. A Ready Deployment already
+   implies its per-pod `grpc.health.v1` readiness probe passed, so in-cluster Service health is
+   covered transitively. An explicit out-of-cluster `grpc.health.v1` probe per Service through
+   `kubectl port-forward` is the live-accept follow-up (the role Services are mTLS; the client-cert
+   story is a K5 design point).
 
 Native deploys are unchanged: `portal-redeploy` and `fleet-redeploy` still work on any host,
 including l2 while k3s runs, as long as the ports don't collide. The k3s edge uses LB addresses, not

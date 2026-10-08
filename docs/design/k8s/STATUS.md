@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 |
-| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | #580, #581, #583, #587, #589 |
+| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | #580, #581, #583, #587, #589, #600 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
@@ -287,16 +287,43 @@ are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#r
     `agent`): it is an operator tool on the deployer's workstation, not something the in-cluster agent
     ever runs.
 
+- **Slice 8 — the `k8s-status` cluster-health rollup.** The tool the live acceptance (slice 9) reads:
+  `nix run .#k8s-status` prints one green/red verdict and exits non-zero when anything is unhealthy.
+  Built in **Rust** (`agent-k8s-status`) to match the renderer and `k8s-secrets` — a pure, testable
+  core plus a thin `kubectl`-driving shell, with the same four-class + `adversarial_` `rstest` tables.
+  - [`crates/agent-k8s-status`](../../../crates/agent-k8s-status) → a pure library (parse
+    `kubectl get … -o json`, grade, roll up, format) plus a thin `k8s-status` binary that only shells
+    out to `kubectl` and prints. Run via [`nix run .#k8s-status`](../../../nix/default.nix), which puts
+    `kubectl` on PATH.
+  - **What "green" means.** It grades two things and is green only when **all** pass: every ArgoCD
+    `Application` is `Synced` **and** `Healthy`, and each role `Deployment` (gateway, sessions, fleet)
+    is Ready — `readyReplicas >= spec.replicas` **and** the `Available` condition is `True`. That is
+    exactly slice 9's acceptance ("ArgoCD syncs; the three roles go Ready"). A Ready Deployment already
+    means its kubelet `grpc.health.v1` readiness probe is passing, so the per-Service health [04](04-manifests-and-gitops.md)
+    sketched is covered in-cluster; an out-of-cluster `kubectl port-forward` gRPC probe over the roles'
+    **mTLS** ports is left to the live run — the client-cert story is a **K5** design point.
+  - **kubectl JSON is treated as untrusted and the core fails closed.** It parses into
+    `serde_json::Value` with a fallback for every field; a missing / wrong-typed / unknown status is
+    graded `Fail` (never assumed healthy), a hostile replica count (negative, overflowing, a string) is
+    rejected to not-ready rather than trusted or panicked on, and every `detail` is bounded to one short
+    line so a crafted name can neither blow up output nor smuggle a payload. An empty rollup is red —
+    nothing graded proves nothing healthy. Each rule is pinned by an `adversarial_` row.
+  - [`nix/checks/k8s-status.nix`](../../../nix/checks/k8s-status.nix) → the **`k8s-status`** gate
+    (`cargoTest -p agent-k8s-status`), registered in
+    [`nix/checks/default.nix`](../../../nix/checks/default.nix) beside `k8s-secrets` — the
+    `k8s-render-tests` twin. The binary is kept **out of the agent image** (the image wraps only
+    `agent`), like `k8s-secrets`: it is an operator tool, not something the in-cluster agent runs.
+  - **Nothing is rendered** by this slice (it reads a live cluster), so `k8s-rendered` stays green.
+
 #### Remaining K3 slices
 
 The rest of K3 lands as one small PR per slice, in order. Slices 5 (`k8s-render-tests`), 6
-(`k8s-kubeconform`) and 7 (`k8s-secrets`) are above.
+(`k8s-kubeconform`), 7 (`k8s-secrets`) and 8 (`k8s-status`) are above.
 `helm.nix` is only needed if a component pulls a third-party chart (none on the application side
 today), so it is not scheduled here.
 
 | Slice | Component / check | Scope | Acceptance |
 |---|---|---|---|
-| 8 | `k8s-status` app | the green/red cluster-health rollup the live acceptance reads | rendered + the gate stays green |
 | 9 | Live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | on l2, then flip the K3 row → ✅ and close out |
 
 The `[auth.mtls] bindings` that consume the SPIFFE SANs, and the cert-manager approver-policy that
