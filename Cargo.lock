@@ -306,6 +306,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-k8s-secrets"
+version = "0.1.0"
+dependencies = [
+ "agent-testkit",
+ "base64 0.22.1",
+ "rstest",
+ "serde",
+ "serde_yaml_ng",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
 name = "agent-lsp"
 version = "0.1.0"
 dependencies = [
