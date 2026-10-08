@@ -386,7 +386,7 @@ metadata (not a `.proto` field, so it is additive and `buf breaking` never sees 
 - [`agent-proto::identity`](../crates/agent-proto/src/identity.rs) defines the key
   constants and `inject_identity` / `extract_identity` over tonic metadata.
 - The ambient `(user, session)` for the current task is a dedicated
-  [`tokio::task_local`](../crates/agent-grpc/src/identity.rs) (`AGENT_IDENTITY`) —
+  [`tokio::task_local`](../crates/agent-core/src/identity.rs) (`AGENT_IDENTITY`) —
   **not** OpenTelemetry baggage, so it flows whether or not telemetry is configured
   (a security boundary must not depend on OTLP being on). `outbound()` injects it
   alongside trace context; `server::span()` extracts it, validates each segment with

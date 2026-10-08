@@ -43,7 +43,7 @@ prompt) while keeping the system head and the recent tail verbatim.
 The switch reaches the strategy through the seam's two optional methods, not a new
 `compact` signature: the runtime calls `on_mode_switch(from, to)` (right after it
 records the switch), which *arms* the next `compact`; `last_compact_action()` lets
-the [metered decorator](metrics.md) label the result. Both are default methods, so
+the [metered decorator](../metrics.md) label the result. Both are default methods, so
 `sliding-window`/`summarizing-window` are unaffected, and the `MeteredContext` /
 `GrpcContext` decorators forward them (a downcast couldn't reach the inner
 strategy). Over gRPC the switch rides the additive `from_mode`/`to_mode` fields on

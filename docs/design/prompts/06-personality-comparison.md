@@ -4,7 +4,9 @@
 > ([`README.md`](README.md)). Round 3 adds **personalities** — the ability to run
 > agent-seddon *as* one of the peer harnesses by adopting its system-prompt text,
 > plus a native **agent-seddon best-of-breed** blend. This doc is the analysis; the
-> architecture is [`07-personalities.md`](07-personalities.md).
+> architecture is [`07-personalities.md`](07-personalities.md), and the empirical
+> A/B measurement it defers to is the results-of-record in
+> [`06-personality-comparison-results.md`](06-personality-comparison-results.md).
 
 The README's ["how three peer agents organise prompts"](README.md#compare-and-contrast-how-three-peer-agents-organise-prompts)
 table compares *structure* (files vs constants vs literals) across hermes/pi/opencode.

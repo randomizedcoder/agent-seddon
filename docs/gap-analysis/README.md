@@ -532,11 +532,13 @@ Two structural facts:
   doubles). It cannot be the `[agent] provider`, cannot be a router upstream, and a role cannot route
   to a pool (registry.rs:478-1154, 787, 865, 930). It is used only for mode votes, review summaries
   and digests (builder.rs:952, 1153, 1211). One `[pool]` per process.
-- **Bug: streamed calls under-count load.** `InFlightGuard` wraps `op(...).await`, which returns when
+- **Bug: streamed calls under-count load.** ~~`InFlightGuard` wraps `op(...).await`, which returns when
   the stream is *set up*, not when it ends (task_router.rs:308-311; same pattern in
-  `metered.rs:956`). The live fleet runs `stream = true`
-  (`.fleet-demo/agent-fleet-runpod-host.toml` (local, untracked):28), so least-loaded
-  sees Kimi as idle while it is generating. Confirmed by reading.
+  `metered.rs:956`).~~ **Fixed (§8.7 item 2).** `InFlightGuard` is now owned (`'static`, `Arc`
+  handles) and the streamed path moves it *into* the returned `ChunkStream`, so the slot releases on
+  drain / drop, not at setup. The live fleet runs `stream = true`
+  (`.fleet-demo/agent-fleet-runpod-host.toml` (local, untracked):28), so previously least-loaded
+  saw Kimi as idle while it was generating. Confirmed by reading; regression-tested.
 
 **The production fleet uses none of the routing layers.** Its config is `provider = "openai-compat"`
 with a single Kimi `[provider]` and a one-member `[pool]` for the MI50 (agent-fleet-runpod-host.toml:16,
@@ -622,8 +624,9 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
 
 1. **Put the fleet on the router:** `[agent] provider = "task-router"`, `[route] source = "registry"`,
    cards for Kimi / GLM / cloud, a `role = review` rule with least-loaded ordering.
-2. **Fix streamed in-flight accounting:** move `InFlightGuard` into the returned `ChunkStream` so it
-   drops on stream end (task_router.rs:308-311, metered.rs:956).
+2. ~~**Fix streamed in-flight accounting:** move `InFlightGuard` into the returned `ChunkStream` so it
+   drops on stream end (task_router.rs:308-311, metered.rs:956).~~ **Done** — the guard is owned and
+   moved into the returned stream; released on drain / drop, regression-tested in `task_router.rs`.
 3. **Hard capacity on the router path:** per-upstream permits plus `Saturation { shed | wait | spill }`,
    reusing `pool.rs`'s `Saturation` and `wait_for_capacity`.
 4. **Process-wide `AdmissionController` decorator** (next to `RoleScoped` and `metered::provider` in
@@ -657,20 +660,34 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
 
 ### 9.1 Reachability from `README.md`
 
+> **Update (closed by #593).** A `doc-orphans` gate now fails `nix flake check` on any first-party
+> (git-tracked) doc that is not reachable from `README.md` by following in-repo Markdown links
+> (`nix run .#doc-orphans` reports; same binary backs both). All the git-tracked orphans below were
+> fixed by *linking* them from an index, not by exempting them, so the allowlist
+> [`test/doc-links/orphans.allow`](../../test/doc-links/orphans.allow) ships empty; a stale exemption
+> also fails, so it cannot drift. The stray `cat_walking_dog_poem.md` is untracked and so outside the
+> gate's git-tracked universe. Same binary + governance shape as the §9.2 gate — see
+> [components/doc-links.md](../components/doc-links.md).
+
 A breadth-first walk over the Markdown link graph from `README.md` (262 in-scope `.md` files):
 252 reachable, 213 within two hops, **10 orphans**:
 
 - `cat_walking_dog_poem.md` (stray, untracked)
-- `docs/graph-arena.md`
-- `docs/design/review-fleet/01-*.md`, `02-*.md`, `04-*.md`, `05-*.md`, `06-*.md`, `PROGRESS.md`
-- `docs/design/review-analysis-depth/STATUS.md`
-- `docs/design/prompts/06-personality-comparison-results.md` (untracked)
+- ~~`docs/graph-arena.md`~~ **linked**
+- ~~`docs/design/review-fleet/01-*.md`, `02-*.md`, `04-*.md`, `05-*.md`, `06-*.md`, `PROGRESS.md`~~ **linked** (phase-doc index)
+- ~~`docs/design/review-analysis-depth/STATUS.md`~~ **linked**
+- ~~`docs/design/prompts/06-personality-comparison-results.md`~~ **linked** (now tracked)
 
 Reachable only at depth 3: components `consensus`, `digest`, `instant-compaction`, `graph`; config
 `02-auth-and-rbac`, `03`, `04`, `05`, `10` (the auth design is three hops from the README); parity
 01–10; adaptive-cognition STATUS.
 
 ### 9.2 Broken links
+
+> **Update (closed by #590).** A `doc-links` gate now fails `nix flake check` on any broken
+> intra-repo doc link (`nix run .#doc-links` reports). The four rows below were fixed; the
+> peer-clone `../../../codex` / `../../../pi` citations are classified `External` and never
+> followed, keeping the gate hermetic. See [components/doc-links.md](../components/doc-links.md).
 
 | Source | Target | Problem |
 |---|---|---|
@@ -736,8 +753,9 @@ Reachable only at depth 3: components `consensus`, `digest`, `instant-compaction
 | components/runtime.md | 2026-09-17 | 30 |
 | components/tools.md | 2026-07-21 | 28 |
 
-**Recommendation.** A link-check + orphan gate in `nix flake check` (same governance shape as
-`mt-audit`); a config reference generated from the `ConfigService` schema; an operator guide
+**Recommendation.** ~~A link-check + orphan gate in `nix flake check` (same governance shape as
+`mt-audit`)~~ **done — #590 (`doc-links`) + #593 (`doc-orphans`)**; a config reference generated from
+the `ConfigService` schema; an operator guide
 "multi-tenant deployment" that walks §2.1's knobs; index the missing entries; every track README
 links its own sub-docs.
 
@@ -774,7 +792,7 @@ links its own sub-docs.
 
 **P1 — routing / scale, cheap and high leverage**
 
-- Fix streamed in-flight accounting (§8.7 item 2).
+- ~~Fix streamed in-flight accounting (§8.7 item 2).~~ **Done.**
 - Fleet on the task-router with registry cards (item 1).
 - Hard per-upstream capacity + process-wide admission queue with role / tenant priority (items 3–5).
 - Card-fed `PriceTable` so cost is real (item 7); Grafana panels for router / pool / cost (item 16).
@@ -809,4 +827,5 @@ links its own sub-docs.
 
 **P3 — docs**
 
-- Index and link fixes, the §9.6 drift table, the operator guide, a link-check gate.
+- Index and link fixes, the §9.6 drift table, the operator guide, ~~a link-check gate~~ **(done:
+  #590 / #593)**.

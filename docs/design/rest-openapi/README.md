@@ -256,7 +256,7 @@ trace sampling are likewise marginal on a loopback compat bridge and were consid
 
 ## Increments (each a gated PR off `main`, never stacked)
 
-1. **This directory** — design-of-record + `STATUS.md` + `docs/README.md` index entry. Docs only.
+1. **This directory** — design-of-record + [`STATUS.md`](STATUS.md) + `docs/README.md` index entry. Docs only.
 2. **Groundwork** — vendor `google/api/{annotations,http}.proto`; wire `tonic-build` + a buf-lint
    exemption for the vendored tree; annotate **one** RPC as proof; land the annotation-coverage unit
    test asserting its rule survives into `FILE_DESCRIPTOR_SET`.

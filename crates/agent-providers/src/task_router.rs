@@ -26,6 +26,7 @@ use agent_core::{
     PoolTier, Result,
 };
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -52,7 +53,10 @@ pub struct RouterUpstream {
 /// this sits on the per-call hot path.
 #[derive(Default)]
 pub(crate) struct LiveStats {
-    in_flight: AtomicU32,
+    // `Arc` so an [`InFlightGuard`] can hold a handle to *this* counter after it
+    // is detached from `&self` and moved into a returned `ChunkStream` — the slot
+    // must stay raised until the stream drains, not merely until it is set up.
+    in_flight: Arc<AtomicU32>,
     latency_ewma_ms: AtomicU32,
 }
 
@@ -80,30 +84,48 @@ impl LiveStats {
 /// emits the [`RouteEvent::InFlight`] gauge event from BOTH edges (the release
 /// fires in `Drop`, so a cancelled call still reports and the gauge drains to
 /// 0 rather than sticking at its last value).
-struct InFlightGuard<'a> {
-    router: &'a TaskRouter,
-    i: usize,
+///
+/// It is **owned** (`'static`), holding only cloned `Arc` handles rather than a
+/// borrow of the router, so a streamed dispatch can move it *into* the returned
+/// [`ChunkStream`]: the slot is then released when the stream drains or the
+/// consumer drops it, not when the stream is merely set up (a streamed call that
+/// is still generating must count as in-flight — see `route`/`stream`).
+struct InFlightGuard {
+    in_flight: Arc<AtomicU32>,
+    observer: Option<RouteObserver>,
+    upstream_id: Arc<str>,
 }
-impl<'a> InFlightGuard<'a> {
-    fn enter(router: &'a TaskRouter, i: usize) -> Self {
-        let n = router.live[i].in_flight.fetch_add(1, Ordering::Relaxed) + 1;
-        router.emit(RouteEvent::InFlight {
-            upstream: &router.upstreams[i].id,
-            count: n,
-        });
-        Self { router, i }
+impl InFlightGuard {
+    fn enter(router: &TaskRouter, i: usize) -> Self {
+        let in_flight = Arc::clone(&router.live[i].in_flight);
+        let observer = router.observer.clone();
+        let upstream_id: Arc<str> = Arc::from(router.upstreams[i].id.as_str());
+        let n = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(o) = &observer {
+            o(RouteEvent::InFlight {
+                upstream: &upstream_id,
+                count: n,
+            });
+        }
+        Self {
+            in_flight,
+            observer,
+            upstream_id,
+        }
     }
 }
-impl Drop for InFlightGuard<'_> {
+impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        let n = self.router.live[self.i]
+        let n = self
             .in_flight
             .fetch_sub(1, Ordering::Relaxed)
             .saturating_sub(1);
-        self.router.emit(RouteEvent::InFlight {
-            upstream: &self.router.upstreams[self.i].id,
-            count: n,
-        });
+        if let Some(o) = &self.observer {
+            o(RouteEvent::InFlight {
+                upstream: &self.upstream_id,
+                count: n,
+            });
+        }
     }
 }
 
@@ -267,9 +289,13 @@ impl TaskRouter {
 
     /// Try each chosen upstream in turn, stopping at the first success or the first
     /// **terminal** failure (mirrors `Router::route`).
+    /// `op` is handed the chosen provider **and** this attempt's [`InFlightGuard`];
+    /// a buffered call holds it for the duration of its future, a streamed call
+    /// moves it into the returned stream so the slot drains with the stream rather
+    /// than at setup.
     async fn route<T, F, Fut>(&self, req: &CompletionRequest, op: F) -> Result<T>
     where
-        F: Fn(Arc<dyn LlmProvider>) -> Fut,
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let hint = self.hint(req);
@@ -305,10 +331,7 @@ impl TaskRouter {
             let u = &self.upstreams[i];
             self.emit(RouteEvent::Routed { target: &u.id });
             let started = (self.now_ms)();
-            let outcome = {
-                let _in_flight = InFlightGuard::enter(self, i);
-                op(u.provider.clone()).await
-            };
+            let outcome = op(u.provider.clone(), InFlightGuard::enter(self, i)).await;
             match outcome {
                 Ok(v) => {
                     self.health[i].record_success();
@@ -386,9 +409,14 @@ impl LlmProvider for TaskRouter {
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let r = req.clone();
-        self.route(&req, move |p| {
+        self.route(&req, move |p, guard| {
             let r = r.clone();
-            async move { p.complete(r).await }
+            // A buffered call is in-flight for the whole future: hold the guard
+            // until `complete` resolves, then it drops here.
+            async move {
+                let _in_flight = guard;
+                p.complete(r).await
+            }
         })
         .await
     }
@@ -397,9 +425,23 @@ impl LlmProvider for TaskRouter {
         // Fallover covers failures raised while *establishing* the stream; once bytes
         // flow the turn is committed (mirrors `Router::stream`).
         let r = req.clone();
-        self.route(&req, move |p| {
+        self.route(&req, move |p, guard| {
             let r = r.clone();
-            async move { p.stream(r).await }
+            async move {
+                let inner = p.stream(r).await?; // setup failure drops `guard` here → falls over
+                                                // Move the guard INTO the returned stream so the in-flight slot is
+                                                // held until the stream drains (or the consumer drops it), not at
+                                                // setup — a streamed upstream is busy while it generates. Mirrors
+                                                // metered.rs's chunk-stream wrapper.
+                let guarded = async_stream::stream! {
+                    let _in_flight = guard;
+                    let mut inner = inner;
+                    while let Some(item) = inner.next().await {
+                        yield item;
+                    }
+                };
+                Ok(Box::pin(guarded) as ChunkStream)
+            }
         })
         .await
     }
@@ -448,6 +490,42 @@ mod tests {
         async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
             Err(Error::Provider(self.msg.clone()))
         }
+    }
+
+    /// A provider whose `stream` yields `n` text chunks **lazily** (no pre-collect,
+    /// so `n = usize::MAX` models an endless upstream). `complete` is unsupported —
+    /// it exists only to exercise the streamed in-flight accounting.
+    struct StreamProvider {
+        n: usize,
+        caps: ModelCapabilities,
+    }
+    #[async_trait]
+    impl LlmProvider for StreamProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            self.caps.clone()
+        }
+        async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+            Err(Error::Provider("stream-only provider".into()))
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            let s = futures_util::stream::iter(0..self.n).map(|i| {
+                Ok(agent_core::CompletionChunk {
+                    delta_text: format!("c{i}"),
+                    ..Default::default()
+                })
+            });
+            Ok(Box::pin(s))
+        }
+    }
+
+    fn streamer(id: &str, n: usize) -> RouterUpstream {
+        up(
+            id,
+            Arc::new(StreamProvider {
+                n,
+                caps: caps(true, false, 1000),
+            }),
+        )
     }
 
     /// A provider that succeeds with a fixed answer + advertises given caps.
@@ -1121,6 +1199,114 @@ mod tests {
                 ("ok".to_string(), 1),
                 ("ok".to_string(), 0),
             ]
+        );
+    }
+
+    // --- streamed in-flight accounting (gap §8.7 item 2) -------------------
+    // A streamed dispatch must stay in-flight until the stream *drains*, not
+    // merely until it is set up: the guard moved into the returned ChunkStream
+    // releases the slot on drain / drop, so least-loaded never reads a still-
+    // generating upstream as idle.
+
+    #[tokio::test]
+    async fn positive_streamed_call_stays_in_flight_until_the_stream_drains() {
+        let router = router(vec![streamer("s", 3)], prefer(&["s"]));
+        let stream = router.stream(req()).await.expect("stream set up");
+        // The bug was that the slot dropped here, at setup.
+        assert_eq!(
+            router.live[0].snapshot().0,
+            1,
+            "a streamed call is in-flight while it generates, not just at setup"
+        );
+        let chunks: Vec<_> = stream.collect().await;
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            router.live[0].snapshot().0,
+            0,
+            "the slot releases once the stream is fully consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_streamed_inflight_release_event_fires_on_drain_not_setup() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let router = TaskRouter::new(vec![streamer("s", 2)], prefer(&["s"]))
+            .unwrap()
+            .with_observer(Arc::new(move |ev| {
+                if let RouteEvent::InFlight { upstream, count } = ev {
+                    sink.lock().unwrap().push((upstream.to_string(), count));
+                }
+            }));
+        let stream = router.stream(req()).await.expect("stream set up");
+        // Only the acquire edge so far — the gauge must NOT have drained at setup.
+        assert_eq!(events.lock().unwrap().clone(), vec![("s".to_string(), 1)]);
+        let _: Vec<_> = stream.collect().await;
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![("s".to_string(), 1), ("s".to_string(), 0)],
+            "the release edge fires when the stream drains"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_stream_setup_failure_releases_slot_and_falls_over() {
+        // The first upstream's stream setup fails (retryable); it must release its
+        // own slot and fail over to a working streamer, leaving both at zero.
+        let bad = up("bad", Arc::new(FailProvider::new("http 503: transient")));
+        let router = router(vec![bad, streamer("good", 1)], prefer(&["bad", "good"]));
+        let stream = router.stream(req()).await.expect("falls over to good");
+        let _: Vec<_> = stream.collect().await;
+        for live in &router.live {
+            assert_eq!(
+                live.snapshot().0,
+                0,
+                "every attempt released its in-flight slot"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn boundary_empty_stream_acquires_and_releases_exactly_once() {
+        // A zero-chunk stream still takes and returns exactly one slot: acquire at
+        // setup, release when the (immediately empty) stream drains.
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let router = TaskRouter::new(vec![streamer("s", 0)], prefer(&["s"]))
+            .unwrap()
+            .with_observer(Arc::new(move |ev| {
+                if let RouteEvent::InFlight { upstream, count } = ev {
+                    sink.lock().unwrap().push((upstream.to_string(), count));
+                }
+            }));
+        let stream = router.stream(req()).await.expect("stream set up");
+        let chunks: Vec<_> = stream.collect().await;
+        assert!(chunks.is_empty());
+        assert_eq!(router.live[0].snapshot().0, 0);
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![("s".to_string(), 1), ("s".to_string(), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_abandoned_unbounded_stream_does_not_leak_in_flight() {
+        // A hostile endpoint that streams forever must not pin a slot when the
+        // consumer abandons the turn: dropping the stream drops the guard.
+        let router = router(vec![streamer("s", usize::MAX)], prefer(&["s"]));
+        let mut stream = router.stream(req()).await.expect("stream set up");
+        assert_eq!(router.live[0].snapshot().0, 1);
+        let _first = stream.next().await.expect("one chunk");
+        assert_eq!(
+            router.live[0].snapshot().0,
+            1,
+            "still in-flight partway through an endless stream"
+        );
+        drop(stream); // abandon it before it ever ends
+        assert_eq!(
+            router.live[0].snapshot().0,
+            0,
+            "abandoning an endless stream must not leak the slot"
         );
     }
 }

@@ -51,6 +51,7 @@ members = [
     "crates/agent-testkit",
     "crates/agent-k8s-render",
     "crates/agent-k8s-secrets",
+    "crates/agent-doc-links",
 ]
 
 [workspace.package]
