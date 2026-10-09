@@ -319,6 +319,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-k8s-status"
+version = "0.1.0"
+dependencies = [
+ "rstest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "agent-lsp"
 version = "0.1.0"
 dependencies = [

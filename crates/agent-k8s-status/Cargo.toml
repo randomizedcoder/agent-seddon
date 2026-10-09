@@ -1,0 +1,28 @@
+[package]
+name = "agent-k8s-status"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The `nix run .#k8s-status` cluster-health tool (k8s track K3, docs/design/k8s/04).
+# The crate is a lib (the pure, testable core: parse `kubectl … -o json`, grade each
+# ArgoCD Application and role Deployment, roll up to one green/red `Report`) plus a thin
+# binary that shells out to `kubectl get … -o json` and prints the rollup. kubectl's
+# JSON is external input, so the core parses it defensively and fails closed.
+[lib]
+
+[[bin]]
+name = "k8s-status"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true

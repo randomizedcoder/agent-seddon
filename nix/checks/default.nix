@@ -383,6 +383,12 @@ in
   # build + redaction, with the mandatory `adversarial_` rows (k8s track K3,
   # docs/design/k8s/07-secrets.md). The `k8s-render-tests` twin.
   k8s-secrets = craneCheck ./k8s-secrets.nix { inherit cargoArtifacts; };
+  # Correctness of the `nix run .#k8s-status` health tool's pure core
+  # (crates/agent-k8s-status): parse `kubectl get … -o json`, grade each ArgoCD
+  # Application + role Deployment, roll up green/red — with the mandatory `adversarial_`
+  # rows proving hostile/missing fields fail closed (k8s track K3, docs/design/k8s/04).
+  # The `k8s-secrets` / `k8s-render-tests` twin.
+  k8s-status = craneCheck ./k8s-status.nix { inherit cargoArtifacts; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.

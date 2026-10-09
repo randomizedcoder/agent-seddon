@@ -170,9 +170,10 @@ let
       }
       ''
         mkdir -p "$out/bin"
-        # Wrap only the `agent` binary. The workspace also builds the `k8s-secrets`
-        # deploy tool (crates/agent-k8s-secrets), but that is an operator-host tool,
-        # not part of the agent runtime/image — it is wrapped separately below.
+        # Wrap only the `agent` binary. The workspace also builds the operator-host
+        # tools `k8s-secrets` (crates/agent-k8s-secrets) and `k8s-status`
+        # (crates/agent-k8s-status), but those run on the deployer's workstation, not
+        # in the agent runtime/image — they are wrapped separately below.
         makeWrapper "${agent-unwrapped}/bin/agent" "$out/bin/agent" \
           --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
           --set-default AGENT_ADVISORY_DB ${advisory-db} \
@@ -551,6 +552,20 @@ let
     '';
   };
 
+  # The `nix run .#k8s-status` health step (k8s track K3, docs/design/k8s/04). Reads
+  # cluster state with `kubectl get … -o json` and prints one green/red rollup: every
+  # ArgoCD Application Synced + Healthy and each role Deployment Ready. The grading logic
+  # lives in crates/agent-k8s-status (defensive parse + fail-closed, gated by the
+  # `k8s-status` check); this wraps its binary with `kubectl` on PATH. Like `k8s-secrets`
+  # it is an operator tool, kept out of the agent runtime/image (see the `agent` wrapper).
+  k8s-status = pkgs.writeShellApplication {
+    name = "k8s-status";
+    runtimeInputs = [ pkgs.kubectl ];
+    text = ''
+      exec ${agent-unwrapped}/bin/k8s-status "$@"
+    '';
+  };
+
   # Static analysis + tests.
   checks = import ./checks {
     inherit
@@ -818,6 +833,7 @@ in
         k8s-images
         k8s-render-manifests
         k8s-secrets
+        k8s-status
         e2e-live
         e2e-expect
         e2e-multi
