@@ -2190,6 +2190,12 @@ struct UpstreamParams<'a> {
     api_key_file: &'a str,
     insecure_tls: bool,
     context_window: u32,
+    /// In-provider retry budget. A **pooled** member keeps its own backoff (the
+    /// pool is not a failover loop), but a **routed** upstream builds with `0` so
+    /// a transient 429 surfaces to the `TaskRouter` immediately and fails over
+    /// fast to a headroom upstream — the router owns retry on the routed path
+    /// (gap §8.7 item 9). See [`build_route_upstream`].
+    max_retries: u32,
 }
 
 /// Build an inline endpoint into an OpenAI-compatible provider — resolving the key
@@ -2219,7 +2225,7 @@ fn build_openai_upstream(
         api_key,
         insecure_tls: p.insecure_tls,
         context_window: p.context_window,
-        max_retries: 2,
+        max_retries: p.max_retries,
         supports_vision: false,
     })
     .map_err(|e| anyhow::anyhow!("building upstream `{name}`: {e}"))
@@ -2240,6 +2246,8 @@ fn build_inline_pool_member(
         api_key_file: &c.api_key_file,
         insecure_tls: c.insecure_tls,
         context_window: c.context_window.unwrap_or(global_context_window),
+        // The pool is not a failover loop — a member keeps its own in-call backoff.
+        max_retries: 2,
     })
 }
 
@@ -2421,6 +2429,11 @@ pub(crate) fn build_route_upstream(
         api_key_file: &u.api_key_file,
         insecure_tls: u.insecure_tls,
         context_window: u.context_window.unwrap_or(global_context_window),
+        // Fail fast on the routed path: a routed upstream surfaces a transient
+        // failure to the `TaskRouter` at once so it can fail over to a headroom
+        // upstream, rather than burning ≤20 s × N in-provider backoff first. The
+        // router owns the retry budget now (gap §8.7 item 9).
+        max_retries: 0,
     })
 }
 
@@ -2937,7 +2950,10 @@ fn synth_anthropic_upstream(
             } else {
                 global_context_window
             },
-            max_retries: card.max_retries,
+            // Fail fast — the `TaskRouter` owns retry on the routed path and uses
+            // `card.max_retries` as its whole-fleet retry budget (gap §8.7 item 9),
+            // so an in-provider backoff here would just delay failover.
+            max_retries: 0,
         })
         .map_err(|e| Error::Registry(format!("card `{}`: {e}", card.id)))?;
         Ok(Arc::new(provider))

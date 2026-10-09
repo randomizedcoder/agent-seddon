@@ -190,7 +190,11 @@ impl RegistryRouter {
 
     /// The connection identity of a card — the fields whose change requires a
     /// NEW provider instance. Routing metadata (tags/tier/cost) deliberately
-    /// excluded: re-tagging must not drop a live connection.
+    /// excluded: re-tagging must not drop a live connection. `max_retries` is
+    /// excluded too: routed upstreams build fail-fast (retries live on the
+    /// `TaskRouter`, gap §8.7 item 9), so the built provider no longer depends
+    /// on it — a budget-only edit reuses the live connection and only rebuilds
+    /// the router (via `config_fingerprint`).
     fn provider_key(u: &Upstream) -> u64 {
         let mut h = DefaultHasher::new();
         (
@@ -201,7 +205,6 @@ impl RegistryRouter {
             &u.api_key_ref,
             u.insecure_tls,
             &u.version,
-            u.max_retries,
         )
             .hash(&mut h);
         h.finish()
@@ -335,10 +338,21 @@ impl RegistryRouter {
         if upstreams.is_empty() {
             return None;
         }
+        // Router-owned retry budget (gap §8.7 item 9): the most retries any
+        // enabled card asks for. Routed upstreams build fail-fast, so a card's
+        // `max_retries` is now the router's whole-fleet re-pass budget rather
+        // than an in-provider backoff count. Already clamped by `card.sanitize()`.
+        let retry_budget = cards
+            .iter()
+            .filter(|c| c.enabled)
+            .map(|c| c.max_retries)
+            .max()
+            .unwrap_or(0);
         let mut router = TaskRouter::new(upstreams, Policy::from_spec(policy))
             .expect("non-empty upstream list")
             .with_breaker(self.breaker_threshold, self.breaker_cooldown_ms)
             .with_clock(self.now_ms.clone())
+            .with_retry_budget(retry_budget)
             .with_snapshot_version(fingerprint);
         if let Some(o) = &self.observer {
             router = router.with_observer(o.clone());

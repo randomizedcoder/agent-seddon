@@ -524,7 +524,7 @@ across N pools × models × prices needs.
 | `RegistryRouter` / `RouterCell` | rebuilds `TaskRouter` on any card change (5 s refresh), **resetting breaker + in-flight stats**; per-tenant cells → load is invisible across tenants | — | — | — | [registry_router.rs](../../crates/agent-providers/src/registry_router.rs):43-66, 149-176, 213-265, 338 |
 | `ConsensusProvider`, `BranchingProvider` | fan-out | — | multiply load, ungated; ~~`branch_leak` fork/cancel gate flaked RED ("heap grew across cycles")~~ **Fixed — not a branch strand: dhat shows the fork/cancel heap is flat at 300 iters; the "growth" was an under-warmed test baseline mistaking tokio's one-time multi-thread / `parking_lot` working-set ramp (~15 KB, grown lazily as workers first park) for per-cycle growth. The test now warms to steady state (convergence, not a magic count) before baselining. As a structured-teardown correctness improvement, `BranchingProvider::complete` also drains its `JoinSet` after `abort_all()` so cancelled branches (captured provider `Arc`s / request clones) are reaped before return, not at the scheduler's leisure** | — | consensus.rs:22-24; branching.rs:522-530 (drain); branch_leak.rs |
 | `reach` | free `GET /models` probe | used by doctor / preflight, **not** by the pool | — | — | [reach.rs](../../crates/agent-providers/src/reach.rs):1-40 |
-| Retry | in-provider full-jitter backoff ≤ 20 s per attempt, `max_retries` times, **before** any failover | — | — | a 429 on Kimi can burn minutes before GLM is tried | [agent-retry/src/lib.rs](../../crates/agent-retry/src/lib.rs):59-60, 114-116; openai_compat.rs:58, 86-161 |
+| Retry | ~~in-provider full-jitter backoff ≤ 20 s per attempt, `max_retries` times, **before** any failover~~ **router-owned on the routed path (§8.7 item 9).** Routed upstreams build **fail-fast** (`max_retries: 0`); the `TaskRouter` owns retry as a bounded whole-fleet re-pass budget, so a 429 fails over to a headroom upstream at once | — | — | ~~a 429 on Kimi can burn minutes before GLM is tried~~ **fixed** — sleepless failover within a pass; one jittered backoff between passes, budget-capped | [agent-retry/src/lib.rs](../../crates/agent-retry/src/lib.rs):59-60, 114-116; [task_router.rs](../../crates/agent-providers/src/task_router.rs) `route`/`one_pass`/`with_retry_budget`; openai_compat.rs:58, 86-161 |
 
 Two structural facts:
 
@@ -639,8 +639,13 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
    output × `max_tokens`), `RouteHint.max_cost` set by fleet and tenancy, a per-tenant per-hour
    spend budget, `PriceTable` fed from registry cards, cost metrics labelled by upstream.
 8. **Spillover tiers:** `spill_to: ["cloud"]` in `RoutePreferSpec`, driven by saturation state.
-9. **Fail over fast on 429** when another upstream has headroom: a router-level retry budget
-   instead of the in-provider 20 s backoff.
+9. ~~**Fail over fast on 429** when another upstream has headroom: a router-level retry budget
+   instead of the in-provider 20 s backoff.~~ **Done** — routed upstreams build fail-fast
+   (`max_retries: 0`, builder.rs); the `TaskRouter` owns retry as a bounded whole-fleet re-pass
+   budget (`with_retry_budget`, wired from `max(card.max_retries)` on the registry path and the new
+   `[route] retry_budget` on the static path), and `order()` defers a saturated upstream behind one
+   with headroom. Failover within a pass is sleepless; one jittered backoff (capped at 20 s) between
+   passes. Four-class + adversarial tests in `task_router.rs`.
 10. **Capacity probes, not liveness pings:** `reach` `/models` for liveness (free); 06 adaptive
     effective capacity; read vLLM / SGLang / llama.cpp `/metrics` (queue depth, KV-cache usage).
 11. **Per-model task-fit on the card:** use `max_output_tokens`; add TPM / RPM, `tags_required`,

@@ -255,7 +255,10 @@ no secret committed — the concrete request that motivated the track. See
 - **Adaptive effective-capacity (05 → 06)** — 05 makes `least-loaded` capacity-aware from a *static*
   `max_concurrency`; the adaptive follow-up shrinks *effective* capacity when a gateway `429`s /
   slows and recovers as it heals (a B300 dropping out of the gateway). Designed in
-  [05](05-capacity-aware.md#deferred--06-adaptive-effective-capacity); not built.
+  [05](05-capacity-aware.md#deferred--06-adaptive-effective-capacity); not built. The *non-adaptive*
+  half — **fast 429 failover** (routed upstreams fail-fast, the `TaskRouter` owns a bounded
+  whole-fleet retry budget, `order()` defers a saturated upstream behind one with headroom) — **is
+  built** (gap §8.7 item 9); see [router.md](../../components/router.md#fast-429-failover--router-owned-retry-gap-87-item-9).
 - **LLM meta-router** — a cheap model picks among rule-eligible candidates. Decision engine stays
   declarative + live-signals.
 - **Learned / outcome-based weights** — tune per-upstream preference from measured latency/cost/

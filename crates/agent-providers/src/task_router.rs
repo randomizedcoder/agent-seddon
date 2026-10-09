@@ -141,6 +141,14 @@ pub struct TaskRouter {
     cooldown_ms: u64,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     observer: Option<RouteObserver>,
+    /// Router-owned retry budget (gap §8.7 item 9). Each `max_retries` is a
+    /// whole-fleet **re-pass**: a pass that exhausts every candidate on transient
+    /// failures backs off once (jittered, capped at `max_delay`) and tries the
+    /// fleet again. Routed upstreams build fail-fast (`max_retries: 0`), so retry
+    /// lives here — a 429 fails over to a headroom upstream at once instead of
+    /// burning ≤20 s × N in-provider backoff first. Default `new(0)` = a single
+    /// pass (today's behaviour); set via [`Self::with_retry_budget`].
+    retry: agent_retry::RetryPolicy,
     /// The registry snapshot fingerprint this fleet was built from (model-router
     /// 04 tail): `0` = a static (TOML-built) fleet. Carried on every decision
     /// event so a routing choice is attributable to a fleet version.
@@ -174,6 +182,7 @@ impl TaskRouter {
             cooldown_ms: 30_000,
             now_ms: Arc::new(crate::router::wall_clock_ms),
             observer: None,
+            retry: agent_retry::RetryPolicy::new(0),
             snapshot_version: 0,
         })
     }
@@ -189,6 +198,17 @@ impl TaskRouter {
     }
     pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
         self.now_ms = now_ms;
+        self
+    }
+    /// Set the router-owned retry budget — the number of whole-fleet re-passes on
+    /// transient failure (gap §8.7 item 9). Capped at
+    /// [`agent_core::MAX_UPSTREAM_RETRIES`] so a hostile/fat-fingered config can't
+    /// turn into an unbounded retry storm; `0` (the default) keeps the single-pass
+    /// behaviour. The schedule is `agent-retry`'s canonical jittered backoff
+    /// (500 ms base, capped at 20 s) — one wait between passes, not per upstream.
+    pub fn with_retry_budget(mut self, max_retries: u32) -> Self {
+        self.retry =
+            agent_retry::RetryPolicy::new(max_retries.min(agent_core::MAX_UPSTREAM_RETRIES));
         self
     }
     pub fn with_observer(mut self, observer: RouteObserver) -> Self {
@@ -261,17 +281,31 @@ impl TaskRouter {
         }
     }
 
-    /// Indices to try, in order: the policy's preferred-and-capable order, with open
-    /// breakers moved to the back (skipped-then-tried-last). Also returns which
-    /// rule decided (for the `Decided` event). The engine resolves straight to
-    /// fleet indices (same order as `self.upstreams`) — no by-id re-lookup.
+    /// Whether an upstream is at its concurrency ceiling right now
+    /// (`max_concurrency != 0 && in_flight >= max_concurrency`). `0` = unbounded,
+    /// never saturated. Read live off [`LiveStats`] — a saturated upstream is
+    /// deferred behind one with headroom in [`Self::order`].
+    fn is_saturated(&self, i: usize) -> bool {
+        let cap = self.upstreams[i].max_concurrency;
+        cap != 0 && self.live[i].snapshot().0 >= cap
+    }
+
+    /// Indices to try, in order: the policy's preferred-and-capable order, then
+    /// three buckets so a request lands on a *usable* upstream first — those with
+    /// **headroom** ahead of those at their concurrency ceiling (gap §8.7 item 9:
+    /// fail over to an upstream with headroom), ahead of those whose breaker is
+    /// **open** (skipped-then-tried-last so a total outage still attempts
+    /// something). Policy order is preserved within each bucket. Also returns
+    /// which rule decided (for the `Decided` event). The engine resolves straight
+    /// to fleet indices (same order as `self.upstreams`) — no by-id re-lookup.
     fn order(&self, hint: &Hint) -> (Vec<usize>, Option<usize>) {
         let now = (self.now_ms)();
         let fleet: Vec<UpstreamMeta<'_>> =
             (0..self.upstreams.len()).map(|i| self.meta(i)).collect();
         let (ordered, rule) = self.policy.resolve_indices(hint, &fleet);
 
-        let mut healthy = Vec::new();
+        let mut headroom = Vec::new();
+        let mut saturated = Vec::new();
         let mut unhealthy = Vec::new();
         for i in ordered {
             if self.health[i].is_open(now, self.cooldown_ms) {
@@ -279,12 +313,15 @@ impl TaskRouter {
                     target: &self.upstreams[i].id,
                 });
                 unhealthy.push(i);
+            } else if self.is_saturated(i) {
+                saturated.push(i);
             } else {
-                healthy.push(i);
+                headroom.push(i);
             }
         }
-        healthy.extend(unhealthy);
-        (healthy, rule)
+        headroom.extend(saturated);
+        headroom.extend(unhealthy);
+        (headroom, rule)
     }
 
     /// Try each chosen upstream in turn, stopping at the first success or the first
@@ -299,9 +336,14 @@ impl TaskRouter {
         Fut: std::future::Future<Output = Result<T>>,
     {
         let hint = self.hint(req);
-        let (order, rule) = self.order(&hint);
         let mode = hint.task_mode.map_or("-", |m| m.as_str());
-        if order.is_empty() {
+        // Decide once up front — the fleet + policy don't change between retry
+        // passes, so the `Decided`/`NoCandidate` event and the `route.select`
+        // trail reflect the opening choice (the per-pass `order()` is recomputed
+        // inside each pass so breaker/cooldown state from a failed pass steers
+        // the next one).
+        let (first_order, rule) = self.order(&hint);
+        if first_order.is_empty() {
             self.emit(RouteEvent::NoCandidate {
                 role: hint.role.as_str(),
             });
@@ -313,7 +355,7 @@ impl TaskRouter {
             role: hint.role.as_str(),
             task_mode: mode,
             rule,
-            chosen: &self.upstreams[order[0]].id,
+            chosen: &self.upstreams[first_order[0]].id,
         });
         // Attaches to the caller's current span, so a decision is reproducible
         // against the exact fleet version that produced it (0 = static fleet).
@@ -323,9 +365,45 @@ impl TaskRouter {
             role = hint.role.as_str(),
             task_mode = mode,
             rule = ?rule,
-            chosen = %self.upstreams[order[0]].id,
+            chosen = %self.upstreams[first_order[0]].id,
             "route decided"
         );
+
+        // Router-owned retry (gap §8.7 item 9): one `op()` call = one whole-fleet
+        // pass; `agent_retry::run` re-invokes it up to `retry.max_retries` times,
+        // backing off once (jittered, capped) between passes. Failover *within* a
+        // pass stays sleepless — now actually fast because routed upstreams build
+        // fail-fast, so each surfaces its 429 at once.
+        let op = &op;
+        let hint = &hint;
+        let out =
+            agent_retry::run(&self.retry, || async move { self.one_pass(hint, op).await }).await;
+        if out.is_err() {
+            // Budget exhausted (or the fleet went terminal on a pass) — the chain
+            // is done.
+            self.emit(RouteEvent::Exhausted);
+        }
+        out
+    }
+
+    /// One whole-fleet pass over a freshly-recomputed [`Self::order`]: the first
+    /// success is [`Attempt::Done`]; a request-level terminal aborts the chain
+    /// ([`Attempt::Fail`], no budget spend); otherwise every candidate is tried
+    /// in turn (sleeplessly) and the pass ends in [`Attempt::Retry`] so the
+    /// driver backs off once and re-passes the fleet (if budget remains).
+    async fn one_pass<T, F, Fut>(&self, hint: &Hint, op: &F) -> agent_retry::Attempt<T, Error>
+    where
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let (order, _rule) = self.order(hint);
+        if order.is_empty() {
+            // A pass can find no candidate only if every upstream's breaker is
+            // open AND filtered — treat as exhausted, don't spin the budget.
+            return agent_retry::Attempt::Fail(Error::Provider(
+                "no upstream can serve this request (capability/requirement mismatch)".into(),
+            ));
+        }
         let mut last: Option<Error> = None;
         for (attempt, &i) in order.iter().enumerate() {
             let u = &self.upstreams[i];
@@ -342,7 +420,7 @@ impl TaskRouter {
                         upstream: &u.id,
                         outcome: "ok",
                     });
-                    return Ok(v);
+                    return agent_retry::Attempt::Done(v);
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -359,7 +437,9 @@ impl TaskRouter {
                             upstream: &u.id,
                             outcome: "terminal",
                         });
-                        return Err(e);
+                        // A request-terminal fails the same way on a re-pass too —
+                        // abort without spending the budget.
+                        return agent_retry::Attempt::Fail(e);
                     }
                     self.emit(RouteEvent::Dispatched {
                         role: hint.role.as_str(),
@@ -377,8 +457,14 @@ impl TaskRouter {
                 }
             }
         }
-        self.emit(RouteEvent::Exhausted);
-        Err(last.unwrap_or_else(|| Error::Provider("task-router exhausted all upstreams".into())))
+        // The whole fleet failed transiently this pass. Back off once (the driver
+        // owns the wait) and re-pass if budget remains; `after: None` because the
+        // per-upstream `Retry-After` is not on the error message the router sees —
+        // the point is to move fast across the fleet, not honour one upstream's
+        // hint. Budget-0 (the default) ⇒ `run` returns this err after one pass.
+        let err =
+            last.unwrap_or_else(|| Error::Provider("task-router exhausted all upstreams".into()));
+        agent_retry::Attempt::Retry { err, after: None }
     }
 }
 
@@ -1308,5 +1394,217 @@ mod tests {
             0,
             "abandoning an endless stream must not leak the slot"
         );
+    }
+
+    // --- router-owned retry on the routed path (gap §8.7 item 9) -----------
+    // Routed upstreams build fail-fast, so the TaskRouter owns retry as a
+    // bounded whole-fleet re-pass budget and defers saturated upstreams behind
+    // ones with headroom. Failover WITHIN a pass is sleepless (fast); the only
+    // wait is one jittered backoff BETWEEN passes. `start_paused` lets a test
+    // read that wait off the virtual clock.
+
+    /// Fails with `msg` for its first `fail_times` calls, then succeeds with
+    /// `answer`. Models an upstream that is briefly rate-limited then recovers.
+    struct FlakyProvider {
+        msg: String,
+        answer: String,
+        fail_times: usize,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl LlmProvider for FlakyProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps(true, false, 1000)
+        }
+        async fn complete(&self, r: CompletionRequest) -> Result<CompletionResponse> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                Err(Error::Provider(self.msg.clone()))
+            } else {
+                ScriptedProvider::new(vec![final_turn(&self.answer)])
+                    .complete(r)
+                    .await
+            }
+        }
+    }
+
+    /// Give a built router a **deterministic** (no-jitter) retry budget so a test
+    /// can assert exact backoff timings and dispatch counts — production uses the
+    /// jittered `with_retry_budget`.
+    fn with_budget(mut r: TaskRouter, budget: u32) -> TaskRouter {
+        r.retry = agent_retry::RetryPolicy::new(budget).with_jitter(agent_retry::Jitter::None);
+        r
+    }
+
+    fn up_cap(id: &str, provider: Arc<dyn LlmProvider>, max_concurrency: u32) -> RouterUpstream {
+        RouterUpstream {
+            max_concurrency,
+            ..up(id, provider)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn positive_429_fails_over_fast_to_headroom_upstream() {
+        // kimi is fail-fast-429; glm is healthy. glm serves on the SAME pass —
+        // kimi is tried exactly once (no in-provider retry, no re-pass) and no
+        // backoff elapses, because the pass succeeded.
+        let bad = Arc::new(FailProvider::new("http 429: slow down"));
+        let r = with_budget(
+            router(
+                vec![
+                    up("kimi", bad.clone()),
+                    up("glm", ok("from-glm", true, false)),
+                ],
+                prefer(&["kimi", "glm"]),
+            ),
+            3,
+        );
+        let start = tokio::time::Instant::now();
+        let resp = r.complete(req()).await.expect("fails over");
+        assert_eq!(resp.message.content_text(), "from-glm");
+        assert_eq!(
+            bad.calls.load(Ordering::SeqCst),
+            1,
+            "the 429 upstream is tried once — failover, not in-provider retry"
+        );
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::ZERO,
+            "failover within a pass is sleepless"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_saturated_upstream_is_deferred() {
+        // kimi is preferred but pinned at its concurrency ceiling; glm has
+        // headroom, so glm serves even though the policy lists kimi first.
+        let r = router(
+            vec![
+                up_cap("kimi", ok("from-kimi", true, false), 1),
+                up_cap("glm", ok("from-glm", true, false), 1),
+            ],
+            prefer(&["kimi", "glm"]),
+        );
+        r.live[0].in_flight.store(1, Ordering::Relaxed); // kimi at its ceiling
+        let resp = r.complete(req()).await.expect("routes to headroom");
+        assert_eq!(resp.message.content_text(), "from-glm");
+    }
+
+    #[tokio::test]
+    async fn negative_terminal_aborts_without_budget_retry() {
+        // A request-terminal (400) fails identically everywhere: abort at once,
+        // no failover and no whole-fleet re-pass even with a budget set.
+        let primary = Arc::new(FailProvider::new("http 400: unsupported parameter"));
+        let secondary = Arc::new(FailProvider::new("should-not-be-reached"));
+        let r = with_budget(
+            router(
+                vec![up("kimi", primary.clone()), up("glm", secondary.clone())],
+                prefer(&["kimi", "glm"]),
+            ),
+            5,
+        );
+        assert!(r.complete(req()).await.is_err());
+        assert_eq!(
+            primary.calls.load(Ordering::SeqCst),
+            1,
+            "a request-terminal is tried exactly once — no budget spend"
+        );
+        assert_eq!(
+            secondary.calls.load(Ordering::SeqCst),
+            0,
+            "a request-terminal must not fall over"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn corner_whole_fleet_429_backs_off_then_succeeds() {
+        // Both upstreams 429 on pass 1; glm recovers on pass 2. Exactly one
+        // between-pass backoff happens — deterministic (no jitter, 500 ms base,
+        // attempt-0 ceiling) — and failover within each pass stays sleepless.
+        let kimi = Arc::new(FailProvider::new("http 429: slow down"));
+        let glm_calls = Arc::new(AtomicUsize::new(0));
+        let glm = Arc::new(FlakyProvider {
+            msg: "http 429: slow down".into(),
+            answer: "from-glm".into(),
+            fail_times: 1,
+            calls: glm_calls.clone(),
+        });
+        let r = with_budget(
+            router(
+                vec![up("kimi", kimi.clone()), up("glm", glm)],
+                prefer(&["kimi", "glm"]),
+            ),
+            3,
+        );
+        let start = tokio::time::Instant::now();
+        let resp = r.complete(req()).await.expect("recovers on the re-pass");
+        assert_eq!(resp.message.content_text(), "from-glm");
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_millis(500),
+            "exactly one between-pass backoff"
+        );
+        assert_eq!(
+            glm_calls.load(Ordering::SeqCst),
+            2,
+            "glm is tried once per pass (pass 1 fails, pass 2 serves)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boundary_retry_budget_is_exhausted_then_errors() {
+        // A permanently-429 two-upstream fleet: with budget B the router makes
+        // 1 + B whole-fleet passes, so each upstream is dispatched 1 + B times,
+        // then errors. Check-the-check: budget 0 fails after a single pass.
+        for (budget, per_upstream) in [(2u32, 3usize), (0, 1)] {
+            let a = Arc::new(FailProvider::new("http 429: slow down"));
+            let b = Arc::new(FailProvider::new("http 429: slow down"));
+            let r = with_budget(
+                router(
+                    vec![up("a", a.clone()), up("b", b.clone())],
+                    prefer(&["a", "b"]),
+                ),
+                budget,
+            );
+            let err = r.complete(req()).await.expect_err("fleet is down");
+            assert!(err.to_string().contains("429"), "{err}");
+            assert_eq!(
+                a.calls.load(Ordering::SeqCst),
+                per_upstream,
+                "budget {budget}: upstream a dispatch count"
+            );
+            assert_eq!(
+                b.calls.load(Ordering::SeqCst),
+                per_upstream,
+                "budget {budget}: upstream b dispatch count"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adversarial_permanent_429_storm_cannot_pin_the_router() {
+        // Every upstream always 429s. The call returns within the bounded budget:
+        // at most `budget` backoffs, each clamped to `max_delay` — never the old
+        // unbounded, minutes-long in-provider burn. Budget 4, no jitter ⇒ the
+        // total wait is 0.5 + 1 + 2 + 4 = 7.5 s (all ceilings ≤ 20 s cap).
+        let a = Arc::new(FailProvider::new("http 429: slow down"));
+        let b = Arc::new(FailProvider::new("http 429: slow down"));
+        let r = with_budget(
+            router(
+                vec![up("a", a.clone()), up("b", b.clone())],
+                prefer(&["a", "b"]),
+            ),
+            4,
+        );
+        let start = tokio::time::Instant::now();
+        let err = r.complete(req()).await.expect_err("storm never clears");
+        assert!(err.to_string().contains("429"), "{err}");
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_millis(7500),
+            "total wait is the bounded sum of capped backoffs, not minutes"
+        );
+        assert_eq!(a.calls.load(Ordering::SeqCst), 5, "1 + 4 passes");
+        assert_eq!(b.calls.load(Ordering::SeqCst), 5);
     }
 }
