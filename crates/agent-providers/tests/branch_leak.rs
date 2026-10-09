@@ -80,10 +80,41 @@ async fn fork_cancel_cycle_does_not_leak() {
         route: None,
     };
 
-    // Warm-up: runtime/task-queue scratch counts as baseline, not growth.
-    let r = provider.complete(req.clone()).await.expect("winner");
-    assert_eq!(r.message.content_text(), "quick");
-    // Let the aborted laggard's teardown settle before baselining.
+    // Warm-up: drive the runtime to STEADY STATE before baselining — runtime
+    // working set counts as baseline, not growth. A dhat dump of the live-at-end
+    // heap shows it is ~15 KB of one-time, process-global runtime structures (the
+    // `parking_lot` park-bucket table + per-worker `stack_overflow::ThreadInfo`),
+    // grown lazily as the worker threads first park on the aborted laggard. That
+    // ramp is SCHEDULING-driven, not cycle-count driven: under the loaded gate
+    // (every leak test runs back-to-back against heavy concurrent builds) a fixed
+    // warm-up count can return before the threads have finished parking, leaving a
+    // low baseline so the remaining one-time ramp is later misread as a per-cycle
+    // leak (the recurring gate flake). So warm until the live heap stops growing —
+    // convergence, not a magic number. The cap is a safety net, not the target: a
+    // *real* unbounded strand never gives consecutive stable samples, trips the
+    // cap with a still-climbing baseline, and then keeps growing through the
+    // measured window below — so this cannot mask a leak, it only waits out the
+    // runtime's one-time working set.
+    const WARMUP_CAP: u64 = 400;
+    const STABLE_EPSILON: usize = 256;
+    const STABLE_RUN: u32 = 8;
+    let mut prev = 0usize;
+    let mut stable = 0u32;
+    for _ in 0..WARMUP_CAP {
+        let r = provider.complete(req.clone()).await.expect("winner");
+        assert_eq!(r.message.content_text(), "quick");
+        let cur = dhat::HeapStats::get().curr_bytes;
+        if cur <= prev + STABLE_EPSILON {
+            stable += 1;
+            if stable >= STABLE_RUN {
+                break;
+            }
+        } else {
+            stable = 0;
+        }
+        prev = cur;
+    }
+    // Let any last aborted-laggard teardown settle before baselining.
     tokio::task::yield_now().await;
 
     let base = dhat::HeapStats::get();
