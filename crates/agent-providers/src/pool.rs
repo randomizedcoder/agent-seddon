@@ -139,6 +139,37 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
+impl PoolMember {
+    /// Atomically reserve one in-flight slot **iff** the member is below its
+    /// concurrency cap, returning the RAII guard (slot freed on drop) or `None`
+    /// when it is already full. The check-and-increment is a single CAS loop, so
+    /// `max_concurrency` is a HARD cap even under concurrent dispatch — this closes
+    /// the `eligible()` (check) → `call_member` (increment) TOCTOU where N racing
+    /// callers could each pass the capacity filter and then all increment past the
+    /// cap. `max_concurrency == 0` is unbounded (an unconditional increment).
+    fn try_reserve(&self) -> Option<InFlightGuard<'_>> {
+        if self.max_concurrency == 0 {
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            return Some(InFlightGuard(&self.in_flight));
+        }
+        let mut cur = self.in_flight.load(Ordering::Acquire);
+        loop {
+            if cur >= self.max_concurrency {
+                return None;
+            }
+            match self.in_flight.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(InFlightGuard(&self.in_flight)),
+                Err(actual) => cur = actual, // lost the race — retry with the fresh value
+            }
+        }
+    }
+}
+
 /// How to add a member to a pool: an (already metered) candidate, its capability
 /// tier, and an optional cost hint (0.0 = free/local). Cost orders fan-out
 /// selection; it is clamped, never trusted.
@@ -393,13 +424,18 @@ impl PoolInner {
     }
 
     /// Run one member's `complete`, timed and breaker-updated. Fail-soft. The
-    /// in-flight count is raised for the duration via an RAII guard so it is
-    /// released on *every* path — success, error, or a panic in the provider — and
-    /// can never leak load that would exile a healthy member from selection.
-    async fn call_member(&self, i: usize, req: CompletionRequest) -> PoolMemberResult {
+    /// in-flight slot is reserved **atomically by the caller** (`try_reserve`) and
+    /// handed in as `guard`, which releases it on *every* path — success, error, or
+    /// a panic in the provider — so the count never leaks load that would exile a
+    /// healthy member from selection, and never over-admits past `max_concurrency`.
+    async fn call_member(
+        &self,
+        i: usize,
+        req: CompletionRequest,
+        guard: InFlightGuard<'_>,
+    ) -> PoolMemberResult {
         let m = &self.members[i];
-        let _n_in = m.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
-        let _guard = InFlightGuard(&m.in_flight);
+        let _guard = guard; // owns the reserved slot for the duration of this call
         self.emit(self.member_state(m));
         let started = Instant::now();
         let outcome = m.candidate.provider.complete(req).await;
@@ -686,9 +722,13 @@ impl LlmPool for PoolProvider {
         if chosen.is_empty() && self.inner.saturated_but_eligible(&req, tier) {
             self.inner.emit(PoolEvent::SaturationShed { mode: "all" });
         }
-        let futures = chosen
-            .into_iter()
-            .map(|i| self.inner.call_member(i, req.clone()));
+        // Reserve each slot atomically up front; a member that filled to capacity
+        // between `eligible()` and here is skipped (fan-out stays fail-soft and the
+        // hard cap holds), so we never over-admit under a concurrent fan-out.
+        let futures = chosen.into_iter().filter_map(|i| {
+            let guard = self.inner.members[i].try_reserve()?;
+            Some(self.inner.call_member(i, req.clone(), guard))
+        });
         futures_util::future::join_all(futures).await
     }
 
@@ -727,7 +767,12 @@ impl LlmPool for PoolProvider {
         }
         let mut last: Option<Error> = None;
         for (attempt, i) in order.iter().enumerate() {
-            match self.inner.call_member(*i, req.clone()).await {
+            // Reserve atomically; if it filled to capacity since selection, skip it
+            // and fall over to the next candidate rather than over-admitting.
+            let Some(guard) = self.inner.members[*i].try_reserve() else {
+                continue;
+            };
+            match self.inner.call_member(*i, req.clone(), guard).await {
                 PoolMemberResult {
                     response: Some(r), ..
                 } => return Ok(r),
@@ -1216,6 +1261,121 @@ mod tests {
         assert_eq!(p.bench_select(&req(), PoolTier::Light, 5), vec![0]);
         p.bench_set_in_flight(0, 2); // at cap → skipped
         assert!(p.bench_select(&req(), PoolTier::Light, 5).is_empty());
+    }
+
+    /// boundary: `try_reserve` is the single atomic admission point — a cap-2 member
+    /// hands out exactly two live permits, refuses the third, and admits again the
+    /// instant a permit drops. This is the invariant the TOCTOU fix rests on, and a
+    /// check-the-check: the old non-atomic `has_capacity`-then-`fetch_add` could hand
+    /// out that third permit.
+    #[test]
+    fn boundary_try_reserve_is_a_hard_cap() {
+        let p = PoolProvider::new("t", vec![capped_member("m", 2)]).expect("pool");
+        let m = &p.inner.members[0];
+        let g1 = m.try_reserve().expect("1st permit (0/2 → 1/2)");
+        let _g2 = m.try_reserve().expect("2nd permit (1/2 → 2/2)");
+        assert!(
+            m.try_reserve().is_none(),
+            "3rd request is refused at the cap"
+        );
+        assert_eq!(m.in_flight.load(Ordering::Acquire), 2);
+        drop(g1); // free one slot
+        assert_eq!(m.in_flight.load(Ordering::Acquire), 1);
+        let _g3 = m
+            .try_reserve()
+            .expect("a freed slot admits the next request");
+        assert_eq!(m.in_flight.load(Ordering::Acquire), 2);
+        assert!(m.try_reserve().is_none(), "back at the cap");
+    }
+
+    /// corner: `max_concurrency == 0` is unbounded — `try_reserve` always succeeds,
+    /// however loaded, and still accounts the slot (so the live gauge is accurate).
+    #[test]
+    fn corner_try_reserve_unbounded_always_admits() {
+        let p = PoolProvider::new("t", vec![capped_member("u", 0)]).expect("pool");
+        let m = &p.inner.members[0];
+        let guards: Vec<_> = (0..1000)
+            .map(|_| m.try_reserve().expect("unbounded"))
+            .collect();
+        assert_eq!(m.in_flight.load(Ordering::Acquire), 1000);
+        drop(guards);
+        assert_eq!(
+            m.in_flight.load(Ordering::Acquire),
+            0,
+            "every slot released"
+        );
+    }
+
+    /// adversarial: under real parallelism, a storm of concurrent `complete()` calls
+    /// against a capped member must never put more than `cap` requests inside the
+    /// provider at once. The old `eligible()`-check → `call_member()`-increment split
+    /// let N racing callers each pass the capacity filter and then all increment past
+    /// the cap; the `try_reserve` CAS closes that window. The provider records the
+    /// peak simultaneous entries and we assert it never breaches the hard cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adversarial_concurrent_dispatch_never_exceeds_cap() {
+        const CAP: usize = 3;
+        struct ConcurrencyProbe {
+            live: AtomicUsize,
+            peak: AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for ConcurrencyProbe {
+            fn capabilities(&self) -> ModelCapabilities {
+                caps()
+            }
+            async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+                let now = self.live.fetch_add(1, Ordering::AcqRel) + 1;
+                self.peak.fetch_max(now, Ordering::AcqRel);
+                // Hold the slot long enough for concurrent callers to pile up behind it.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                self.live.fetch_sub(1, Ordering::AcqRel);
+                Ok(final_turn("probe"))
+            }
+            async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+                Err(Error::Provider("unused".into()))
+            }
+        }
+        let probe = Arc::new(ConcurrencyProbe {
+            live: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        });
+        let peek = probe.clone();
+        let p = Arc::new(
+            PoolProvider::new(
+                "t",
+                vec![PoolSpec {
+                    candidate: Candidate {
+                        name: "capped".into(),
+                        provider: probe,
+                    },
+                    tier: PoolTier::Light,
+                    cost: 0.0,
+                    weight: 1.0,
+                    max_concurrency: CAP,
+                }],
+            )
+            .expect("pool"),
+        );
+        let handles: Vec<_> = (0..64)
+            .map(|_| {
+                let pp = p.clone();
+                tokio::spawn(async move { pp.complete(req()).await })
+            })
+            .collect();
+        let mut ok = 0usize;
+        for h in handles {
+            if h.await.expect("join").is_ok() {
+                ok += 1;
+            }
+        }
+        let peak = peek.peak.load(Ordering::Acquire);
+        assert!(peak <= CAP, "peak {peak} breached the hard cap {CAP}");
+        assert!(
+            peak >= 1,
+            "some calls must have been admitted (peak {peak})"
+        );
+        assert!(ok >= 1, "an admitted call must succeed (ok {ok})");
     }
 
     /// boundary: all members saturated → `complete` sheds a `saturated` error
