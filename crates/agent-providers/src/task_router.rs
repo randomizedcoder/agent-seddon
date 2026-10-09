@@ -19,8 +19,8 @@
 //! always win: a hint can narrow the fleet but can never clear a real
 //! requirement. See docs/design/model-router/02b-hint-threading.md.
 
-use crate::route::{estimate_min_context, Hint, Policy, Role, UpstreamMeta};
-use crate::router::{Health, RouteEvent, RouteObserver};
+use crate::route::{estimate_min_context, Hint, Policy, Role, Saturation, UpstreamMeta};
+use crate::router::{poll_for_capacity, Health, RouteEvent, RouteObserver, MAX_SATURATION_WAIT_MS};
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider, ModelCapabilities,
     PoolTier, Result,
@@ -96,29 +96,53 @@ struct InFlightGuard {
     upstream_id: Arc<str>,
 }
 impl InFlightGuard {
-    fn enter(router: &TaskRouter, i: usize) -> Self {
+    /// Take one in-flight slot on upstream `i`. Soft mode (the default) and an
+    /// uncapped upstream (`max_concurrency == 0`) always admit. Under the opt-in
+    /// **hard** cap (gap §8.7 item 3) the check-and-increment is one CAS loop —
+    /// the mirror of `PoolMember::try_reserve` — so N racing callers can never
+    /// all pass the ceiling; `None` = at cap, don't dispatch.
+    fn try_enter(router: &TaskRouter, i: usize) -> Option<Self> {
         let in_flight = Arc::clone(&router.live[i].in_flight);
+        let cap = router.upstreams[i].max_concurrency;
+        let n = if router.saturation.is_some() && cap != 0 {
+            let mut cur = in_flight.load(Ordering::Acquire);
+            loop {
+                if cur >= cap {
+                    return None;
+                }
+                match in_flight.compare_exchange_weak(
+                    cur,
+                    cur + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break cur + 1,
+                    Err(actual) => cur = actual, // lost the race — retry with the fresh value
+                }
+            }
+        } else {
+            in_flight.fetch_add(1, Ordering::AcqRel) + 1
+        };
         let observer = router.observer.clone();
         let upstream_id: Arc<str> = Arc::from(router.upstreams[i].id.as_str());
-        let n = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(o) = &observer {
             o(RouteEvent::InFlight {
                 upstream: &upstream_id,
                 count: n,
             });
         }
-        Self {
+        Some(Self {
             in_flight,
             observer,
             upstream_id,
-        }
+        })
     }
 }
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         let n = self
             .in_flight
-            .fetch_sub(1, Ordering::Relaxed)
+            .fetch_sub(1, Ordering::AcqRel)
             .saturating_sub(1);
         if let Some(o) = &self.observer {
             o(RouteEvent::InFlight {
@@ -149,6 +173,14 @@ pub struct TaskRouter {
     /// burning ≤20 s × N in-provider backoff first. Default `new(0)` = a single
     /// pass (today's behaviour); set via [`Self::with_retry_budget`].
     retry: agent_retry::RetryPolicy,
+    /// Opt-in **hard** capacity (gap §8.7 item 3). `None` (the default) keeps
+    /// model-router 05's soft semantics: `max_concurrency` only reorders and a
+    /// saturated upstream is still dispatched. `Some(policy)` makes it an
+    /// admission cap — a saturated upstream is skipped (never dispatched), and a
+    /// pass where *every* candidate is saturated sheds or waits per `policy`.
+    saturation: Option<Saturation>,
+    /// Bounded wait budget (ms) for `Saturation::Wait`; clamped ≤30 s.
+    saturation_wait_ms: u64,
     /// The registry snapshot fingerprint this fleet was built from (model-router
     /// 04 tail): `0` = a static (TOML-built) fleet. Carried on every decision
     /// event so a routing choice is attributable to a fleet version.
@@ -183,6 +215,8 @@ impl TaskRouter {
             now_ms: Arc::new(crate::router::wall_clock_ms),
             observer: None,
             retry: agent_retry::RetryPolicy::new(0),
+            saturation: None,
+            saturation_wait_ms: 0,
             snapshot_version: 0,
         })
     }
@@ -211,9 +245,24 @@ impl TaskRouter {
             agent_retry::RetryPolicy::new(max_retries.min(agent_core::MAX_UPSTREAM_RETRIES));
         self
     }
+    /// Opt into the **hard** per-upstream concurrency cap (gap §8.7 item 3):
+    /// `None` = soft (the default; `max_concurrency` only reorders), `Some(Shed)`
+    /// = skip saturated upstreams and shed when all are saturated, `Some(Wait)` =
+    /// first wait up to `wait_ms` (clamped ≤30 s) for a slot to free. An upstream
+    /// with `max_concurrency == 0` is uncapped in every mode.
+    pub fn with_saturation(mut self, saturation: Option<Saturation>, wait_ms: u64) -> Self {
+        self.saturation = saturation;
+        self.saturation_wait_ms = wait_ms.min(MAX_SATURATION_WAIT_MS);
+        self
+    }
     pub fn with_observer(mut self, observer: RouteObserver) -> Self {
         self.observer = Some(observer);
         self
+    }
+    /// The effective saturation policy and (clamped) wait budget — `(None, _)`
+    /// = soft. Lets a `RegistryRouter` rebuild be checked for the opt-in cap.
+    pub fn saturation_policy(&self) -> (Option<Saturation>, u64) {
+        (self.saturation, self.saturation_wait_ms)
     }
     /// Stamp the registry snapshot fingerprint this fleet was built from
     /// (`RegistryRouter` sets it on every rebuild; `0` = static fleet).
@@ -390,7 +439,9 @@ impl TaskRouter {
     /// success is [`Attempt::Done`]; a request-level terminal aborts the chain
     /// ([`Attempt::Fail`], no budget spend); otherwise every candidate is tried
     /// in turn (sleeplessly) and the pass ends in [`Attempt::Retry`] so the
-    /// driver backs off once and re-passes the fleet (if budget remains).
+    /// driver backs off once and re-passes the fleet (if budget remains). Under
+    /// the opt-in hard cap a saturated candidate is skipped; a pass that admits
+    /// *nothing* waits (bounded, once) or sheds per [`Saturation`].
     async fn one_pass<T, F, Fut>(&self, hint: &Hint, op: &F) -> agent_retry::Attempt<T, Error>
     where
         F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
@@ -405,57 +456,48 @@ impl TaskRouter {
             ));
         }
         let mut last: Option<Error> = None;
-        for (attempt, &i) in order.iter().enumerate() {
-            let u = &self.upstreams[i];
-            self.emit(RouteEvent::Routed { target: &u.id });
-            let started = (self.now_ms)();
-            let outcome = op(u.provider.clone(), InFlightGuard::enter(self, i)).await;
-            match outcome {
-                Ok(v) => {
-                    self.health[i].record_success();
-                    let elapsed = (self.now_ms)().saturating_sub(started);
-                    self.live[i].record_latency(u32::try_from(elapsed).unwrap_or(u32::MAX));
-                    self.emit(RouteEvent::Dispatched {
-                        role: hint.role.as_str(),
-                        upstream: &u.id,
-                        outcome: "ok",
-                    });
-                    return agent_retry::Attempt::Done(v);
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    self.health[i].record_failure((self.now_ms)(), self.failure_threshold);
-                    // Terminal errors fail identically on every upstream — stop. EXCEPT an
-                    // auth-terminal (401/403), which is upstream-specific (a rotated key /
-                    // forbidden endpoint on this upstream says nothing about the next), so
-                    // fall over instead of aborting the whole chain.
-                    let auth_terminal = agent_retry::is_auth_terminal(&msg);
-                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal && !auth_terminal
-                    {
-                        self.emit(RouteEvent::Dispatched {
-                            role: hint.role.as_str(),
-                            upstream: &u.id,
-                            outcome: "terminal",
-                        });
-                        // A request-terminal fails the same way on a re-pass too —
-                        // abort without spending the budget.
-                        return agent_retry::Attempt::Fail(e);
-                    }
-                    self.emit(RouteEvent::Dispatched {
-                        role: hint.role.as_str(),
-                        upstream: &u.id,
-                        outcome: if auth_terminal { "auth" } else { "retryable" },
-                    });
-                    if attempt + 1 < order.len() {
-                        self.emit(RouteEvent::FellOver {
-                            from: &u.id,
-                            to: &self.upstreams[order[attempt + 1]].id,
-                            reason: if auth_terminal { "auth" } else { "retryable" },
-                        });
-                    }
-                    last = Some(e);
+        let mut waited = false;
+        loop {
+            let mut dispatched = false;
+            for (attempt, &i) in order.iter().enumerate() {
+                let u = &self.upstreams[i];
+                // Hard cap (opt-in): an upstream at its ceiling is skipped, not
+                // dispatched — and not a breaker failure (it's our admission, not
+                // an upstream fault). Soft mode always admits.
+                let Some(guard) = InFlightGuard::try_enter(self, i) else {
+                    self.emit(RouteEvent::SkippedSaturated { target: &u.id });
+                    continue;
+                };
+                dispatched = true;
+                if let Some(done) = self
+                    .dispatch(hint, op, &order, attempt, guard, &mut last)
+                    .await
+                {
+                    return done;
                 }
             }
+            if dispatched {
+                break;
+            }
+            // Every candidate is at its hard cap. `wait`: poll (bounded) for a slot
+            // to free, then re-run the pass ONCE; otherwise / on timeout, shed —
+            // `Fail`, so a QoS shed spends no retry budget (pool semantics).
+            if self.saturation == Some(Saturation::Wait) && !waited {
+                waited = true;
+                let freed = poll_for_capacity(self.saturation_wait_ms, || {
+                    order.iter().any(|&i| !self.is_saturated(i)).then_some(())
+                })
+                .await;
+                if freed.is_some() {
+                    continue;
+                }
+            }
+            self.emit(RouteEvent::Shed {
+                role: hint.role.as_str(),
+            });
+            return agent_retry::Attempt::Fail(Error::Provider(
+                "task-router saturated: all candidate upstreams at capacity".into(),
+            ));
         }
         // The whole fleet failed transiently this pass. Back off once (the driver
         // owns the wait) and re-pass if budget remains; `after: None` because the
@@ -465,6 +507,75 @@ impl TaskRouter {
         let err =
             last.unwrap_or_else(|| Error::Provider("task-router exhausted all upstreams".into()));
         agent_retry::Attempt::Retry { err, after: None }
+    }
+
+    /// Dispatch one admitted candidate (`order[attempt]`, slot already held by
+    /// `guard`). `Some(attempt)` ends the pass (success or a request-terminal);
+    /// `None` = it failed over-ably — `last` holds the error, try the next.
+    async fn dispatch<T, F, Fut>(
+        &self,
+        hint: &Hint,
+        op: &F,
+        order: &[usize],
+        attempt: usize,
+        guard: InFlightGuard,
+        last: &mut Option<Error>,
+    ) -> Option<agent_retry::Attempt<T, Error>>
+    where
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let i = order[attempt];
+        let u = &self.upstreams[i];
+        self.emit(RouteEvent::Routed { target: &u.id });
+        let started = (self.now_ms)();
+        let outcome = op(u.provider.clone(), guard).await;
+        match outcome {
+            Ok(v) => {
+                self.health[i].record_success();
+                let elapsed = (self.now_ms)().saturating_sub(started);
+                self.live[i].record_latency(u32::try_from(elapsed).unwrap_or(u32::MAX));
+                self.emit(RouteEvent::Dispatched {
+                    role: hint.role.as_str(),
+                    upstream: &u.id,
+                    outcome: "ok",
+                });
+                Some(agent_retry::Attempt::Done(v))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.health[i].record_failure((self.now_ms)(), self.failure_threshold);
+                // Terminal errors fail identically on every upstream — stop. EXCEPT an
+                // auth-terminal (401/403), which is upstream-specific (a rotated key /
+                // forbidden endpoint on this upstream says nothing about the next), so
+                // fall over instead of aborting the whole chain.
+                let auth_terminal = agent_retry::is_auth_terminal(&msg);
+                if agent_retry::classify(&msg) == agent_retry::Class::Terminal && !auth_terminal {
+                    self.emit(RouteEvent::Dispatched {
+                        role: hint.role.as_str(),
+                        upstream: &u.id,
+                        outcome: "terminal",
+                    });
+                    // A request-terminal fails the same way on a re-pass too —
+                    // abort without spending the budget.
+                    return Some(agent_retry::Attempt::Fail(e));
+                }
+                self.emit(RouteEvent::Dispatched {
+                    role: hint.role.as_str(),
+                    upstream: &u.id,
+                    outcome: if auth_terminal { "auth" } else { "retryable" },
+                });
+                if attempt + 1 < order.len() {
+                    self.emit(RouteEvent::FellOver {
+                        from: &u.id,
+                        to: &self.upstreams[order[attempt + 1]].id,
+                        reason: if auth_terminal { "auth" } else { "retryable" },
+                    });
+                }
+                *last = Some(e);
+                None
+            }
+        }
     }
 }
 
@@ -1606,5 +1717,254 @@ mod tests {
         );
         assert_eq!(a.calls.load(Ordering::SeqCst), 5, "1 + 4 passes");
         assert_eq!(b.calls.load(Ordering::SeqCst), 5);
+    }
+
+    // --- opt-in hard capacity (gap §8.7 item 3) ------------------------------
+
+    /// A succeeding provider that counts its calls.
+    fn counting(answer: &str) -> (Arc<dyn LlmProvider>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(FlakyProvider {
+            msg: String::new(),
+            answer: answer.into(),
+            fail_times: 0,
+            calls: calls.clone(),
+        });
+        (p, calls)
+    }
+
+    /// Two-upstream fleet: `glm` (preferred, has headroom) always 429s; `kimi`
+    /// is healthy but pinned at its cap of 1. Soft mode falls over onto the
+    /// saturated kimi; hard mode must not.
+    fn saturated_fallback(saturation: Option<Saturation>) -> (TaskRouter, Arc<AtomicUsize>) {
+        let (kimi, kimi_calls) = counting("from-kimi");
+        let r = router(
+            vec![
+                up("glm", Arc::new(FailProvider::new("http 429: slow down"))),
+                up_cap("kimi", kimi, 1),
+            ],
+            prefer(&["glm", "kimi"]),
+        )
+        .with_saturation(saturation, 0);
+        r.live[1].in_flight.store(1, Ordering::Relaxed); // kimi at its ceiling
+        (r, kimi_calls)
+    }
+
+    #[tokio::test]
+    async fn positive_hard_cap_skips_saturated_upstream() {
+        let (r, kimi_calls) = saturated_fallback(Some(Saturation::Shed));
+        let err = r
+            .complete(req())
+            .await
+            .expect_err("glm 429s, kimi is capped");
+        assert!(
+            err.to_string().contains("429"),
+            "a dispatch happened: {err}"
+        );
+        assert_eq!(
+            kimi_calls.load(Ordering::SeqCst),
+            0,
+            "a saturated upstream is never dispatched under the hard cap"
+        );
+        assert_eq!(r.live[1].snapshot().0, 1, "kimi's slot count untouched");
+    }
+
+    #[tokio::test]
+    async fn negative_soft_default_still_dispatches_saturated() {
+        // Check-the-check for the case above: the default (soft, model-router 05)
+        // falls over onto the saturated kimi and it serves.
+        let (r, kimi_calls) = saturated_fallback(None);
+        let resp = r.complete(req()).await.expect("soft mode dispatches");
+        assert_eq!(resp.message.content_text(), "from-kimi");
+        assert_eq!(kimi_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn negative_shed_spends_no_retry_budget() {
+        // Every candidate is at its hard cap: shed at once — no dispatch, no
+        // between-pass backoff even with a retry budget set.
+        let (a, a_calls) = counting("a");
+        let (b, b_calls) = counting("b");
+        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let sink = events.clone();
+        let r = with_budget(
+            router(
+                vec![up_cap("a", a, 1), up_cap("b", b, 2)],
+                prefer(&["a", "b"]),
+            ),
+            3,
+        )
+        .with_saturation(Some(Saturation::Shed), 0)
+        .with_observer(Arc::new(move |ev| match ev {
+            RouteEvent::SkippedSaturated { target } => {
+                sink.lock().unwrap().push(format!("saturated:{target}"));
+            }
+            RouteEvent::Shed { role } => sink.lock().unwrap().push(format!("shed:{role}")),
+            _ => {}
+        }));
+        r.live[0].in_flight.store(1, Ordering::Relaxed);
+        r.live[1].in_flight.store(2, Ordering::Relaxed);
+        let start = tokio::time::Instant::now();
+        let err = r.complete(req()).await.expect_err("all saturated");
+        assert!(err.to_string().contains("saturated"), "{err}");
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO, "no backoff");
+        assert_eq!(a_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(b_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["saturated:a", "saturated:b", "shed:main"],
+            "one pass, one shed — the budget is not spent re-passing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn corner_wait_admits_when_a_permit_frees() {
+        // `wait`: kimi is at its cap; a slot frees at 100 ms, inside the 1 s
+        // budget, so the request waits (bounded) and kimi serves it.
+        let (kimi, kimi_calls) = counting("from-kimi");
+        let r = Arc::new(
+            router(vec![up_cap("kimi", kimi, 1)], prefer(&["kimi"]))
+                .with_saturation(Some(Saturation::Wait), 1_000),
+        );
+        r.live[0].in_flight.store(1, Ordering::Relaxed);
+        let r2 = r.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            r2.live[0].in_flight.store(0, Ordering::Relaxed); // the other call finished
+        });
+        let start = tokio::time::Instant::now();
+        let resp = r.complete(req()).await.expect("admitted after the wait");
+        assert_eq!(resp.message.content_text(), "from-kimi");
+        assert_eq!(kimi_calls.load(Ordering::SeqCst), 1);
+        let waited = start.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(100)
+                && waited <= std::time::Duration::from_millis(125),
+            "admitted on the first 25 ms tick after the slot freed, got {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boundary_wait_times_out_then_sheds() {
+        // The slot never frees: the wait is exactly its budget, then a shed.
+        let (kimi, kimi_calls) = counting("from-kimi");
+        let r = router(vec![up_cap("kimi", kimi, 1)], prefer(&["kimi"]))
+            .with_saturation(Some(Saturation::Wait), 100);
+        r.live[0].in_flight.store(1, Ordering::Relaxed);
+        let start = tokio::time::Instant::now();
+        let err = r.complete(req()).await.expect_err("never frees");
+        assert!(err.to_string().contains("saturated"), "{err}");
+        assert_eq!(start.elapsed(), std::time::Duration::from_millis(100));
+        assert_eq!(kimi_calls.load(Ordering::SeqCst), 0);
+        // A hostile wait budget is clamped to the 30 s ceiling.
+        let (p, _) = counting("x");
+        let r = router(vec![up("x", p)], prefer(&["x"]))
+            .with_saturation(Some(Saturation::Wait), u64::MAX);
+        assert_eq!(r.saturation_wait_ms, MAX_SATURATION_WAIT_MS);
+    }
+
+    #[tokio::test]
+    async fn corner_streamed_hard_slot_held_until_drain() {
+        // A streamed call keeps its hard slot until the stream drains/drops, so
+        // a second stream sheds while the first is live and is admitted after.
+        let r = router(
+            vec![RouterUpstream {
+                max_concurrency: 1,
+                ..streamer("s", usize::MAX)
+            }],
+            prefer(&["s"]),
+        )
+        .with_saturation(Some(Saturation::Shed), 0);
+        let first = r.stream(req()).await.expect("admitted");
+        let err = r
+            .stream(req())
+            .await
+            .err()
+            .expect("slot held by the live stream");
+        assert!(err.to_string().contains("saturated"), "{err}");
+        drop(first);
+        assert!(r.stream(req()).await.is_ok(), "slot released on drop");
+    }
+
+    /// A provider that parks every call on `gate` and records its own peak
+    /// concurrency — the truth the router's admission must respect.
+    struct GatedProvider {
+        gate: Arc<tokio::sync::Semaphore>,
+        inside: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl LlmProvider for GatedProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps(true, false, 1000)
+        }
+        async fn complete(&self, r: CompletionRequest) -> Result<CompletionResponse> {
+            let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            let _permit = self.gate.acquire().await.expect("gate open");
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+            ScriptedProvider::new(vec![final_turn("ok")])
+                .complete(r)
+                .await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adversarial_concurrent_burst_never_exceeds_hard_cap() {
+        // 10 concurrent calls race one upstream capped at 2. The CAS admission
+        // lets exactly 2 in and sheds 8 — the provider never sees a 3rd.
+        // Check-the-check: soft mode lets the whole burst through (peak 10).
+        const BURST: usize = 10;
+        for (saturation, admitted) in [(Some(Saturation::Shed), 2usize), (None, BURST)] {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let inside = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let provider = Arc::new(GatedProvider {
+                gate: gate.clone(),
+                inside: inside.clone(),
+                peak: peak.clone(),
+            });
+            let r = Arc::new(
+                router(vec![up_cap("gpu", provider, 2)], prefer(&["gpu"]))
+                    .with_saturation(saturation, 0),
+            );
+            let shed = Arc::new(AtomicUsize::new(0));
+            let tasks: Vec<_> = (0..BURST)
+                .map(|_| {
+                    let (r, shed) = (r.clone(), shed.clone());
+                    tokio::spawn(async move {
+                        let out = r.complete(req()).await;
+                        if out.is_err() {
+                            shed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        out
+                    })
+                })
+                .collect();
+            // Hold the gate until every call has either entered the provider or
+            // been shed — the moment of maximum contention.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while inside.load(Ordering::SeqCst) + shed.load(Ordering::SeqCst) < BURST {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("every call resolved admission");
+            gate.add_permits(BURST);
+            let mut ok = 0;
+            for t in tasks {
+                match t.await.expect("task") {
+                    Ok(_) => ok += 1,
+                    Err(e) => assert!(e.to_string().contains("saturated"), "{e}"),
+                }
+            }
+            assert_eq!(
+                peak.load(Ordering::SeqCst),
+                admitted,
+                "{saturation:?}: peak"
+            );
+            assert_eq!(ok, admitted, "{saturation:?}: served");
+            assert_eq!(r.live[0].snapshot().0, 0, "every slot released");
+        }
     }
 }

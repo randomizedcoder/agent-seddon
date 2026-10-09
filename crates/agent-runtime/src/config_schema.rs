@@ -91,6 +91,7 @@ pub const ENUM_CHOICES: &[(&str, &[&str])] = &[
     ),
     ("consensus.evidence", &["auto", "off"]),
     ("route.source", &["", "registry"]),
+    ("route.on_saturation", &["soft", "shed", "wait"]),
     ("auth.mode", &["", "none", "oidc"]),
 ];
 

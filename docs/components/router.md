@@ -217,6 +217,39 @@ goal is to move across the fleet fast. `max_retries` is also dropped from
 `RegistryRouter::provider_key` (the built provider no longer depends on it), so a
 budget-only card edit reuses the live connection and only rebuilds the router.
 
+### Hard capacity — opt-in per-upstream cap (gap §8.7 item 3)
+
+By default `max_concurrency` is **soft** on the router path
+([model-router 05](../design/model-router/05-capacity-aware.md)): it normalises
+`least-loaded` and `order()` defers a saturated upstream, but a saturated upstream is
+still dispatched if the order reaches it. `[route] on_saturation` turns it into an
+**admission cap** — the same semantics the fan-out pool has
+([gpu-pool 02](../design/gpu-pool/02-capacity.md)), reusing its `Saturation` enum and
+bounded poll:
+
+| `on_saturation` | Saturated upstream | Every candidate saturated |
+|---|---|---|
+| `soft` (default) | still dispatched (reorder only) | — |
+| `shed` | **skipped**, never dispatched | error `task-router saturated: …` at once |
+| `wait` | **skipped**, never dispatched | poll every 25 ms for up to `saturation_wait_ms` (default 500, clamped ≤ 30 s), re-run the pass **once**, else shed |
+
+- **Race-free.** A slot is taken by one CAS on the upstream's in-flight counter (the
+  mirror of the pool's `PoolMember::try_reserve`), so N concurrent callers can never
+  all pass the ceiling — a 10-call burst against a cap of 2 admits exactly 2.
+- **Not a fault.** A skip is our own admission, so it never counts toward the
+  breaker. A shed is `Attempt::Fail` — it spends **no** retry budget (the fleet is
+  full, not flaky). A pass where some upstreams were dispatched and failed while the
+  rest were saturated ends in the normal between-pass backoff, which gives slots time
+  to free.
+- **Streams hold their slot until drained** (the in-flight guard rides the returned
+  stream), so a long generation keeps counting against the cap.
+- **Observability.** `RouteEvent::SkippedSaturated` / `RouteEvent::Shed` map onto the
+  existing route-decision counter as `skipped_saturated` / `shed`.
+- Applies to both the static `[route]` fleet and the registry-backed fleet (re-applied
+  on every rebuild). An upstream with `max_concurrency = 0` is uncapped in every mode.
+- **Not yet:** `spill` to another tier when saturated — that is gap §8.7 item 8
+  (`spill_to`).
+
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 
 [Model-router 03](../design/model-router/03-registry-proto.md): the task-router's

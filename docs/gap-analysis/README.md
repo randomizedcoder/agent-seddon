@@ -520,7 +520,7 @@ across N pools × models × prices needs.
 |---|---|---|---|---|---|
 | `Router` (failover) | `InOrder` / `RoundRobin` | passive breaker: 3 failures / 30 s cooldown; open upstreams are **reordered to the back, not excluded** | ❌ no in-flight, no `max_concurrency` | ❌ | [router.rs](../../crates/agent-providers/src/router.rs):37-45, 66-104, 245-262 |
 | `LlmPool` / `PoolProvider` | `Cost` (default) / `RoundRobin` / `LeastLoaded` (raw in-flight) / `Weighted` | active probe = a **billed 1-token completion** every 15 s | per-member `max_concurrency`, hard; ~~check and increment not atomic~~ **Fixed — now a single `PoolMember::try_reserve` CAS (atomic check-and-reserve), so the cap holds under concurrent dispatch; closed the `eligible()`→`call_member` TOCTOU** | `Saturation::{Shed, Wait ≤ 30 s}` then error; no queue, no spillover | [pool.rs](../../crates/agent-providers/src/pool.rs):62-80, 231-233, 316-323, 401, 440-466, 471-482, 716-723 |
-| `TaskRouter` (the routed generator path) | filters health / tools / vision / `min_context` / tier / `max_cost` (input cost only); live signals `cost` / `latency` / `least-loaded` **reorder only, never admit or refuse** | no active probe; `healthy: true` hard-coded in `meta()` | soft | ❌ | [route.rs](../../crates/agent-providers/src/route.rs):124-141, 283-292; [task_router.rs](../../crates/agent-providers/src/task_router.rs):233; [05-capacity-aware.md](../design/model-router/05-capacity-aware.md):27 "Soft, not a cap" |
+| `TaskRouter` (the routed generator path) | filters health / tools / vision / `min_context` / tier / `max_cost` (input cost only); live signals `cost` / `latency` / `least-loaded` **reorder only, never admit or refuse** | no active probe; `healthy: true` hard-coded in `meta()` | soft by default; **opt-in hard cap** (`[route] on_saturation`, CAS admission — §8.7 item 3) | ~~❌~~ opt-in `shed` / bounded `wait` (§8.7 item 3); no spillover yet | [route.rs](../../crates/agent-providers/src/route.rs):124-141, 283-292; [task_router.rs](../../crates/agent-providers/src/task_router.rs):233; [05-capacity-aware.md](../design/model-router/05-capacity-aware.md):27 "Soft, not a cap" |
 | `RegistryRouter` / `RouterCell` | rebuilds `TaskRouter` on any card change (5 s refresh), **resetting breaker + in-flight stats**; per-tenant cells → load is invisible across tenants | — | — | — | [registry_router.rs](../../crates/agent-providers/src/registry_router.rs):43-66, 149-176, 213-265, 338 |
 | `ConsensusProvider`, `BranchingProvider` | fan-out | — | multiply load, ungated; ~~`branch_leak` fork/cancel gate flaked RED ("heap grew across cycles")~~ **Fixed — not a branch strand: dhat shows the fork/cancel heap is flat at 300 iters; the "growth" was an under-warmed test baseline mistaking tokio's one-time multi-thread / `parking_lot` working-set ramp (~15 KB, grown lazily as workers first park) for per-cycle growth. The test now warms to steady state (convergence, not a magic count) before baselining. As a structured-teardown correctness improvement, `BranchingProvider::complete` also drains its `JoinSet` after `abort_all()` so cancelled branches (captured provider `Arc`s / request clones) are reaped before return, not at the scheduler's leisure** | — | consensus.rs:22-24; branching.rs:522-530 (drain); branch_leak.rs |
 | `reach` | free `GET /models` probe | used by doctor / preflight, **not** by the pool | — | — | [reach.rs](../../crates/agent-providers/src/reach.rs):1-40 |
@@ -627,8 +627,14 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
 2. ~~**Fix streamed in-flight accounting:** move `InFlightGuard` into the returned `ChunkStream` so it
    drops on stream end (task_router.rs:308-311, metered.rs:956).~~ **Done** — the guard is owned and
    moved into the returned stream; released on drain / drop, regression-tested in `task_router.rs`.
-3. **Hard capacity on the router path:** per-upstream permits plus `Saturation { shed | wait | spill }`,
-   reusing `pool.rs`'s `Saturation` and `wait_for_capacity`.
+3. ~~**Hard capacity on the router path:** per-upstream permits plus `Saturation { shed | wait | spill }`,
+   reusing `pool.rs`'s `Saturation` and `wait_for_capacity`.~~ **Done** (shed + wait; `spill` is
+   item 8) — opt-in `[route] on_saturation = "shed" | "wait"` (default `soft` keeps model-router 05).
+   A slot is taken by a CAS on the upstream's in-flight counter (the pool's `try_reserve` pattern),
+   so a saturated upstream is never dispatched; a pass that admits nothing sheds (no retry-budget
+   spend) or waits ≤ `saturation_wait_ms` (clamped 30 s) once. `Saturation` moved to `route.rs` and
+   the bounded poll to `router::poll_for_capacity`, shared with the pool. Applies to the static and
+   registry fleets; four-class + adversarial (10-call burst vs cap 2) tests in `task_router.rs`.
 4. **Process-wide `AdmissionController` decorator** (next to `RoleScoped` and `metered::provider` in
    `builder.rs`): a bounded priority queue keyed on role (Main > Review > Summarize / Classify) and tenant.
 5. **Per-tenant LLM fairness:** port `scheduler_driver`'s ceiling + round-robin + per-tenant cap to

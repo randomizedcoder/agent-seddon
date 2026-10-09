@@ -157,6 +157,12 @@ pub enum RouteEvent<'a> {
     InFlight { upstream: &'a str, count: u32 },
     /// `target` was skipped because its breaker is open.
     SkippedUnhealthy { target: &'a str },
+    /// `target` was not dispatched because it is at its hard concurrency cap
+    /// (task-router opt-in hard capacity, gap §8.7 item 3). Not a breaker failure.
+    SkippedSaturated { target: &'a str },
+    /// Every candidate for this `role` was at its hard cap (after any bounded
+    /// `wait`), so the request was shed without dispatch (gap §8.7 item 3).
+    Shed { role: &'a str },
     /// Every candidate was exhausted.
     Exhausted,
     /// The task-router's policy decision (02b): `chosen` won for this
@@ -185,6 +191,30 @@ pub struct Router {
     cursor: AtomicUsize,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     observer: Option<RouteObserver>,
+}
+
+/// Poll tick for [`poll_for_capacity`].
+const CAPACITY_TICK_MS: u64 = 25;
+/// Hard ceiling on any saturation wait (30 s) — a hostile/fat-fingered
+/// `saturation_wait_ms` can never become an unbounded wait.
+pub(crate) const MAX_SATURATION_WAIT_MS: u64 = 30_000;
+
+/// The `wait` saturation policy's bounded poll (GPU pool 02, gap §8.7 item 3):
+/// every 25 ms re-run `probe` until it yields capacity, for at most `wait_ms`
+/// (clamped to [`MAX_SATURATION_WAIT_MS`]). `None` on timeout — the caller sheds.
+/// Shared by the fan-out pool and the task-router's hard cap.
+pub(crate) async fn poll_for_capacity<T>(
+    wait_ms: u64,
+    mut probe: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    let ticks = wait_ms.min(MAX_SATURATION_WAIT_MS) / CAPACITY_TICK_MS;
+    for _ in 0..ticks {
+        tokio::time::sleep(std::time::Duration::from_millis(CAPACITY_TICK_MS)).await;
+        if let Some(v) = probe() {
+            return Some(v);
+        }
+    }
+    None
 }
 
 pub(crate) fn wall_clock_ms() -> u64 {
@@ -628,6 +658,8 @@ mod tests {
                     }
                     RouteEvent::FellOver { from, .. } => format!("fellover:{from}"),
                     RouteEvent::SkippedUnhealthy { target } => format!("skipped:{target}"),
+                    RouteEvent::SkippedSaturated { target } => format!("saturated:{target}"),
+                    RouteEvent::Shed { role } => format!("shed:{role}"),
                     RouteEvent::Exhausted => "exhausted".into(),
                     RouteEvent::Decided { chosen, .. } => format!("decided:{chosen}"),
                     RouteEvent::NoCandidate { role } => format!("no-candidate:{role}"),

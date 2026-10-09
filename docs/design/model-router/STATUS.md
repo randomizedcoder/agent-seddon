@@ -259,6 +259,9 @@ no secret committed — the concrete request that motivated the track. See
   half — **fast 429 failover** (routed upstreams fail-fast, the `TaskRouter` owns a bounded
   whole-fleet retry budget, `order()` defers a saturated upstream behind one with headroom) — **is
   built** (gap §8.7 item 9); see [router.md](../../components/router.md#fast-429-failover--router-owned-retry-gap-87-item-9).
+  An opt-in **hard** per-upstream cap (`[route] on_saturation = "shed" | "wait"`, the pool's
+  `Saturation` semantics; soft stays the default) is also built (gap §8.7 item 3); see
+  [router.md](../../components/router.md#hard-capacity--opt-in-per-upstream-cap-gap-87-item-3).
 - **LLM meta-router** — a cheap model picks among rule-eligible candidates. Decision engine stays
   declarative + live-signals.
 - **Learned / outcome-based weights** — tune per-upstream preference from measured latency/cost/

@@ -1790,6 +1790,16 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
             tracing::debug!(target, "skipped unhealthy provider");
             m.on_route_decision(target, "skipped_unhealthy");
         }
+        // Opt-in hard capacity (gap §8.7 item 3): bounded new label values on the
+        // existing decision family, not a new metric.
+        RouteEvent::SkippedSaturated { target } => {
+            tracing::debug!(target, "skipped saturated provider");
+            m.on_route_decision(target, "skipped_saturated");
+        }
+        RouteEvent::Shed { role } => {
+            tracing::warn!(role, "task-router shed: every candidate at capacity");
+            m.on_route_decision("-", "shed");
+        }
         RouteEvent::Exhausted => {
             tracing::warn!("router exhausted every candidate");
             m.on_route_decision("-", "exhausted");

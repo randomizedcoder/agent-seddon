@@ -19,7 +19,7 @@
 //! endpoint) is *skipped with a warning*, never a poisoned fleet. Keys resolve
 //! locally in the synthesizer from `api_key_ref` — never from registry payload.
 
-use crate::route::Policy;
+use crate::route::{Policy, Saturation};
 use crate::router::RouteObserver;
 use crate::task_router::{RouterUpstream, TaskRouter};
 use agent_core::{
@@ -91,6 +91,10 @@ pub struct RegistryRouter {
     refresh_ms: u64,
     breaker_threshold: usize,
     breaker_cooldown_ms: u64,
+    /// Opt-in hard capacity applied to every rebuilt fleet (gap §8.7 item 3);
+    /// `None` = soft. See [`TaskRouter::with_saturation`].
+    saturation: Option<Saturation>,
+    saturation_wait_ms: u64,
     observer: Option<RouteObserver>,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// When set, each verified tenant gets its **own** fleet cell (snapshot +
@@ -110,6 +114,8 @@ impl RegistryRouter {
             refresh_ms: 5_000,
             breaker_threshold: 3,
             breaker_cooldown_ms: 30_000,
+            saturation: None,
+            saturation_wait_ms: 0,
             observer: None,
             now_ms: Arc::new(crate::router::wall_clock_ms),
             per_tenant: false,
@@ -125,6 +131,13 @@ impl RegistryRouter {
     pub fn with_breaker(mut self, threshold: usize, cooldown_ms: u64) -> Self {
         self.breaker_threshold = threshold.max(1);
         self.breaker_cooldown_ms = cooldown_ms;
+        self
+    }
+    /// Opt-in hard capacity for every fleet this router builds (gap §8.7 item 3);
+    /// forwarded to [`TaskRouter::with_saturation`] (which clamps the wait).
+    pub fn with_saturation(mut self, saturation: Option<Saturation>, wait_ms: u64) -> Self {
+        self.saturation = saturation;
+        self.saturation_wait_ms = wait_ms;
         self
     }
     pub fn with_observer(mut self, observer: RouteObserver) -> Self {
@@ -353,6 +366,7 @@ impl RegistryRouter {
             .with_breaker(self.breaker_threshold, self.breaker_cooldown_ms)
             .with_clock(self.now_ms.clone())
             .with_retry_budget(retry_budget)
+            .with_saturation(self.saturation, self.saturation_wait_ms)
             .with_snapshot_version(fingerprint);
         if let Some(o) = &self.observer {
             router = router.with_observer(o.clone());
@@ -561,6 +575,37 @@ mod tests {
             2,
             "only the new card was built"
         );
+    }
+
+    /// The opt-in hard cap (gap §8.7 item 3) is applied to every rebuilt fleet —
+    /// a registry edit must not silently drop back to soft — and the wait is
+    /// clamped by the TaskRouter. Check-the-check: the default stays soft.
+    #[tokio::test]
+    async fn positive_saturation_threads_through_every_rebuild() {
+        let reg = registry_with(vec![card("a")]);
+        let (synth, _) = counting_synth("ok");
+        let (t, now) = clock();
+        let soft = RegistryRouter::new(reg.clone(), synth.clone())
+            .with_refresh_ms(0)
+            .with_clock(now.clone());
+        assert_eq!(
+            soft.snapshot().await.unwrap().saturation_policy(),
+            (None, 0)
+        );
+
+        let hard = RegistryRouter::new(reg.clone(), synth)
+            .with_refresh_ms(0)
+            .with_clock(now)
+            .with_saturation(Some(Saturation::Wait), u64::MAX);
+        let want = (
+            Some(Saturation::Wait),
+            crate::router::MAX_SATURATION_WAIT_MS,
+        );
+        assert_eq!(hard.snapshot().await.unwrap().saturation_policy(), want);
+        reg.put(card("b")).await.unwrap(); // forces a rebuild
+        t.fetch_add(1, Ordering::SeqCst);
+        let rebuilt = hard.snapshot().await.unwrap();
+        assert_eq!(rebuilt.saturation_policy(), want, "survives the rebuild");
     }
 
     /// Every registry-built fleet carries a non-zero snapshot version, and a
