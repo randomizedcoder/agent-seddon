@@ -970,6 +970,13 @@ fn default_breaker_threshold() -> usize {
 fn default_breaker_cooldown() -> u64 {
     30
 }
+/// The router's default whole-fleet retry budget (gap §8.7 item 9). `2` matches
+/// the in-provider backoff count inline route upstreams used to carry, so an
+/// unconfigured static `[route]` keeps the same resilience — now applied as
+/// fast whole-fleet re-passes instead of per-upstream in-call backoff.
+fn default_route_retry_budget() -> u32 {
+    2
+}
 
 /// A health-checked, tiered pool of cheap providers (`docs/design/code-review/llm-pool.md`).
 /// `members` are registered provider names; `tiers` is a parallel list of
@@ -1153,6 +1160,13 @@ pub struct RouteCfg {
     pub failure_threshold: usize,
     #[serde(default = "default_breaker_cooldown")]
     pub cooldown_secs: u64,
+    /// Router-owned retry budget (gap §8.7 item 9): the number of whole-fleet
+    /// re-passes on a transient failure, each with one jittered backoff. Routed
+    /// upstreams fail fast (no in-call backoff), so a 429 fails over to a
+    /// headroom upstream at once and the fleet is retried under this single
+    /// bounded budget. Clamped to [`agent_core::MAX_UPSTREAM_RETRIES`] on build.
+    #[serde(default = "default_route_retry_budget")]
+    pub retry_budget: u32,
 }
 
 impl Default for RouteCfg {
@@ -1165,6 +1179,7 @@ impl Default for RouteCfg {
             judge_from_env: false,
             failure_threshold: default_breaker_threshold(),
             cooldown_secs: default_breaker_cooldown(),
+            retry_budget: default_route_retry_budget(),
         }
     }
 }

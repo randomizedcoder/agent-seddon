@@ -179,6 +179,44 @@ with hostile hints — liveness + exact decision accounting + post-storm
 recovery) and a dhat leak budget (`route_leak`: failover path frees all
 scratch, <120 blocks/call) gate it alongside the Ir ceilings.
 
+### Fast 429 failover — router-owned retry (gap §8.7 item 9)
+
+On the routed path, **retry lives on the router, not inside each upstream.** Routed
+upstreams build **fail-fast** (`max_retries: 0` in `builder.rs` — both the
+openai-compat synth and the anthropic synth), so a transient 429/5xx surfaces to the
+`TaskRouter` immediately instead of burning ≤ 20 s × N of in-provider backoff first.
+A single 429 on a busy upstream therefore fails over to one with headroom *at once*.
+
+The router owns the budget via `with_retry_budget(max_retries)`:
+
+- **One `op()` = one whole-fleet pass.** `route()` wraps a single `one_pass()` over a
+  freshly-recomputed `order()` and feeds it to `agent_retry::run` (the one canonical
+  retry impl) — there is no hand-rolled loop. A pass tries each candidate in turn;
+  the first success returns, a request-level **terminal aborts the chain without
+  spending budget**, and a pass that exhausts every candidate on transient failures
+  reports `Retry` so the driver backs off **once** (jittered, capped at 20 s) and
+  re-passes the fleet — up to `max_retries` re-passes. Failover *within* a pass stays
+  sleepless, so the only wait is between passes, not per upstream.
+- **Headroom-aware ordering.** `order()` sorts candidates into three buckets —
+  **headroom** first, then those at their concurrency ceiling
+  (`max_concurrency != 0 && in_flight >= max_concurrency`), then breaker-open
+  (skipped-then-tried-last) — preserving policy order within each. So "fail over when
+  another upstream has headroom" is a structural guarantee, not just the soft
+  least-loaded tie-break.
+- **Where the budget comes from.** Registry path: `max(card.max_retries)` over the
+  enabled cards (`registry_router.rs`). Static `[route]` path: the new
+  `[route] retry_budget` knob (default `2`, matching the in-provider count inline
+  upstreams used to carry — same resilience, now as fast whole-fleet re-passes).
+  Both clamp to `agent_core::MAX_UPSTREAM_RETRIES`. Default `0` on a bare
+  `TaskRouter::new` keeps the historical single-pass behaviour.
+
+Because retry moved off the upstream, a per-upstream `Retry-After` is not on the
+error the router sees — the router uses its own capped jittered backoff between
+passes rather than honouring one upstream's hint, which is the right call when the
+goal is to move across the fleet fast. `max_retries` is also dropped from
+`RegistryRouter::provider_key` (the built provider no longer depends on it), so a
+budget-only card edit reuses the live connection and only rebuilds the router.
+
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 
 [Model-router 03](../design/model-router/03-registry-proto.md): the task-router's

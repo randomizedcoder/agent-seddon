@@ -744,6 +744,9 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # upstreams = ["kimi", "glm", "mi50"]  # failover order: Kimi → GLM → local MI50 floor
 # # policy = "latency"
 # # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
+# # retry_budget = 2  (gap §8.7 item 9): routed upstreams fail fast, so a 429 fails
+# #   over to a headroom upstream at once; the router then retries the WHOLE fleet up
+# #   to this many times (one jittered backoff between passes, capped at 20 s).
 #
 # # source = "registry" (model-router 04): the fleet + policy come from the LIVE
 # # [registry] store — this TOML seeds it when empty, and a control-plane
