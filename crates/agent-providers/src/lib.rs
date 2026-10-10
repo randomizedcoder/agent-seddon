@@ -60,6 +60,7 @@ pub use router::{Candidate, RouteEvent, RoutePolicy, Router};
 /// Declarative task-aware routing — the pure decision engine (model-router
 /// increment 02). Depends only on `agent_core::PoolTier`, so it is always compiled.
 pub mod route;
+pub use route::Saturation;
 
 /// Non-billing provider reachability (`GET {base_url}/models`) for `agent doctor` /
 /// the fleet Preflight probes. Family-agnostic raw HTTP, so it is always compiled.
@@ -86,7 +87,7 @@ pub use registry_router::{RegistryRouter, UpstreamSynth};
 #[cfg(feature = "provider-pool")]
 pub mod pool;
 #[cfg(feature = "provider-pool")]
-pub use pool::{PoolEvent, PoolObserver, PoolPolicy, PoolProvider, PoolSpec, Saturation};
+pub use pool::{PoolEvent, PoolObserver, PoolPolicy, PoolProvider, PoolSpec};
 
 /// `ConsensusProvider` — the response-level generator × critic gate with a bounded
 /// convergence loop and an alternatives ledger (cognition-graph increment 01,

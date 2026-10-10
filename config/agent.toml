@@ -747,6 +747,10 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # # retry_budget = 2  (gap §8.7 item 9): routed upstreams fail fast, so a 429 fails
 # #   over to a headroom upstream at once; the router then retries the WHOLE fleet up
 # #   to this many times (one jittered backoff between passes, capped at 20 s).
+# # on_saturation = "soft"  (gap §8.7 item 3): "soft" = upstream max_concurrency only
+# #   reorders least-loaded; "shed" = a HARD cap — a saturated upstream is never
+# #   dispatched, and a request is shed when every candidate is full; "wait" = first
+# #   wait up to saturation_wait_ms (default 500, clamped ≤ 30 s) for a slot to free.
 #
 # # source = "registry" (model-router 04): the fleet + policy come from the LIVE
 # # [registry] store — this TOML seeds it when empty, and a control-plane

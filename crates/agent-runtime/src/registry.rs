@@ -848,6 +848,7 @@ pub fn register_builtins(r: &mut Registry) {
                     cfg.failure_threshold,
                     cfg.cooldown_secs.saturating_mul(1_000),
                 )
+                .with_saturation(cfg.saturation(), cfg.saturation_wait_ms)
                 .with_observer(Arc::new(move |ev| {
                     crate::metered::record_route_event(&obs, ev);
                 }));
@@ -900,6 +901,8 @@ pub fn register_builtins(r: &mut Registry) {
                 // Routed upstreams build fail-fast; the router owns retry as a
                 // bounded whole-fleet budget (gap §8.7 item 9).
                 .with_retry_budget(cfg.retry_budget)
+                // Opt-in hard per-upstream cap (gap §8.7 item 3); `soft` = None.
+                .with_saturation(cfg.saturation(), cfg.saturation_wait_ms)
                 .with_observer(Arc::new(move |ev| {
                     crate::metered::record_route_event(&metrics, ev);
                 }));

@@ -27,6 +27,9 @@ consumes it:
 - **Soft, not a cap.** The engine only *reorders*; it never hard-skips a saturated upstream. A
   higher-capacity endpoint simply looks less loaded and is preferred until the ratios equalise; the
   gateway's own `429`/`503` (retryable → existing failover) remains the real overload backstop.
+  *Later (gap §8.7 item 3):* soft stays the **default**; `[route] on_saturation = "shed" | "wait"`
+  opts into a hard admission cap with the pool's semantics — see
+  [router.md](../../components/router.md#hard-capacity--opt-in-per-upstream-cap-gap-87-item-3).
 - **Exact back-compat.** `max_concurrency = 0` (unknown/unset) ⇒ effective capacity `1`, so the key
   is `in_flight × SCALE` — monotonic in in-flight, i.e. byte-identical ordering to 04. A fleet that
   sets no capacity is unaffected.

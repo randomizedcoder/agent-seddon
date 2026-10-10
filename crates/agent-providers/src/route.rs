@@ -95,6 +95,30 @@ pub fn estimate_min_context(req: &agent_core::CompletionRequest) -> u32 {
         .min(agent_core::MAX_ROUTE_MIN_CONTEXT)
 }
 
+/// What a capacity-capped dispatcher does when every eligible upstream is at its
+/// concurrency cap — shared by the fan-out pool (GPU pool 02) and the task-router's
+/// opt-in hard cap (gap §8.7 item 3). Both are bounded and fail-soft — never an
+/// unbounded queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Saturation {
+    /// Shed immediately: a fan-out returns fewer/zero slots; a single `complete`
+    /// returns a `saturated` error the caller reads. The safe default.
+    #[default]
+    Shed,
+    /// Wait a **bounded** time for a permit to free, then re-select; on timeout,
+    /// fall through to `shed`.
+    Wait,
+}
+
+impl Saturation {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wait" => Saturation::Wait,
+            _ => Saturation::Shed,
+        }
+    }
+}
+
 /// The `match` half of a rule — every present condition must hold for it to fire.
 #[derive(Debug, Clone, Default)]
 pub struct Match {

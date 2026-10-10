@@ -977,6 +977,23 @@ fn default_breaker_cooldown() -> u64 {
 fn default_route_retry_budget() -> u32 {
     2
 }
+/// `[route] on_saturation` default: `soft` — model-router 05's reorder-only
+/// semantics, so a fleet that never opts in is unaffected (gap §8.7 item 3).
+fn default_route_on_saturation() -> String {
+    "soft".to_string()
+}
+
+impl RouteCfg {
+    /// The router's saturation policy: `None` = soft (`"soft"` / empty), else the
+    /// opt-in hard cap. Anything other than `wait` parses as `shed` (fail closed:
+    /// a typo still caps — and the schema check flags it).
+    pub fn saturation(&self) -> Option<agent_providers::Saturation> {
+        match self.on_saturation.trim().to_ascii_lowercase().as_str() {
+            "" | "soft" => None,
+            other => Some(agent_providers::Saturation::parse(other)),
+        }
+    }
+}
 
 /// A health-checked, tiered pool of cheap providers (`docs/design/code-review/llm-pool.md`).
 /// `members` are registered provider names; `tiers` is a parallel list of
@@ -1167,6 +1184,17 @@ pub struct RouteCfg {
     /// bounded budget. Clamped to [`agent_core::MAX_UPSTREAM_RETRIES`] on build.
     #[serde(default = "default_route_retry_budget")]
     pub retry_budget: u32,
+    /// Per-upstream concurrency semantics (gap §8.7 item 3): `soft` (default —
+    /// `max_concurrency` only reorders `least-loaded`, a saturated upstream is
+    /// still dispatched, model-router 05), or an opt-in **hard** cap: `shed`
+    /// (skip saturated upstreams; error when all are saturated) or `wait` (first
+    /// wait up to `saturation_wait_ms` for a slot). Applies to both the static
+    /// and the registry-backed router.
+    #[serde(default = "default_route_on_saturation")]
+    pub on_saturation: String,
+    /// Bounded wait budget (ms) for `on_saturation = "wait"` (clamped ≤ 30s).
+    #[serde(default = "default_saturation_wait_ms")]
+    pub saturation_wait_ms: u64,
 }
 
 impl Default for RouteCfg {
@@ -1180,6 +1208,8 @@ impl Default for RouteCfg {
             failure_threshold: default_breaker_threshold(),
             cooldown_secs: default_breaker_cooldown(),
             retry_budget: default_route_retry_budget(),
+            on_saturation: default_route_on_saturation(),
+            saturation_wait_ms: default_saturation_wait_ms(),
         }
     }
 }
@@ -5274,6 +5304,27 @@ mod tests {
         assert!(cfg.upstreams.is_empty() && cfg.rules.is_empty());
         assert_eq!(cfg.failure_threshold, 3);
         assert_eq!(cfg.cooldown_secs, 30);
+        // Hard capacity is opt-in (gap §8.7 item 3): an unconfigured route is soft.
+        assert_eq!(cfg.on_saturation, "soft");
+        assert_eq!(cfg.saturation(), None);
+        assert_eq!(cfg.saturation_wait_ms, 500);
+    }
+
+    /// `[route] on_saturation` → the router's policy: soft/empty = `None`, the
+    /// hard modes parse, and an unknown value fails CLOSED to `shed` (still capped).
+    #[test]
+    fn route_on_saturation_parses_every_class() {
+        use agent_providers::Saturation;
+        for (raw, want) in [
+            ("soft", None),                        // positive: explicit default
+            ("shed", Some(Saturation::Shed)),      // positive
+            (" WAIT ", Some(Saturation::Wait)),    // corner: case + whitespace
+            ("", None),                            // boundary: empty = soft
+            ("unbounded", Some(Saturation::Shed)), // adversarial: typo/hostile → capped
+        ] {
+            let cfg: RouteCfg = toml::from_str(&format!("on_saturation = {raw:?}")).unwrap();
+            assert_eq!(cfg.saturation(), want, "on_saturation = {raw:?}");
+        }
     }
 
     /// Corner: a registry-resolved upstream (no endpoint) with no metadata parses.

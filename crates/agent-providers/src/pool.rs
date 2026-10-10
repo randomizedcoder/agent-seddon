@@ -9,7 +9,10 @@
 //! at once. Fails **soft**: a dead member is a slot in the result, never a batch
 //! failure. See `docs/design/code-review/llm-pool.md`.
 
-use crate::router::{is_capable, wall_clock_ms, Health};
+// `Saturation` lives in `route` (shared with the task-router's hard cap); re-exported
+// here so `pool::Saturation` paths keep working.
+pub use crate::route::Saturation;
+use crate::router::{is_capable, poll_for_capacity, wall_clock_ms, Health};
 use crate::Candidate;
 use agent_core::{
     CompletionRequest, CompletionResponse, Error, HealthReport, LlmPool, Message, PoolMemberHealth,
@@ -53,28 +56,6 @@ impl PoolPolicy {
             PoolPolicy::RoundRobin => "round-robin",
             PoolPolicy::LeastLoaded => "least-loaded",
             PoolPolicy::Weighted => "weighted",
-        }
-    }
-}
-
-/// What the pool does when every eligible member is at its concurrency cap
-/// (GPU pool 02). Both are bounded and fail-soft — never an unbounded queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Saturation {
-    /// Shed immediately: a fan-out returns fewer/zero slots; a single `complete`
-    /// returns a `saturated` error the caller reads. The safe default.
-    #[default]
-    Shed,
-    /// Wait a **bounded** time for a permit to free, then re-select; on timeout,
-    /// fall through to `shed`.
-    Wait,
-}
-
-impl Saturation {
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "wait" => Saturation::Wait,
-            _ => Saturation::Shed,
         }
     }
 }
@@ -505,16 +486,12 @@ impl PoolInner {
     /// saturation policy). Returns the first non-empty eligible order, or empty on
     /// timeout. The tick count is hard-capped, so this can never wait unboundedly.
     async fn wait_for_capacity(&self, req: &CompletionRequest) -> Vec<usize> {
-        const TICK_MS: u64 = 25;
-        let ticks = (self.saturation_wait_ms / TICK_MS).min(1_200); // ≤ 30s
-        for _ in 0..ticks {
-            tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
+        poll_for_capacity(self.saturation_wait_ms, || {
             let order = self.eligible(req, PoolTier::Light, self.members.len());
-            if !order.is_empty() {
-                return order;
-            }
-        }
-        Vec::new()
+            (!order.is_empty()).then_some(order)
+        })
+        .await
+        .unwrap_or_default()
     }
 }
 
