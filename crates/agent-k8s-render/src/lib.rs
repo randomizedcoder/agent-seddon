@@ -663,6 +663,58 @@ pub fn check_exec_seam_exclude(ms: &[Manifest]) -> Vec<Finding> {
     out
 }
 
+/// `[auth] allow_insecure_listen = true` (the K3 interim posture until K5's
+/// `mode = "oidc"`) is only acceptable on a strict-mTLS listener: the same agent.toml
+/// must set `[grpc.tls]` `cert`, `key` and `client_ca`, so the "any peer can claim any
+/// tenant" risk is confined to cluster-CA cert holders. Read by parsing the TOML — a
+/// `client_ca` in a comment or under another table does not count.
+pub fn check_insecure_listen_needs_mtls(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "insecure-listen-needs-mtls";
+    let mut out = Vec::new();
+    for m in ms.iter().filter(|m| m.kind() == Some("ConfigMap")) {
+        let Some(text) = dig(&m.doc, &["data"])
+            .and_then(|d| d.get("agent.toml"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let cfg: toml::Value = match toml::from_str(text) {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(Finding::new(
+                    ID,
+                    &m.path,
+                    format!("agent.toml did not parse as TOML: {e}"),
+                ));
+                continue;
+            }
+        };
+        let get = |path: &[&str]| {
+            path.iter()
+                .try_fold(&cfg, |v, k| v.as_table().and_then(|t| t.get(*k)))
+        };
+        if get(&["auth", "allow_insecure_listen"]).and_then(toml::Value::as_bool) != Some(true) {
+            continue;
+        }
+        for key in ["cert", "key", "client_ca"] {
+            let set = get(&["grpc", "tls", key])
+                .and_then(toml::Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            if !set {
+                out.push(Finding::new(
+                    ID,
+                    &m.path,
+                    format!(
+                        "`[auth] allow_insecure_listen = true` without `[grpc.tls] {key}`: \
+                         the listener would not be strict mTLS"
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// No Service port and no containerPort is an exec-seam port.
 pub fn check_no_exec_seam_exposure(ms: &[Manifest]) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -1022,7 +1074,7 @@ pub fn check_no_secret_material(ms: &[Manifest]) -> Vec<Finding> {
 }
 
 /// Every invariant, in the order the suite reports them.
-pub const ALL_CHECKS: [(&str, CheckFn); 13] = [
+pub const ALL_CHECKS: [(&str, CheckFn); 14] = [
     ("security-context", check_security_context),
     ("no-privilege", check_no_privilege),
     ("probes", check_probes),
@@ -1036,6 +1088,10 @@ pub const ALL_CHECKS: [(&str, CheckFn); 13] = [
     ("ca-chain", check_ca_chain),
     ("component-application", check_component_application),
     ("no-secret-material", check_no_secret_material),
+    (
+        "insecure-listen-needs-mtls",
+        check_insecure_listen_needs_mtls,
+    ),
 ];
 
 /// The rendered `k3s` target root: `$AGENT_RENDERED_K3S` when set (the flake check points
@@ -1315,6 +1371,35 @@ mod tests {
         *at_mut(cm, &["binaryData"]) = Value::Mapping(mm);
     }
 
+    // The K3 interim auth posture is only safe on strict mTLS: each of these leaves
+    // `allow_insecure_listen = true` on a listener that is no longer strict mTLS.
+    const CLIENT_CA_LINE: &str = "client_ca = \"/etc/agent/tls/ca.crt\"";
+    fn brk_drop_client_ca(cm: &mut Value) {
+        set_toml(cm, |t| t.replace(CLIENT_CA_LINE, ""));
+    }
+    fn brk_client_ca_only_in_comment(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(CLIENT_CA_LINE, &format!("# {CLIENT_CA_LINE}"))
+        });
+    }
+    fn brk_client_ca_under_other_table(cm: &mut Value) {
+        set_toml(cm, |t| {
+            format!(
+                "{}\n[grpc.other]\n{CLIENT_CA_LINE}\n",
+                t.replace(CLIENT_CA_LINE, "")
+            )
+        });
+    }
+    fn brk_empty_client_ca(cm: &mut Value) {
+        set_toml(cm, |t| t.replace(CLIENT_CA_LINE, "client_ca = \"  \""));
+    }
+    fn brk_drop_tls_table(cm: &mut Value) {
+        set_toml(cm, |t| t.replace("[grpc.tls]", "[grpc.tls_off]"));
+    }
+    fn brk_unparseable_toml(cm: &mut Value) {
+        set_toml(cm, |t| format!("{t}\n[auth\n"));
+    }
+
     // -- positive: the real tree satisfies every invariant -----------------------------
 
     #[rstest]
@@ -1331,6 +1416,7 @@ mod tests {
     #[case::ca_chain(check_ca_chain)]
     #[case::component_application(check_component_application)]
     #[case::no_secret_material(check_no_secret_material)]
+    #[case::insecure_listen_needs_mtls(check_insecure_listen_needs_mtls)]
     fn positive_real_tree_is_clean(#[case] check: Check) {
         let findings = check(&tree());
         assert!(
@@ -1479,6 +1565,36 @@ mod tests {
         brk_pem_in_binarydata,
         check_no_secret_material
     )]
+    #[case::insecure_listen_without_client_ca(
+        is_gateway_configmap,
+        brk_drop_client_ca,
+        check_insecure_listen_needs_mtls
+    )]
+    #[case::insecure_listen_client_ca_only_in_comment(
+        is_gateway_configmap,
+        brk_client_ca_only_in_comment,
+        check_insecure_listen_needs_mtls
+    )]
+    #[case::insecure_listen_client_ca_under_other_table(
+        is_gateway_configmap,
+        brk_client_ca_under_other_table,
+        check_insecure_listen_needs_mtls
+    )]
+    #[case::insecure_listen_blank_client_ca(
+        is_gateway_configmap,
+        brk_empty_client_ca,
+        check_insecure_listen_needs_mtls
+    )]
+    #[case::insecure_listen_without_tls_table(
+        is_gateway_configmap,
+        brk_drop_tls_table,
+        check_insecure_listen_needs_mtls
+    )]
+    #[case::insecure_listen_unparseable_toml(
+        is_gateway_configmap,
+        brk_unparseable_toml,
+        check_insecure_listen_needs_mtls
+    )]
     fn adversarial_mutation_is_flagged(
         #[case] pred: Pred,
         #[case] brk: Breaker,
@@ -1496,6 +1612,43 @@ mod tests {
             !check(&ms).is_empty(),
             "the hostile mutation was not flagged"
         );
+    }
+
+    #[test]
+    fn corner_insecure_listen_off_needs_no_tls() {
+        // The invariant binds the flag, not every ConfigMap: with the flag gone, a
+        // listener without [grpc.tls] is the S1 guard's job, not this check's.
+        let mut ms = tree();
+        let cm = ms
+            .iter_mut()
+            .find(|m| is_gateway_configmap(m))
+            .expect("gateway ConfigMap");
+        set_toml(&mut cm.doc, |t| {
+            t.replace(
+                "allow_insecure_listen = true",
+                "allow_insecure_listen = false",
+            )
+            .replace("[grpc.tls]", "[grpc.tls_off]")
+        });
+        assert!(check_insecure_listen_needs_mtls(&ms).is_empty());
+    }
+
+    #[test]
+    fn boundary_every_role_configmap_takes_the_interim_posture() {
+        // All three roles ship `allow_insecure_listen` (else the S1 guard refuses the
+        // 0.0.0.0 bind) — so the check above is never vacuous over the real tree.
+        let n = tree()
+            .iter()
+            .filter(|m| m.kind() == Some("ConfigMap"))
+            .filter_map(|m| {
+                dig(&m.doc, &["data"])?
+                    .get("agent.toml")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .filter(|t| t.contains("allow_insecure_listen = true"))
+            .count();
+        assert_eq!(n, ROLES.len());
     }
 
     // -- the health-probe argv reader, row by row ---------------------------------------

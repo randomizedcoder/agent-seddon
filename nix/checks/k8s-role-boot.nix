@@ -6,8 +6,10 @@
 # `k8s-rendered` proves rendered/ is fresh, `k8s-render-tests` proves its invariants,
 # `k8s-kubeconform` proves its schema — none of them run the agent. This one does,
 # per role, straight from the COMMITTED manifests:
-#   - the ConfigMap's `agent.toml` is the config (only the TLS mount path and the
-#     0.0.0.0 bind are rewritten, to a minted test PKI and loopback);
+#   - the ConfigMap's `agent.toml` is the config (only the TLS mount path is rewritten,
+#     to a minted test PKI). The 0.0.0.0 bind is kept as committed: the startup listen
+#     guard (S1) treats loopback as trusted, so a loopback rewrite hid a role that a pod
+#     refuses to start (the first l2 live accept crash-looped on exactly that);
 #   - the Deployment's container `args` are the argv;
 #   - the cwd/HOME is a fresh writable dir (the pod's `home` emptyDir);
 #   - the Deployment's own `readinessProbe.exec.command` (with the probe's image path
@@ -64,10 +66,14 @@ pkgs.runCommand "k8s-role-boot"
       openssl x509 -req -in "$work/$role/leaf.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key" \
         -CAcreateserial -days 1 -extfile "$work/$role/ext.cnf" -out "$tls/tls.crt" 2>/dev/null
 
-      # The committed config, re-pointed at the test PKI and loopback.
+      # The committed config, re-pointed at the test PKI. The bind stays as committed
+      # (0.0.0.0, a routable address to the S1 listen guard); the build sandbox's
+      # private network namespace keeps it unreachable from outside.
       yq -e '.data["agent.toml"]' "$dir/configmap-$role.yaml" \
-        | sed -e "s#/etc/agent/tls#$tls#g" -e 's#"0\.0\.0\.0:#"127.0.0.1:#g' \
+        | sed -e "s#/etc/agent/tls#$tls#g" \
         > "$work/$role/agent.toml"
+      grep -q '"0\.0\.0\.0:' "$work/$role/agent.toml" \
+        || { echo "FAIL: [$role] expected the committed 0.0.0.0 bind" >&2; exit 1; }
 
       deploy="$dir/deployment-$role.yaml"
       mapfile -t args < <(yq -e '.spec.template.spec.containers[0].args[]' "$deploy" \
