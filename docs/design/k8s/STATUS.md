@@ -360,6 +360,11 @@ are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#r
   - **Live acceptance** (after merge): import the image on l2 (`nix run .#k8s-images -- --import`,
     which needs sudo; this is also K2's pending live half). Then ArgoCD syncs the app-of-apps, the
     three roles go Ready, and `nix run .#k8s-status` is green → flip K3 to ✅.
+  - **Tag release before the import.** #602 and #603 (Rust) merged ahead of #604, so on main the
+    committed tag (`dpbg9qjy…`) no longer matched the image's content hash (`dyqbs4fw…`). An import
+    would have loaded a tag the manifests don't name (`ErrImageNeverPull`). A tag-only release PR
+    (`nix run .#k8s-images` + `nix run .#k8s-render-manifests`) restores the fixed point. Any
+    Rust change that lands on main between a release and the import repeats this.
   - **Known follow-up (not a blocker).** The role certs are 24h, and **K4**
     (`[grpc.tls] reload_poll_secs`) isn't built. A long-running pod therefore needs a restart at
     renewal until K4 lands.
