@@ -694,8 +694,11 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # context_window = 131072             # per-upstream; unset ⇒ the global [agent] one
 # tags = ["reasoning", "long-context"]
 # tier = "heavy"
-# input_cost = 3.0                    # per-Mtok hint for cost-aware ordering
-# max_concurrency = 24                # aggregate slots behind this endpoint: if the
+# input_cost = 3.0                    # USD per Mtok: cost-aware ordering AND, with
+# output_cost = 12.0                  # output_cost, prices the turns this upstream
+#                                     # serves (both unset/0 ⇒ the built-in price
+#                                     # table, i.e. $0 "estimated" for most models)
+# max_concurrency = 24               # aggregate slots behind this endpoint: if the
 #                                     # URL is a GATEWAY load-balancing 3× B300s,
 #                                     # set ~3× a single card's slots so the
 #                                     # "least-loaded" policy sends it ~3× the traffic

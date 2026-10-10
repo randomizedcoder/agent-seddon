@@ -22,8 +22,8 @@
 use crate::route::{estimate_min_context, Hint, Policy, Role, Saturation, UpstreamMeta};
 use crate::router::{poll_for_capacity, Health, RouteEvent, RouteObserver, MAX_SATURATION_WAIT_MS};
 use agent_core::{
-    ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider, ModelCapabilities,
-    PoolTier, Result,
+    price_usage, ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider,
+    ModelCapabilities, ModelPrices, PoolTier, Result, Usage,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -40,11 +40,41 @@ pub struct RouterUpstream {
     pub tier: PoolTier,
     /// Per-Mtok input cost (a routing hint; clamped non-negative on build).
     pub input_cost: f32,
+    /// Per-Mtok output cost (clamped non-negative on build). With `input_cost`
+    /// it prices a turn this upstream serves — see [`RouterUpstream::card_prices`].
+    pub output_cost: f32,
     /// Aggregate concurrency this upstream can absorb (≈ GPUs × per-GPU slots for
     /// a multi-GPU gateway); `0` = unknown/unbounded. Feeds the capacity-normalised
     /// `least-loaded` ordering — see [`crate::route::UpstreamMeta::max_concurrency`].
     pub max_concurrency: u32,
     pub provider: Arc<dyn LlmProvider>,
+}
+
+impl RouterUpstream {
+    /// The card's rates as a price row, or `None` for an unpriced card (both
+    /// costs `0`) so the caller falls back to its own price table rather than
+    /// recording a confident `$0`. Cache lines are `0`: the OpenAI-compatible
+    /// decoder's `prompt_tokens` already *includes* cached tokens, so billing
+    /// `cache_read_tokens` again would double-count — a card carries no cache
+    /// discount, so cached input is priced at the full input rate (upper bound).
+    fn card_prices(&self) -> Option<ModelPrices> {
+        (self.input_cost > 0.0 || self.output_cost > 0.0).then(|| ModelPrices {
+            input: f64::from(self.input_cost),
+            output: f64::from(self.output_cost),
+            cache_read: 0.0,
+            cache_write: 0.0,
+        })
+    }
+}
+
+/// Stamp the serving upstream's card cost onto `usage` — only when the provider
+/// did not report a cost itself (never overwrite a real figure).
+fn stamp_cost(usage: &mut Option<Usage>, prices: Option<ModelPrices>) {
+    if let (Some(u), Some(p)) = (usage.as_mut(), prices) {
+        if u.cost.is_none() {
+            u.cost = Some(price_usage(&p, u));
+        }
+    }
 }
 
 /// Per-upstream live dispatch accounting (model-router 04): requests currently
@@ -189,8 +219,9 @@ pub struct TaskRouter {
 
 impl TaskRouter {
     /// Build a router over `upstreams` steered by `policy`. Errors on an empty fleet
-    /// (a router with nothing to route to can never answer). Per-member `input_cost`
-    /// is clamped finite + non-negative so a hostile config can't poison ordering.
+    /// (a router with nothing to route to can never answer). Per-member `input_cost` /
+    /// `output_cost` are clamped finite + non-negative so a hostile config can't
+    /// poison ordering or a turn's price.
     pub fn new(mut upstreams: Vec<RouterUpstream>, policy: Policy) -> Result<Self> {
         if upstreams.is_empty() {
             return Err(Error::Provider(
@@ -198,8 +229,10 @@ impl TaskRouter {
             ));
         }
         for u in &mut upstreams {
-            if !u.input_cost.is_finite() || u.input_cost < 0.0 {
-                u.input_cost = 0.0;
+            for c in [&mut u.input_cost, &mut u.output_cost] {
+                if !c.is_finite() || *c < 0.0 {
+                    *c = 0.0;
+                }
             }
         }
         let health = upstreams.iter().map(|_| Health::new()).collect();
@@ -381,7 +414,7 @@ impl TaskRouter {
     /// than at setup.
     async fn route<T, F, Fut>(&self, req: &CompletionRequest, op: F) -> Result<T>
     where
-        F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard, Option<ModelPrices>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let hint = self.hint(req);
@@ -444,7 +477,7 @@ impl TaskRouter {
     /// *nothing* waits (bounded, once) or sheds per [`Saturation`].
     async fn one_pass<T, F, Fut>(&self, hint: &Hint, op: &F) -> agent_retry::Attempt<T, Error>
     where
-        F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard, Option<ModelPrices>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let (order, _rule) = self.order(hint);
@@ -522,14 +555,14 @@ impl TaskRouter {
         last: &mut Option<Error>,
     ) -> Option<agent_retry::Attempt<T, Error>>
     where
-        F: Fn(Arc<dyn LlmProvider>, InFlightGuard) -> Fut,
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard, Option<ModelPrices>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let i = order[attempt];
         let u = &self.upstreams[i];
         self.emit(RouteEvent::Routed { target: &u.id });
         let started = (self.now_ms)();
-        let outcome = op(u.provider.clone(), guard).await;
+        let outcome = op(u.provider.clone(), guard, u.card_prices()).await;
         match outcome {
             Ok(v) => {
                 self.health[i].record_success();
@@ -606,13 +639,15 @@ impl LlmProvider for TaskRouter {
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let r = req.clone();
-        self.route(&req, move |p, guard| {
+        self.route(&req, move |p, guard, prices| {
             let r = r.clone();
             // A buffered call is in-flight for the whole future: hold the guard
             // until `complete` resolves, then it drops here.
             async move {
                 let _in_flight = guard;
-                p.complete(r).await
+                let mut resp = p.complete(r).await?;
+                stamp_cost(&mut resp.usage, prices);
+                Ok(resp)
             }
         })
         .await
@@ -622,7 +657,7 @@ impl LlmProvider for TaskRouter {
         // Fallover covers failures raised while *establishing* the stream; once bytes
         // flow the turn is committed (mirrors `Router::stream`).
         let r = req.clone();
-        self.route(&req, move |p, guard| {
+        self.route(&req, move |p, guard, prices| {
             let r = r.clone();
             async move {
                 let inner = p.stream(r).await?; // setup failure drops `guard` here → falls over
@@ -633,7 +668,12 @@ impl LlmProvider for TaskRouter {
                 let guarded = async_stream::stream! {
                     let _in_flight = guard;
                     let mut inner = inner;
-                    while let Some(item) = inner.next().await {
+                    while let Some(mut item) = inner.next().await {
+                        // The terminal chunk carries usage: price it by the
+                        // upstream that actually generated it.
+                        if let Ok(chunk) = &mut item {
+                            stamp_cost(&mut chunk.usage, prices);
+                        }
                         yield item;
                     }
                 };
@@ -759,6 +799,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Heavy,
             input_cost: 0.0,
+            output_cost: 0.0,
             max_concurrency: 0,
             provider,
         }
@@ -1268,6 +1309,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            output_cost: 0.0,
             max_concurrency: 0,
             provider: Arc::new(TimedProvider {
                 id,
@@ -1307,6 +1349,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            output_cost: 0.0,
             max_concurrency: 0,
             provider: Arc::new(OkProvider {
                 answer: "fine".into(),
@@ -1319,6 +1362,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            output_cost: 0.0,
             max_concurrency: 0,
             provider: Arc::new(fail),
         };
@@ -1361,6 +1405,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            output_cost: 0.0,
             max_concurrency: 0,
             provider: Arc::new(fail),
         };
@@ -1369,6 +1414,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            output_cost: 0.0,
             max_concurrency: 0,
             provider: Arc::new(OkProvider {
                 answer: "fine".into(),
@@ -1966,5 +2012,168 @@ mod tests {
             assert_eq!(ok, admitted, "{saturation:?}: served");
             assert_eq!(r.live[0].snapshot().0, 0, "every slot released");
         }
+    }
+
+    // --- card-fed pricing (gap §8.2) ------------------------------------------
+
+    /// Succeeds with a fixed `usage` (buffered) or one text chunk + a terminal
+    /// chunk carrying `usage` (streamed) — the shape every real decoder emits.
+    struct UsageProvider {
+        usage: Usage,
+    }
+    #[async_trait]
+    impl LlmProvider for UsageProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps(true, false, 1000)
+        }
+        async fn complete(&self, r: CompletionRequest) -> Result<CompletionResponse> {
+            let mut resp = ok("y", true, false).complete(r).await?;
+            resp.usage = Some(self.usage.clone());
+            Ok(resp)
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            let chunks = vec![
+                Ok(agent_core::CompletionChunk {
+                    delta_text: "y".into(),
+                    ..Default::default()
+                }),
+                Ok(agent_core::CompletionChunk {
+                    finish_reason: Some("stop".into()),
+                    usage: Some(self.usage.clone()),
+                    ..Default::default()
+                }),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(chunks)))
+        }
+    }
+
+    fn usage(prompt: u32, completion: u32) -> Usage {
+        Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt.saturating_add(completion),
+            ..Default::default()
+        }
+    }
+
+    /// An upstream serving `u`, carded at `input`/`output` USD per Mtok.
+    fn priced(id: &str, u: Usage, input: f32, output: f32) -> RouterUpstream {
+        let mut up = up(id, Arc::new(UsageProvider { usage: u }));
+        up.input_cost = input;
+        up.output_cost = output;
+        up
+    }
+
+    async fn buffered_cost(r: &TaskRouter) -> Option<agent_core::Cost> {
+        r.complete(req()).await.unwrap().usage.unwrap().cost
+    }
+
+    #[tokio::test]
+    async fn positive_card_prices_stamp_buffered_usage() {
+        // 1 Mtok in @ $2 + 1 Mtok out @ $8 = $10.
+        let r = router(
+            vec![priced("kimi", usage(1_000_000, 1_000_000), 2.0, 8.0)],
+            prefer(&[]),
+        );
+        let c = buffered_cost(&r)
+            .await
+            .expect("card-priced turn carries a cost");
+        assert_eq!((c.input, c.output, c.total), (2.0, 8.0, 10.0));
+        assert_eq!((c.cache_read, c.cache_write), (0.0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn positive_stream_terminal_usage_gets_card_cost() {
+        let r = router(
+            vec![priced("kimi", usage(500_000, 250_000), 2.0, 8.0)],
+            prefer(&[]),
+        );
+        let chunks: Vec<_> = r.stream(req()).await.unwrap().collect().await;
+        let costs: Vec<_> = chunks
+            .iter()
+            .map(|c| c.as_ref().unwrap().usage.as_ref().and_then(|u| u.cost))
+            .collect();
+        // Only the terminal (usage-bearing) chunk is priced; text chunks untouched.
+        assert!(costs[0].is_none());
+        assert_eq!(costs[1].as_ref().map(|c| c.total), Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn negative_unpriced_card_leaves_cost_none() {
+        // A $0/$0 card is "unknown", not "free": leave the cost unset so the
+        // agent loop falls back to its own price table.
+        let r = router(
+            vec![priced("mi50", usage(1_000, 1_000), 0.0, 0.0)],
+            prefer(&[]),
+        );
+        assert!(buffered_cost(&r).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn negative_provider_reported_cost_is_not_overwritten() {
+        let reported = agent_core::Cost {
+            total: 0.42,
+            ..Default::default()
+        };
+        let mut u = usage(1_000_000, 1_000_000);
+        u.cost = Some(reported);
+        let r = router(vec![priced("a", u, 2.0, 8.0)], prefer(&[]));
+        assert_eq!(buffered_cost(&r).await, Some(reported));
+    }
+
+    #[tokio::test]
+    async fn corner_failover_prices_the_serving_upstream() {
+        // A (expensive) fails over-ably; B (cheap) serves ⇒ B's rates apply.
+        let mut a = up("a", Arc::new(FailProvider::new("http 429: slow down")));
+        a.input_cost = 100.0;
+        a.output_cost = 100.0;
+        let b = priced("b", usage(1_000_000, 0), 1.0, 1.0);
+        let r = router(vec![a, b], prefer(&["a", "b"]));
+        assert_eq!(buffered_cost(&r).await.map(|c| c.total), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn boundary_cached_tokens_not_double_billed() {
+        // OpenAI-compat `prompt_tokens` already includes the cached hits, so a
+        // card (no cache rate) bills them once, via the input line.
+        let mut u = usage(1_000_000, 0);
+        u.cache_read_tokens = 600_000;
+        let r = router(vec![priced("a", u, 2.0, 0.0)], prefer(&[]));
+        let c = buffered_cost(&r).await.unwrap();
+        assert_eq!((c.input, c.cache_read, c.total), (2.0, 0.0, 2.0));
+        // Output-only pricing still counts as a priced card.
+        let r = router(
+            vec![priced("b", usage(0, 1_000_000), 0.0, 3.0)],
+            prefer(&[]),
+        );
+        assert_eq!(buffered_cost(&r).await.map(|c| c.total), Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn adversarial_hostile_card_costs_clamp() {
+        for (input, output) in [
+            (f32::NAN, f32::NAN),
+            (-1.0, -5.0),
+            (f32::INFINITY, f32::NEG_INFINITY),
+        ] {
+            let r = TaskRouter::new(
+                vec![priced("x", usage(u32::MAX, u32::MAX), input, output)],
+                prefer(&[]),
+            )
+            .unwrap();
+            assert_eq!(
+                (r.upstreams[0].input_cost, r.upstreams[0].output_cost),
+                (0.0, 0.0),
+                "{input}/{output} clamps on build"
+            );
+            // Clamped to an unpriced card ⇒ no (poisoned) cost is stamped.
+            assert!(buffered_cost(&r).await.is_none(), "{input}/{output}");
+        }
+        // A huge-but-finite rate with max token counts stays finite.
+        let r = router(
+            vec![priced("x", usage(u32::MAX, u32::MAX), f32::MAX, f32::MAX)],
+            prefer(&[]),
+        );
+        assert!(buffered_cost(&r).await.unwrap().total.is_finite());
     }
 }

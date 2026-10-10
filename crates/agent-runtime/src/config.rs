@@ -1605,9 +1605,14 @@ pub struct RouteUpstreamCfg {
     /// `light` | `medium` | `heavy` (missing ⇒ medium).
     #[serde(default)]
     pub tier: String,
-    /// Per-Mtok input cost hint (clamped non-negative on build).
+    /// Per-Mtok input cost (USD; clamped non-negative on build). Orders `cost`
+    /// routing and, with `output_cost`, prices the turns this upstream serves.
     #[serde(default)]
     pub input_cost: Option<f32>,
+    /// Per-Mtok output cost (USD; clamped non-negative on build). Prices the
+    /// completion tokens of a turn this upstream serves.
+    #[serde(default)]
+    pub output_cost: Option<f32>,
     /// Aggregate concurrency this endpoint can absorb. For a multi-GPU gateway —
     /// one OpenAI-compatible endpoint that internally load-balances several cards
     /// — set this to ≈ GPUs × per-GPU slots so capacity-normalised `least-loaded`
@@ -5266,6 +5271,7 @@ mod tests {
             tags = ["reasoning", "long-context"]
             tier = "heavy"
             input_cost = 3.0
+            output_cost = 12.0
 
             [[upstreams]]
             name = "glm"
@@ -5291,6 +5297,8 @@ mod tests {
         assert_eq!(cfg.upstreams[0].tags, vec!["reasoning", "long-context"]);
         assert_eq!(cfg.upstreams[0].context_window, Some(131_072));
         assert_eq!(cfg.upstreams[0].input_cost, Some(3.0));
+        assert_eq!(cfg.upstreams[0].output_cost, Some(12.0));
+        assert_eq!(cfg.upstreams[1].output_cost, None, "absent ⇒ unpriced");
         assert!(cfg.upstreams[1].insecure_tls);
         assert_eq!(cfg.rules.len(), 1);
         assert_eq!(cfg.rules[0].match_.role, "review");

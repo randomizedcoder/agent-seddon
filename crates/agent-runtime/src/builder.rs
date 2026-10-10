@@ -2763,6 +2763,7 @@ fn route_cfg_from(
             tags: u.tags.clone(),
             tier: u.tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
             input_cost: (u.input_cost != 0.0).then_some(u.input_cost),
+            output_cost: (u.output_cost != 0.0).then_some(u.output_cost),
             max_concurrency: (u.max_concurrency != 0).then_some(u.max_concurrency),
         });
     }
@@ -3047,6 +3048,7 @@ fn route_upstream_card(
         supports_tools: true,
         tags: u.tags.clone(),
         input_cost: u.input_cost.unwrap_or(0.0),
+        output_cost: u.output_cost.unwrap_or(0.0),
         tier: agent_core::PoolTier::parse(&u.tier),
         // Aggregate concurrency (multi-GPU gateway); `card.sanitize()` clamps it.
         max_concurrency: u.max_concurrency.unwrap_or(0),
@@ -4996,6 +4998,7 @@ mod model_router_config_tests {
           tags: "reasoning"
           tier: POOL_TIER_HEAVY
           input_cost: 0.6
+          output_cost: 2.5
         }
         upstreams {
           id: "glm"
@@ -5046,10 +5049,15 @@ mod model_router_config_tests {
         assert_eq!(kimi.tags, vec!["reasoning"]);
         assert_eq!(kimi.tier, "heavy");
         assert_eq!(kimi.input_cost, Some(0.6));
+        assert_eq!(kimi.output_cost, Some(2.5));
         let glm = &rc.upstreams[1];
         assert_eq!(glm.api_key_env, "GLM_KEY");
         assert!(glm.insecure_tls);
         assert_eq!(glm.context_window, None, "0 = inherit the global window");
+        assert_eq!(
+            glm.output_cost, None,
+            "0 = unpriced (falls back to the price table)"
+        );
         // Policy: typed enums → the canonical strings the strict parser accepts.
         assert_eq!(rc.rules.len(), 1);
         assert_eq!(rc.rules[0].match_.role, "judge");

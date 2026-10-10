@@ -549,13 +549,18 @@ all bypassed.
 
 Card fields ([agent-core/src/lib.rs](../../crates/agent-core/src/lib.rs):2710-2741;
 [upstream.proto](../../crates/agent-proto/proto/agent/v1/upstream.proto):26-54): `input_cost` is a filter and
-tie-break only; **`output_cost` is stored and never read**; `weight` is dropped on the router path
+tie-break (and, since the card-fed pricing fix, a price); ~~**`output_cost` is stored and never read**~~
+**read** — it prices routed turns (below); `weight` is dropped on the router path
 (task_router.rs:35-46); `max_output_tokens` unused; `context_window` is the only task-fit gate
 (chars ÷ 4 estimate). No RPM / TPM, region, quality score, budget or live-health field.
 
-**Spend accounting ignores the cards.** Every turn is priced by `PriceTable::builtin()` (agent.rs:2213)
+~~**Spend accounting ignores the cards.** Every turn is priced by `PriceTable::builtin()` (agent.rs:2213)
 whose rows are Claude 3.x and GPT-4o only ([cost.rs](../../crates/agent-tokenizer/src/cost.rs):13-19),
-so Kimi, GLM and MI50 turns cost **$0 "Estimated"**. [model-router/STATUS.md](../design/model-router/STATUS.md):45
+so Kimi, GLM and MI50 turns cost **$0 "Estimated"**.~~ **Fixed (card-fed pricing).** The `TaskRouter`
+stamps each routed turn's `Usage.cost` from the *serving* upstream's card (`input_cost` /
+`output_cost`, buffered and streamed, failover-aware); the loop records it as `actual` and falls back
+to the builtin table only for an unpriced card or an unrouted provider — see
+[router.md](../components/router.md#turn-pricing-from-the-upstream-card-gap-82). [model-router/STATUS.md](../design/model-router/STATUS.md):45
 records that the `PriceTable` plumbing did not land. The portal Router tab's Health column is
 `static_health()` (all Healthy, `in_flight 0`, [agent-registry/src/lib.rs](../../crates/agent-registry/src/lib.rs):123-133);
 live `TaskRouter` stats are never surfaced.
@@ -643,7 +648,8 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
    (registry_router.rs:183-198) so they survive registry edits and span tenants.
 7. **Cost- and budget-aware selection:** `OrderPolicy::CostPerTask` (input × estimated prompt +
    output × `max_tokens`), `RouteHint.max_cost` set by fleet and tenancy, a per-tenant per-hour
-   spend budget, `PriceTable` fed from registry cards, cost metrics labelled by upstream.
+   spend budget, ~~`PriceTable` fed from registry cards~~ (**done** — routed turns are priced from the
+   serving card, §8.2), cost metrics labelled by upstream.
 8. **Spillover tiers:** `spill_to: ["cloud"]` in `RoutePreferSpec`, driven by saturation state.
 9. ~~**Fail over fast on 429** when another upstream has headroom: a router-level retry budget
    instead of the in-provider 20 s backoff.~~ **Done** — routed upstreams build fail-fast
@@ -806,7 +812,7 @@ links its own sub-docs.
 - ~~Fix streamed in-flight accounting (§8.7 item 2).~~ **Done.**
 - Fleet on the task-router with registry cards (item 1).
 - Hard per-upstream capacity + process-wide admission queue with role / tenant priority (items 3–5).
-- Card-fed `PriceTable` so cost is real (item 7); Grafana panels for router / pool / cost (item 16).
+- ~~Card-fed `PriceTable` so cost is real (item 7)~~ **done** (§8.2); Grafana panels for router / pool / cost (item 16).
 
 **P2 — product**
 

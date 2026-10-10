@@ -334,6 +334,7 @@ impl RegistryRouter {
                 tags: card.tags.clone(),
                 tier: card.tier.unwrap_or(agent_core::PoolTier::Medium),
                 input_cost: card.input_cost,
+                output_cost: card.output_cost,
                 // Aggregate concurrency (multi-GPU gateway) — already clamped by
                 // `card.sanitize()` above; feeds capacity-normalised routing.
                 max_concurrency: card.max_concurrency,
@@ -606,6 +607,75 @@ mod tests {
         t.fetch_add(1, Ordering::SeqCst);
         let rebuilt = hard.snapshot().await.unwrap();
         assert_eq!(rebuilt.saturation_policy(), want, "survives the rebuild");
+    }
+
+    /// A card's rates price the turns it serves, and a re-price takes effect on
+    /// the next snapshot — without rebuilding the live provider (cost is
+    /// routing metadata, outside `provider_key`).
+    #[tokio::test]
+    async fn positive_card_reprice_takes_effect_without_reconnect() {
+        struct Billed;
+        #[async_trait]
+        impl LlmProvider for Billed {
+            fn capabilities(&self) -> agent_core::ModelCapabilities {
+                agent_core::ModelCapabilities {
+                    supports_tools: true,
+                    context_window: 1000,
+                    supports_response_format: false,
+                    supports_vision: false,
+                }
+            }
+            async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+                let mut resp = final_turn("ok");
+                resp.usage = Some(agent_core::Usage {
+                    prompt_tokens: 1_000_000,
+                    completion_tokens: 1_000_000,
+                    ..Default::default()
+                });
+                Ok(resp)
+            }
+            async fn stream(&self, _r: CompletionRequest) -> Result<agent_core::ChunkStream> {
+                Err(Error::Provider("no stream".into()))
+            }
+        }
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let b = builds.clone();
+        let synth: UpstreamSynth = Arc::new(move |_: &Upstream| {
+            b.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(Billed) as Arc<dyn LlmProvider>)
+        });
+        let priced = |input: f32, output: f32| Upstream {
+            input_cost: input,
+            output_cost: output,
+            ..card("a")
+        };
+        let reg = registry_with(vec![priced(2.0, 8.0)]);
+        let (t, now) = clock();
+        let router = RegistryRouter::new(reg.clone(), synth)
+            .with_refresh_ms(0)
+            .with_clock(now);
+        let total = |resp: CompletionResponse| resp.usage.and_then(|u| u.cost).map(|c| c.total);
+        let req = CompletionRequest {
+            messages: vec![agent_core::Message::user("hi")],
+            tools: vec![],
+            max_tokens: 16,
+            temperature: 0.0,
+            response_format: None,
+            route: None,
+        };
+        assert_eq!(
+            total(router.complete(req.clone()).await.unwrap()),
+            Some(10.0)
+        );
+
+        reg.put(priced(2.0, 4.0)).await.unwrap(); // re-price output
+        t.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(total(router.complete(req).await.unwrap()), Some(6.0));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "re-price reuses the connection"
+        );
     }
 
     /// Every registry-built fleet carries a non-zero snapshot version, and a
