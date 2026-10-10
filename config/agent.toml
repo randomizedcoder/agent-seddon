@@ -754,6 +754,10 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # #   reorders least-loaded; "shed" = a HARD cap — a saturated upstream is never
 # #   dispatched, and a request is shed when every candidate is full; "wait" = first
 # #   wait up to saturation_wait_ms (default 500, clamped ≤ 30 s) for a slot to free.
+# # spill_to = ["cloud"]  (gap §8.7 item 8, on any `prefer` incl. [route.default_prefer]):
+# #   upstreams carrying a listed tag are a RESERVE — held back while a primary
+# #   (untagged) upstream has headroom, spilled onto only once every primary is
+# #   saturated (in_flight ≥ max_concurrency) or breaker-open. Overflow, not failover.
 #
 # # source = "registry" (model-router 04): the fleet + policy come from the LIVE
 # # [registry] store — this TOML seeds it when empty, and a control-plane

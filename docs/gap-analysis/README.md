@@ -520,7 +520,7 @@ across N pools × models × prices needs.
 |---|---|---|---|---|---|
 | `Router` (failover) | `InOrder` / `RoundRobin` | passive breaker: 3 failures / 30 s cooldown; open upstreams are **reordered to the back, not excluded** | ❌ no in-flight, no `max_concurrency` | ❌ | [router.rs](../../crates/agent-providers/src/router.rs):37-45, 66-104, 245-262 |
 | `LlmPool` / `PoolProvider` | `Cost` (default) / `RoundRobin` / `LeastLoaded` (raw in-flight) / `Weighted` | active probe = a **billed 1-token completion** every 15 s | per-member `max_concurrency`, hard; ~~check and increment not atomic~~ **Fixed — now a single `PoolMember::try_reserve` CAS (atomic check-and-reserve), so the cap holds under concurrent dispatch; closed the `eligible()`→`call_member` TOCTOU** | `Saturation::{Shed, Wait ≤ 30 s}` then error; no queue, no spillover | [pool.rs](../../crates/agent-providers/src/pool.rs):62-80, 231-233, 316-323, 401, 440-466, 471-482, 716-723 |
-| `TaskRouter` (the routed generator path) | filters health / tools / vision / `min_context` / tier / `max_cost` (input cost only); live signals `cost` / `latency` / `least-loaded` **reorder only, never admit or refuse** | no active probe; `healthy: true` hard-coded in `meta()` | soft by default; **opt-in hard cap** (`[route] on_saturation`, CAS admission — §8.7 item 3) | ~~❌~~ opt-in `shed` / bounded `wait` (§8.7 item 3); no spillover yet | [route.rs](../../crates/agent-providers/src/route.rs):124-141, 283-292; [task_router.rs](../../crates/agent-providers/src/task_router.rs):233; [05-capacity-aware.md](../design/model-router/05-capacity-aware.md):27 "Soft, not a cap" |
+| `TaskRouter` (the routed generator path) | filters health / tools / vision / `min_context` / tier / `max_cost` (input cost only); live signals `cost` / `latency` / `least-loaded` **reorder only, never admit or refuse** | no active probe; `healthy: true` hard-coded in `meta()` | soft by default; **opt-in hard cap** (`[route] on_saturation`, CAS admission — §8.7 item 3) | ~~❌~~ opt-in `shed` / bounded `wait` (§8.7 item 3); `prefer.spill_to` reserve tier (§8.7 item 8) | [route.rs](../../crates/agent-providers/src/route.rs):124-141, 283-292; [task_router.rs](../../crates/agent-providers/src/task_router.rs):233; [05-capacity-aware.md](../design/model-router/05-capacity-aware.md):27 "Soft, not a cap" |
 | `RegistryRouter` / `RouterCell` | rebuilds `TaskRouter` on any card change (5 s refresh), **resetting breaker + in-flight stats**; per-tenant cells → load is invisible across tenants | — | — | — | [registry_router.rs](../../crates/agent-providers/src/registry_router.rs):43-66, 149-176, 213-265, 338 |
 | `ConsensusProvider`, `BranchingProvider` | fan-out | — | multiply load, ungated; ~~`branch_leak` fork/cancel gate flaked RED ("heap grew across cycles")~~ **Fixed — not a branch strand: dhat shows the fork/cancel heap is flat at 300 iters; the "growth" was an under-warmed test baseline mistaking tokio's one-time multi-thread / `parking_lot` working-set ramp (~15 KB, grown lazily as workers first park) for per-cycle growth. The test now warms to steady state (convergence, not a magic count) before baselining. As a structured-teardown correctness improvement, `BranchingProvider::complete` also drains its `JoinSet` after `abort_all()` so cancelled branches (captured provider `Arc`s / request clones) are reaped before return, not at the scheduler's leisure** | — | consensus.rs:22-24; branching.rs:522-530 (drain); branch_leak.rs |
 | `reach` | free `GET /models` probe | used by doctor / preflight, **not** by the pool | — | — | [reach.rs](../../crates/agent-providers/src/reach.rs):1-40 |
@@ -596,7 +596,8 @@ autoscaling signal ([gpu-pool/STATUS.md](../design/gpu-pool/STATUS.md):115 defer
 ### 8.5 The docs' own deferrals
 
 model-router 05 is still marked "🚧 in progress" although shipped; 06 adaptive effective capacity,
-LLM meta-router, learned weights and whole-fleet spillover are deferred (model-router/STATUS.md:17,
+LLM meta-router and learned weights are deferred (whole-fleet spillover has since shipped as
+`prefer.spill_to`, §8.7 item 8) (model-router/STATUS.md:17,
 253-263); gateway-vs-cards visibility (05-capacity-aware.md:43-52); real GPU-utilisation probing and
 autoscaling (gpu-pool/STATUS.md:108-116); loadtest admission is per served seam only; the
 [tokenization-cache](../design/tokenization-cache.md) note is a token-count memo, not a throughput
@@ -650,7 +651,13 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
    output × `max_tokens`), `RouteHint.max_cost` set by fleet and tenancy, a per-tenant per-hour
    spend budget, ~~`PriceTable` fed from registry cards~~ (**done** — routed turns are priced from the
    serving card, §8.2), cost metrics labelled by upstream.
-8. **Spillover tiers:** `spill_to: ["cloud"]` in `RoutePreferSpec`, driven by saturation state.
+8. ~~**Spillover tiers:** `spill_to: ["cloud"]` in `RoutePreferSpec`, driven by saturation state.~~
+   **Done** — `prefer.spill_to` (TOML, registry `RoutePrefer.spill_to = 5`, agent-core spec,
+   validated like `tags`). Tagged upstreams are a reserve the `TaskRouter` holds back while any
+   primary has headroom (not saturated, breaker closed) and spills onto otherwise — in `soft` it
+   leads the order; under `shed` / `wait` it is also the in-pass fallback before a wait/shed.
+   Capacity-driven, not error-driven; an override can't jump the queue; `RouteEvent::Spilled` →
+   decision label `spilled`. Four-class + adversarial tests in `task_router.rs` / `route.rs`.
 9. ~~**Fail over fast on 429** when another upstream has headroom: a router-level retry budget
    instead of the in-provider 20 s backoff.~~ **Done** — routed upstreams build fail-fast
    (`max_retries: 0`, builder.rs); the `TaskRouter` owns retry as a bounded whole-fleet re-pass
@@ -828,7 +835,7 @@ links its own sub-docs.
 **P2 — routing / scale, larger**
 
 - Durable claim lease + parallel prep for a multi-process fleet; cost / budget-aware ordering and
-  spillover tiers; capacity probes + adaptive effective capacity; prefix-cache affinity; lever 3
+  ~~spillover tiers~~ (done, §8.7 item 8); capacity probes + adaptive effective capacity; prefix-cache affinity; lever 3
   map-reduce; `PoolAsProvider`.
 
 **P2 — LLM awareness**

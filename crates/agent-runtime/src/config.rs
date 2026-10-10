@@ -1665,6 +1665,11 @@ pub struct RoutePreferCfg {
     /// it can mis-sort, never mis-fire).
     #[serde(default)]
     pub policy: String,
+    /// Spillover tier tags (gap §8.7 item 8): eligible upstreams carrying any
+    /// of these tags are a reserve, tried only once every primary candidate is
+    /// saturated or breaker-open. Empty ⇒ no reserve.
+    #[serde(default)]
+    pub spill_to: Vec<String>,
 }
 
 /// One routing rule (`[[route.rules]]`): when `match` holds, order by `prefer`.
@@ -5333,6 +5338,24 @@ mod tests {
             let cfg: RouteCfg = toml::from_str(&format!("on_saturation = {raw:?}")).unwrap();
             assert_eq!(cfg.saturation(), want, "on_saturation = {raw:?}");
         }
+    }
+
+    /// `prefer.spill_to` (gap §8.7 item 8) parses on a rule and the default;
+    /// absent ⇒ empty (no reserve tier — today's behaviour).
+    #[test]
+    fn route_prefer_spill_to_parses_and_defaults_empty() {
+        let cfg: RouteCfg = toml::from_str(
+            r#"
+            [[rules]]
+            match = { role = "review" }
+            prefer = { tags = ["reasoning"], spill_to = ["cloud", "burst"] }
+            [default_prefer]
+            upstreams = ["mi50"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.rules[0].prefer.spill_to, ["cloud", "burst"]);
+        assert!(cfg.default_prefer.spill_to.is_empty());
     }
 
     /// Corner: a registry-resolved upstream (no endpoint) with no metadata parses.

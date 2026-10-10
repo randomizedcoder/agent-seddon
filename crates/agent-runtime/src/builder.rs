@@ -2453,6 +2453,7 @@ pub(crate) fn build_route_policy(
         tags: p.tags.clone(),
         tier: agent_core::PoolTier::parse(&p.tier),
         upstreams: p.upstreams.clone(),
+        spill_to: p.spill_to.clone(),
         policy: match p.policy.trim() {
             "" => None,
             s => {
@@ -2774,6 +2775,7 @@ fn route_cfg_from(
         // Validated to the closed set by ModelRouterConfig::validate (04
         // consumes it as the live-signal tie-break).
         policy: p.policy.clone(),
+        spill_to: p.spill_to.clone(),
     };
     for r in &mrc.policy.rules {
         out.rules.push(RouteRuleCfg {
@@ -3071,6 +3073,7 @@ fn route_policy_spec_from_toml(
         tier: agent_core::PoolTier::parse(&p.tier),
         upstreams: p.upstreams.clone(),
         policy: p.policy.clone(),
+        spill_to: p.spill_to.clone(),
     };
     let mut rules = Vec::new();
     for (i, r) in cfg.rules.iter().enumerate() {
@@ -4339,6 +4342,7 @@ mod route_policy_tests {
                     tier: "heavy".into(),
                     upstreams: vec![],
                     policy: String::new(),
+                    spill_to: vec!["cloud".into()],
                 },
             }],
             default_prefer: RoutePreferCfg {
@@ -4363,6 +4367,11 @@ mod route_policy_tests {
             Some(agent_core::PoolTier::Heavy)
         );
         assert_eq!(policy.default_prefer.upstreams, vec!["kimi"]);
+        assert_eq!(policy.rules[0].prefer.spill_to, vec!["cloud"]);
+        assert!(
+            policy.default_prefer.spill_to.is_empty(),
+            "absent ⇒ no reserve"
+        );
     }
 
     // A typo'd `match` constraint must fail the build, not silently match every
@@ -5019,7 +5028,7 @@ mod model_router_config_tests {
         policy {
           rules {
             match { role: ROUTE_ROLE_JUDGE task_mode: TASK_MODE_DEBUG min_context: 4096 }
-            prefer { tags: "reasoning" tier: POOL_TIER_HEAVY }
+            prefer { tags: "reasoning" tier: POOL_TIER_HEAVY spill_to: "cloud" }
           }
           default_prefer { upstreams: "kimi" upstreams: "glm" }
           failure_threshold: 5
@@ -5064,6 +5073,7 @@ mod model_router_config_tests {
         assert_eq!(rc.rules[0].match_.task_mode, "debug");
         assert_eq!(rc.rules[0].match_.min_context, 4096);
         assert_eq!(rc.rules[0].prefer.tier, "heavy");
+        assert_eq!(rc.rules[0].prefer.spill_to, vec!["cloud"]);
         assert_eq!(rc.default_prefer.upstreams, vec!["kimi", "glm"]);
         assert_eq!(rc.failure_threshold, 5);
         assert_eq!(rc.cooldown_secs, 60);
@@ -5247,6 +5257,14 @@ mod registry_seed_tests {
         });
         let err = route_policy_spec_from_toml(&cfg).expect_err("typo fails seed");
         assert!(format!("{err:#}").contains("unknown match task_mode"));
+    }
+
+    #[test]
+    fn positive_policy_seed_carries_spill_to() {
+        let mut cfg = crate::config::RouteCfg::default();
+        cfg.default_prefer.spill_to = vec!["cloud".into()];
+        let spec = route_policy_spec_from_toml(&cfg).expect("seeds");
+        assert_eq!(spec.default_prefer.spill_to, vec!["cloud"]);
     }
 
     #[tokio::test]

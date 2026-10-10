@@ -3000,6 +3000,11 @@ pub struct RoutePreferSpec {
     /// `"least-loaded"`. Validated on ingest; consumed by the registry-backed
     /// router (model-router 04).
     pub policy: String,
+    /// Spillover tier tags (gap §8.7 item 8): eligible upstreams carrying any
+    /// of these tags are a **reserve** — held back while a primary (untagged)
+    /// candidate has usable headroom, and tried only once every primary is
+    /// saturated or breaker-open. Empty ⇒ no reserve (today's behaviour).
+    pub spill_to: Vec<String>,
 }
 
 impl RoutePreferSpec {
@@ -3013,10 +3018,17 @@ impl RoutePreferSpec {
                 truncate_for_log(&self.policy)
             )));
         }
-        if self.tags.len() > MAX_UPSTREAM_TAGS || self.upstreams.len() > MAX_REGISTRY_UPSTREAMS {
+        if self.tags.len() > MAX_UPSTREAM_TAGS
+            || self.spill_to.len() > MAX_UPSTREAM_TAGS
+            || self.upstreams.len() > MAX_REGISTRY_UPSTREAMS
+        {
             return Err(Error::Registry(format!("{ctx}: prefer lists too long")));
         }
-        if self.tags.iter().any(|t| t.len() > MAX_UPSTREAM_TAG_LEN)
+        if self
+            .tags
+            .iter()
+            .chain(&self.spill_to)
+            .any(|t| t.len() > MAX_UPSTREAM_TAG_LEN)
             || self.upstreams.iter().any(|u| u.len() > MAX_SEGMENT_LEN)
         {
             return Err(Error::Registry(format!("{ctx}: prefer entry too long")));
@@ -7445,6 +7457,29 @@ mod tests {
         };
         assert!(fleet(MAX_REGISTRY_UPSTREAMS).validate().is_ok());
         assert!(fleet(MAX_REGISTRY_UPSTREAMS + 1).validate().is_err());
+    }
+
+    /// `prefer.spill_to` (gap §8.7 item 8) shares the tag caps: a hostile
+    /// registry write can't smuggle an unbounded reserve list or huge tags.
+    #[rstest]
+    #[case::positive_empty(vec![], true)]
+    #[case::positive_one_tier(vec!["cloud".into()], true)]
+    #[case::boundary_tag_len_at_cap(vec!["x".repeat(MAX_UPSTREAM_TAG_LEN)], true)]
+    #[case::boundary_count_at_cap(vec!["t".into(); MAX_UPSTREAM_TAGS], true)]
+    #[case::adversarial_tag_too_long(vec!["x".repeat(MAX_UPSTREAM_TAG_LEN + 1)], false)]
+    #[case::adversarial_too_many(vec!["t".into(); MAX_UPSTREAM_TAGS + 1], false)]
+    fn route_prefer_spill_to_caps(#[case] spill_to: Vec<String>, #[case] ok: bool) {
+        let spec = RoutePolicySpec {
+            rules: vec![RouteRuleSpec {
+                prefer: RoutePreferSpec {
+                    spill_to,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(spec.validate().is_ok(), ok);
     }
 
     #[test]

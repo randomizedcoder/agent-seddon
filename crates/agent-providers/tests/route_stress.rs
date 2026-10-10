@@ -168,6 +168,7 @@ async fn stress_concurrent_mixed_fleet_stays_live_and_accounted() {
                     tier: Some(PoolTier::Heavy),
                     upstreams: vec![],
                     policy: None,
+                    spill_to: vec![],
                 },
             },
             Rule {

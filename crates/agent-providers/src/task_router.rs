@@ -109,6 +109,17 @@ impl LiveStats {
     }
 }
 
+/// One pass's candidates (see [`TaskRouter::order`]): `order` is offered first;
+/// `reserve` is the held-back spillover tier (gap §8.7 item 8), offered only when
+/// nothing in `order` is admitted. `rule` = which rule decided (`Decided` event);
+/// `spilled` = `order` already leads with the reserve (no primary had headroom).
+struct Plan {
+    order: Vec<usize>,
+    reserve: Vec<usize>,
+    rule: Option<usize>,
+    spilled: bool,
+}
+
 /// RAII in-flight guard: decrements on every exit path (incl. panic/cancel), so
 /// the least-loaded signal can never drift upward from a lost decrement — and
 /// emits the [`RouteEvent::InFlight`] gauge event from BOTH edges (the release
@@ -380,12 +391,64 @@ impl TaskRouter {
     /// something). Policy order is preserved within each bucket. Also returns
     /// which rule decided (for the `Decided` event). The engine resolves straight
     /// to fleet indices (same order as `self.upstreams`) — no by-id re-lookup.
-    fn order(&self, hint: &Hint) -> (Vec<usize>, Option<usize>) {
+    ///
+    /// **Spillover** (gap §8.7 item 8): survivors tagged with the deciding
+    /// preference's `spill_to` are a held-back reserve. While some primary has
+    /// usable headroom (breaker closed, under its cap) the reserve is kept out of
+    /// [`Plan::order`] and parked in [`Plan::reserve`] — tried within the pass
+    /// only if every primary then refuses admission (hard cap). Once *no* primary
+    /// has headroom the plan spills: the reserve leads, primaries follow. A
+    /// fleet where only the reserve can serve uses it as primary (fail-soft —
+    /// spillover never refuses a request the fleet could answer).
+    fn order(&self, hint: &Hint) -> Plan {
         let now = (self.now_ms)();
         let fleet: Vec<UpstreamMeta<'_>> =
             (0..self.upstreams.len()).map(|i| self.meta(i)).collect();
-        let (ordered, rule) = self.policy.resolve_indices(hint, &fleet);
+        let (mut ordered, mut rule) = self.policy.resolve_indices(hint, &fleet);
+        // An override can't jump the spill queue: one naming a reserve upstream
+        // (under the preference that would otherwise decide) is dropped, so the
+        // reserve is still only spilled onto — a carried hint can't pull a
+        // request onto the (typically paid) tier while a primary has headroom.
+        if hint.override_upstream.is_some() {
+            let plain = Hint {
+                override_upstream: None,
+                ..hint.clone()
+            };
+            let (all, plain_rule) = self.policy.resolve_indices(&plain, &fleet);
+            let pick_is_reserve = ordered.first().is_some_and(|&i| {
+                self.policy
+                    .prefer_for(plain_rule)
+                    .is_reserve(&self.upstreams[i].tags)
+            });
+            if pick_is_reserve {
+                (ordered, rule) = (all, plain_rule);
+            }
+        }
+        let prefer = self.policy.prefer_for(rule);
+        let (mut primary, mut reserve): (Vec<usize>, Vec<usize>) = ordered
+            .into_iter()
+            .partition(|&i| !prefer.is_reserve(&self.upstreams[i].tags));
+        if primary.is_empty() {
+            primary = std::mem::take(&mut reserve);
+        }
+        let (mut primary, primary_headroom) = self.bucket(primary, now);
+        let (mut reserve, _) = self.bucket(reserve, now);
+        let spilled = !reserve.is_empty() && !primary_headroom;
+        if spilled {
+            reserve.append(&mut primary);
+            primary = std::mem::take(&mut reserve);
+        }
+        Plan {
+            order: primary,
+            reserve,
+            rule,
+            spilled,
+        }
+    }
 
+    /// Bucket `ordered` into headroom → saturated → breaker-open (policy order
+    /// kept within each); the flag says whether any member has usable headroom.
+    fn bucket(&self, ordered: Vec<usize>, now: u64) -> (Vec<usize>, bool) {
         let mut headroom = Vec::new();
         let mut saturated = Vec::new();
         let mut unhealthy = Vec::new();
@@ -401,9 +464,10 @@ impl TaskRouter {
                 headroom.push(i);
             }
         }
+        let has_headroom = !headroom.is_empty();
         headroom.extend(saturated);
         headroom.extend(unhealthy);
-        (headroom, rule)
+        (headroom, has_headroom)
     }
 
     /// Try each chosen upstream in turn, stopping at the first success or the first
@@ -424,7 +488,11 @@ impl TaskRouter {
         // trail reflect the opening choice (the per-pass `order()` is recomputed
         // inside each pass so breaker/cooldown state from a failed pass steers
         // the next one).
-        let (first_order, rule) = self.order(&hint);
+        let Plan {
+            order: first_order,
+            rule,
+            ..
+        } = self.order(&hint);
         if first_order.is_empty() {
             self.emit(RouteEvent::NoCandidate {
                 role: hint.role.as_str(),
@@ -480,36 +548,54 @@ impl TaskRouter {
         F: Fn(Arc<dyn LlmProvider>, InFlightGuard, Option<ModelPrices>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let (order, _rule) = self.order(hint);
-        if order.is_empty() {
+        self.run_plan(hint, op, self.order(hint)).await
+    }
+
+    /// The body of [`Self::one_pass`] over an already-built [`Plan`].
+    async fn run_plan<T, F, Fut>(
+        &self,
+        hint: &Hint,
+        op: &F,
+        plan: Plan,
+    ) -> agent_retry::Attempt<T, Error>
+    where
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard, Option<ModelPrices>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        if plan.order.is_empty() {
             // A pass can find no candidate only if every upstream's breaker is
             // open AND filtered — treat as exhausted, don't spin the budget.
             return agent_retry::Attempt::Fail(Error::Provider(
                 "no upstream can serve this request (capability/requirement mismatch)".into(),
             ));
         }
+        // Emitted here, not in `order()`, so the opening `Decided` plan in
+        // `route()` doesn't double-count a spill.
+        if plan.spilled {
+            self.emit(RouteEvent::Spilled {
+                role: hint.role.as_str(),
+            });
+        }
         let mut last: Option<Error> = None;
         let mut waited = false;
         loop {
-            let mut dispatched = false;
-            for (attempt, &i) in order.iter().enumerate() {
-                let u = &self.upstreams[i];
-                // Hard cap (opt-in): an upstream at its ceiling is skipped, not
-                // dispatched — and not a breaker failure (it's our admission, not
-                // an upstream fault). Soft mode always admits.
-                let Some(guard) = InFlightGuard::try_enter(self, i) else {
-                    self.emit(RouteEvent::SkippedSaturated { target: &u.id });
-                    continue;
-                };
-                dispatched = true;
-                if let Some(done) = self
-                    .dispatch(hint, op, &order, attempt, guard, &mut last)
-                    .await
-                {
+            let (mut admitted, done) = self.try_each(hint, op, &plan.order, &mut last).await;
+            if let Some(done) = done {
+                return done;
+            }
+            // Every primary refused admission (they filled between `order()` and
+            // the CAS) — spill onto the held-back reserve before waiting/shedding.
+            if !admitted && !plan.reserve.is_empty() {
+                self.emit(RouteEvent::Spilled {
+                    role: hint.role.as_str(),
+                });
+                let (a, done) = self.try_each(hint, op, &plan.reserve, &mut last).await;
+                if let Some(done) = done {
                     return done;
                 }
+                admitted = a;
             }
-            if dispatched {
+            if admitted {
                 break;
             }
             // Every candidate is at its hard cap. `wait`: poll (bounded) for a slot
@@ -518,7 +604,11 @@ impl TaskRouter {
             if self.saturation == Some(Saturation::Wait) && !waited {
                 waited = true;
                 let freed = poll_for_capacity(self.saturation_wait_ms, || {
-                    order.iter().any(|&i| !self.is_saturated(i)).then_some(())
+                    plan.order
+                        .iter()
+                        .chain(&plan.reserve)
+                        .any(|&i| !self.is_saturated(i))
+                        .then_some(())
                 })
                 .await;
                 if freed.is_some() {
@@ -540,6 +630,39 @@ impl TaskRouter {
         let err =
             last.unwrap_or_else(|| Error::Provider("task-router exhausted all upstreams".into()));
         agent_retry::Attempt::Retry { err, after: None }
+    }
+
+    /// Offer the request to each of `cands` in turn: a candidate at its hard cap
+    /// is skipped (not dispatched, not a breaker failure); an admitted one is
+    /// dispatched. Returns whether anything was admitted, plus `Some` when the
+    /// pass is decided (success or a request-terminal).
+    async fn try_each<T, F, Fut>(
+        &self,
+        hint: &Hint,
+        op: &F,
+        cands: &[usize],
+        last: &mut Option<Error>,
+    ) -> (bool, Option<agent_retry::Attempt<T, Error>>)
+    where
+        F: Fn(Arc<dyn LlmProvider>, InFlightGuard, Option<ModelPrices>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut admitted = false;
+        for (attempt, &i) in cands.iter().enumerate() {
+            // Hard cap (opt-in): an upstream at its ceiling is skipped. Soft mode
+            // always admits.
+            let Some(guard) = InFlightGuard::try_enter(self, i) else {
+                self.emit(RouteEvent::SkippedSaturated {
+                    target: &self.upstreams[i].id,
+                });
+                continue;
+            };
+            admitted = true;
+            if let Some(done) = self.dispatch(hint, op, cands, attempt, guard, last).await {
+                return (true, Some(done));
+            }
+        }
+        (admitted, None)
     }
 
     /// Dispatch one admitted candidate (`order[attempt]`, slot already held by
@@ -835,6 +958,7 @@ mod tests {
                 tier: None,
                 upstreams: ids.iter().map(|s| (*s).to_string()).collect(),
                 policy: None,
+                spill_to: vec![],
             },
         }
     }
@@ -2175,5 +2299,285 @@ mod tests {
             prefer(&[]),
         );
         assert!(buffered_cost(&r).await.unwrap().total.is_finite());
+    }
+
+    // --- spillover tiers (gap §8.7 item 8) -----------------------------------
+
+    type Events = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// `cloud` (tagged "cloud", cap 2) is listed FIRST in the explicit order, so
+    /// without spillover it would serve; `local` (cap 1) is the primary. With
+    /// `spill_to = spill` the cloud is a reserve held back behind local.
+    fn spill_fleet(
+        saturation: Option<Saturation>,
+        spill: &[&str],
+    ) -> (TaskRouter, Arc<AtomicUsize>, Arc<AtomicUsize>, Events) {
+        let (local, local_calls) = counting("from-local");
+        let (cloud, cloud_calls) = counting("from-cloud");
+        let mut policy = prefer(&["cloud", "local"]);
+        policy.default_prefer.spill_to = spill.iter().map(|s| (*s).to_string()).collect();
+        let events: Events = Arc::default();
+        let sink = events.clone();
+        let r = router(
+            vec![
+                RouterUpstream {
+                    tags: vec!["cloud".into()],
+                    ..up_cap("cloud", cloud, 2)
+                },
+                up_cap("local", local, 1),
+            ],
+            policy,
+        )
+        .with_saturation(saturation, 1_000)
+        .with_observer(Arc::new(move |ev| {
+            let e = match ev {
+                RouteEvent::Spilled { role } => format!("spilled:{role}"),
+                RouteEvent::SkippedSaturated { target } => format!("saturated:{target}"),
+                RouteEvent::Shed { role } => format!("shed:{role}"),
+                _ => return,
+            };
+            sink.lock().unwrap().push(e);
+        }));
+        (r, local_calls, cloud_calls, events)
+    }
+    const CLOUD: usize = 0;
+    const LOCAL: usize = 1;
+
+    #[tokio::test]
+    async fn positive_reserve_is_held_back_while_a_primary_has_headroom() {
+        for sat in [None, Some(Saturation::Shed), Some(Saturation::Wait)] {
+            let (r, local, cloud, events) = spill_fleet(sat, &["cloud"]);
+            let resp = r.complete(req()).await.expect("local serves");
+            assert_eq!(resp.message.content_text(), "from-local", "{sat:?}");
+            assert_eq!(
+                cloud.load(Ordering::SeqCst),
+                0,
+                "{sat:?}: reserve untouched"
+            );
+            assert_eq!(local.load(Ordering::SeqCst), 1);
+            assert!(events.lock().unwrap().is_empty(), "{sat:?}: no spill");
+        }
+        // Check-the-check: without `spill_to` the explicit order picks cloud.
+        let (r, _, cloud, _) = spill_fleet(Some(Saturation::Shed), &[]);
+        let resp = r.complete(req()).await.unwrap();
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        assert_eq!(cloud.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn positive_spills_to_reserve_when_every_primary_is_saturated() {
+        // Soft, shed and wait all spill once the primary is at its cap.
+        for sat in [None, Some(Saturation::Shed), Some(Saturation::Wait)] {
+            let (r, local, cloud, events) = spill_fleet(sat, &["cloud"]);
+            r.live[LOCAL].in_flight.store(1, Ordering::Relaxed);
+            let resp = r.complete(req()).await.expect("cloud absorbs overflow");
+            assert_eq!(resp.message.content_text(), "from-cloud", "{sat:?}");
+            assert_eq!(
+                (local.load(Ordering::SeqCst), cloud.load(Ordering::SeqCst)),
+                (0, 1)
+            );
+            assert_eq!(*events.lock().unwrap(), ["spilled:main"], "{sat:?}");
+            assert_eq!(
+                r.live[CLOUD].snapshot().0,
+                0,
+                "{sat:?}: reserve slot released"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_primary_failure_does_not_spill() {
+        // Spillover is capacity-driven, not error-driven: a primary WITH headroom
+        // that 429s does not pull the reserve into the same pass.
+        let (cloud, cloud_calls) = counting("from-cloud");
+        let mut policy = prefer(&["local", "cloud"]);
+        policy.default_prefer.spill_to = vec!["cloud".into()];
+        let r = router(
+            vec![
+                up("local", Arc::new(FailProvider::new("http 429: slow down"))),
+                RouterUpstream {
+                    tags: vec!["cloud".into()],
+                    ..up("cloud", cloud)
+                },
+            ],
+            policy,
+        )
+        .with_saturation(Some(Saturation::Shed), 0);
+        let err = r.complete(req()).await.expect_err("local 429s, no spill");
+        assert!(err.to_string().contains("429"), "{err}");
+        assert_eq!(cloud_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn corner_breaker_open_primary_spills() {
+        // A primary whose breaker is open has no usable headroom either.
+        let (r, local, cloud, events) = spill_fleet(None, &["cloud"]);
+        r.health[LOCAL].record_failure((r.now_ms)(), 1);
+        let resp = r.complete(req()).await.expect("cloud serves the outage");
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        assert_eq!(
+            (local.load(Ordering::SeqCst), cloud.load(Ordering::SeqCst)),
+            (0, 1)
+        );
+        assert_eq!(*events.lock().unwrap(), ["spilled:main"]);
+    }
+
+    #[tokio::test]
+    async fn corner_only_reserve_can_serve_is_used_without_spilling() {
+        // A tool-call request only the reserve can take: it serves as primary —
+        // spillover never refuses a request the fleet could answer.
+        let mut policy = prefer(&["local", "cloud"]);
+        policy.default_prefer.spill_to = vec!["cloud".into()];
+        let events: Events = Arc::default();
+        let sink = events.clone();
+        let r = router(
+            vec![
+                up("local", ok("from-local", false, false)),
+                RouterUpstream {
+                    tags: vec!["cloud".into()],
+                    ..up("cloud", ok("from-cloud", true, false))
+                },
+            ],
+            policy,
+        )
+        .with_observer(Arc::new(move |ev| {
+            if let RouteEvent::Spilled { role } = ev {
+                sink.lock().unwrap().push(format!("spilled:{role}"));
+            }
+        }));
+        let resp = r.complete(req_with_tools()).await.expect("cloud has tools");
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        assert!(events.lock().unwrap().is_empty(), "not a spill");
+    }
+
+    #[tokio::test]
+    async fn corner_spill_to_is_scoped_to_its_rule() {
+        // Only the `judge` rule holds cloud in reserve; `main` (default prefer,
+        // no spill_to) still takes cloud first by explicit order.
+        let (cloud, _) = counting("from-cloud");
+        let (local, _) = counting("from-local");
+        let mut judge = role_rule(Role::Judge, &["cloud", "local"]);
+        judge.prefer.spill_to = vec!["cloud".into()];
+        let mut policy = prefer(&["cloud", "local"]);
+        policy.rules.push(judge);
+        let r = router(
+            vec![
+                RouterUpstream {
+                    tags: vec!["cloud".into()],
+                    ..up("cloud", cloud)
+                },
+                up("local", local),
+            ],
+            policy,
+        );
+        let main = r.complete(req()).await.unwrap();
+        assert_eq!(main.message.content_text(), "from-cloud");
+        let judged = hinted(
+            req(),
+            agent_core::RouteHint {
+                role: Some(Role::Judge),
+                ..Default::default()
+            },
+        );
+        let resp = r.complete(judged).await.unwrap();
+        assert_eq!(resp.message.content_text(), "from-local");
+    }
+
+    #[tokio::test]
+    async fn corner_primary_filling_after_planning_spills_within_the_pass() {
+        // The race the in-pass fallback covers: `order()` saw local with headroom
+        // (reserve parked), then local filled before admission — the pass offers
+        // the reserve instead of shedding.
+        let (r, local, cloud, events) = spill_fleet(Some(Saturation::Shed), &["cloud"]);
+        let plan = Plan {
+            order: vec![LOCAL],
+            reserve: vec![CLOUD],
+            rule: None,
+            spilled: false,
+        };
+        r.live[LOCAL].in_flight.store(1, Ordering::Relaxed); // filled since planning
+        let hint = r.hint(&req());
+        let op = |p: Arc<dyn LlmProvider>, _g: InFlightGuard, _c: Option<ModelPrices>| async move {
+            p.complete(req()).await
+        };
+        let agent_retry::Attempt::Done(resp) = r.run_plan(&hint, &op, plan).await else {
+            panic!("the reserve should have served");
+        };
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        assert_eq!(
+            (local.load(Ordering::SeqCst), cloud.load(Ordering::SeqCst)),
+            (0, 1)
+        );
+        assert_eq!(*events.lock().unwrap(), ["saturated:local", "spilled:main"]);
+    }
+
+    #[tokio::test]
+    async fn boundary_reserve_also_full_sheds_without_dispatch() {
+        let (r, local, cloud, events) = spill_fleet(Some(Saturation::Shed), &["cloud"]);
+        r.live[LOCAL].in_flight.store(1, Ordering::Relaxed);
+        r.live[CLOUD].in_flight.store(2, Ordering::Relaxed);
+        let err = r.complete(req()).await.expect_err("whole fleet full");
+        assert!(err.to_string().contains("saturated"), "{err}");
+        assert_eq!(
+            (local.load(Ordering::SeqCst), cloud.load(Ordering::SeqCst)),
+            (0, 0)
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "spilled:main",
+                "saturated:cloud",
+                "saturated:local",
+                "shed:main"
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boundary_wait_admits_on_the_reserve_when_it_frees() {
+        // Everything full; the bounded wait watches the reserve too, so a cloud
+        // slot freeing at 100 ms is taken.
+        let (r, _, cloud, _) = spill_fleet(Some(Saturation::Wait), &["cloud"]);
+        let r = Arc::new(r);
+        r.live[LOCAL].in_flight.store(1, Ordering::Relaxed);
+        r.live[CLOUD].in_flight.store(2, Ordering::Relaxed);
+        let r2 = r.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            r2.live[CLOUD].in_flight.store(1, Ordering::Relaxed);
+        });
+        let resp = r.complete(req()).await.expect("admitted after the wait");
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        assert_eq!(cloud.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn adversarial_override_cannot_jump_the_spill_queue() {
+        // A carried override naming the reserve is dropped while local has
+        // headroom — a hint can't pull the request onto the paid tier.
+        let over = |id: &str| {
+            hinted(
+                req(),
+                agent_core::RouteHint {
+                    override_upstream: Some(id.into()),
+                    ..Default::default()
+                },
+            )
+        };
+        let (r, _, cloud, _) = spill_fleet(Some(Saturation::Shed), &["cloud"]);
+        let resp = r.complete(over("cloud")).await.unwrap();
+        assert_eq!(resp.message.content_text(), "from-local");
+        assert_eq!(cloud.load(Ordering::SeqCst), 0);
+        // Once local is full the reserve is fair game (the override agrees).
+        r.live[LOCAL].in_flight.store(1, Ordering::Relaxed);
+        let resp = r.complete(over("cloud")).await.unwrap();
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        // Check-the-check: without spill_to the same override is honoured.
+        let (r, _, _, _) = spill_fleet(Some(Saturation::Shed), &[]);
+        let resp = r.complete(over("cloud")).await.unwrap();
+        assert_eq!(resp.message.content_text(), "from-cloud");
+        // And an override naming a primary still wins over the explicit order.
+        let resp = r.complete(over("local")).await.unwrap();
+        assert_eq!(resp.message.content_text(), "from-local");
     }
 }

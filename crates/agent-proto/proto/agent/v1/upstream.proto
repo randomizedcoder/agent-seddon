@@ -86,6 +86,10 @@ message RoutePrefer {
   // Live-signal ordering policy: "" | "cost" | "latency" | "least-loaded".
   // Validated on ingest; consumed by the registry-backed router (increment 04).
   string policy = 4;
+  // Spillover tier tags (gap §8.7 item 8): upstreams carrying any of these tags
+  // are a reserve, tried only once every primary candidate is saturated or
+  // breaker-open. Empty ⇒ no reserve.
+  repeated string spill_to = 5;
 }
 
 message RouteRule {

@@ -3157,6 +3157,7 @@ impl From<agent_core::RoutePreferSpec> for pb::RoutePrefer {
             tier: p.tier.map_or(pb::PoolTier::Unspecified, pb::PoolTier::from) as i32,
             upstreams: p.upstreams,
             policy: p.policy,
+            spill_to: p.spill_to,
         }
     }
 }
@@ -3169,6 +3170,7 @@ impl From<pb::RoutePrefer> for agent_core::RoutePreferSpec {
             tier,
             upstreams: p.upstreams,
             policy: p.policy,
+            spill_to: p.spill_to,
         }
     }
 }
@@ -5484,6 +5486,7 @@ mod tests {
                         tier: Some(agent_core::PoolTier::Heavy),
                         upstreams: vec!["kimi".into()],
                         policy: "cost".into(),
+                        spill_to: vec!["cloud".into()],
                     },
                 }],
                 default_prefer: agent_core::RoutePreferSpec {
