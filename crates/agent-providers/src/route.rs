@@ -181,9 +181,20 @@ pub struct Prefer {
     pub upstreams: Vec<String>,
     /// Live-signal tie-break among equally-preferred survivors (04).
     pub policy: Option<OrderPolicy>,
+    /// Spillover tier tags (gap §8.7 item 8): a survivor carrying any of these
+    /// tags is a **reserve** — the `TaskRouter` holds it back while a primary
+    /// survivor has usable headroom and spills onto it only once every primary
+    /// is saturated or breaker-open. Ordering is unaffected (the engine stays a
+    /// pure ranker); the split is applied by the dispatcher. Empty ⇒ no reserve.
+    pub spill_to: Vec<String>,
 }
 
 impl Prefer {
+    /// Whether `tags` puts an upstream in this preference's spillover reserve.
+    pub fn is_reserve(&self, tags: &[String]) -> bool {
+        !self.spill_to.is_empty() && tags.iter().any(|t| self.spill_to.contains(t))
+    }
+
     /// A total, deterministic sort key; **lower is more-preferred**:
     /// (explicit-position, −tag-overlap, −preferred-tier, live-signal, id) — the
     /// trailing id makes ties stable and reproducible (important for the bench +
@@ -249,6 +260,7 @@ impl Policy {
             tier: p.tier,
             upstreams: p.upstreams.clone(),
             policy: OrderPolicy::parse(&p.policy),
+            spill_to: p.spill_to.clone(),
         };
         Policy {
             rules: spec
@@ -265,6 +277,15 @@ impl Policy {
                 .collect(),
             default_prefer: prefer(&spec.default_prefer),
         }
+    }
+
+    /// The preference a [`Self::resolve_indices`] `rule` result ordered by —
+    /// `Some(i)` = that rule's, `None` = the default (also an override win).
+    /// An out-of-range index (never produced by the engine) falls back to the
+    /// default rather than panicking.
+    pub fn prefer_for(&self, rule: Option<usize>) -> &Prefer {
+        rule.and_then(|i| self.rules.get(i))
+            .map_or(&self.default_prefer, |r| &r.prefer)
     }
 
     /// Resolve `hint` against the `fleet`, returning eligible upstream ids
@@ -409,6 +430,7 @@ mod tests {
                     tier: Some(PoolTier::Heavy),
                     upstreams: vec![],
                     policy: None,
+                    spill_to: vec![],
                 },
             )],
             default_prefer: Prefer::default(),
@@ -994,5 +1016,39 @@ mod tests {
     #[case::corner_empty("", None)]
     fn order_policy_parse(#[case] s: &str, #[case] want: Option<OrderPolicy>) {
         assert_eq!(OrderPolicy::parse(s), want);
+    }
+
+    #[rstest::rstest]
+    #[case::positive_tagged(&["cloud"], &["cloud", "fast"], true)]
+    #[case::negative_untagged(&["cloud"], &["local"], false)]
+    #[case::corner_no_spill_to_means_no_reserve(&[], &["cloud"], false)]
+    #[case::boundary_untagged_upstream(&["cloud"], &[], false)]
+    #[case::adversarial_case_and_prefix_dont_match(&["cloud"], &["Cloud", "cloud-x"], false)]
+    fn prefer_is_reserve(#[case] spill: &[&str], #[case] tags: &[&str], #[case] want: bool) {
+        let p = Prefer {
+            spill_to: spill.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        };
+        let tags: Vec<String> = tags.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(p.is_reserve(&tags), want);
+    }
+
+    #[test]
+    fn spill_to_maps_from_spec_and_prefer_for_selects_by_rule() {
+        let spec = agent_core::RoutePolicySpec {
+            rules: vec![agent_core::RouteRuleSpec {
+                prefer: agent_core::RoutePreferSpec {
+                    spill_to: vec!["cloud".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let policy = Policy::from_spec(&spec);
+        assert_eq!(policy.prefer_for(Some(0)).spill_to, ["cloud"]);
+        assert!(policy.prefer_for(None).spill_to.is_empty(), "default");
+        // An out-of-range index (never produced) falls back to the default.
+        assert!(policy.prefer_for(Some(usize::MAX)).spill_to.is_empty());
     }
 }

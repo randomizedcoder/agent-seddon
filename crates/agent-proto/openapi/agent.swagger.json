@@ -10102,6 +10102,13 @@
         "policy": {
           "type": "string",
           "description": "Live-signal ordering policy: \"\" | \"cost\" | \"latency\" | \"least-loaded\".\nValidated on ingest; consumed by the registry-backed router (increment 04)."
+        },
+        "spillTo": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Spillover tier tags (gap §8.7 item 8): upstreams carrying any of these tags\nare a reserve, tried only once every primary candidate is saturated or\nbreaker-open. Empty ⇒ no reserve."
         }
       },
       "description": "The `prefer` half: how to order the survivors once a rule matches."

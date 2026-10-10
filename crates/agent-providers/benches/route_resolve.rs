@@ -73,6 +73,7 @@ fn policy() -> Policy {
                 tier: Some(PoolTier::Heavy),
                 upstreams: vec![],
                 policy: None,
+                spill_to: vec![],
             },
         })
         .collect();
@@ -83,6 +84,7 @@ fn policy() -> Policy {
             tier: None,
             upstreams: vec![],
             policy: None,
+            spill_to: vec![],
         },
     }
 }

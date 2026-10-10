@@ -271,4 +271,6 @@ no secret committed — the concrete request that motivated the track. See
   success (extends gpu-pool's deferred "learned weights").
 - **Escalate-to-heavy on classifier disagreement** — the aspirational mode-vote path; the hook
   lands in 04, the adaptive part is deferred.
-- **Whole-fleet saturation spillover** to a cloud provider.
+- ~~**Whole-fleet saturation spillover** to a cloud provider.~~ **Built** (gap §8.7 item 8):
+  `prefer.spill_to` tags a reserve tier spilled onto only once every primary is saturated or
+  breaker-open — see [router.md](../../components/router.md#spillover-tiers--preferspill_to-gap-87-item-8).

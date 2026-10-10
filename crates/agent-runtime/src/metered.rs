@@ -1800,6 +1800,10 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
             tracing::warn!(role, "task-router shed: every candidate at capacity");
             m.on_route_decision("-", "shed");
         }
+        RouteEvent::Spilled { role } => {
+            tracing::info!(role, "task-router spilled onto the reserve tier");
+            m.on_route_decision("-", "spilled");
+        }
         RouteEvent::Exhausted => {
             tracing::warn!("router exhausted every candidate");
             m.on_route_decision("-", "exhausted");

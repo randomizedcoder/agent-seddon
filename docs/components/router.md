@@ -247,8 +247,54 @@ bounded poll:
   existing route-decision counter as `skipped_saturated` / `shed`.
 - Applies to both the static `[route]` fleet and the registry-backed fleet (re-applied
   on every rebuild). An upstream with `max_concurrency = 0` is uncapped in every mode.
-- **Not yet:** `spill` to another tier when saturated — that is gap §8.7 item 8
-  (`spill_to`).
+- **Spill** to a reserve tier when saturated — see below (gap §8.7 item 8).
+
+### Spillover tiers — `prefer.spill_to` (gap §8.7 item 8)
+
+`spill_to = ["cloud"]` on a rule's `prefer` (or `[route.default_prefer]`, or the registry
+`RoutePrefer.spill_to`) makes every eligible upstream carrying one of those tags a
+**reserve**. The reserve is held back while a **primary** (an eligible upstream without
+a spill tag) still has usable headroom, and is spilled onto only once none does — so
+local GPUs absorb the load and the paid tier takes only the overflow.
+
+- **"No headroom"** = every primary is saturated (`in_flight ≥ max_concurrency`) or has
+  its breaker open. A spilled pass tries the reserve first, then the primaries; it
+  re-evaluates on every retry pass, so traffic returns to the primaries as soon as a
+  slot frees.
+- **Works in every `on_saturation` mode.** Under `soft` the reserve leads the order once
+  the primaries are full. Under `shed` / `wait` it is also the in-pass fallback when the
+  primaries fill between planning and admission (the CAS refuses them), before any wait
+  or shed; `wait` polls the reserve's slots too. A shed happens only when the reserve is
+  full as well.
+- **Capacity-driven, not error-driven.** A primary *with* headroom that fails (e.g. a
+  429) does not pull the reserve into the pass — that is failover's job across
+  primaries and the retry budget's across passes. A primary that keeps failing opens
+  its breaker, which does count as "no headroom".
+- **Fail-soft.** If only reserve upstreams can serve a request (e.g. only the cloud card
+  supports tools), they serve it as primaries — spillover never refuses a request the
+  fleet could answer. `spill_to` is scoped to the rule (or default) that ordered the
+  request.
+- **Fail-closed overrides.** A carried `override_upstream` naming a reserve upstream is
+  dropped while a primary has headroom, so a request hint cannot pull a turn onto the
+  paid tier early.
+- **Observability.** `RouteEvent::Spilled { role }` → route-decision label `spilled`
+  (once per pass that spills).
+- Validated like `tags` on the registry path (≤ 32 entries, ≤ 64 bytes each).
+
+```toml
+[[route.upstreams]]
+name = "mi50"            # primary: local GPU, 4 slots (endpoint/model/key as usual)
+max_concurrency = 4
+[[route.upstreams]]
+name = "kimi"            # reserve: paid cloud
+tags = ["cloud"]
+max_concurrency = 16
+
+[route]
+on_saturation = "shed"
+[route.default_prefer]
+spill_to = ["cloud"]
+```
 
 ### Turn pricing from the upstream card (gap §8.2)
 

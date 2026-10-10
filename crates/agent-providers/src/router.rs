@@ -163,6 +163,10 @@ pub enum RouteEvent<'a> {
     /// Every candidate for this `role` was at its hard cap (after any bounded
     /// `wait`), so the request was shed without dispatch (gap §8.7 item 3).
     Shed { role: &'a str },
+    /// No primary candidate for this `role` had headroom (all saturated or
+    /// breaker-open), so the request spilled onto the matched rule's `spill_to`
+    /// reserve tier (gap §8.7 item 8).
+    Spilled { role: &'a str },
     /// Every candidate was exhausted.
     Exhausted,
     /// The task-router's policy decision (02b): `chosen` won for this
@@ -660,6 +664,7 @@ mod tests {
                     RouteEvent::SkippedUnhealthy { target } => format!("skipped:{target}"),
                     RouteEvent::SkippedSaturated { target } => format!("saturated:{target}"),
                     RouteEvent::Shed { role } => format!("shed:{role}"),
+                    RouteEvent::Spilled { role } => format!("spilled:{role}"),
                     RouteEvent::Exhausted => "exhausted".into(),
                     RouteEvent::Decided { chosen, .. } => format!("decided:{chosen}"),
                     RouteEvent::NoCandidate { role } => format!("no-candidate:{role}"),
