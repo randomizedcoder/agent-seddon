@@ -77,7 +77,7 @@ impl Prices for PriceTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{calculate_cost, Cost, CostStatus, Usage};
+    use agent_core::{calculate_cost, price_usage, Cost, CostStatus, Usage};
     use agent_testkit::StaticPrices;
     use rstest::rstest;
 
@@ -122,6 +122,10 @@ mod tests {
         let (cost, status) = calculate_cost("model", &u, &prices);
         approx_eq(&cost, &expected);
         assert_eq!(status, CostStatus::Actual);
+        // `price_usage` is the same math for a caller holding the row (the
+        // task-router pricing by card) — identical on every case.
+        let row = prices.get("model").expect("row");
+        approx_eq(&price_usage(&row, &u), &expected);
     }
 
     #[test]

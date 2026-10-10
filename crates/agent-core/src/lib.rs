@@ -777,10 +777,19 @@ pub trait Prices: Send + Sync {
 /// lines. An unknown model yields a zero-priced cost + [`CostStatus::Estimated`] —
 /// never a panic and never a wrong bill.
 pub fn calculate_cost(model: &str, usage: &Usage, prices: &dyn Prices) -> (Cost, CostStatus) {
-    let (p, status) = match prices.get(model) {
-        Some(p) => (p, CostStatus::Actual),
-        None => (ModelPrices::ZERO, CostStatus::Estimated),
-    };
+    match prices.get(model) {
+        Some(p) => (price_usage(&p, usage), CostStatus::Actual),
+        None => (
+            price_usage(&ModelPrices::ZERO, usage),
+            CostStatus::Estimated,
+        ),
+    }
+}
+
+/// The per-line cost math behind [`calculate_cost`], for a caller that already
+/// holds the row (e.g. the task-router pricing a turn by the serving upstream's
+/// card).
+pub fn price_usage(p: &ModelPrices, usage: &Usage) -> Cost {
     // A price row is config/provider data and could be malformed or hostile
     // (`NaN`, negative, `inf`). Treat any non-finite or negative rate as 0 so a bad
     // row can't poison `total` (NaN propagates through `+`) or reach the Prometheus
@@ -796,14 +805,13 @@ pub fn calculate_cost(model: &str, usage: &Usage, prices: &dyn Prices) -> (Cost,
     let output = line(p.output, usage.completion_tokens);
     let cache_read = line(p.cache_read, usage.cache_read_tokens);
     let cache_write = line(p.cache_write, usage.cache_write_tokens);
-    let cost = Cost {
+    Cost {
         input,
         output,
         cache_read,
         cache_write,
         total: input + output + cache_read + cache_write,
-    };
-    (cost, status)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -250,6 +250,31 @@ bounded poll:
 - **Not yet:** `spill` to another tier when saturated — that is gap §8.7 item 8
   (`spill_to`).
 
+### Turn pricing from the upstream card (gap §8.2)
+
+The agent loop prices a turn under the configured `[provider] model`, which on a routed
+turn is **not** the upstream that answered — and the built-in `PriceTable` only knows
+Claude 3.x / GPT-4o, so Kimi / GLM / local turns used to cost **$0 "estimated"**. The
+task-router knows the serving upstream, so it stamps `Usage.cost` from that upstream's
+card (`input_cost` / `output_cost`, USD per Mtok, already clamped finite and
+non-negative); the loop records a stamped cost as `actual` and only falls back to the
+`PriceTable` when there is none.
+
+- **Buffered and streamed.** `complete` prices the response; `stream` prices the
+  terminal usage-bearing chunk. A failed-over turn is priced by the upstream that
+  actually served it.
+- **Unpriced ≠ free.** A card with both costs `0` stamps nothing, so the price-table
+  fallback still applies. A cost the provider reported itself is never overwritten.
+- **No cache double-billing.** The OpenAI-compatible `prompt_tokens` already *includes*
+  cached tokens, and a card carries no cache discount, so cached input is billed once
+  at the full input rate (an upper bound); the cache-read/-write lines stay `0`.
+- **Re-pricing is live.** A registry `Put` that changes only a card's costs rebuilds
+  the inner router (the snapshot fingerprint covers whole cards) but reuses the live
+  connection (`provider_key` excludes routing metadata).
+- Set `output_cost` beside `input_cost` on `[[route.upstreams]]` or the registry card.
+  **Not yet** (rest of gap §8.7 item 7): cost-per-task ordering, fleet/tenant
+  `max_cost`, spend budgets, cost metrics labelled by upstream.
+
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 
 [Model-router 03](../design/model-router/03-registry-proto.md): the task-router's

@@ -2329,9 +2329,12 @@ impl Agent {
                     u.cache_write_tokens as u64,
                 );
                 #[cfg(feature = "tokenizer")]
-                {
-                    let prices = agent_tokenizer::PriceTable::builtin();
-                    let (cost, _status) = agent_core::calculate_cost(model, u, &prices);
+                let builtin = agent_tokenizer::PriceTable::builtin();
+                #[cfg(feature = "tokenizer")]
+                let fallback: Option<&dyn agent_core::Prices> = Some(&builtin);
+                #[cfg(not(feature = "tokenizer"))]
+                let fallback: Option<&dyn agent_core::Prices> = None;
+                if let Some((cost, _status)) = turn_cost(model, u, fallback) {
                     metrics.add_cost(
                         model,
                         cost.input,
@@ -3347,6 +3350,22 @@ const REVIEW_READONLY_TOOLS: &[&str] = &[
 /// `run_loop` raises `max_tokens` to this floor; an operator's explicit higher
 /// value is preserved (it is a floor, not an override).
 const REVIEW_MAX_TOKENS_FLOOR: u32 = 8192;
+
+/// The USD cost of one model turn. A cost already stamped on the usage wins —
+/// the task-router prices a routed turn by the card of the upstream that
+/// actually served it, which the loop (keyed on the configured `model`) cannot
+/// see. Otherwise price `model` from the `fallback` table (`None` without the
+/// `tokenizer` feature ⇒ no cost recorded).
+fn turn_cost(
+    model: &str,
+    usage: &agent_core::Usage,
+    fallback: Option<&dyn agent_core::Prices>,
+) -> Option<(agent_core::Cost, agent_core::CostStatus)> {
+    match &usage.cost {
+        Some(c) => Some((*c, agent_core::CostStatus::Actual)),
+        None => fallback.map(|p| agent_core::calculate_cost(model, usage, p)),
+    }
+}
 
 /// How many back-to-back truncated completions the loop will nudge through
 /// before giving up. A truncated response is never a final answer, so we let
@@ -6850,6 +6869,37 @@ mod tests {
     #[case::adversarial_unicode_lookalike("lëngth", false)]
     fn is_truncated_finish_cases(#[case] finish: &str, #[case] want: bool) {
         assert_eq!(is_truncated_finish(finish), want);
+    }
+
+    /// Turn pricing: a cost the task-router stamped from the serving upstream's
+    /// card wins over the configured-model lookup (which would mis-key a routed
+    /// turn); with no stamp, the fallback table prices `model` (hit ⇒ Actual,
+    /// miss ⇒ $0 Estimated); no table and no stamp ⇒ nothing recorded.
+    #[rstest]
+    #[case::positive_stamped_wins_over_table(Some(7.0), true, "gpt-x", Some((7.0, agent_core::CostStatus::Actual)))]
+    #[case::positive_table_hit(None, true, "gpt-x", Some((2.0, agent_core::CostStatus::Actual)))]
+    #[case::negative_table_miss_is_estimated_zero(None, true, "kimi", Some((0.0, agent_core::CostStatus::Estimated)))]
+    #[case::corner_stamped_without_table(Some(7.0), false, "kimi", Some((7.0, agent_core::CostStatus::Actual)))]
+    #[case::boundary_no_stamp_no_table(None, false, "gpt-x", None)]
+    #[case::adversarial_stamp_beats_spoofed_model_row(Some(0.5), true, "gpt-x-pretend", Some((0.5, agent_core::CostStatus::Actual)))]
+    fn turn_cost_cases(
+        #[case] stamped: Option<f64>,
+        #[case] with_table: bool,
+        #[case] model: &str,
+        #[case] want: Option<(f64, agent_core::CostStatus)>,
+    ) {
+        let usage = agent_core::Usage {
+            prompt_tokens: 1_000_000,
+            cost: stamped.map(|total| agent_core::Cost {
+                total,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let table = agent_testkit::StaticPrices::one("gpt-x", 2.0, 0.0, 0.0, 0.0);
+        let fallback: Option<&dyn agent_core::Prices> = with_table.then_some(&table as _);
+        let got = turn_cost(model, &usage, fallback).map(|(c, s)| (c.total, s));
+        assert_eq!(got, want);
     }
 
     fn agent_over(provider: Arc<dyn LlmProvider>, max_iterations: usize) -> Arc<Agent> {

@@ -882,6 +882,7 @@ pub fn register_builtins(r: &mut Registry) {
                 tags: u.tags.clone(),
                 tier,
                 input_cost: u.input_cost.unwrap_or(0.0),
+                output_cost: u.output_cost.unwrap_or(0.0),
                 // Clamp the operator-supplied capacity the same way a registry
                 // card's `sanitize()` does (hostile/typo'd numbers fail closed).
                 max_concurrency: u
