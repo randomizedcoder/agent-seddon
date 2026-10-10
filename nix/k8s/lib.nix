@@ -196,18 +196,65 @@ let
   # The ArgoCD sync-wave annotation (a STRING, so it survives as `"0"` not int 0).
   syncWave = n: { "argocd.argoproj.io/sync-wave" = toString n; };
 
-  # A gRPC readiness/liveness/startup probe on the role's port. k8s dials the
-  # standard `grpc.health.v1.Health` the agent serves on every seam process.
+  # Where a role's cert-manager Secret is mounted (and the probe reads it from).
+  tlsMountPath = "/etc/agent/tls";
+
+  # A readiness/liveness/startup probe that checks the standard
+  # `grpc.health.v1.Health` the agent serves on the role's port.
+  #
+  # It is an `exec` probe, not the kubelet's native `grpc:` probe: every role
+  # listener is strict mTLS (`[grpc.tls] client_ca`), and the native prober dials
+  # plaintext with no client certificate, so its handshake is refused before the
+  # health service is reached and the pod never goes Ready. Instead the probe runs
+  # `grpc-health-probe` (shipped in the image, nix/k8s/images.nix) inside the
+  # container against loopback, presenting the pod's own `tls-<role>` certificate
+  # (issued with `client auth` usage, components/pki.nix) and verifying the server
+  # by the role name, which is a DNS SAN on that same certificate. One mTLS port,
+  # no plaintext health surface.
   grpcProbe =
     {
+      component,
       port,
       periodSeconds ? 10,
       failureThreshold ? 3,
     }:
     {
-      grpc.port = port;
+      exec.command = [
+        "/bin/grpc-health-probe"
+        "-addr=127.0.0.1:${toString port}"
+        "-tls"
+        "-tls-ca-cert=${tlsMountPath}/ca.crt"
+        "-tls-client-cert=${tlsMountPath}/tls.crt"
+        "-tls-client-key=${tlsMountPath}/tls.key"
+        "-tls-server-name=${component}"
+        "-connect-timeout=2s"
+        "-rpc-timeout=2s"
+      ];
+      # Covers the probe's own 2s connect + 2s RPC budget (the k8s default is 1s).
+      timeoutSeconds = 5;
       inherit periodSeconds failureThreshold;
     };
+
+  # The image's WorkingDir and HOME. The rootfs is read-only, and the agent's default
+  # state paths (`.agent/…`, the search index, tool caches) are relative to the cwd or
+  # under HOME, so the Deployment mounts a writable emptyDir here. That state is
+  # per-pod and ephemeral until K8 wires the shared stores.
+  homePath = "/home/agent";
+
+  # The head of every role's `agent.toml`. `[agent]` and `[provider]` are required
+  # by the config loader; K3 roles serve their seams' control planes and reach no
+  # model, so the provider points at a closed loopback port until K8 wires the real
+  # providers (and their keys, docs/design/k8s/07) in.
+  roleBaseToml = ''
+    # Placeholder model wiring until K8: the loader requires [agent] + [provider],
+    # but no K3 role calls a model, so the provider is a closed loopback port.
+    [agent]
+    provider = "openai-compat"
+
+    [provider]
+    base_url = "http://127.0.0.1:1/v1"
+    model = "unwired-until-k8"
+  '';
 
   # The single hardened securityContext every non-sandbox container gets.
   hardenedSecurityContext = {
@@ -222,9 +269,10 @@ let
   #
   # `args` is the `agent` argv after the entrypoint (e.g. `[ "--serve-all" ]`); the
   # role's ConfigMap is mounted read-only at /etc/agent and its TLS Secret at
-  # /etc/agent/tls, and a writable emptyDir gives the read-only rootfs a scratch
-  # /tmp. Probes are gRPC on the role port; requests are always set and only memory
-  # is limited (CPU is not, to avoid throttling a bursty first token).
+  # /etc/agent/tls, and writable emptyDirs give the read-only rootfs a scratch
+  # /tmp and a state-holding HOME/cwd (`homePath`). Probes check gRPC health on the role port over the pod's own mTLS cert
+  # (`grpcProbe`); requests are always set and only memory is limited (CPU is
+  # not, to avoid throttling a bursty first token).
   deployment =
     {
       component,
@@ -274,10 +322,10 @@ let
                     containerPort = metricsPort;
                   }
                 ];
-                readinessProbe = grpcProbe { inherit port; };
-                livenessProbe = grpcProbe { inherit port; };
+                readinessProbe = grpcProbe { inherit component port; };
+                livenessProbe = grpcProbe { inherit component port; };
                 startupProbe = grpcProbe {
-                  inherit port;
+                  inherit component port;
                   # A slow first start (cold caches, cert mount) gets ~60s.
                   periodSeconds = 5;
                   failureThreshold = 12;
@@ -298,12 +346,16 @@ let
                   }
                   {
                     name = "tls";
-                    mountPath = "/etc/agent/tls";
+                    mountPath = tlsMountPath;
                     readOnly = true;
                   }
                   {
                     name = "tmp";
                     mountPath = "/tmp";
+                  }
+                  {
+                    name = "home";
+                    mountPath = homePath;
                   }
                 ];
               }
@@ -319,6 +371,10 @@ let
               }
               {
                 name = "tmp";
+                emptyDir = { };
+              }
+              {
+                name = "home";
                 emptyDir = { };
               }
             ];
@@ -444,6 +500,7 @@ in
     labels
     syncWave
     grpcProbe
+    roleBaseToml
     deployment
     service
     configMapFromToml

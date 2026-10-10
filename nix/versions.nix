@@ -234,6 +234,13 @@ in
   # bwrap tests skip there).
   bubblewrap = pkgs.bubblewrap;
 
+  # `grpc-health-probe`: the k8s health probe for the strict-mTLS role listeners
+  # (docs/design/k8s/04). The kubelet's native `grpc:` prober dials plaintext with
+  # no client certificate, so it can never complete the agent's mTLS handshake; an
+  # `exec` probe runs this static binary from the agent image instead, presenting
+  # the pod's own `tls-<role>` certificate. Shipped at `/bin/grpc-health-probe`.
+  grpc-health-probe = pkgs.grpc-health-probe;
+
   # `promptfoo`: the LLM eval + red-team harness that drives the real agent as an
   # `exec:` provider in `nix run .#eval` / `.#redteam` (docs/eval.md). Vendored +
   # pinned HERE (via nix/promptfoo.nix) so we track the latest release independently

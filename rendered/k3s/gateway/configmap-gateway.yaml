@@ -5,6 +5,15 @@ data:
     # gateway role — rendered by nix/k8s/components/gateway.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
+    # Placeholder model wiring until K8: the loader requires [agent] + [provider],
+    # but no K3 role calls a model, so the provider is a closed loopback port.
+    [agent]
+    provider = "openai-compat"
+
+    [provider]
+    base_url = "http://127.0.0.1:1/v1"
+    model = "unwired-until-k8"
+
     # `--serve-all` hosts every enabled seam on one port. On a cluster Service the
     # exec seams must not get a listener (docs/design/k8s/08); an unknown name here
     # is a config-load error (crates/agent-cli, #580).

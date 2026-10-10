@@ -25,11 +25,13 @@ let
 
   # The gateway's rendered config. Only the cluster-relevant blocks: the exec-seam
   # exclusion, the mTLS material mounted from the cert-manager Secret, and the
-  # metrics bind. Fuller wiring (providers, stores, OTLP) lands with K8.
+  # metrics bind. The head is the shared placeholder `[agent]`/`[provider]`
+  # (`k8sLib.roleBaseToml`); fuller wiring (providers, stores, OTLP) lands with K8.
   agentToml = ''
     # gateway role — rendered by nix/k8s/components/gateway.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
+    ${k8sLib.roleBaseToml}
     # `--serve-all` hosts every enabled seam on one port. On a cluster Service the
     # exec seams must not get a listener (docs/design/k8s/08); an unknown name here
     # is a config-load error (crates/agent-cli, #580).

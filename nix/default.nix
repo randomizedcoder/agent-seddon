@@ -79,12 +79,12 @@ let
         # that dir so unrelated JSON can't sweep in and rebuild deps.)
         || (lib.hasInfix "/agent-proto/openapi/" path)
         || (lib.hasInfix "/tests/fixtures/" path)
-        # `agent-k8s-render`'s tests walk the committed rendered manifests
-        # (`rendered/k3s/*.yaml`) via `env!("CARGO_MANIFEST_DIR")/../../rendered/k3s`
-        # (the `k8s-render-tests` check), so the YAML must survive the filter or those
-        # tests can't find the tree in the crane sandbox. (Scoped to that dir so other
-        # rendered targets don't sweep in and rebuild deps.)
-        || (lib.hasInfix "/rendered/k3s/" path)
+        # NOT `rendered/`: the manifests name the agent image by its content-hash tag, so
+        # if they were in the source the agent (and its image) is built from, every
+        # re-render would move the tag and the committed tag could never name the image
+        # `nix run .#k8s-images -- --import` loads. The `k8s-render-tests` check hands
+        # the crate the committed tree via `$AGENT_RENDERED_K3S` instead, and the
+        # package build excludes that crate (`excludeRenderTests`).
         || (craneLib.filterCargoSources path type)
       );
     name = "source";
@@ -107,6 +107,12 @@ let
     PROTOC = "${versions.protobuf}/bin/protoc";
   };
 
+  # `agent-k8s-render`'s tests read the committed rendered/k3s tree, which is kept out
+  # of the crane source (above). The checks point them at the tree via
+  # `$AGENT_RENDERED_K3S`; the package build (the image's input) must not depend on the
+  # tree, so it skips that crate.
+  excludeRenderTests = "--workspace --exclude agent-k8s-render";
+
   # Build all workspace dependencies once; reused by the package + every check.
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
@@ -121,6 +127,7 @@ let
     commonArgs
     // {
       inherit cargoArtifacts;
+      cargoTestExtraArgs = excludeRenderTests;
       nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [
         pkgs.git
         pkgs.ripgrep

@@ -49,6 +49,11 @@ let
       userTree
       pkgs.dockerTools.caCertificates # /etc/ssl/certs/ca-bundle.crt + SSL_CERT_FILE
       pkgs.tzdata
+      # `/bin/grpc-health-probe`: the role Deployments' `exec` health probe. The
+      # listeners are strict mTLS and the kubelet's native `grpc:` prober can't
+      # present a client certificate, so the probe runs in-container with the
+      # pod's own `tls-<role>` cert instead (nix/k8s/lib.nix `grpcProbe`).
+      versions.grpc-health-probe
     ]
     # bwrap for the Tier-1 sandbox backend (the sandbox role runs the same image).
     ++ lib.optional pkgs.stdenv.isLinux versions.bubblewrap;

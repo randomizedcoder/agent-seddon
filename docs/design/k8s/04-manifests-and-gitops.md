@@ -30,8 +30,20 @@ Each component in `nix/k8s/components/` is a function:
 - `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`,
   `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`;
 - the sandbox sidecar is the single audited exception ([08](08-sandbox.md));
-- `grpc` readiness and liveness probes on the role's port, plus a `startupProbe` for a slow first
-  start;
+- readiness, liveness and startup probes (startup covers a slow first start) that `exec`
+  `/bin/grpc-health-probe` against `127.0.0.1:<role port>` over mTLS. The probe presents the pod's
+  own `tls-<role>` cert and checks the server against one of that cert's DNS SANs.
+  - Why not the kubelet's native `grpc:` probe: it dials plaintext and sends no client cert. The
+    role listeners are strict mTLS (`[grpc.tls] client_ca`), so the handshake is refused before
+    the health service is reached and the pod never goes Ready.
+  - `k8s-render-tests` pins the exact argv, so `-tls` can't be dropped and `-tls-no-verify`, a
+    foreign server name or a non-loopback target can't be slipped in;
+- writable emptyDirs at `/tmp` and at `/home/agent` (the image's WorkingDir and HOME). The rootfs
+  is read-only and the agent's default state paths sit under the cwd or HOME. That state is
+  per-pod until K8 wires the shared stores;
+- a shared `[agent]`/`[provider]` head on every role's `agent.toml` (`k8sLib.roleBaseToml`). The
+  config loader requires both; no K3 role calls a model, so the provider points at a closed
+  loopback port until K8;
 - resource requests; memory limits;
 - labels `app.kubernetes.io/{name,part-of=agent-seddon,component}`.
 
@@ -106,7 +118,8 @@ host ports.
 | Check | What it asserts |
 |---|---|
 | `k8s-rendered` | Committed `rendered/` equals a fresh render, for every target |
-| `k8s-render-tests` | Python table tests over the rendered objects, four classes plus `adversarial_` (below) |
+| `k8s-render-tests` | Rust (`crates/agent-k8s-render`) table tests over the rendered objects, four classes plus `adversarial_` (below) |
+| `k8s-role-boot` | Boots each role from its committed ConfigMap + Deployment args on a minted test PKI. The Deployment's own exec probe argv must reach `SERVING` over mTLS, and a plaintext probe must be refused |
 | `k8s-kubeconform` | Every object validates against pinned Kubernetes schemas and vendored CRD schemas for Cilium, cert-manager and ArgoCD (fixed-output derivations), `-strict` |
 | `k8s-image-smoke` | [03](03-images-and-registry.md#gate) |
 
@@ -116,8 +129,12 @@ host ports.
 - no Service exposes the sandbox, pty or forge ports, and no container listens on them over TCP;
 - only the sandbox sidecar has `privileged`, `SYS_ADMIN` or `Unconfined`, and only in pods that
   carry it;
-- every Deployment has readiness and liveness probes, and every object has a sync wave and the
-  `part-of` label;
+- every Deployment has readiness, liveness and startup probes, and every object has a sync wave
+  and the `part-of` label;
+- no probe on an mTLS role port is a native `grpc:` probe. Each one is the exact
+  `grpc-health-probe` exec: `-tls`, the mounted CA/cert/key, `-addr=127.0.0.1:<grpc port>`, and a
+  `-tls-server-name` that is a DNS SAN of the role's Certificate. Unknown flags, `-tls-no-verify`,
+  `--`-spellings, repeated flags and a shell instead of the probe are all rejected;
 - no `hostNetwork`, `hostPID` or `hostPath`, except where listed in an allowlist with a reason;
 - every `CiliumNetworkPolicy` selector matches at least one workload, so there are no dead allows;
 - the namespace default-deny exists for ingress and egress.

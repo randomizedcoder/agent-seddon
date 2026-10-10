@@ -25,6 +25,7 @@ let
     # fleet role — rendered by nix/k8s/components/fleet.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
+    ${k8sLib.roleBaseToml}
     [grpc.fleet]
     listen = "0.0.0.0:${toString f.port}"
 

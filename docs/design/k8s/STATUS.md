@@ -315,6 +315,55 @@ are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#r
     `agent`), like `k8s-secrets`: it is an operator tool, not something the in-cluster agent runs.
   - **Nothing is rendered** by this slice (it reads a live cluster), so `k8s-rendered` stays green.
 
+- **Slice 9 — make the roles bootable and probeable, then live acceptance on l2** (🟡 in
+  progress). No role pod had ever run (K1 synced an empty `apps/`). Preparing the live run turned up
+  two blockers that no YAML-reading gate could see. Both are fixed in this slice's PR, before the
+  l2 run:
+  - **The probes could never pass.** The role listeners are strict mTLS (`[grpc.tls] client_ca`;
+    `crates/agent-grpc/src/tls.rs` builds a `WebPkiClientVerifier` with no unauthenticated
+    fallback). But the Deployments used the kubelet's native `grpc:` probe, which dials plaintext
+    with no client cert. The handshake was refused before the health service, so the pods would
+    never go Ready and liveness would crash-loop them.
+    - Fix: an `exec` probe running `/bin/grpc-health-probe` (nixpkgs 0.4.53, pinned in
+      `nix/versions.nix`, now in the agent image) against `127.0.0.1:<role port>`. It presents the
+      pod's own `tls-<role>` cert, which already carries `client auth`, and verifies the server by
+      the `<role>` DNS SAN ([`nix/k8s/lib.nix`](../../../nix/k8s/lib.nix) `grpcProbe`).
+    - No new plaintext surface and no agent code change. The Slice 8 note above about a "kubelet
+      `grpc.health.v1` readiness probe" now means this exec probe.
+  - **The configs didn't load.** The config loader requires `[agent]` and `[provider]`, and the
+    rendered ConfigMaps had neither. The agent's default state paths (`.agent/…`, the search index)
+    also sit under the cwd/HOME, which is the read-only rootfs in the pod.
+    - Fix: a shared placeholder head, `k8sLib.roleBaseToml`. Its provider is a closed loopback port,
+      because no K3 role calls a model; K8 wires the real providers.
+    - Plus a writable `home` emptyDir at `/home/agent`. That state is per-pod and ephemeral until K8.
+  - **The committed tag could never name the shipped image.** Slice 5 put `rendered/k3s/` into the
+    crane source, so the agent build and its image tag depended on manifests that name that tag.
+    Every `nix run .#k8s-images` + re-render moved the tag again, so `--import` on l2 would load a
+    tag no manifest names.
+    - Fix: drop `rendered/` from the crane source. The checks (`k8s-render-tests`, `test`,
+      `coverage`) hand `agent-k8s-render` the committed tree via `$AGENT_RENDERED_K3S` (a
+      content-addressed copy of just `rendered/k3s`), and the package build skips that crate.
+    - Verified: after the release the committed tag equals a fresh `.#agent-image` tag
+      ([03](03-images-and-registry.md)).
+  - **Gates.**
+    - `k8s-render-tests` now pins the exact probe argv: an allowlist of canonical `-name=value`
+      flags, `-tls` plus the mounted CA/cert/key, `-addr=127.0.0.1:<grpc port>`, and a
+      `-tls-server-name` that is a DNS SAN on the role's Certificate. A native `grpc:` probe is a
+      finding. The `adversarial_` rows cover the Go-flag-parsing tricks: `-tls-no-verify`,
+      `--`-spellings, `-tls=false`, repeated flags, flags after a positional, `-x v` spelling,
+      foreign SAN, non-loopback target, swapped credentials, and a shell instead of the probe.
+    - New **`k8s-role-boot`** gate ([`nix/checks/k8s-role-boot.nix`](../../../nix/checks/k8s-role-boot.nix)).
+      It boots each role from its committed ConfigMap and Deployment args on a minted test PKI. The
+      Deployment's own readiness argv must reach `SERVING` over mTLS, and a plaintext probe must be
+      refused.
+    - `k8s-image-smoke` now runs `/bin/grpc-health-probe -version` from the image root.
+  - **Live acceptance** (after merge): import the image on l2 (`nix run .#k8s-images -- --import`,
+    which needs sudo; this is also K2's pending live half). Then ArgoCD syncs the app-of-apps, the
+    three roles go Ready, and `nix run .#k8s-status` is green → flip K3 to ✅.
+  - **Known follow-up (not a blocker).** The role certs are 24h, and **K4**
+    (`[grpc.tls] reload_poll_secs`) isn't built. A long-running pod therefore needs a restart at
+    renewal until K4 lands.
+
 #### Remaining K3 slices
 
 The rest of K3 lands as one small PR per slice, in order. Slices 5 (`k8s-render-tests`), 6
@@ -324,7 +373,7 @@ today), so it is not scheduled here.
 
 | Slice | Component / check | Scope | Acceptance |
 |---|---|---|---|
-| 9 | Live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | on l2, then flip the K3 row → ✅ and close out |
+| 9 | Probe/config fix (above), then live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | on l2, then flip the K3 row → ✅ and close out |
 
 The `[auth.mtls] bindings` that consume the SPIFFE SANs, and the cert-manager approver-policy that
 would constrain which SANs a requester may obtain, are **K5**, not remaining K3 work. The policy /
