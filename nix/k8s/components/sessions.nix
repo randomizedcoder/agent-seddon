@@ -24,6 +24,7 @@ let
     # sessions role — rendered by nix/k8s/components/sessions.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
+    ${k8sLib.roleBaseToml}
     [grpc.sessions]
     listen = "0.0.0.0:${toString s.port}"
 

@@ -27,12 +27,22 @@ spec:
             - "--serve-all"
             - "--config"
             - /etc/agent/agent.toml
-          image: "agent-seddon/agent:pjhcdr1v75r8a0z1xpznr7qjzi0gfz28"
+          image: "agent-seddon/agent:dpbg9qjy7vmczk1dwj7cghb634hw9drk"
           livenessProbe:
+            exec:
+              command:
+                - /bin/grpc-health-probe
+                - "-addr=127.0.0.1:50100"
+                - "-tls"
+                - "-tls-ca-cert=/etc/agent/tls/ca.crt"
+                - "-tls-client-cert=/etc/agent/tls/tls.crt"
+                - "-tls-client-key=/etc/agent/tls/tls.key"
+                - "-tls-server-name=gateway"
+                - "-connect-timeout=2s"
+                - "-rpc-timeout=2s"
             failureThreshold: 3
-            grpc:
-              port: 50100
             periodSeconds: 10
+            timeoutSeconds: 5
           name: agent
           ports:
             - containerPort: 50100
@@ -40,10 +50,20 @@ spec:
             - containerPort: 9700
               name: metrics
           readinessProbe:
+            exec:
+              command:
+                - /bin/grpc-health-probe
+                - "-addr=127.0.0.1:50100"
+                - "-tls"
+                - "-tls-ca-cert=/etc/agent/tls/ca.crt"
+                - "-tls-client-cert=/etc/agent/tls/tls.crt"
+                - "-tls-client-key=/etc/agent/tls/tls.key"
+                - "-tls-server-name=gateway"
+                - "-connect-timeout=2s"
+                - "-rpc-timeout=2s"
             failureThreshold: 3
-            grpc:
-              port: 50100
             periodSeconds: 10
+            timeoutSeconds: 5
           resources:
             limits:
               memory: 512Mi
@@ -60,10 +80,20 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           startupProbe:
+            exec:
+              command:
+                - /bin/grpc-health-probe
+                - "-addr=127.0.0.1:50100"
+                - "-tls"
+                - "-tls-ca-cert=/etc/agent/tls/ca.crt"
+                - "-tls-client-cert=/etc/agent/tls/tls.crt"
+                - "-tls-client-key=/etc/agent/tls/tls.key"
+                - "-tls-server-name=gateway"
+                - "-connect-timeout=2s"
+                - "-rpc-timeout=2s"
             failureThreshold: 12
-            grpc:
-              port: 50100
             periodSeconds: 5
+            timeoutSeconds: 5
           volumeMounts:
             - mountPath: /etc/agent
               name: config
@@ -73,6 +103,8 @@ spec:
               readOnly: true
             - mountPath: /tmp
               name: tmp
+            - mountPath: /home/agent
+              name: home
       volumes:
         - configMap:
             name: gateway-config
@@ -82,3 +114,5 @@ spec:
             secretName: tls-gateway
         - emptyDir: {}
           name: tmp
+        - emptyDir: {}
+          name: home

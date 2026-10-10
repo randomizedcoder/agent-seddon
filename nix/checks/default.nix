@@ -32,11 +32,19 @@ let
   # once so each line below states only what it adds (`cargoArtifacts`, `go-ast`, …).
   craneCheck = f: extra: import f ({ inherit craneLib commonArgs; } // extra);
   agentCheck = f: extra: import f ({ inherit pkgs agent; } // extra);
+  # The committed rendered/k3s tree for `agent-k8s-render`'s tests (`$AGENT_RENDERED_K3S`).
+  # It is not in the crane source: the manifests name the image by content hash, so an
+  # agent built from a source containing them would move that hash on every re-render.
+  # Copied out on its own, so these checks re-run only when the manifests change.
+  renderedK3s = builtins.path {
+    path = src + "/rendered/k3s";
+    name = "rendered-k3s";
+  };
 in
 {
   clippy = craneCheck ./clippy.nix { inherit cargoArtifacts; };
   rustfmt = craneCheck ./rustfmt.nix { };
-  test = craneCheck ./test.nix { inherit pkgs cargoArtifacts; };
+  test = craneCheck ./test.nix { inherit pkgs cargoArtifacts renderedK3s; };
   # The campaign track's first-autonomous-PR path end to end (CP-06b): the shipped
   # driver + planner + poller and the in-process worker over a real git checkout
   # with a bare origin, a scripted model and a fake forge (agent-runtime's
@@ -168,7 +176,7 @@ in
   # suite instrumented and emits lcov.info. Non-gating on the number (no
   # `--fail-under`); the human report is `nix run .#coverage`. See
   # docs/components/testing.md.
-  coverage = craneCheck ./coverage.nix { inherit pkgs; };
+  coverage = craneCheck ./coverage.nix { inherit pkgs renderedK3s; };
   # Model-free smoke of the load/overload harness: it compiles, sheds
   # RESOURCE_EXHAUSTED under overload, and the ramp path runs (no perf assertions).
   loadtest-smoke = craneCheck ./loadtest-smoke.nix { inherit cargoArtifacts; };
@@ -359,6 +367,25 @@ in
       agent
       ;
   };
+  # Every committed role boots and passes its own probe (k8s track K3,
+  # docs/design/k8s/04): each role's rendered ConfigMap + Deployment args run the real
+  # agent on a minted test PKI, the Deployment's exec `grpc-health-probe` argv must
+  # reach SERVING over mTLS, and a plaintext (kubelet-native `grpc:`) probe must be
+  # refused. The only K3 gate that runs the agent rather than reading YAML.
+  k8s-role-boot = import ./k8s-role-boot.nix {
+    inherit
+      pkgs
+      lib
+      src
+      versions
+      agent
+      ;
+    roles = [
+      "gateway"
+      "sessions"
+      "fleet"
+    ];
+  };
   # The committed rendered/ tree must equal a fresh render (k8s track K3,
   # docs/design/k8s/04): editing a component or bumping an image tag without
   # re-rendering fails the gate. The hermetic twin of
@@ -372,7 +399,7 @@ in
   # table-driven rstest suite over rendered/k3s/ pinning the renderer's
   # hardening/identity/GitOps invariants plus the adversarial check-the-checks rows
   # (k8s track K3, docs/design/k8s/04).
-  k8s-render-tests = craneCheck ./k8s-render-tests.nix { inherit cargoArtifacts; };
+  k8s-render-tests = craneCheck ./k8s-render-tests.nix { inherit cargoArtifacts renderedK3s; };
   # Schema-validity (not just drift/invariants) of every rendered object:
   # `kubeconform -strict` over rendered/k3s, incl. the cert-manager and ArgoCD
   # custom resources, against schemas vendored + pinned here (no network, no

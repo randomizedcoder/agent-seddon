@@ -24,12 +24,16 @@
   pkgs,
   craneLib,
   commonArgs,
+  renderedK3s,
 }:
 
 craneLib.cargoLlvmCov (
   commonArgs
   // {
     cargoArtifacts = null;
+    # `agent-k8s-render` reads the committed rendered/ tree, which is not in the crane
+    # source (nix/checks/default.nix `renderedK3s`).
+    AGENT_RENDERED_K3S = renderedK3s;
     # The suite shells out to these exactly as the `test` check supplies them:
     # `git` for agent-git's fixture repos, `rg` for the grep tool's fast path.
     nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [

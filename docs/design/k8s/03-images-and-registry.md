@@ -4,7 +4,7 @@
 
 | Image | Built from | Contents |
 |---|---|---|
-| `agent-seddon/agent` | `.#agent` | the `agent` binary, `cacert`, `tzdata`, `bubblewrap`, a passwd entry for uid 10001 |
+| `agent-seddon/agent` | `.#agent` | the `agent` binary, `cacert`, `tzdata`, `bubblewrap`, `/bin/grpc-health-probe` (the role pods' exec health probe, [04](04-manifests-and-gitops.md)), a passwd entry for uid 10001 |
 | `agent-seddon/portal-web` | the portal web build in [`nix/portal/default.nix`](../../../nix/portal/default.nix) | `static-web-server` + the bundle, run with `--cache-control-headers=false` as today |
 | Envoy | upstream image, pinned in [`nix/versions.nix`](../../../nix/versions.nix) | unchanged |
 
@@ -32,6 +32,16 @@ tag being stale is neither — releasing is a decision. Re-running `nix run .#k8
 freshness probe instead: it rewrites `image-tags.nix` from the current build, so a non-empty
 `git diff nix/k8s/image-tags.nix` is exactly "the committed tag is stale". (The K3 drift check does
 gate: it fails if `rendered/` disagrees with the renderer given the *committed* tags.)
+
+**The image must not depend on `rendered/`.** The release is a fixed point only if re-rendering
+leaves the image unchanged. Otherwise the cycle never closes: releasing writes the new tag, the
+re-render changes `rendered/`, and that changes the tag again. Then the tag a manifest names is
+never the tag `--import` loads, and pods sit in `ErrImageNeverPull`.
+
+So `rendered/k3s/` is kept out of the crane source the agent is built from. `agent-k8s-render`'s
+tests, which walk that tree, get it from `$AGENT_RENDERED_K3S` in the checks instead, and the
+package build skips that crate (K3 Slice 9 fixed this; Slice 5 had put the tree into the source).
+Right after a release, `nix eval --raw .#agent-image.imageTag` equals the committed tag.
 
 ## Getting images onto nodes
 

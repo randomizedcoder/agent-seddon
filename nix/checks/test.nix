@@ -9,12 +9,16 @@
   craneLib,
   commonArgs,
   cargoArtifacts,
+  renderedK3s,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
     inherit cargoArtifacts;
+    # `agent-k8s-render` reads the committed rendered/ tree, which is not in the crane
+    # source (nix/checks/default.nix `renderedK3s`).
+    AGENT_RENDERED_K3S = renderedK3s;
     # The hermetic check sandbox has no host PATH, unlike `nix develop`, so
     # provide the CLIs the tests shell out to:
     #   - `git`: `agent-git`'s integration tests (identity via `GIT_AUTHOR_*`/

@@ -33,7 +33,9 @@ port never has two definitions.
   - The agent code path is identical ([05](05-identity-and-pki.md)).
 - **Health.** Every server carries `grpc.health.v1` ([`server/health.rs`](../../../crates/agent-grpc/src/server/health.rs)).
   - Native: `serve-smoke` and `portal-redeploy` poll it.
-  - Clusters: it is the kubelet's `grpc:` probe.
+  - Clusters: an `exec` probe runs `grpc-health-probe` in the pod, presenting the pod's own
+    mTLS cert. The kubelet's native `grpc:` probe can't be used: it dials plaintext with no client
+    cert, and the role listeners are strict mTLS ([04](04-manifests-and-gitops.md)).
 
 ## What differs
 

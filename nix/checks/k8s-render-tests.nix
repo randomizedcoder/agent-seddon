@@ -8,15 +8,18 @@
 # `binaryData`). The invariants and their `adversarial_` check-the-checks live in the
 # `agent-k8s-render` crate; this runs that crate's test binary.
 #
-# The crate's tests read the committed tree via `env!("CARGO_MANIFEST_DIR")/../../rendered/k3s`,
-# so the rendered YAML is whitelisted into the crane source filter (see nix/default.nix).
-# The workspace-wide `test` check also exercises these tests under default features; this
-# dedicated, crate-scoped check is the named Slice-5 gate (and the one the "hand-break a
-# manifest → gate fails" meta-check targets).
+# The crate's tests read the committed tree from `$AGENT_RENDERED_K3S`, pointed here at the
+# raw flake source's rendered/k3s. The YAML is deliberately NOT in the crane source: the
+# manifests name the image by its content-hash tag, so building the agent from a source that
+# contains them would move the tag on every re-render (see nix/default.nix). For the same
+# reason the package build excludes this crate. The workspace `test` and `coverage` checks
+# also point it at the tree; this crate-scoped check is the named Slice-5 gate (and the one
+# the "hand-break a manifest → gate fails" meta-check targets).
 {
   craneLib,
   commonArgs,
   cargoArtifacts,
+  renderedK3s,
 }:
 
 craneLib.cargoTest (
@@ -24,5 +27,6 @@ craneLib.cargoTest (
   // {
     inherit cargoArtifacts;
     cargoTestExtraArgs = "-p agent-k8s-render";
+    AGENT_RENDERED_K3S = renderedK3s;
   }
 )

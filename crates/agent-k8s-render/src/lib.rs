@@ -57,6 +57,24 @@ pub const SYNC_WAVE_ANN: &str = "argocd.argoproj.io/sync-wave";
 /// never appear on a Service or a containerPort. grpc + metrics, from nix/constants.nix.
 pub const EXEC_SEAM_PORTS: [i64; 6] = [50066, 50067, 50068, 9616, 9617, 9618];
 
+/// The health-probe binary the agent image ships (nix/k8s/images.nix).
+pub const HEALTH_PROBE_BIN: &str = "/bin/grpc-health-probe";
+/// Where each role's `tls-<role>` Secret is mounted (nix/k8s/lib.nix `tlsMountPath`).
+pub const TLS_MOUNT: &str = "/etc/agent/tls";
+/// Every workload container carries all three.
+pub const PROBE_KINDS: [&str; 3] = ["readinessProbe", "livenessProbe", "startupProbe"];
+/// The `-name=value` flags a role health probe may pass. Anything else — `-tls-no-verify`,
+/// `-alts`, `-spiffe`, an unknown flag — is refused by [`probe_argv_problems`].
+const PROBE_VALUE_FLAGS: [&str; 7] = [
+    "addr",
+    "tls-ca-cert",
+    "tls-client-cert",
+    "tls-client-key",
+    "tls-server-name",
+    "connect-timeout",
+    "rpc-timeout",
+];
+
 // Sync waves: pki at 0; ConfigMaps/Services at 2; the gateway Deployment comes up before
 // sessions/fleet, which exchange a `svc:` token with it, at 3 vs 4.
 const PKI_WAVE: i64 = 0;
@@ -320,23 +338,152 @@ pub fn check_no_privilege(ms: &[Manifest]) -> Vec<Finding> {
     out
 }
 
-/// Every workload container has gRPC readiness and liveness probes.
+/// Validate one health probe's `exec` argv against the mTLS role it guards, reading it
+/// exactly as `grpc-health-probe` (Go's `flag` package) will. Returns the problems; an
+/// empty list means the probe can pass the role's strict-mTLS listener and checks the
+/// server it is meant to.
+///
+/// Go's `flag` accepts `--x` as well as `-x`, `-x v` as well as `-x=v`, `-tls=false`,
+/// and silently stops parsing at the first non-flag argument — so a lenient reader could
+/// see `-tls` that the probe never applies, or miss a `--tls-no-verify`. Only one
+/// canonical spelling is accepted here (bare `-tls`, every other flag `-name=value` from
+/// an allowlist, no repeats); anything else is a problem, so this reading and the
+/// probe's can't differ.
+pub fn probe_argv_problems(argv: &[&str], grpc_port: Option<i64>, sans: &[&str]) -> Vec<String> {
+    let Some((bin, args)) = argv.split_first() else {
+        return vec!["exec command is empty".into()];
+    };
+    let mut out = Vec::new();
+    if *bin != HEALTH_PROBE_BIN {
+        out.push(format!("exec must run {HEALTH_PROBE_BIN}, got {bin:?}"));
+    }
+    let mut tls = false;
+    let mut vals: HashMap<&str, &str> = HashMap::new();
+    for a in args {
+        if *a == "-tls" {
+            if tls {
+                out.push("duplicate -tls".into());
+            }
+            tls = true;
+            continue;
+        }
+        match a.strip_prefix('-').and_then(|r| r.split_once('=')) {
+            Some((k, v)) if PROBE_VALUE_FLAGS.contains(&k) => {
+                if vals.insert(k, v).is_some() {
+                    out.push(format!("duplicate -{k}"));
+                }
+            }
+            _ => out.push(format!("disallowed probe argument {a:?}")),
+        }
+    }
+    if !tls {
+        out.push("missing -tls: the role listener is mTLS, a plaintext probe is refused".into());
+    }
+    for (k, file) in [
+        ("tls-ca-cert", "ca.crt"),
+        ("tls-client-cert", "tls.crt"),
+        ("tls-client-key", "tls.key"),
+    ] {
+        let want = format!("{TLS_MOUNT}/{file}");
+        if vals.get(k).copied() != Some(want.as_str()) {
+            out.push(format!("-{k} must be {want} (the pod's own mounted cert)"));
+        }
+    }
+    match grpc_port {
+        Some(p) => {
+            let want = format!("127.0.0.1:{p}");
+            if vals.get("addr").copied() != Some(want.as_str()) {
+                out.push(format!(
+                    "-addr must be {want} (loopback, the container's grpc port)"
+                ));
+            }
+        }
+        None => out.push("the container has no `grpc` port for the probe to check".into()),
+    }
+    match vals.get("tls-server-name") {
+        Some(n) if sans.contains(n) => {}
+        Some(n) => out.push(format!(
+            "-tls-server-name {n:?} is not a DNS SAN on the role certificate"
+        )),
+        None => out.push("missing -tls-server-name (the probe dials loopback)".into()),
+    }
+    out
+}
+
+/// Every workload container has readiness, liveness and startup probes that can pass
+/// its strict-mTLS listener: an `exec` of `grpc-health-probe` presenting the pod's own
+/// `tls-<role>` cert ([`probe_argv_problems`]). A native `grpc:` probe is refused — the
+/// kubelet dials it plaintext with no client certificate, so its handshake is rejected
+/// before the health service is reached and the pod never goes Ready.
 pub fn check_probes(ms: &[Manifest]) -> Vec<Finding> {
+    // The DNS SANs on each role Certificate, keyed by the Secret it issues.
+    let sans_by_secret: HashMap<&str, Vec<&str>> = role_certificates(ms)
+        .iter()
+        .filter_map(|m| {
+            let secret = dig(&m.doc, &["spec", "secretName"])?.as_str()?;
+            let dns = dig(&m.doc, &["spec", "dnsNames"])
+                .and_then(Value::as_sequence)
+                .map(|s| s.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            Some((secret, dns))
+        })
+        .collect();
     let mut out = Vec::new();
     for m in deployments(ms) {
+        let tls_secret = pod_volumes(m).iter().find_map(|v| {
+            v.get("secret")?
+                .get("secretName")?
+                .as_str()
+                .filter(|n| n.starts_with("tls-"))
+        });
+        let sans: &[&str] = tls_secret
+            .and_then(|s| sans_by_secret.get(s))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         for c in containers(m) {
             let where_ = container_at(m, c);
-            for probe in ["readinessProbe", "livenessProbe"] {
-                let has_grpc_port = c
-                    .get(probe)
-                    .and_then(|p| dig(p, &["grpc", "port"]))
-                    .is_some();
-                if !has_grpc_port {
+            let grpc_port = c
+                .get("ports")
+                .and_then(Value::as_sequence)
+                .and_then(|ps| {
+                    ps.iter()
+                        .find(|p| p.get("name").and_then(Value::as_str) == Some("grpc"))
+                })
+                .and_then(|p| p.get("containerPort"))
+                .and_then(Value::as_i64);
+            for kind in PROBE_KINDS {
+                let Some(probe) = c.get(kind) else {
                     out.push(Finding::new(
                         "probes",
                         &where_,
-                        format!("{probe} must be a grpc probe with a port"),
+                        format!("{kind} is missing"),
                     ));
+                    continue;
+                };
+                if probe.get("grpc").is_some() {
+                    out.push(Finding::new(
+                        "probes",
+                        &where_,
+                        format!(
+                            "{kind} is a native grpc probe: the kubelet dials it plaintext \
+                             with no client certificate, so it can never pass the mTLS listener"
+                        ),
+                    ));
+                }
+                let argv: Option<Vec<&str>> = dig(probe, &["exec", "command"])
+                    .and_then(Value::as_sequence)
+                    .and_then(|s| s.iter().map(Value::as_str).collect());
+                match argv {
+                    None => out.push(Finding::new(
+                        "probes",
+                        &where_,
+                        format!("{kind} must be an exec of {HEALTH_PROBE_BIN}"),
+                    )),
+                    Some(argv) => {
+                        for p in probe_argv_problems(&argv, grpc_port, sans) {
+                            out.push(Finding::new("probes", &where_, format!("{kind}: {p}")));
+                        }
+                    }
                 }
             }
         }
@@ -1022,6 +1169,75 @@ mod tests {
             .unwrap()
             .remove(Value::String("livenessProbe".into()));
     }
+    fn brk_drop_startup(d: &mut Value) {
+        container0_mut(d)
+            .as_mapping_mut()
+            .unwrap()
+            .remove(Value::String("startupProbe".into()));
+    }
+    /// The bug this gate guards: back to the kubelet's native, certless `grpc:` probe on
+    /// the container's own (mTLS) grpc port.
+    fn brk_native_grpc_probe(d: &mut Value) {
+        let c = container0_mut(d);
+        let port = c["ports"][0]["containerPort"].clone();
+        let mut grpc = serde_yaml_ng::Mapping::new();
+        grpc.insert(Value::String("port".into()), port);
+        let mut probe = serde_yaml_ng::Mapping::new();
+        probe.insert(Value::String("grpc".into()), Value::Mapping(grpc));
+        *at_mut(c, &["readinessProbe"]) = Value::Mapping(probe);
+    }
+    /// Rewrite the first container's readinessProbe argv.
+    fn edit_readiness_argv(d: &mut Value, f: impl FnOnce(&mut Vec<Value>)) {
+        let argv = at_mut(container0_mut(d), &["readinessProbe", "exec", "command"])
+            .as_sequence_mut()
+            .expect("readinessProbe exec command");
+        f(argv);
+    }
+    fn drop_args(argv: &mut Vec<Value>, prefixes: &[&str]) {
+        argv.retain(|a| {
+            let s = a.as_str().unwrap_or("");
+            !prefixes
+                .iter()
+                .any(|p| s == *p || s.starts_with(&format!("{p}=")))
+        });
+    }
+    fn set_arg(argv: &mut [Value], flag: &str, value: &str) {
+        for a in argv.iter_mut() {
+            if a.as_str()
+                .is_some_and(|s| s.starts_with(&format!("{flag}=")))
+            {
+                *a = Value::String(format!("{flag}={value}"));
+            }
+        }
+    }
+    fn brk_probe_plaintext(d: &mut Value) {
+        edit_readiness_argv(d, |a| drop_args(a, &["-tls"]));
+    }
+    fn brk_probe_certless(d: &mut Value) {
+        edit_readiness_argv(d, |a| {
+            drop_args(a, &["-tls-client-cert", "-tls-client-key"]);
+        });
+    }
+    fn brk_probe_no_verify(d: &mut Value) {
+        edit_readiness_argv(d, |a| a.push(Value::String("-tls-no-verify".into())));
+    }
+    fn brk_probe_double_dash_no_verify(d: &mut Value) {
+        edit_readiness_argv(d, |a| a.push(Value::String("--tls-no-verify".into())));
+    }
+    fn brk_probe_flag_after_positional(d: &mut Value) {
+        // Go's flag parser stops at "x": every flag after it — `-tls` included — is
+        // silently ignored, so the probe would dial plaintext.
+        edit_readiness_argv(d, |a| a.insert(1, Value::String("x".into())));
+    }
+    fn brk_probe_foreign_server_name(d: &mut Value) {
+        edit_readiness_argv(d, |a| set_arg(a, "-tls-server-name", "evil.example"));
+    }
+    fn brk_probe_wrong_port(d: &mut Value) {
+        edit_readiness_argv(d, |a| set_arg(a, "-addr", "127.0.0.1:1"));
+    }
+    fn brk_probe_shell(d: &mut Value) {
+        edit_readiness_argv(d, |a| a[0] = Value::String("/bin/sh".into()));
+    }
     fn brk_drop_part_of(d: &mut Value) {
         remove_at(d, &["metadata", "labels"], "app.kubernetes.io/part-of");
     }
@@ -1201,6 +1417,24 @@ mod tests {
     #[case::sys_admin_capability(is_deployment, brk_sys_admin, check_no_privilege)]
     #[case::unconfined_seccomp(is_deployment, brk_unconfined_seccomp, check_no_privilege)]
     #[case::missing_liveness_probe(is_deployment, brk_drop_liveness, check_probes)]
+    #[case::missing_startup_probe(is_deployment, brk_drop_startup, check_probes)]
+    #[case::native_grpc_probe_on_mtls_port(is_deployment, brk_native_grpc_probe, check_probes)]
+    #[case::probe_without_tls(is_deployment, brk_probe_plaintext, check_probes)]
+    #[case::probe_without_client_cert(is_deployment, brk_probe_certless, check_probes)]
+    #[case::probe_skips_server_verify(is_deployment, brk_probe_no_verify, check_probes)]
+    #[case::probe_double_dash_skip_verify(
+        is_deployment,
+        brk_probe_double_dash_no_verify,
+        check_probes
+    )]
+    #[case::probe_flags_after_positional(
+        is_deployment,
+        brk_probe_flag_after_positional,
+        check_probes
+    )]
+    #[case::probe_foreign_server_name(is_deployment, brk_probe_foreign_server_name, check_probes)]
+    #[case::probe_wrong_port(is_deployment, brk_probe_wrong_port, check_probes)]
+    #[case::probe_runs_a_shell(is_deployment, brk_probe_shell, check_probes)]
     #[case::missing_part_of_label(is_deployment, brk_drop_part_of, check_labels)]
     #[case::integer_sync_wave(is_deployment, brk_int_sync_wave, check_sync_waves)]
     #[case::forge_removed_from_exclude(
@@ -1262,5 +1496,163 @@ mod tests {
             !check(&ms).is_empty(),
             "the hostile mutation was not flagged"
         );
+    }
+
+    // -- the health-probe argv reader, row by row ---------------------------------------
+
+    /// The gateway role's DNS SANs (components/pki.nix) and its grpc port.
+    const SANS: [&str; 3] = [
+        "gateway",
+        "gateway.agent-seddon",
+        "gateway.agent-seddon.svc",
+    ];
+    const PORT: Option<i64> = Some(50100);
+
+    /// What a row expects of [`probe_argv_problems`].
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Expect {
+        /// No problems: this probe can pass the mTLS listener and checks the right server.
+        Accept,
+        /// At least one problem, and one names `needle`.
+        Reject(&'static str),
+    }
+    use Expect::{Accept, Reject};
+
+    #[rstest]
+    #[case::positive_canonical_rendered_argv(
+        "the exact argv nix/k8s/lib.nix renders for the gateway",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway",
+          "-connect-timeout=2s", "-rpc-timeout=2s"],
+        PORT, &SANS, Accept)]
+    #[case::positive_timeouts_are_optional(
+        "the 1s grpc-health-probe default timeouts are allowed",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Accept)]
+    #[case::negative_plaintext_probe(
+        "no -tls: grpc-health-probe dials plaintext, which the mTLS listener refuses",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("missing -tls"))]
+    #[case::negative_certless_tls(
+        "TLS with no client cert: refused by the mTLS verifier (the serve-smoke contract)",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("-tls-client-cert"))]
+    #[case::negative_ca_from_elsewhere(
+        "the server is verified against a CA that is not the mounted one",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/tmp/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("-tls-ca-cert"))]
+    #[case::negative_server_name_not_a_san(
+        "the server name is not on the role cert, so verification would fail",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=sessions"],
+        PORT, &SANS, Reject("not a DNS SAN"))]
+    #[case::boundary_empty_argv(
+        "an empty exec command",
+        &[], PORT, &SANS, Reject("empty"))]
+    #[case::boundary_no_grpc_port(
+        "the container declares no `grpc` port, so there is nothing to target",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        None, &SANS, Reject("no `grpc` port"))]
+    #[case::boundary_no_role_certificate(
+        "no Certificate issues the mounted Secret: no SAN can match (fail closed)",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &[], Reject("not a DNS SAN"))]
+    #[case::corner_flag_order_is_irrelevant(
+        "the same flags in another order are read the same",
+        &["/bin/grpc-health-probe", "-tls-server-name=gateway", "-tls",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-addr=127.0.0.1:50100"],
+        PORT, &SANS, Accept)]
+    #[case::corner_fqdn_san_as_server_name(
+        "any of the cert's DNS SANs verifies, not just the bare role name",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key",
+          "-tls-server-name=gateway.agent-seddon.svc"],
+        PORT, &SANS, Accept)]
+    #[case::adversarial_skip_server_verify(
+        "-tls-no-verify would accept any server at all",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls", "-tls-no-verify",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("-tls-no-verify"))]
+    #[case::adversarial_double_dash_spelling(
+        "Go's flag reads --tls-no-verify the same as -tls-no-verify",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls", "--tls-no-verify",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("--tls-no-verify"))]
+    #[case::adversarial_tls_switched_back_off(
+        "a later -tls=false wins in Go's flag, leaving the probe plaintext",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway", "-tls=false"],
+        PORT, &SANS, Reject("-tls=false"))]
+    #[case::adversarial_flags_after_a_positional(
+        "Go's flag stops at the first non-flag, so the -tls after it is never applied",
+        &["/bin/grpc-health-probe", "x", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("\"x\""))]
+    #[case::adversarial_separate_value_spelling(
+        "`-addr VALUE` is two args; only the one canonical `-addr=VALUE` is read",
+        &["/bin/grpc-health-probe", "-addr", "127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("disallowed"))]
+    #[case::adversarial_repeated_addr_overrides(
+        "a second -addr silently overrides the first in Go's flag",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway",
+          "-addr=10.0.0.9:50100"],
+        PORT, &SANS, Reject("duplicate -addr"))]
+    #[case::adversarial_non_loopback_target(
+        "probing another address checks some other server, not this container",
+        &["/bin/grpc-health-probe", "-addr=10.0.0.9:50100", "-tls",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("-addr must be"))]
+    #[case::adversarial_alternate_credentials(
+        "-spiffe swaps in workload-API credentials instead of the mounted cert",
+        &["/bin/grpc-health-probe", "-addr=127.0.0.1:50100", "-tls", "-spiffe",
+          "-tls-ca-cert=/etc/agent/tls/ca.crt", "-tls-client-cert=/etc/agent/tls/tls.crt",
+          "-tls-client-key=/etc/agent/tls/tls.key", "-tls-server-name=gateway"],
+        PORT, &SANS, Reject("-spiffe"))]
+    #[case::adversarial_shell_instead_of_probe(
+        "the exec runs a shell, not the probe",
+        &["/bin/sh", "-c", "exit 0"],
+        PORT, &SANS, Reject("must run /bin/grpc-health-probe"))]
+    fn probe_argv_table(
+        #[case] description: &str,
+        #[case] argv: &[&str],
+        #[case] grpc_port: Option<i64>,
+        #[case] sans: &[&str],
+        #[case] expect: Expect,
+    ) {
+        let problems = probe_argv_problems(argv, grpc_port, sans);
+        match expect {
+            Accept => assert!(
+                problems.is_empty(),
+                "{description}: expected accept, got {problems:#?}"
+            ),
+            Reject(needle) => assert!(
+                problems.iter().any(|p| p.contains(needle)),
+                "{description}: expected a problem naming {needle:?}, got {problems:#?}"
+            ),
+        }
     }
 }

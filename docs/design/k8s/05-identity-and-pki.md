@@ -85,6 +85,9 @@ spec:
   usages:   [ server auth, client auth, digital signature ]
 ```
 
+- `client auth` is also what lets a pod pass its own health probe. The role listeners are strict
+  mTLS, so the exec `grpc-health-probe` presents this same cert to `127.0.0.1` and checks the server
+  against one of the `dnsNames` ([04](04-manifests-and-gitops.md)).
 - `<deployment>` is a per-target setting (`l2` for k3s on l2). It matches the SAN convention in
   [07](../security-hardening/07-transport-tls-and-pki.md).
 - **Short lifetimes on purpose.** A 24-hour certificate renews every day, so the reload path is

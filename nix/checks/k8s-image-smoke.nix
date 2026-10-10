@@ -15,6 +15,9 @@
 # It then runs the binary out of the unpacked image root with `--help` (the agent
 # CLI has no `--version`; `--help` exits 0, reads no config and calls nothing), so a
 # broken image — wrong interpreter, missing loader, unruntime binary — fails here.
+# It also runs `/bin/grpc-health-probe -version`: the role Deployments' exec health
+# probe (the strict-mTLS listeners can't use the kubelet's native `grpc:` prober), so
+# an image without it would leave every role pod un-Ready.
 #
 # Offline/hermetic: no registry, no daemon; `streamLayeredImage` writes a tar to
 # stdout and we read it.
@@ -106,5 +109,16 @@ pkgs.runCommand "k8s-image-smoke"
       *) echo "FAIL: /bin/agent --help did not render the expected usage" >&2; exit 1 ;;
     esac
 
-    echo "OK: agent image is non-root, shell-free on PATH, and runs $repotag" > "$out"
+    # The role Deployments' exec health probe must ship at the absolute path the
+    # rendered manifests name (nix/k8s/lib.nix `grpcProbe`), and must run.
+    if ! probe="$(root/bin/grpc-health-probe -version)"; then
+      echo "FAIL: /bin/grpc-health-probe -version must exit 0 from the image root" >&2
+      exit 1
+    fi
+    case "$probe" in
+      ${versions.grpc-health-probe.version}*) : ;;
+      *) echo "FAIL: /bin/grpc-health-probe reported '$probe', expected ${versions.grpc-health-probe.version}" >&2; exit 1 ;;
+    esac
+
+    echo "OK: agent image is non-root, shell-free on PATH, ships grpc-health-probe, and runs $repotag" > "$out"
   ''
