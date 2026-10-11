@@ -8,8 +8,8 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 |---|---|---|---|---|
 | K0 | Design: native + k3s + full k8s | agent-seddon | ✅ | #576 |
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
-| K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 |
-| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | 🟡 | #580, #581, #583, #587, #589, #600 |
+| K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 (live import on l2 at K3 Slice 9) |
+| K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ✅ | #580, #581, #583, #587, #588, #589, #591, #596, #600, #604, #605, #607 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
@@ -105,15 +105,18 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
   - **portal-web and Envoy images are deferred to K6.** portal-web is not hermetically buildable
     today (its Flutter web SDK downloads at build time), and K3 needs only the agent image; both
     edge images are built at K6, next to where the edge is deployed.
-- **Pending live acceptance (K2's second half):** `nix run .#k8s-images -- --import` on l2, then
-  `crictl images` lists `agent-seddon/agent:pjhcdr1v75r8a0z1xpznr7qjzi0gfz28`. Needs sudo on l2;
-  runs after this merges (the gate half — the image builds and the smoke check passes — is done).
+- **Live acceptance (K2's second half), done at K3 Slice 9, 2026-10-11:** `nix run .#k8s-images --
+  --import` on l2 loaded `agent-seddon/agent:i9pgccifvp9mns2rwfp1lnnkr48cp206` (1002 MiB), and
+  `k3s ctr -n k8s.io images ls` lists it. The tag named here at K2 (`pjhcdr1v…`) was never
+  imported; the tag moves with every Rust change, so the import happens at the release that
+  deploys.
 
-### K3 — being landed in slices (2026-09-29)
+### K3 — landed in slices (2026-09-29 → 2026-10-11)
 
 K3 is large (renderer infra, components, PKI, policy, `rendered/k3s/`, three gate checks, the
-secrets/status apps). It is landing as small PRs in the K1/K2 style rather than one PR. Slices 1–7
-are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#remaining-k3-slices).
+secrets/status apps). It landed as small PRs in the K1/K2 style rather than one PR: slices 1–9 are
+below, and the original slice plan is kept in [Remaining K3 slices](#remaining-k3-slices). K3 is
+✅ — live on l2 since 2026-10-11.
 
 - **Slice 1 — `[grpc.gateway] exclude` (the Rust prerequisite).** [08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)'s
   hard precondition: `--serve-all` hosts the exec seams (`sandbox`/`pty`/`forge`) whenever their
@@ -315,10 +318,10 @@ are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#r
     `agent`), like `k8s-secrets`: it is an operator tool, not something the in-cluster agent runs.
   - **Nothing is rendered** by this slice (it reads a live cluster), so `k8s-rendered` stays green.
 
-- **Slice 9 — make the roles bootable and probeable, then live acceptance on l2** (🟡 in
-  progress). No role pod had ever run (K1 synced an empty `apps/`). Preparing the live run turned up
-  two blockers that no YAML-reading gate could see. Both are fixed in this slice's PR, before the
-  l2 run:
+- **Slice 9 — make the roles bootable and probeable, then live acceptance on l2** (✅ #604,
+  #605, #607; live 2026-10-11). No role pod had ever run (K1 synced an empty `apps/`). Getting
+  there took four fixes that no YAML-reading gate could see. The first three landed in #604, before
+  the l2 run; the fourth (#607) was found by it:
   - **The probes could never pass.** The role listeners are strict mTLS (`[grpc.tls] client_ca`;
     `crates/agent-grpc/src/tls.rs` builds a `WebPkiClientVerifier` with no unauthenticated
     fallback). But the Deployments used the kubelet's native `grpc:` probe, which dials plaintext
@@ -383,6 +386,18 @@ are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#r
   - **Known follow-up (not a blocker).** The role certs are 24h, and **K4**
     (`[grpc.tls] reload_poll_secs`) isn't built. A long-running pod therefore needs a restart at
     renewal until K4 lands.
+  - **Known follow-up (not a blocker).** The agent warns that `/etc/agent/tls/tls.key` is mode
+    `644`: the `tls-<role>` Secret volume uses the default `defaultMode`. Tightening it needs a
+    `defaultMode` the non-root uid can still read (e.g. `0440` + `fsGroup`); left for K5, with the
+    rest of the identity work.
+  - **Live acceptance on l2, 2026-10-11** (main `c16c6606`, image `i9pgccifvp9mns2rwfp1lnnkr48cp206`):
+    - all five ArgoCD Applications (`agent-seddon`, `pki`, `gateway`, `sessions`, `fleet`) are
+      `Synced`/`Healthy`;
+    - `gateway`, `sessions` and `fleet` are `1/1` ready, `Available`, with 0 restarts;
+    - `nix run .#k8s-status` reports `OK (8 ok, 0 warn, 0 fail, 0 skipped)`, exit 0;
+    - inside the gateway pod, the readiness argv (`/bin/grpc-health-probe … -tls-server-name=gateway`)
+      returns `status: SERVING`, and a plaintext probe to the same port is refused;
+    - each role logs the interim `allow_insecure_listen` warning, as designed until K5.
 
 #### Remaining K3 slices
 
@@ -393,7 +408,7 @@ today), so it is not scheduled here.
 
 | Slice | Component / check | Scope | Acceptance |
 |---|---|---|---|
-| 9 | Probe/config fix (above), then live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | on l2, then flip the K3 row → ✅ and close out |
+| 9 | Probe/config/auth fixes (above), then live acceptance on l2 | ArgoCD syncs the app-of-apps; gateway, sessions and fleet go Ready; `k8s-status` is green | ✅ done on l2, 2026-10-11 |
 
 The `[auth.mtls] bindings` that consume the SPIFFE SANs, and the cert-manager approver-policy that
 would constrain which SANs a requester may obtain, are **K5**, not remaining K3 work. The policy /
