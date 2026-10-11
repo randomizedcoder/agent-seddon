@@ -82,6 +82,7 @@ pub struct Metrics {
     router_dispatch: IntCounterVec,
     router_failover: IntCounterVec,
     router_inflight: IntGaugeVec,
+    router_cost_usd: CounterVec,
     gate_verdicts: IntCounterVec,
     gate_rounds: Histogram,
     gate_phase_seconds: HistogramVec,
@@ -558,6 +559,17 @@ impl Metrics {
                 "Requests currently in flight per task-router upstream",
             ),
             &["upstream"],
+        )
+        .unwrap();
+        // Gap §8.7 item 7: spend by the upstream that actually SERVED the turn. A
+        // router-side view of the same money `agent_cost_usd_total` records by
+        // configured model — don't sum the two families.
+        let router_cost_usd = CounterVec::new(
+            Opts::new(
+                "agent_router_cost_usd_total",
+                "Task-router USD cost by role, serving upstream and billed line",
+            ),
+            &["role", "upstream", "kind"],
         )
         .unwrap();
         let gate_verdicts = IntCounterVec::new(
@@ -1578,6 +1590,7 @@ impl Metrics {
             Box::new(router_dispatch.clone()),
             Box::new(router_failover.clone()),
             Box::new(router_inflight.clone()),
+            Box::new(router_cost_usd.clone()),
             Box::new(gate_verdicts.clone()),
             Box::new(gate_rounds.clone()),
             Box::new(gate_phase_seconds.clone()),
@@ -1738,6 +1751,7 @@ impl Metrics {
             router_dispatch,
             router_failover,
             router_inflight,
+            router_cost_usd,
             gate_verdicts,
             gate_rounds,
             gate_phase_seconds,
@@ -2103,6 +2117,33 @@ impl Metrics {
         self.router_failover
             .with_label_values(&[from, to, reason])
             .inc();
+    }
+    /// One served turn's USD cost on the task-router, one line per billed `kind`
+    /// (`input`/`output`/`cache_read`/`cache_write`), labelled by the upstream
+    /// that served it (gap §8.7 item 7). Upstream ids are bounded by the
+    /// registry's upstream cap. Same guard as `add_cost`: only a finite,
+    /// positive line is recorded (`inc_by` panics on a negative; NaN/inf poison).
+    pub fn on_router_cost(
+        &self,
+        role: &str,
+        upstream: &str,
+        input: f64,
+        output: f64,
+        cache_read: f64,
+        cache_write: f64,
+    ) {
+        for (kind, usd) in [
+            ("input", input),
+            ("output", output),
+            ("cache_read", cache_read),
+            ("cache_write", cache_write),
+        ] {
+            if usd.is_finite() && usd > 0.0 {
+                self.router_cost_usd
+                    .with_label_values(&[role, upstream, kind])
+                    .inc_by(usd);
+            }
+        }
     }
     /// The per-upstream in-flight gauge (04 follow-up). Fed from both edges of
     /// the router's RAII guard — the release fires in Drop, so the gauge
@@ -3753,6 +3794,56 @@ mod tests {
         assert!(
             !text.contains("kind=\"cache_read\""),
             "infinite cache_read recorded"
+        );
+    }
+
+    /// Gap §8.7 item 7: `on_router_cost` records each finite-positive billed line
+    /// under the serving upstream, and drops the rest without panicking.
+    #[rstest]
+    #[case::positive_all_lines((0.002, 0.008, 0.0005, 0.0001), &["input", "output", "cache_read", "cache_write"])]
+    #[case::negative_zero_cost_records_nothing((0.0, 0.0, 0.0, 0.0), &[])]
+    #[case::corner_output_only((0.0, 0.25, 0.0, 0.0), &["output"])]
+    #[case::boundary_smallest_positive((f64::MIN_POSITIVE, 0.0, 0.0, 0.0), &["input"])]
+    #[case::adversarial_hostile_lines_dropped((f64::NAN, -1.0, f64::INFINITY, f64::NEG_INFINITY), &[])]
+    #[case::adversarial_one_good_line_survives((f64::NAN, 0.5, -0.0, f64::INFINITY), &["output"])]
+    fn on_router_cost_records_finite_positive_lines(
+        #[case] lines: (f64, f64, f64, f64),
+        #[case] want: &[&str],
+    ) {
+        let m = Metrics::new();
+        m.on_router_cost("generate", "kimi", lines.0, lines.1, lines.2, lines.3);
+        let text = m.encode_text();
+        for kind in ["input", "output", "cache_read", "cache_write"] {
+            let series = format!(
+                "agent_router_cost_usd_total{{kind=\"{kind}\",role=\"generate\",upstream=\"kimi\"}}"
+            );
+            assert_eq!(
+                text.contains(&series),
+                want.contains(&kind),
+                "{kind}: {text}"
+            );
+        }
+        assert!(!text.contains("NaN"), "NaN leaked into export: {text}");
+    }
+
+    #[test]
+    fn positive_router_cost_accumulates_per_upstream() {
+        let m = Metrics::new();
+        m.on_router_cost("generate", "kimi", 0.5, 0.0, 0.0, 0.0);
+        m.on_router_cost("generate", "kimi", 0.25, 0.0, 0.0, 0.0);
+        m.on_router_cost("generate", "mi50", 0.125, 0.0, 0.0, 0.0);
+        let text = m.encode_text();
+        assert!(
+            text.contains(
+                "agent_router_cost_usd_total{kind=\"input\",role=\"generate\",upstream=\"kimi\"} 0.75"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "agent_router_cost_usd_total{kind=\"input\",role=\"generate\",upstream=\"mi50\"} 0.125"
+            ),
+            "{text}"
         );
     }
 

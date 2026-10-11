@@ -141,7 +141,7 @@ any high-cardinality dimension) that is useful for triage goes on the **span**, 
   `agent_repo_worktrees_live`, `agent_repo_errors_total`, `agent_ast_query_seconds`,
   `agent_ast_result_nodes`, `agent_ast_errors_total`, `agent_lsp_request_seconds`,
   `agent_lsp_diagnostics_total`, `agent_lsp_errors_total`, `agent_embed_seconds`, `agent_embed_batch`.
-- **pool / router** — `agent_pool_*` (11 families), `agent_router_*` (5), `agent_route_decisions_total`.
+- **pool / router** — `agent_pool_*` (11 families), `agent_router_*` (6), `agent_route_decisions_total`.
 - **forge / web / sandbox / scan** — `agent_forge_calls_total`, `agent_forge_duration_seconds`,
   `agent_web_*` (6), `agent_sandbox_exec_total`, `agent_sandbox_exec_seconds`,
   `agent_scanner_findings_total`, `agent_scan_duration_seconds`.

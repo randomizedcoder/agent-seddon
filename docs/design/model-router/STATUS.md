@@ -47,6 +47,8 @@ leak) and must pass `nix develop -c nix flake check`.
   task-router now stamps each routed turn's `Usage.cost` from the serving card's
   `input_cost`/`output_cost`, so routed turns are priced without a `PriceTable` row — see
   [router.md](../../components/router.md#turn-pricing-from-the-upstream-card-gap-82).
+  That spend is metered per serving upstream as
+  `agent_router_cost_usd_total{role,upstream,kind}` (gap §8.7 item 7).
 - **02: engine + fixed-role router only — hint threading deferred to [02b](02b-hint-threading.md)**
   (the code says so explicitly). As built: `Hint`/`Match` carry `role + min_context` (+
   capability/cost/tier filters) but **no `task_mode`**; `Prefer` orders by explicit

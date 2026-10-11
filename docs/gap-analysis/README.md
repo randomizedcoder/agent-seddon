@@ -650,7 +650,9 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
 7. **Cost- and budget-aware selection:** `OrderPolicy::CostPerTask` (input × estimated prompt +
    output × `max_tokens`), `RouteHint.max_cost` set by fleet and tenancy, a per-tenant per-hour
    spend budget, ~~`PriceTable` fed from registry cards~~ (**done** — routed turns are priced from the
-   serving card, §8.2), cost metrics labelled by upstream.
+   serving card, §8.2), ~~cost metrics labelled by upstream~~ (**done** —
+   `agent_router_cost_usd_total{role,upstream,kind}` from a `RouteEvent::Priced` the `TaskRouter`
+   emits once per served turn; a stream reports on drain, a failed-over attempt is never billed).
 8. ~~**Spillover tiers:** `spill_to: ["cloud"]` in `RoutePreferSpec`, driven by saturation state.~~
    **Done** — `prefer.spill_to` (TOML, registry `RoutePrefer.spill_to = 5`, agent-core spec,
    validated like `tags`). Tagged upstreams are a reserve the `TaskRouter` holds back while any

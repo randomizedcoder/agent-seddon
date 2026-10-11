@@ -317,9 +317,18 @@ non-negative); the loop records a stamped cost as `actual` and only falls back t
 - **Re-pricing is live.** A registry `Put` that changes only a card's costs rebuilds
   the inner router (the snapshot fingerprint covers whole cards) but reuses the live
   connection (`provider_key` excludes routing metadata).
+- **Spend by upstream.** Each served turn's cost — the card price, or the provider's
+  own figure — is metered as `agent_router_cost_usd_total{role,upstream,kind}`
+  (`kind` = `input|output|cache_read|cache_write`), labelled by the upstream that
+  *served* it (a failed-over attempt is never billed). A stream reports once, from
+  its last usage, when it drains — never per chunk; an abandoned stream reports
+  nothing (as the loop records nothing). Non-finite/non-positive lines are dropped.
+  This is a router-side view of the same money `agent_cost_usd_total{model,…}`
+  records per session: query one or the other, never sum both. E.g.
+  `sum by (upstream) (rate(agent_router_cost_usd_total[1h]))`.
 - Set `output_cost` beside `input_cost` on `[[route.upstreams]]` or the registry card.
   **Not yet** (rest of gap §8.7 item 7): cost-per-task ordering, fleet/tenant
-  `max_cost`, spend budgets, cost metrics labelled by upstream.
+  `max_cost`, spend budgets.
 
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 
@@ -406,7 +415,9 @@ draws ~N× the traffic before it reaches parity. `max_concurrency = 0` (unset)
 ⇒ capacity 1, i.e. the raw-in-flight ordering, unchanged. See
 [model-router 05](../design/model-router/05-capacity-aware.md). Per-upstream dispatch is metered:
 `agent_router_dispatch_total{role,upstream,outcome}`,
-`agent_router_failover_total{from,to,reason}`, and the
+`agent_router_failover_total{from,to,reason}`,
+`agent_router_cost_usd_total{role,upstream,kind}` (spend by serving upstream — see
+pricing above), and the
 `agent_router_upstream_inflight{upstream}` gauge (fed from both edges of the
 RAII in-flight guard, so it drains to 0 even for cancelled calls). The classifier vote and review
 fan-out stamp `classify`/`review` role hints on their requests (the fan-out

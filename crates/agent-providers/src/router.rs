@@ -26,8 +26,8 @@
 //! so one router can span local and remote providers.
 
 use agent_core::{
-    ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider, ModelCapabilities,
-    Result,
+    ChunkStream, CompletionRequest, CompletionResponse, Cost, Error, LlmProvider,
+    ModelCapabilities, Result,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -181,6 +181,15 @@ pub enum RouteEvent<'a> {
     /// The hard filter rejected every upstream for this `role` — nothing was
     /// even dialed (distinct from `Exhausted`, where dispatch failed).
     NoCandidate { role: &'a str },
+    /// A turn `upstream` served cost `cost` — the serving card's price or the
+    /// provider's own figure (gap §8.7 item 7). Once per served turn; a stream
+    /// reports when it drains. Task-router only. A provider-reported figure is
+    /// untrusted (may be NaN/negative) — the metrics sink drops such lines.
+    Priced {
+        role: &'a str,
+        upstream: &'a str,
+        cost: &'a Cost,
+    },
 }
 
 pub struct Router {
@@ -668,6 +677,9 @@ mod tests {
                     RouteEvent::Exhausted => "exhausted".into(),
                     RouteEvent::Decided { chosen, .. } => format!("decided:{chosen}"),
                     RouteEvent::NoCandidate { role } => format!("no-candidate:{role}"),
+                    RouteEvent::Priced { upstream, cost, .. } => {
+                        format!("priced:{upstream}:{}", cost.total)
+                    }
                 });
             }),
         );
