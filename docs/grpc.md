@@ -650,6 +650,12 @@ lifts the "multi-user serving / distributed subagents" non-goal in
 [`DESIGN.md`](../DESIGN.md) §1 — the seam boundaries were always the plan; gRPC just
 makes them network-addressable.
 
+What is actually built is narrower than this sketch: the Kubernetes track
+([`design/k8s/`](design/k8s/README.md), status in [`STATUS.md`](design/k8s/STATUS.md))
+runs three `--serve-all` roles (gateway, sessions, fleet) on k3s at K3, each
+terminating its own mTLS with a cert-manager SPIFFE certificate. Per-seam
+Deployments, the edge and the sandbox sidecar are later increments.
+
 ## Introspection — reflection + `grpcurl`
 
 Every `--serve-<seam>` process enables **gRPC server reflection** (both the `v1`

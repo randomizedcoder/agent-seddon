@@ -33,6 +33,6 @@ this repo; its STATUS row records the commit there.
 ## Docs to correct as increments land
 
 - [`features-comparison.md`](../../features-comparison.md) (the "container images, orchestration
-  manifests … are not built" paragraph) at K3.
-- [`grpc.md`](../../grpc.md) "Deployment sketch (k8s)" to link here, at K3.
+  manifests … are not built" paragraph) at K3 — ✅ done.
+- [`grpc.md`](../../grpc.md) "Deployment sketch (k8s)" to link here, at K3 — ✅ done.
 - [`deployment-l2.md`](../../deployment-l2.md) at K8.

@@ -328,11 +328,13 @@ its components are not interchangeable gRPC seams selected from config). But be
 precise about what
 exists: the contract, the transports, the health checks and the tests are real —
 including an end-to-end test that runs the loop with four seams remote at once —
-while **container images, orchestration manifests and any multi-host deployment
-are not built**. Everything runs over loopback or a unix socket today. Calling it
-a "k8s-style topology" (as an earlier draft of this document did) promised more
-than the code delivers. Kubernetes deployment (k3s and full k8s, alongside native) is
-designed in [`design/k8s/`](design/k8s/README.md), not yet built.
+and, since K3 of the [Kubernetes track](design/k8s/STATUS.md), so is a single-node
+k3s deployment: a Nix-built agent image and Nix-rendered manifests synced by ArgoCD
+run the gateway, sessions and fleet roles on l2 over cert-manager mTLS. Still **not
+built**: per-seam scale-out, the in-cluster edge, the sandbox sidecar and any
+multi-host deployment (K4–K9). Calling it a "k8s-style topology" (as an earlier draft
+of this document did) promised more than the code delivered at the time; the design
+is in [`design/k8s/`](design/k8s/README.md).
 
 ### MCP — client and server
 `crates/agent-mcp` is an MCP **client** (stdio subprocess + streamable HTTP behind
