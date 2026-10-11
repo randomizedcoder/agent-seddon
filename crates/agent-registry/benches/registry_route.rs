@@ -71,6 +71,7 @@ fn fleet(n: usize) -> ModelRouterConfig {
         },
         failure_threshold: 0,
         cooldown_secs: 0,
+        max_cost: None,
     };
     ModelRouterConfig { upstreams, policy }
 }

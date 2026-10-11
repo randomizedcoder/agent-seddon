@@ -325,6 +325,7 @@ async fn ramp(seam: &str, transport: &'static str, conc: usize, requests: usize)
                     upstreams: vec!["gen".into()],
                     ..Default::default()
                 },
+                max_cost: None,
             };
             let router: Arc<dyn LlmProvider> =
                 Arc::new(TaskRouter::new(ups, policy).expect("router"));
