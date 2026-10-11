@@ -356,10 +356,13 @@ impl TaskRouter {
     /// in depth — wire decode sanitizes too, but an in-process caller may not);
     /// `needs_tools`/`needs_vision` are ALWAYS derived from the request itself,
     /// so a hostile hint can't steer a tool-call request onto a tool-less
-    /// upstream; `min_context` falls back to a cheap chars/4 estimate.
+    /// upstream; `min_context` falls back to a cheap chars/4 estimate. The
+    /// `cost-per-task` weights are always derived from the request (that same
+    /// estimate, and `max_tokens` as the output budget) — never carried.
     fn hint(&self, req: &CompletionRequest) -> Hint {
         let mut carried = req.route.clone().unwrap_or_default();
         carried.sanitize();
+        let est_input_tokens = estimate_min_context(req);
         Hint {
             role: carried.role.unwrap_or(self.role),
             task_mode: carried.task_mode,
@@ -368,9 +371,11 @@ impl TaskRouter {
             min_context: if carried.min_context > 0 {
                 carried.min_context
             } else {
-                estimate_min_context(req)
+                est_input_tokens
             },
             max_cost: carried.max_cost,
+            est_input_tokens,
+            est_output_tokens: req.max_tokens,
             tier: carried.tier,
             override_upstream: carried.override_upstream,
         }
@@ -392,6 +397,7 @@ impl TaskRouter {
             tier: u.tier,
             context_window: caps.context_window,
             input_cost: u.input_cost,
+            output_cost: u.output_cost,
             healthy: true,
             supports_vision: caps.supports_vision,
             supports_tools: caps.supports_tools,
@@ -1024,6 +1030,38 @@ mod tests {
         );
         let resp = r.complete(req()).await.expect("routes");
         assert_eq!(resp.message.content_text(), "from-kimi");
+    }
+
+    /// `cost-per-task` (gap §8.7 item 7) weighs each card by THIS request: the
+    /// prompt estimate and `max_tokens` come from the request itself, so the
+    /// same fleet serves a long answer and a long prompt from different upstreams.
+    #[rstest::rstest]
+    // (The test doubles' window is 1000 tokens, so the "long" prompt is ~1k.)
+    #[case::positive_long_answer_goes_to_cheap_output(4, 100_000, "from-out-cheap")]
+    #[case::positive_long_prompt_goes_to_cheap_input(4_000, 1, "from-in-cheap")]
+    #[tokio::test]
+    async fn cost_per_task_orders_on_the_request_size(
+        #[case] prompt_chars: usize,
+        #[case] max_tokens: u32,
+        #[case] want: &str,
+    ) {
+        let mut a = up("in-cheap", ok("from-in-cheap", true, false));
+        (a.input_cost, a.output_cost) = (1.0, 20.0);
+        let mut b = up("out-cheap", ok("from-out-cheap", true, false));
+        (b.input_cost, b.output_cost) = (3.0, 4.0);
+        let policy = Policy {
+            rules: vec![],
+            default_prefer: Prefer {
+                policy: Some(crate::route::OrderPolicy::CostPerTask),
+                ..Default::default()
+            },
+        };
+        let r = router(vec![a, b], policy);
+        let mut q = req();
+        q.messages = vec![agent_core::Message::user("x".repeat(prompt_chars))];
+        q.max_tokens = max_tokens;
+        let resp = r.complete(q).await.expect("routes");
+        assert_eq!(resp.message.content_text(), want);
     }
 
     /// A static (TOML-built) fleet reports version 0; `RegistryRouter` stamps

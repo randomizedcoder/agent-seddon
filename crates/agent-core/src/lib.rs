@@ -2996,8 +2996,8 @@ pub struct RoutePreferSpec {
     pub tags: Vec<String>,
     pub tier: Option<PoolTier>,
     pub upstreams: Vec<String>,
-    /// Live-signal ordering policy: `""` | `"cost"` | `"latency"` |
-    /// `"least-loaded"`. Validated on ingest; consumed by the registry-backed
+    /// Live-signal ordering policy: `""` | `"cost"` | `"cost-per-task"` |
+    /// `"latency"` | `"least-loaded"`. Validated on ingest; consumed by the registry-backed
     /// router (model-router 04).
     pub policy: String,
     /// Spillover tier tags (gap §8.7 item 8): eligible upstreams carrying any
@@ -3011,7 +3011,7 @@ impl RoutePreferSpec {
     fn validate(&self, ctx: &str) -> Result<()> {
         if !matches!(
             self.policy.as_str(),
-            "" | "cost" | "latency" | "least-loaded"
+            "" | "cost" | "cost-per-task" | "latency" | "least-loaded"
         ) {
             return Err(Error::Registry(format!(
                 "{ctx}: unknown prefer.policy {:?}",
@@ -7416,9 +7416,11 @@ mod tests {
     #[rstest]
     #[case::positive_empty_policy("", true)]
     #[case::positive_cost("cost", true)]
+    #[case::positive_cost_per_task("cost-per-task", true)]
     #[case::positive_latency("latency", true)]
     #[case::positive_least_loaded("least-loaded", true)]
     #[case::negative_typo("least-loded", false)]
+    #[case::negative_underscore_spelling("cost_per_task", false)]
     #[case::negative_llm("ask-an-llm", false)]
     fn route_prefer_policy_strings(#[case] policy: &str, #[case] ok: bool) {
         let spec = RoutePolicySpec {

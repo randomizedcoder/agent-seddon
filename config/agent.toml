@@ -740,7 +740,10 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 #
 # # Applied when no rule matches — here: prefer kimi, fall back to glm.
 # # `policy` (model-router 04) breaks ties among equally-preferred survivors by a
-# # LIVE signal: "cost" | "latency" | "least-loaded" (a tie-break, never an override).
+# # LIVE signal: "cost" | "cost-per-task" | "latency" | "least-loaded" (a tie-break,
+# # never an override). "cost" = cheapest input rate; "cost-per-task" = cheapest
+# # ESTIMATED request: input_cost × prompt-token estimate + output_cost × max_tokens,
+# # so a cheap-input/dear-output upstream loses a long-answer task.
 # # "least-loaded" orders by in-flight NORMALISED by `max_concurrency`, so a
 # # higher-capacity endpoint (a multi-GPU gateway) draws proportionally more.
 # [route.default_prefer]

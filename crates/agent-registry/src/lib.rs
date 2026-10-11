@@ -56,6 +56,7 @@ pub fn decide(cfg: &ModelRouterConfig, hint: &RouteHint) -> RouteDecision {
             tier: u.tier.unwrap_or(PoolTier::Medium),
             context_window: u.context_window,
             input_cost: u.input_cost,
+            output_cost: u.output_cost,
             healthy: true,
             supports_vision: u.supports_vision,
             supports_tools: u.supports_tools,
@@ -79,6 +80,10 @@ pub fn decide(cfg: &ModelRouterConfig, hint: &RouteHint) -> RouteDecision {
         needs_vision: false,
         needs_tools: false,
         max_cost: hint.max_cost,
+        // No request body ⇒ no size estimate: `cost-per-task` previews on the
+        // blended input + output rate (the engine's unknown-count fallback).
+        est_input_tokens: 0,
+        est_output_tokens: 0,
         tier: hint.tier,
         override_upstream: hint.override_upstream.clone(),
     };

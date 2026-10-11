@@ -2462,7 +2462,7 @@ pub(crate) fn build_route_policy(
                     // Lenient like the rest of `prefer`: mis-sorts, never mis-fires.
                     tracing::warn!(
                         policy = %s,
-                        "unknown prefer.policy — ignoring (cost | latency | least-loaded)"
+                        "unknown prefer.policy — ignoring (cost | cost-per-task | latency | least-loaded)"
                     );
                 }
                 parsed

@@ -35,6 +35,7 @@ fn fleet(n: usize) -> Vec<UpstreamMeta<'static>> {
             },
             context_window: 8_192 + (i as u32) * 2_048,
             input_cost: (i % 5) as f32,
+            output_cost: (i % 3) as f32,
             healthy: i % 7 != 0, // a few unhealthy, filtered out
             supports_vision: i % 4 == 0,
             supports_tools: true,

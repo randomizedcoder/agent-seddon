@@ -38,6 +38,11 @@ pub struct Hint {
     pub needs_tools: bool,
     /// Per-Mtok input-cost ceiling; `None` = no cap.
     pub max_cost: Option<f32>,
+    /// Estimated prompt tokens and the output-token budget — the weights the
+    /// `cost-per-task` ordering prices each upstream at (gap §8.7 item 7).
+    /// Ordering-only, never a filter; `0` = unknown (see [`task_cost_key`]).
+    pub est_input_tokens: u32,
+    pub est_output_tokens: u32,
     /// Tier floor; `None` = any tier.
     pub tier: Option<PoolTier>,
     /// An explicit upstream id that wins *when eligible* — it can never select an
@@ -59,6 +64,8 @@ pub struct UpstreamMeta<'a> {
     pub context_window: u32,
     /// Per-Mtok input cost.
     pub input_cost: f32,
+    /// Per-Mtok output cost — read only by the `cost-per-task` ordering.
+    pub output_cost: f32,
     pub healthy: bool,
     pub supports_vision: bool,
     pub supports_tools: bool,
@@ -146,17 +153,24 @@ impl Match {
 /// upstream still wins regardless of its live numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderPolicy {
+    /// Cheapest per-Mtok **input** rate first.
     Cost,
+    /// Cheapest *estimated* request first: input rate × estimated prompt
+    /// tokens + output rate × the output budget (gap §8.7 item 7), so an
+    /// upstream with cheap input but dear output loses a long-answer task.
+    CostPerTask,
     Latency,
     LeastLoaded,
 }
 
 impl OrderPolicy {
-    /// Parse the config string (`cost | latency | least-loaded`); unknown /
-    /// empty ⇒ `None` (callers decide whether that warns or errors).
+    /// Parse the config string (`cost | cost-per-task | latency |
+    /// least-loaded`); unknown / empty ⇒ `None` (callers decide whether that
+    /// warns or errors).
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim() {
             "cost" => OrderPolicy::Cost,
+            "cost-per-task" => OrderPolicy::CostPerTask,
             "latency" => OrderPolicy::Latency,
             "least-loaded" => OrderPolicy::LeastLoaded,
             _ => return None,
@@ -169,6 +183,19 @@ impl OrderPolicy {
 /// float sort key. Overflow-safe — `in_flight ≤ u32::MAX` and the multiply is in
 /// `i64`, so the worst case (`u32::MAX × SCALE`) stays well under `i64::MAX`.
 const LEAST_LOADED_SCALE: i64 = 1_000_000;
+
+/// The `cost-per-task` key: the request's estimated price in **nano-dollars**
+/// (USD/Mtok × tokens × 10³), ordinal without a float sort key. A `0` (unknown)
+/// count weighs its side as one token, so a hint that carries no estimate
+/// orders by the blended `input + output` rate instead of tying every upstream
+/// at 0. Rates are clamped finite + non-negative on build; the float→int cast
+/// saturates, so even a `f32::MAX` rate × `u32::MAX` tokens is a total key.
+fn task_cost_key(u: &UpstreamMeta<'_>, hint: &Hint) -> i64 {
+    let tokens = |n: u32| f64::from(n.max(1));
+    let est = f64::from(u.input_cost) * tokens(hint.est_input_tokens)
+        + f64::from(u.output_cost) * tokens(hint.est_output_tokens);
+    (est * 1_000.0) as i64
+}
 
 /// The `prefer` half — how to ORDER the survivors once a rule matches.
 #[derive(Debug, Clone, Default)]
@@ -201,7 +228,7 @@ impl Prefer {
     /// tests). The live-signal key (04) only separates survivors the explicit
     /// preferences left tied, and is `0` (neutral) with no `policy` — so a
     /// policy-less rank is byte-identical to the 02b ordering.
-    fn rank(&self, u: &UpstreamMeta<'_>) -> (usize, i64, i64, i64) {
+    fn rank(&self, u: &UpstreamMeta<'_>, hint: &Hint) -> (usize, i64, i64, i64) {
         let pos = self
             .upstreams
             .iter()
@@ -216,6 +243,7 @@ impl Prefer {
             // milli-dollar per Mtok: keeps sub-cent differences ordinal without
             // float keys (the cost was clamped finite + non-negative on build).
             Some(OrderPolicy::Cost) => (f64::from(u.input_cost) * 1_000.0) as i64,
+            Some(OrderPolicy::CostPerTask) => task_cost_key(u, hint),
             Some(OrderPolicy::Latency) => i64::from(u.latency_ewma_ms),
             // Capacity-normalised load: order by the *ratio* in_flight/capacity,
             // not raw in-flight, so a higher-capacity endpoint (e.g. a gateway
@@ -345,8 +373,9 @@ impl Policy {
         // 3. Rank each survivor once (the non-id key), then order — ties broken
         // by the borrowed id, so the result is byte-identical to the old
         // String-keyed sort without its per-member allocation.
-        let mut ranked: Vec<((usize, i64, i64, i64), usize)> =
-            eligible.map(|i| (prefer.rank(&fleet[i]), i)).collect();
+        let mut ranked: Vec<((usize, i64, i64, i64), usize)> = eligible
+            .map(|i| (prefer.rank(&fleet[i], hint), i))
+            .collect();
 
         // An explicit override wins outright — but only if it passed the filter, so a
         // model-supplied id can never dial an ineligible/unknown upstream.
@@ -386,6 +415,7 @@ mod tests {
             tier,
             context_window: window,
             input_cost: cost,
+            output_cost: 0.0,
             healthy: true,
             supports_vision: false,
             supports_tools: true,
@@ -919,6 +949,7 @@ mod tests {
         let fleet = vec![live("b", 0.0, 0, 0), live("a", 0.0, 0, 0)];
         for pol in [
             Some(OrderPolicy::Cost),
+            Some(OrderPolicy::CostPerTask),
             Some(OrderPolicy::Latency),
             Some(OrderPolicy::LeastLoaded),
             None,
@@ -940,12 +971,112 @@ mod tests {
         ];
         for pol in [
             OrderPolicy::Cost,
+            OrderPolicy::CostPerTask,
             OrderPolicy::Latency,
             OrderPolicy::LeastLoaded,
         ] {
             let got = policy_only(Some(pol)).resolve(&Hint::default(), &fleet);
             assert_eq!(got[0], "ok", "{pol:?}");
         }
+    }
+
+    // --- cost-per-task (gap §8.7 item 7) ------------------------------------
+
+    /// An upstream carded at `input` / `output` USD per Mtok; nothing else differs.
+    fn rated(id: &'static str, input: f32, output: f32) -> UpstreamMeta<'static> {
+        UpstreamMeta {
+            output_cost: output,
+            ..live(id, input, 0, 0)
+        }
+    }
+
+    /// "in-cheap" bills $1 in / $20 out; "out-cheap" bills $3 in / $4 out.
+    fn split_rates() -> Vec<UpstreamMeta<'static>> {
+        vec![rated("in-cheap", 1.0, 20.0), rated("out-cheap", 3.0, 4.0)]
+    }
+
+    fn sized(input: u32, output: u32) -> Hint {
+        Hint {
+            est_input_tokens: input,
+            est_output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    fn order(pol: OrderPolicy, hint: &Hint, fleet: &[UpstreamMeta<'_>]) -> Vec<String> {
+        policy_only(Some(pol)).resolve(hint, fleet)
+    }
+
+    #[rstest::rstest]
+    // 1k in + 10k out: in-cheap = 1k + 200k, out-cheap = 3k + 40k.
+    #[case::positive_long_answer_prefers_cheap_output(1_000, 10_000, "out-cheap")]
+    // 100k in + 100 out: in-cheap = 100k + 2k, out-cheap = 300k + 0.4k.
+    #[case::positive_long_prompt_prefers_cheap_input(100_000, 100, "in-cheap")]
+    // Nothing known ⇒ one token each side ⇒ blended rate: 21 vs 7.
+    #[case::corner_unknown_counts_order_by_blended_rate(0, 0, "out-cheap")]
+    // Only the prompt known: 1 out-token barely weighs ⇒ input rate decides.
+    #[case::boundary_unknown_output_side_weighs_one_token(1_000_000, 0, "in-cheap")]
+    fn cost_per_task_prices_the_request_not_the_rate(
+        #[case] input: u32,
+        #[case] output: u32,
+        #[case] want: &str,
+    ) {
+        let got = order(
+            OrderPolicy::CostPerTask,
+            &sized(input, output),
+            &split_rates(),
+        );
+        assert_eq!(got[0], want);
+    }
+
+    #[test]
+    fn positive_cost_per_task_differs_from_input_only_cost() {
+        // The same long-answer request: `cost` looks at the input rate alone
+        // and picks the upstream that is dearer for this task.
+        let hint = sized(1_000, 10_000);
+        assert_eq!(
+            order(OrderPolicy::Cost, &hint, &split_rates())[0],
+            "in-cheap"
+        );
+        assert_eq!(
+            order(OrderPolicy::CostPerTask, &hint, &split_rates())[0],
+            "out-cheap"
+        );
+    }
+
+    #[test]
+    fn negative_cost_per_task_orders_but_never_filters() {
+        // A huge estimate makes the dear upstream dearer — it still survives,
+        // last. Refusing on price is `max_cost`'s job, not the ordering's.
+        let got = order(
+            OrderPolicy::CostPerTask,
+            &sized(2_000_000, 1_000_000),
+            &split_rates(),
+        );
+        assert_eq!(got, vec!["out-cheap".to_string(), "in-cheap".to_string()]);
+    }
+
+    #[test]
+    fn boundary_equal_task_cost_ties_to_id() {
+        // 2 in + 2 out == 1 in + 3 out for one token each side: tie ⇒ id order.
+        let fleet = vec![rated("b", 2.0, 2.0), rated("a", 1.0, 3.0)];
+        let got = order(OrderPolicy::CostPerTask, &sized(1, 1), &fleet);
+        assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn adversarial_hostile_rates_and_counts_never_panic() {
+        // f32::MAX rates × u32::MAX tokens overflow f64 nowhere near, but the
+        // i64 key saturates — the hostile upstream sorts last, nothing panics.
+        let fleet = vec![
+            rated("evil", f32::MAX, f32::MAX),
+            rated("ok", 0.5, 2.0),
+            rated("also-evil", f32::MAX, 0.0),
+        ];
+        let got = order(OrderPolicy::CostPerTask, &sized(u32::MAX, u32::MAX), &fleet);
+        assert_eq!(got[0], "ok");
+        // The two saturated keys tie and fall back to the stable id order.
+        assert_eq!(got[1..], ["also-evil".to_string(), "evil".to_string()]);
     }
 
     // --- capacity-normalised least-loaded (multi-GPU gateway) ---------------
@@ -1009,6 +1140,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::positive_cost("cost", Some(OrderPolicy::Cost))]
+    #[case::positive_cost_per_task("cost-per-task", Some(OrderPolicy::CostPerTask))]
     #[case::positive_latency("latency", Some(OrderPolicy::Latency))]
     #[case::positive_least_loaded("least-loaded", Some(OrderPolicy::LeastLoaded))]
     #[case::positive_padded("  cost  ", Some(OrderPolicy::Cost))]

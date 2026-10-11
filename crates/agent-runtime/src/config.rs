@@ -1660,9 +1660,9 @@ pub struct RoutePreferCfg {
     #[serde(default)]
     pub upstreams: Vec<String>,
     /// Live-signal tie-break among equally-preferred survivors (model-router
-    /// 04): `"cost"` | `"latency"` | `"least-loaded"`; empty ⇒ none. Lenient
-    /// like the rest of `prefer` (an unknown value warns and orders nothing —
-    /// it can mis-sort, never mis-fire).
+    /// 04): `"cost"` | `"cost-per-task"` | `"latency"` | `"least-loaded"`;
+    /// empty ⇒ none. Lenient like the rest of `prefer` (an unknown value warns
+    /// and orders nothing — it can mis-sort, never mis-fire).
     #[serde(default)]
     pub policy: String,
     /// Spillover tier tags (gap §8.7 item 8): eligible upstreams carrying any
