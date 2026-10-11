@@ -3200,6 +3200,7 @@ impl From<agent_core::RoutePolicySpec> for pb::RoutePolicy {
             default_prefer: Some(p.default_prefer.into()),
             failure_threshold: p.failure_threshold,
             cooldown_secs: p.cooldown_secs,
+            max_cost: p.max_cost,
         }
     }
 }
@@ -3211,6 +3212,7 @@ impl From<pb::RoutePolicy> for agent_core::RoutePolicySpec {
             default_prefer: p.default_prefer.map(Into::into).unwrap_or_default(),
             failure_threshold: p.failure_threshold,
             cooldown_secs: p.cooldown_secs,
+            max_cost: p.max_cost,
         };
         out.sanitize();
         out
@@ -5495,6 +5497,7 @@ mod tests {
                 },
                 failure_threshold: 3,
                 cooldown_secs: 30,
+                max_cost: Some(4.5),
             },
         }
     }
@@ -5647,8 +5650,15 @@ mod tests {
             default_prefer: None,
             failure_threshold: 0,
             cooldown_secs: 0,
+            max_cost: Some(f32::NAN),
         };
         let spec = agent_core::RoutePolicySpec::from(wire);
+        // A hostile ceiling decodes as-is and is refused by validation (the
+        // registry's write path), never silently dropped into "no cap".
+        assert!(
+            spec.validate().is_err(),
+            "NaN policy max_cost must not validate"
+        );
         assert_eq!(spec.rules[0].match_.task_mode, None);
         assert_eq!(spec.rules[0].match_.role, None);
         assert_eq!(

@@ -324,6 +324,7 @@ pub(crate) mod testdata {
                 },
                 failure_threshold: 0,
                 cooldown_secs: 0,
+                max_cost: None,
             },
         }
     }
@@ -395,6 +396,29 @@ mod tests {
         assert_eq!(d.rule, rule);
         assert_eq!(d.order.len(), 2);
         assert!(d.why.contains(rule), "{}", d.why);
+    }
+
+    /// The `Route` preview applies the policy-wide `max_cost` (gap §8.7 item 7)
+    /// exactly as the live router does: the judge rule's preferred (and dearer)
+    /// kimi is ineligible under a $2 ceiling, and a hint can't lift it.
+    #[rstest]
+    #[case::positive_policy_cap_applies(None, "glm")]
+    #[case::negative_hint_cannot_lift_the_cap(Some(100.0), "glm")]
+    fn route_preview_honours_policy_max_cost(#[case] hint_cap: Option<f32>, #[case] want: &str) {
+        let mut cfg = config();
+        cfg.upstreams[0].input_cost = 5.0; // kimi
+        cfg.upstreams[1].input_cost = 1.0; // glm
+        cfg.policy.max_cost = Some(2.0);
+        let d = decide(
+            &cfg,
+            &RouteHint {
+                role: Some(RouteRole::Judge),
+                max_cost: hint_cap,
+                ..Default::default()
+            },
+        );
+        assert_eq!(d.chosen, want);
+        assert_eq!(d.order, vec![want.to_string()]);
     }
 
     #[test]

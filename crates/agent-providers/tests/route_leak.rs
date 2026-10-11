@@ -98,6 +98,7 @@ async fn routed_complete_with_failover_does_not_leak() {
             upstreams: vec!["hopper".into(), "ok0".into()],
             ..Default::default()
         },
+        max_cost: None,
     };
     // A generous breaker threshold keeps the hop on the hot path every time
     // (an open breaker would reorder it away and quietly measure less).

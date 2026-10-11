@@ -105,6 +105,10 @@ message RoutePolicy {
   RoutePrefer default_prefer = 2;
   uint32 failure_threshold = 3;
   uint32 cooldown_secs = 4;
+  // Policy-wide per-Mtok input-cost ceiling: an upstream whose input_cost
+  // exceeds it is never eligible; a request's RouteHint.max_cost can only
+  // tighten it. Unset ⇒ no ceiling. Must be finite and non-negative.
+  optional float max_cost = 5;
 }
 
 // The whole model-router config as ONE message: this is what a `*.textproto`

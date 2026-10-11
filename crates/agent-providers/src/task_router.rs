@@ -1008,6 +1008,7 @@ mod tests {
                 policy: None,
                 spill_to: vec![],
             },
+            max_cost: None,
         }
     }
 
@@ -1055,6 +1056,7 @@ mod tests {
                 policy: Some(crate::route::OrderPolicy::CostPerTask),
                 ..Default::default()
             },
+            max_cost: None,
         };
         let r = router(vec![a, b], policy);
         let mut q = req();
@@ -1230,6 +1232,7 @@ mod tests {
                 upstreams: vec!["kimi".into(), "glm".into()],
                 ..Default::default()
             },
+            max_cost: None,
         };
         let r = router(
             vec![
@@ -1274,6 +1277,7 @@ mod tests {
                 upstreams: vec!["kimi".into(), "glm".into()],
                 ..Default::default()
             },
+            max_cost: None,
         };
         let r = router(
             vec![
@@ -1307,6 +1311,7 @@ mod tests {
         let policy = Policy {
             rules: vec![role_rule(Role::Judge, &["glm"])],
             default_prefer: Prefer::default(),
+            max_cost: None,
         };
         let r = router(
             vec![
@@ -1528,6 +1533,7 @@ mod tests {
                 policy: Some(crate::route::OrderPolicy::Latency),
                 ..Default::default()
             },
+            max_cost: None,
         };
         let c = clock.clone();
         let router = TaskRouter::new(vec![mk("slow", 500), mk("fast", 10)], policy)
@@ -1577,6 +1583,7 @@ mod tests {
                 policy: Some(crate::route::OrderPolicy::LeastLoaded),
                 ..Default::default()
             },
+            max_cost: None,
         };
         let router = TaskRouter::new(vec![failing, ok], policy).unwrap();
         // Success after a failover: both the failed and the successful attempt

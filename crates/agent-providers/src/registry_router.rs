@@ -842,6 +842,9 @@ mod tests {
         struct TenantReg {
             by_tenant: HashMap<String, Vec<Upstream>>,
             policy: Mutex<RoutePolicySpec>,
+            /// Per-tenant policy overrides (a tenant's own `PutPolicy`); a tenant
+            /// without one reads the shared `policy`.
+            tenant_policy: HashMap<String, RoutePolicySpec>,
             fail: std::sync::atomic::AtomicBool,
         }
         impl TenantReg {
@@ -849,6 +852,7 @@ mod tests {
                 Self {
                     by_tenant,
                     policy: Mutex::new(RoutePolicySpec::default()),
+                    tenant_policy: HashMap::new(),
                     fail: std::sync::atomic::AtomicBool::new(false),
                 }
             }
@@ -877,6 +881,9 @@ mod tests {
             async fn get_policy(&self) -> Result<RoutePolicySpec> {
                 if self.fail.load(Ordering::SeqCst) {
                     return Err(Error::Registry("registry down".into()));
+                }
+                if let Some(p) = self.tenant_policy.get(&agent_core::current_tenant()) {
+                    return Ok(p.clone());
                 }
                 Ok(self.policy.lock().unwrap().clone())
             }
@@ -945,6 +952,47 @@ mod tests {
         async fn snapshot_as(router: &RegistryRouter, user: &str) -> Arc<TaskRouter> {
             let key = SessionKey::parse(user, "s1").unwrap();
             scope(key, async { router.snapshot().await.unwrap() }).await
+        }
+
+        // positive (gap §8.7 item 7): a tenant's own policy `max_cost` caps only
+        // that tenant — acme (cap $2/Mtok) is kept off the $5 upstream it would
+        // otherwise prefer; globex (no cap) still routes to it.
+        #[tokio::test]
+        async fn positive_policy_max_cost_is_per_tenant() {
+            let priced = |id: &str, input_cost: f32| Upstream {
+                input_cost,
+                ..card(id)
+            };
+            let fleet = || vec![priced("dear", 5.0), priced("cheap", 1.0)];
+            let prefer_dear = RoutePolicySpec {
+                default_prefer: agent_core::RoutePreferSpec {
+                    upstreams: vec!["dear".into(), "cheap".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut reg = TenantReg::new(
+                [("acme", fleet()), ("globex", fleet())]
+                    .into_iter()
+                    .map(|(t, c)| (t.to_string(), c))
+                    .collect(),
+            );
+            *reg.policy.get_mut().unwrap() = prefer_dear.clone();
+            reg.tenant_policy.insert(
+                "acme".into(),
+                RoutePolicySpec {
+                    max_cost: Some(2.0),
+                    ..prefer_dear
+                },
+            );
+            let (synth, _) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(Arc::new(reg), synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now);
+            assert_eq!(complete_as(&router, "acme").await, "from-cheap");
+            assert_eq!(complete_as(&router, "globex").await, "from-dear");
         }
 
         // positive: two verified tenants get DIFFERENT fleets built from their own

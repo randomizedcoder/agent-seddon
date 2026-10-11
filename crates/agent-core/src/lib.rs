@@ -3052,6 +3052,11 @@ pub struct RoutePolicySpec {
     pub default_prefer: RoutePreferSpec,
     pub failure_threshold: u32,
     pub cooldown_secs: u32,
+    /// Policy-wide per-Mtok input-cost ceiling (gap §8.7 item 7): an upstream
+    /// whose `input_cost` exceeds it is never eligible. A request's own
+    /// `RouteHint.max_cost` can only tighten it. `None` = no ceiling. Must be
+    /// finite and non-negative ([`Self::validate`]).
+    pub max_cost: Option<f32>,
 }
 
 impl RoutePolicySpec {
@@ -3066,6 +3071,11 @@ impl RoutePolicySpec {
     /// naming an unknown upstream stays *lenient* — it mis-sorts, it cannot
     /// mis-fire — matching the TOML contract (02b).
     pub fn validate(&self) -> Result<()> {
+        if self.max_cost.is_some_and(|c| !c.is_finite() || c < 0.0) {
+            return Err(Error::Registry(
+                "policy max_cost must be finite and non-negative".into(),
+            ));
+        }
         if self.rules.len() > MAX_ROUTE_RULES {
             return Err(Error::Registry(format!(
                 "{} route rules (cap {MAX_ROUTE_RULES})",
@@ -7411,6 +7421,21 @@ mod tests {
         assert_eq!(u.context_window, MAX_ROUTE_MIN_CONTEXT);
         assert_eq!(u.max_retries, MAX_UPSTREAM_RETRIES);
         assert_eq!(u.max_concurrency, MAX_UPSTREAM_CONCURRENCY);
+    }
+
+    #[rstest]
+    #[case::positive_unset(None, true)]
+    #[case::positive_finite(Some(2.5), true)]
+    #[case::boundary_zero(Some(0.0), true)]
+    #[case::negative_negative(Some(-1.0), false)]
+    #[case::adversarial_nan(Some(f32::NAN), false)]
+    #[case::adversarial_infinity(Some(f32::INFINITY), false)]
+    fn route_policy_max_cost_validation(#[case] max_cost: Option<f32>, #[case] ok: bool) {
+        let spec = RoutePolicySpec {
+            max_cost,
+            ..Default::default()
+        };
+        assert_eq!(spec.validate().is_ok(), ok, "{max_cost:?}");
     }
 
     #[rstest]
