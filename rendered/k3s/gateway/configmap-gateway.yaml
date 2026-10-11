@@ -14,6 +14,14 @@ data:
     base_url = "http://127.0.0.1:1/v1"
     model = "unwired-until-k8"
 
+    # Until K5 renders `mode = "oidc"` + `[auth.mtls] bindings`, the roles run
+    # `mode = "none"` on a routable pod address, which the S1 listen guard refuses
+    # unless accepted here. The listener stays strict mTLS (`[grpc.tls] client_ca`,
+    # enforced by k8s-render-tests `insecure-listen-needs-mtls`): only a cluster-CA
+    # cert holder connects, but such a peer can assert any tenant. Warns every start.
+    [auth]
+    allow_insecure_listen = true
+
     # `--serve-all` hosts every enabled seam on one port. On a cluster Service the
     # exec seams must not get a listener (docs/design/k8s/08); an unknown name here
     # is a config-load error (crates/agent-cli, #580).

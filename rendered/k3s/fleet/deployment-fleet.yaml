@@ -27,7 +27,7 @@ spec:
             - "--serve-fleet"
             - "--config"
             - /etc/agent/agent.toml
-          image: "agent-seddon/agent:dyqbs4fw8rkh781qaha855l462l1xw61"
+          image: "agent-seddon/agent:i9pgccifvp9mns2rwfp1lnnkr48cp206"
           livenessProbe:
             exec:
               command:

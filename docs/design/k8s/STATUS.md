@@ -360,6 +360,21 @@ are below; the remaining slices (8–9) are outlined in [Remaining K3 slices](#r
   - **Live acceptance** (after merge): import the image on l2 (`nix run .#k8s-images -- --import`,
     which needs sudo; this is also K2's pending live half). Then ArgoCD syncs the app-of-apps, the
     three roles go Ready, and `nix run .#k8s-status` is green → flip K3 to ✅.
+  - **Fourth blocker, found on the first live run: the S1 listen guard refused every role.** With
+    the image imported, all three pods crash-looped on `refusing to serve on 0.0.0.0:<port> without
+    authentication`. The roles had no `[auth]`, so `mode = "none"`, which S1 refuses on a routable
+    address. `k8s-role-boot` missed it because it rewrote the bind to `127.0.0.1`, the one case the
+    guard trusts.
+    - Fix (user decision, interim until K5's `mode = "oidc"` + `[auth.mtls] bindings`):
+      `roleBaseToml` sets `[auth] allow_insecure_listen = true`. The listener stays strict mTLS, so
+      only a cluster-CA cert holder connects, but that peer can assert any tenant. The agent warns
+      on every start.
+    - New render-test invariant **`insecure-listen-needs-mtls`**: a ConfigMap that sets the flag
+      must also set `[grpc.tls]` `cert`/`key`/`client_ca`, read by parsing the TOML. Its
+      `adversarial_` rows cover a dropped, commented-out, blank and mis-tabled `client_ca`, a
+      renamed `[grpc.tls]`, and unparseable TOML.
+    - `k8s-role-boot` now boots on the committed `0.0.0.0` bind (the sandbox's private netns keeps
+      it unreachable).
   - **Tag release before the import.** #602 and #603 (Rust) merged ahead of #604, so on main the
     committed tag (`dpbg9qjy…`) no longer matched the image's content hash (`dyqbs4fw…`). An import
     would have loaded a tag the manifests don't name (`ErrImageNeverPull`). A tag-only release PR
