@@ -83,7 +83,8 @@ message RoutePrefer {
   repeated string tags = 1;
   PoolTier tier = 2; // UNSPECIFIED ⇒ no tier bias
   repeated string upstreams = 3; // explicit id order, ahead of the unlisted
-  // Live-signal ordering policy: "" | "cost" | "latency" | "least-loaded".
+  // Live-signal ordering policy: "" | "cost" | "cost-per-task" | "latency" |
+  // "least-loaded".
   // Validated on ingest; consumed by the registry-backed router (increment 04).
   string policy = 4;
   // Spillover tier tags (gap §8.7 item 8): upstreams carrying any of these tags

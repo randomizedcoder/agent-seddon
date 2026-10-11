@@ -10101,7 +10101,7 @@
         },
         "policy": {
           "type": "string",
-          "description": "Live-signal ordering policy: \"\" | \"cost\" | \"latency\" | \"least-loaded\".\nValidated on ingest; consumed by the registry-backed router (increment 04)."
+          "description": "Live-signal ordering policy: \"\" | \"cost\" | \"cost-per-task\" | \"latency\" |\n\"least-loaded\".\nValidated on ingest; consumed by the registry-backed router (increment 04)."
         },
         "spillTo": {
           "type": "array",

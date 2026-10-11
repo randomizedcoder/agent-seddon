@@ -326,9 +326,17 @@ non-negative); the loop records a stamped cost as `actual` and only falls back t
   This is a router-side view of the same money `agent_cost_usd_total{model,…}`
   records per session: query one or the other, never sum both. E.g.
   `sum by (upstream) (rate(agent_router_cost_usd_total[1h]))`.
+- **Cost-per-task ordering.** `prefer.policy = "cost-per-task"` orders survivors by
+  the *estimated price of this request*: `input_cost × prompt estimate + output_cost ×
+  max_tokens` (the prompt estimate is the same chars/4 figure the context floor uses).
+  Plain `cost` reads only the input rate, so it picks a cheap-input / dear-output
+  upstream even for a long answer; `cost-per-task` doesn't. Both weights come from the
+  request itself, never the carried hint. An unknown (`0`) count weighs that side as
+  one token, so without an estimate (e.g. the registry `Route` preview) it orders by
+  the blended `input + output` rate. Like every policy it is a tie-break, never a
+  filter — refusing on price is `max_cost`'s job.
 - Set `output_cost` beside `input_cost` on `[[route.upstreams]]` or the registry card.
-  **Not yet** (rest of gap §8.7 item 7): cost-per-task ordering, fleet/tenant
-  `max_cost`, spend budgets.
+  **Not yet** (rest of gap §8.7 item 7): fleet/tenant `max_cost`, spend budgets.
 
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 
@@ -403,7 +411,7 @@ survives a `--model-router-config` wholesale replace (deployment-local, not
 fleet config); garbled or oversized env values fail closed.
 
 **Live-signal ordering** (04, the 02-deferred `prefer.policy`):
-`cost | latency | least-loaded` breaks ties among equally-preferred survivors
+`cost | cost-per-task | latency | least-loaded` breaks ties among equally-preferred survivors
 using the router's own dispatch accounting (an RAII in-flight counter + an
 α=0.3 latency EWMA per upstream) — a *tie-break*, never an override: an
 explicitly preferred upstream still wins regardless of its live numbers, and

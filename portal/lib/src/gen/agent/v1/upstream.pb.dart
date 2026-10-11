@@ -580,7 +580,8 @@ class RoutePrefer extends $pb.GeneratedMessage {
   @$pb.TagNumber(3)
   $pb.PbList<$core.String> get upstreams => $_getList(2);
 
-  /// Live-signal ordering policy: "" | "cost" | "latency" | "least-loaded".
+  /// Live-signal ordering policy: "" | "cost" | "cost-per-task" | "latency" |
+  /// "least-loaded".
   /// Validated on ingest; consumed by the registry-backed router (increment 04).
   @$pb.TagNumber(4)
   $core.String get policy => $_getSZ(3);
