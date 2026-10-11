@@ -285,6 +285,7 @@ health = [
   "agent_router_decisions_total",
   "agent_router_dispatch_total",
   "agent_router_failover_total",
+  "agent_router_cost_usd_total",
   "agent_router_no_candidate_total",
   "agent_router_upstream_inflight",
   "agent_sandbox_exec_seconds",

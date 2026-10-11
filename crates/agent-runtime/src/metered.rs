@@ -1826,6 +1826,22 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
             tracing::warn!(role, "task-router: no upstream can serve this request");
             m.on_router_no_candidate(role);
         }
+        // Gap §8.7 item 7: spend by the upstream that served the turn. The sink
+        // drops non-finite/non-positive lines (a provider-reported cost is untrusted).
+        RouteEvent::Priced {
+            role,
+            upstream,
+            cost,
+        } => {
+            m.on_router_cost(
+                role,
+                upstream,
+                cost.input,
+                cost.output,
+                cost.cache_read,
+                cost.cache_write,
+            );
+        }
     }
 }
 
@@ -3098,6 +3114,47 @@ mod router_inflight_tests {
             ),
             0.0,
             "the gauge drains to zero"
+        );
+    }
+
+    /// Gap §8.7 item 7: a `Priced` event lands on the per-upstream cost family,
+    /// one series per billed line; a hostile line is dropped without panicking.
+    #[test]
+    fn positive_priced_event_feeds_router_cost_by_upstream() {
+        let _lock = callsite_guard();
+        let m = Metrics::new();
+        let probe = MetricsProbe::new(&m);
+        let cost = agent_core::Cost {
+            input: 2.0,
+            output: f64::NAN,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 2.0,
+        };
+        record_route_event(
+            &m,
+            RouteEvent::Priced {
+                role: "main",
+                upstream: "kimi",
+                cost: &cost,
+            },
+        );
+        assert_eq!(
+            probe.delta(
+                &m,
+                "agent_router_cost_usd_total",
+                Some("kind=\"input\",role=\"main\",upstream=\"kimi\"")
+            ),
+            2.0
+        );
+        assert_eq!(
+            probe.delta(
+                &m,
+                "agent_router_cost_usd_total",
+                Some("kind=\"output\",role=\"main\",upstream=\"kimi\"")
+            ),
+            0.0,
+            "the NaN output line is dropped"
         );
     }
 }
