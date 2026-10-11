@@ -336,7 +336,19 @@ non-negative); the loop records a stamped cost as `actual` and only falls back t
   the blended `input + output` rate. Like every policy it is a tie-break, never a
   filter — refusing on price is `max_cost`'s job.
 - Set `output_cost` beside `input_cost` on `[[route.upstreams]]` or the registry card.
-  **Not yet** (rest of gap §8.7 item 7): fleet/tenant `max_cost`, spend budgets.
+  **Not yet** (rest of gap §8.7 item 7): per-tenant spend budgets.
+- **Policy-wide cost ceiling.** `[route] max_cost` (or `max_cost` on the registry
+  `RoutePolicy`) is a per-Mtok **input**-cost ceiling owned by whoever owns the policy:
+  a fleet process sets it in its own `[route]`; with `source = "registry"` and
+  `[tenancy] per_tenant`, each tenant's own `PutPolicy` sets that tenant's ceiling (the
+  per-tenant router cell builds from that tenant's policy). A request's carried
+  `RouteHint.max_cost` can only **tighten** it — the effective cap is the lower of the
+  two, so neither a hint nor a NaN in one can lift it. Over-cap upstreams are filtered
+  out, not deferred; unpriced (`$0`) cards always pass, so price your paid upstreams.
+  A non-finite or negative ceiling is a config / `PutPolicy` error; one that reaches
+  the engine anyway (a corrupt store) caps at `0` — fail closed, never "no cap". The
+  registry `Route` preview applies it too. A changed ceiling rebuilds the router on the
+  next refresh (the snapshot fingerprint covers the whole policy).
 
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 

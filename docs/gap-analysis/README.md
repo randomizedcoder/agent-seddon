@@ -649,7 +649,9 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
    (registry_router.rs:183-198) so they survive registry edits and span tenants.
 7. **Cost- and budget-aware selection:** ~~`OrderPolicy::CostPerTask` (input × estimated prompt +
    output × `max_tokens`)~~ (**done** — `prefer.policy = "cost-per-task"`, weights derived from the
-   request, a tie-break like the other policies), `RouteHint.max_cost` set by fleet and tenancy, a per-tenant per-hour
+   request, a tie-break like the other policies), ~~`RouteHint.max_cost` set by fleet and tenancy~~ (**done** —
+   a policy-wide ceiling: `[route] max_cost` for a fleet, `RoutePolicy.max_cost = 5` per tenant via
+   the registry; a carried hint can only tighten it), a per-tenant per-hour
    spend budget, ~~`PriceTable` fed from registry cards~~ (**done** — routed turns are priced from the
    serving card, §8.2), ~~cost metrics labelled by upstream~~ (**done** —
    `agent_router_cost_usd_total{role,upstream,kind}` from a `RouteEvent::Priced` the `TaskRouter`

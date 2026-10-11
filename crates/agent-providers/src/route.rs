@@ -275,6 +275,33 @@ pub struct Rule {
 pub struct Policy {
     pub rules: Vec<Rule>,
     pub default_prefer: Prefer,
+    /// Policy-wide per-Mtok input-cost ceiling (gap §8.7 item 7) — set by
+    /// whoever owns the policy: a fleet's `[route] max_cost`, or a tenant's own
+    /// registry policy. A request's carried `max_cost` can only **tighten** it
+    /// (the effective cap is the lower of the two), never lift it. `None` = no
+    /// ceiling. Already sanitized (see [`policy_cap`]).
+    pub max_cost: Option<f32>,
+}
+
+/// Fail-closed reading of a configured cost ceiling: `+∞` is "no cap"
+/// (`None`); NaN or a negative value — a corrupt or hostile policy — caps at
+/// `0`, so only unpriced upstreams stay eligible rather than the cap silently
+/// vanishing.
+pub fn policy_cap(c: Option<f32>) -> Option<f32> {
+    match c? {
+        c if c == f32::INFINITY => None,
+        c if c.is_nan() || c < 0.0 => Some(0.0),
+        c => Some(c),
+    }
+}
+
+/// The effective ceiling for one request: the lower of the policy's and the
+/// hint's (either may be absent).
+fn tighter(a: Option<f32>, b: Option<f32>) -> Option<f32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 impl Policy {
@@ -304,6 +331,7 @@ impl Policy {
                 })
                 .collect(),
             default_prefer: prefer(&spec.default_prefer),
+            max_cost: policy_cap(spec.max_cost),
         }
     }
 
@@ -352,6 +380,7 @@ impl Policy {
         fleet: &[UpstreamMeta<'_>],
     ) -> (Vec<usize>, Option<usize>) {
         // 1. Hard filter: only upstreams that CAN serve the request survive.
+        let max_cost = tighter(self.max_cost, hint.max_cost);
         let eligible = (0..fleet.len()).filter(|&i| {
             let u = &fleet[i];
             u.healthy
@@ -361,7 +390,7 @@ impl Policy {
                     || u.context_window == 0
                     || u.context_window >= hint.min_context)
                 && hint.tier.is_none_or(|t| u.tier >= t)
-                && hint.max_cost.is_none_or(|mc| u.input_cost <= mc)
+                && max_cost.is_none_or(|mc| u.input_cost <= mc)
         });
 
         // 2. The first matching rule sets the ordering (else the default
@@ -464,6 +493,7 @@ mod tests {
                 },
             )],
             default_prefer: Prefer::default(),
+            max_cost: None,
         };
         let hint = Hint {
             role: Role::Review,
@@ -492,6 +522,7 @@ mod tests {
                 upstreams: vec!["mi50".into()],
                 ..Default::default()
             },
+            max_cost: None,
         };
         let hint = Hint {
             task_mode: Some(TaskMode::Review),
@@ -517,6 +548,7 @@ mod tests {
                 upstreams: vec!["mi50".into()],
                 ..Default::default()
             },
+            max_cost: None,
         };
         // No mode on the hint ⇒ fall to the default, never guess.
         assert_eq!(policy.resolve(&Hint::default(), &fleet())[0], "mi50");
@@ -546,6 +578,7 @@ mod tests {
                 upstreams: vec!["mi50".into()],
                 ..Default::default()
             },
+            max_cost: None,
         };
         let both = Hint {
             role: Role::Judge,
@@ -569,6 +602,67 @@ mod tests {
         assert_eq!(Policy::default().resolve(&hint, &fleet()), vec!["glm"]);
     }
 
+    // --- policy-wide max_cost ceiling (gap §8.7 item 7) ---------------------
+
+    fn capped(cap: Option<f32>) -> Policy {
+        Policy {
+            max_cost: cap,
+            ..Policy::default()
+        }
+    }
+
+    fn eligible(p: &Policy, hint_cap: Option<f32>) -> Vec<String> {
+        let hint = Hint {
+            max_cost: hint_cap,
+            ..Default::default()
+        };
+        let mut ids = p.resolve(&hint, &fleet());
+        ids.sort();
+        ids
+    }
+
+    // fleet(): kimi $3, glm $1, mi50 $0 (per Mtok input).
+    #[rstest::rstest]
+    #[case::positive_policy_cap_excludes_the_dear(Some(1.5), None, &["glm", "mi50"][..])]
+    #[case::positive_hint_tightens_the_policy_cap(Some(5.0), Some(0.5), &["mi50"][..])]
+    #[case::negative_hint_cannot_lift_the_policy_cap(Some(1.5), Some(10.0), &["glm", "mi50"][..])]
+    #[case::corner_no_policy_cap_keeps_the_hint_cap(None, Some(1.5), &["glm", "mi50"][..])]
+    #[case::corner_no_cap_at_all(None, None, &["glm", "kimi", "mi50"][..])]
+    #[case::boundary_policy_cap_exactly_at_input_cost_passes(Some(3.0), None, &["glm", "kimi", "mi50"][..])]
+    #[case::boundary_zero_cap_leaves_only_unpriced(Some(0.0), None, &["mi50"][..])]
+    // f32::min ignores NaN, so a hostile (unsanitized) hint can't erase the ceiling.
+    #[case::adversarial_nan_hint_cannot_erase_the_policy_cap(Some(1.5), Some(f32::NAN), &["glm", "mi50"][..])]
+    fn policy_max_cost_is_a_ceiling_the_hint_can_only_tighten(
+        #[case] policy_cap: Option<f32>,
+        #[case] hint_cap: Option<f32>,
+        #[case] want: &[&str],
+    ) {
+        assert_eq!(eligible(&capped(policy_cap), hint_cap), want);
+    }
+
+    #[rstest::rstest]
+    #[case::positive_finite_kept(Some(2.5), Some(2.5))]
+    #[case::corner_unset_is_no_cap(None, None)]
+    #[case::corner_infinity_is_no_cap(Some(f32::INFINITY), None)]
+    #[case::boundary_zero_kept(Some(0.0), Some(0.0))]
+    #[case::adversarial_nan_fails_closed_to_zero(Some(f32::NAN), Some(0.0))]
+    #[case::adversarial_negative_fails_closed_to_zero(Some(-1.0), Some(0.0))]
+    #[case::adversarial_neg_infinity_fails_closed_to_zero(Some(f32::NEG_INFINITY), Some(0.0))]
+    fn policy_cap_reads_a_configured_ceiling(#[case] c: Option<f32>, #[case] want: Option<f32>) {
+        assert_eq!(policy_cap(c), want);
+    }
+
+    #[test]
+    fn adversarial_corrupt_spec_cap_fails_closed_via_from_spec() {
+        // A spec that skipped validation (a corrupt store) must not silently
+        // lose its ceiling: NaN ⇒ cap 0 ⇒ only the unpriced upstream survives.
+        let spec = agent_core::RoutePolicySpec {
+            max_cost: Some(f32::NAN),
+            ..Default::default()
+        };
+        assert_eq!(eligible(&Policy::from_spec(&spec), None), ["mi50"]);
+    }
+
     #[test]
     fn positive_max_cost_excludes_the_pricey_one() {
         let hint = Hint {
@@ -590,6 +684,7 @@ mod tests {
                 upstreams: vec!["mi50".into()],
                 ..Default::default()
             },
+            max_cost: None,
         };
         let order = policy.resolve(&Hint::default(), &fleet());
         assert_eq!(order.first().map(String::as_str), Some("mi50")); // default put mi50 first
@@ -630,6 +725,7 @@ mod tests {
                 ),
             ],
             default_prefer: Prefer::default(),
+            max_cost: None,
         };
         let hint = Hint {
             role: Role::Review,
@@ -732,6 +828,7 @@ mod tests {
                 ),
             ],
             default_prefer: Prefer::default(),
+            max_cost: None,
         }
     }
 
@@ -899,6 +996,7 @@ mod tests {
                 policy,
                 ..Default::default()
             },
+            max_cost: None,
         }
     }
 
@@ -939,6 +1037,7 @@ mod tests {
                 policy: Some(OrderPolicy::Latency),
                 ..Default::default()
             },
+            max_cost: None,
         };
         assert_eq!(p.resolve(&Hint::default(), &fleet)[0], "slow");
     }

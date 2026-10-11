@@ -186,6 +186,7 @@ async fn stress_concurrent_mixed_fleet_stays_live_and_accounted() {
             upstreams: vec!["down0".into(), "flaky0".into(), "solid0".into()],
             ..Default::default()
         },
+        max_cost: None,
     };
 
     // A racing fake clock: every call advances time, so breaker cooldowns

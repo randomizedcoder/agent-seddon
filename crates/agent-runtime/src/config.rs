@@ -1195,6 +1195,13 @@ pub struct RouteCfg {
     /// Bounded wait budget (ms) for `on_saturation = "wait"` (clamped ≤ 30s).
     #[serde(default = "default_saturation_wait_ms")]
     pub saturation_wait_ms: u64,
+    /// Policy-wide per-Mtok input-cost ceiling (gap §8.7 item 7): an upstream
+    /// whose `input_cost` exceeds it is never routed to; a request's own
+    /// `max_cost` can only tighten it. Unset = no ceiling. Must be finite and
+    /// non-negative (rejected at build otherwise). With `source = "registry"`
+    /// it seeds the registry policy, where each tenant can set its own.
+    #[serde(default)]
+    pub max_cost: Option<f32>,
 }
 
 impl Default for RouteCfg {
@@ -1210,6 +1217,7 @@ impl Default for RouteCfg {
             retry_budget: default_route_retry_budget(),
             on_saturation: default_route_on_saturation(),
             saturation_wait_ms: default_saturation_wait_ms(),
+            max_cost: None,
         }
     }
 }
@@ -5321,6 +5329,15 @@ mod tests {
         assert_eq!(cfg.on_saturation, "soft");
         assert_eq!(cfg.saturation(), None);
         assert_eq!(cfg.saturation_wait_ms, 500);
+        // No policy-wide cost ceiling unless one is configured.
+        assert_eq!(cfg.max_cost, None);
+    }
+
+    /// `[route] max_cost` (gap §8.7 item 7) parses as the policy-wide ceiling.
+    #[test]
+    fn positive_route_max_cost_parses() {
+        let cfg: RouteCfg = toml::from_str("max_cost = 2.5").unwrap();
+        assert_eq!(cfg.max_cost, Some(2.5));
     }
 
     /// `[route] on_saturation` → the router's policy: soft/empty = `None`, the
