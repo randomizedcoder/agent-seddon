@@ -448,6 +448,23 @@ them) land with their own component, tracked separately.
   - a cert/key mismatch kept serving the old cert and warned each tick;
   - `/metrics` showed `agent_tls_reload_total{part="tls",trigger="poll",result="ok"} 1`, and a
     SIGHUP added the `trigger="sighup"` series.
+- **Live on l2 (k3s), 2026-10-12.** Image `yv37blpm…` was imported, and ArgoCD has all five
+  Applications `Synced`/`Healthy` at `d8fbd742`. The three roles are 1/1 Ready, and each logs
+  `reloading TLS and signing keys on file change every_secs=30`. A forced renewal of the
+  `gateway` Certificate (`cmctl renew`) went as follows:
+  - 14:21:21 — the Secret holds the new leaf (serial `4301B5…` → `3F23EB…`);
+  - 14:22:09 — the agent logs `reloaded what="tls" ... trigger="poll"`, 48 s later (kubelet
+    projection plus one 30 s tick);
+  - 14:22:17 — a client handshake over `port-forward` that presents the pod's own client cert is
+    served the new serial;
+  - the same container kept running (started 08:12:09, 0 restarts), so the renewal needed no
+    signal and no restart.
+- **Found (for K5):** the role's private key is mode `0644` in the pod. The `tls` Secret volume
+  sets no `defaultMode`, and the pod has no `fsGroup`, so the agent warns
+  `a gRPC TLS private key is group/world-accessible` on start and on each reload. A key owned by
+  root with mode `0400` would be unreadable to uid 10001. The fix is therefore
+  `fsGroup: 10001` plus `defaultMode: 0440`, together with a decision on whether a group-readable
+  key should still warn.
 - **Found (for K8):** a serve mode binds `/metrics` to `127.0.0.1:<role metrics port>` and only
   with `[metrics] enabled = true`. The roles' rendered `[metrics] listen = "0.0.0.0:…"` is
   therefore ignored, and their metrics endpoint is off in the cluster today.
