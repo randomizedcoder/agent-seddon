@@ -439,6 +439,8 @@ them) land with their own component, tracked separately.
 - **Tag release in the same PR.** The new ConfigMaps carry a `[grpc.tls]` key that the running
   image (`i9pgccif…`) refuses (`deny_unknown_fields`). So the PR also bumps the tag to
   `h5b2lzbinjsmq4vvf2xvnl46kksrh3pd`, which must be imported on l2 before the roles restart.
+  #610 and #612 merged ahead of #613, so that tag was built without them; it is re-released on
+  merged main as `yv37blpmarcw2in1vbi9js8r51340k6q` (the tag to import).
 - **Live on native, 2026-10-11** (`agent --serve-all`, the gateway's rendered `agent.toml` with
   `reload_poll_secs = 2`, files in a kubelet-shaped `..data` symlink layout):
   - swapping `..data` to a new leaf with no signal made `openssl s_client` see `CN=gen1` → `CN=gen2`
