@@ -2500,10 +2500,17 @@ pub(crate) fn build_route_policy(
     if cfg.max_cost.is_some_and(|c| !c.is_finite() || c < 0.0) {
         anyhow::bail!("[route] max_cost must be finite and non-negative");
     }
+    if cfg
+        .max_spend_per_hour
+        .is_some_and(|b| !b.is_finite() || b < 0.0)
+    {
+        anyhow::bail!("[route] max_spend_per_hour must be finite and non-negative");
+    }
     Ok(Policy {
         rules,
         default_prefer: prefer(&cfg.default_prefer),
         max_cost: cfg.max_cost,
+        max_spend_per_hour: cfg.max_spend_per_hour,
     })
 }
 
@@ -3109,6 +3116,7 @@ fn route_policy_spec_from_toml(
         failure_threshold: u32::try_from(cfg.failure_threshold).unwrap_or(u32::MAX),
         cooldown_secs: u32::try_from(cfg.cooldown_secs).unwrap_or(u32::MAX),
         max_cost: cfg.max_cost,
+        max_spend_per_hour: cfg.max_spend_per_hour,
     };
     spec.sanitize();
     spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -4477,6 +4485,34 @@ mod route_policy_tests {
             ),
         }
     }
+
+    /// `[route] max_spend_per_hour` (gap §8.7 item 7) becomes the policy's
+    /// hourly budget; a value that can't be a budget is a config error, never
+    /// "unlimited".
+    #[rstest::rstest]
+    #[case::positive_carried(Some(5.0), Ok(Some(5.0)))]
+    #[case::corner_unset(None, Ok(None))]
+    #[case::boundary_zero(Some(0.0), Ok(Some(0.0)))]
+    #[case::negative_negative(Some(-1.0), Err(()))]
+    #[case::adversarial_nan(Some(f64::NAN), Err(()))]
+    #[case::adversarial_infinity(Some(f64::INFINITY), Err(()))]
+    fn route_spend_budget_builds_the_policy_budget(
+        #[case] budget: Option<f64>,
+        #[case] want: Result<Option<f64>, ()>,
+    ) {
+        let cfg = RouteCfg {
+            max_spend_per_hour: budget,
+            ..Default::default()
+        };
+        match (build_route_policy(&cfg), want) {
+            (Ok(p), Ok(w)) => assert_eq!(p.max_spend_per_hour, w),
+            (Err(e), Err(())) => assert!(e.to_string().contains("max_spend_per_hour"), "{e}"),
+            (got, w) => panic!(
+                "{budget:?}: got {:?}, want {w:?}",
+                got.map(|p| p.max_spend_per_hour)
+            ),
+        }
+    }
 }
 
 /// Build the config-selected content scanner, or `None` when `[scanner] rules`
@@ -5318,6 +5354,26 @@ mod registry_seed_tests {
         };
         let err = route_policy_spec_from_toml(&cfg).expect_err("NaN never seeds");
         assert!(format!("{err:#}").contains("max_cost"), "{err:#}");
+    }
+
+    #[test]
+    fn positive_policy_seed_carries_spend_budget() {
+        let cfg = crate::config::RouteCfg {
+            max_spend_per_hour: Some(5.0),
+            ..Default::default()
+        };
+        let spec = route_policy_spec_from_toml(&cfg).expect("seeds");
+        assert_eq!(spec.max_spend_per_hour, Some(5.0));
+    }
+
+    #[test]
+    fn adversarial_policy_seed_refuses_a_negative_spend_budget() {
+        let cfg = crate::config::RouteCfg {
+            max_spend_per_hour: Some(-5.0),
+            ..Default::default()
+        };
+        let err = route_policy_spec_from_toml(&cfg).expect_err("negative never seeds");
+        assert!(format!("{err:#}").contains("max_spend_per_hour"), "{err:#}");
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@
 
 use crate::route::{Policy, Saturation};
 use crate::router::RouteObserver;
-use crate::task_router::{RouterUpstream, TaskRouter};
+use crate::task_router::{RouterUpstream, SpendLedger, TaskRouter};
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider, ModelCapabilities,
     ProviderRegistry, Result, RoutePolicySpec, Upstream,
@@ -43,6 +43,14 @@ use tokio::sync::RwLock;
 /// same bound the `PerTenant<Store>` view cache uses).
 const MAX_CACHED_TENANTS: usize = 1024;
 
+/// Upper bound on per-tenant spend ledgers (gap §8.7 item 7). Ledgers live
+/// **outside** the cell cache so evicting a cell — which a client can force
+/// under `mode = "none"` by cycling >1024 tenant ids — can't forgive a
+/// tenant's hour. A ledger is only ever dropped when forgetting it is exact
+/// (nothing spent in the window, nothing held, no live cell using it). ~1 KiB
+/// each, so the bound is ~4 MiB.
+const MAX_SPEND_LEDGERS: usize = 4 * MAX_CACHED_TENANTS;
+
 /// Builds the concrete provider for one upstream card. Injected by the runtime
 /// (it owns key resolution, metering, and the provider constructors); returns
 /// `Err` for a card it cannot build — the router skips that card.
@@ -63,16 +71,52 @@ struct RouterCell {
     providers: Mutex<HashMap<u64, Arc<dyn LlmProvider>>>,
     last_refresh_ms: AtomicU64,
     fingerprint: AtomicU64,
+    /// This tenant's hourly spend (gap §8.7 item 7), handed to every rebuilt
+    /// router so a card or policy edit doesn't forgive the hour's spend.
+    spend: Arc<SpendLedger>,
 }
 
 impl RouterCell {
-    fn new() -> Self {
+    fn new(spend: Arc<SpendLedger>) -> Self {
         Self {
             current: RwLock::new(None),
             providers: Mutex::new(HashMap::new()),
             last_refresh_ms: AtomicU64::new(0),
             fingerprint: AtomicU64::new(0),
+            spend,
         }
+    }
+}
+
+/// Per-tenant spend ledgers, kept apart from the evictable [`CellCache`] (see
+/// [`MAX_SPEND_LEDGERS`]). Full ⇒ prune every *idle* ledger (forgetting it is
+/// exact); still full ⇒ the newcomer books into the shared `overflow` ledger —
+/// fail closed: a flood of distinct tenants shares one budget rather than
+/// each getting a fresh one.
+#[derive(Default)]
+struct LedgerMap {
+    ledgers: HashMap<String, Arc<SpendLedger>>,
+    overflow: Arc<SpendLedger>,
+}
+
+impl LedgerMap {
+    fn get_or_create(&mut self, key: &str, now_ms: u64) -> Arc<SpendLedger> {
+        if let Some(l) = self.ledgers.get(key) {
+            return l.clone();
+        }
+        if self.ledgers.len() >= MAX_SPEND_LEDGERS {
+            // Idle = only this map holds it (no live cell / router / in-flight
+            // turn), nothing held, nothing spent in the window.
+            self.ledgers.retain(|_, l| {
+                Arc::strong_count(l) > 1 || l.reserved() > 0.0 || l.spent(now_ms) > 0.0
+            });
+        }
+        if self.ledgers.len() >= MAX_SPEND_LEDGERS {
+            return self.overflow.clone();
+        }
+        let l = Arc::new(SpendLedger::default());
+        self.ledgers.insert(key.to_string(), l.clone());
+        l
     }
 }
 
@@ -104,6 +148,8 @@ pub struct RegistryRouter {
     /// The per-tenant fleet cells, built lazily and cached (bounded); one entry
     /// (`local`) when `per_tenant` is off.
     cells: Mutex<CellCache>,
+    /// Each tenant's hourly spend, outliving its (evictable) cell.
+    ledgers: Mutex<LedgerMap>,
 }
 
 impl RegistryRouter {
@@ -120,6 +166,7 @@ impl RegistryRouter {
             now_ms: Arc::new(crate::router::wall_clock_ms),
             per_tenant: false,
             cells: Mutex::new(CellCache::default()),
+            ledgers: Mutex::new(LedgerMap::default()),
         }
     }
 
@@ -175,8 +222,15 @@ impl RegistryRouter {
                 return cell.clone();
             }
         }
-        // Build the empty cell outside the lookup lock, then insert-or-share under it.
-        let cell = Arc::new(RouterCell::new());
+        // Build the empty cell outside the lookup lock, then insert-or-share under
+        // it. Its ledger comes from the eviction-proof map, so a re-built cell
+        // resumes the tenant's hour.
+        let spend = self
+            .ledgers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_create(&key, (self.now_ms)());
+        let cell = Arc::new(RouterCell::new(spend));
         let mut cache = self.cells.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(existing) = cache.cells.get(&key) {
             return existing.clone();
@@ -368,7 +422,8 @@ impl RegistryRouter {
             .with_clock(self.now_ms.clone())
             .with_retry_budget(retry_budget)
             .with_saturation(self.saturation, self.saturation_wait_ms)
-            .with_snapshot_version(fingerprint);
+            .with_snapshot_version(fingerprint)
+            .with_spend_ledger(cell.spend.clone());
         if let Some(o) = &self.observer {
             router = router.with_observer(o.clone());
         }
@@ -995,6 +1050,101 @@ mod tests {
             assert_eq!(complete_as(&router, "globex").await, "from-dear");
         }
 
+        // positive (gap §8.7 item 7): the hourly spend budget is per tenant and
+        // outlives a rebuild — acme's spent budget keeps acme on the free
+        // upstream (even after a policy edit rebuilds its fleet) while globex,
+        // under the same budget but nothing spent, still gets the dear one.
+        #[tokio::test]
+        async fn positive_spend_budget_is_per_tenant_and_survives_a_rebuild() {
+            let priced = |id: &str, input_cost: f32| Upstream {
+                input_cost,
+                ..card(id)
+            };
+            let fleet = || vec![priced("dear", 5.0), priced("free", 0.0)];
+            let budgeted = RoutePolicySpec {
+                default_prefer: agent_core::RoutePreferSpec {
+                    upstreams: vec!["dear".into(), "free".into()],
+                    ..Default::default()
+                },
+                max_spend_per_hour: Some(5.0),
+                ..Default::default()
+            };
+            let reg = TenantReg::new(
+                [("acme", fleet()), ("globex", fleet())]
+                    .into_iter()
+                    .map(|(t, c)| (t.to_string(), c))
+                    .collect(),
+            );
+            *reg.policy.lock().unwrap() = budgeted.clone();
+            let reg = Arc::new(reg);
+            let (synth, _) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg.clone(), synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now.clone());
+            assert_eq!(complete_as(&router, "acme").await, "from-dear");
+            let before = snapshot_as(&router, "acme").await;
+            // acme spends its $5 for the hour.
+            router.cells.lock().unwrap().cells["acme"]
+                .spend
+                .add(now(), 5.0);
+            assert_eq!(complete_as(&router, "acme").await, "from-free");
+            assert_eq!(complete_as(&router, "globex").await, "from-dear");
+            // A policy edit rebuilds acme's fleet; the spend carries over.
+            *reg.policy.lock().unwrap() = RoutePolicySpec {
+                failure_threshold: 7,
+                ..budgeted
+            };
+            assert!(!Arc::ptr_eq(&before, &snapshot_as(&router, "acme").await));
+            assert_eq!(complete_as(&router, "acme").await, "from-free");
+        }
+
+        // adversarial (gap §8.7 item 7): under `mode = "none"` a client can mint
+        // >1024 tenant ids to evict any tenant's cell. Eviction must not forgive
+        // the hour: acme's ledger lives outside the cell cache, so acme's rebuilt
+        // cell is still over budget and stays on the free upstream.
+        #[tokio::test]
+        async fn adversarial_tenant_flood_eviction_cannot_reset_a_spent_budget() {
+            let priced = |id: &str, input_cost: f32| Upstream {
+                input_cost,
+                ..card(id)
+            };
+            let reg = TenantReg::new(
+                [("acme", vec![priced("dear", 5.0), priced("free", 0.0)])]
+                    .into_iter()
+                    .map(|(t, c)| (t.to_string(), c))
+                    .collect(),
+            );
+            *reg.policy.lock().unwrap() = RoutePolicySpec {
+                default_prefer: agent_core::RoutePreferSpec {
+                    upstreams: vec!["dear".into(), "free".into()],
+                    ..Default::default()
+                },
+                max_spend_per_hour: Some(5.0),
+                ..Default::default()
+            };
+            let (synth, _) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(Arc::new(reg), synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now.clone());
+            assert_eq!(complete_as(&router, "acme").await, "from-dear");
+            router.cells.lock().unwrap().cells["acme"]
+                .spend
+                .add(now(), 5.0);
+            for i in 0..(MAX_CACHED_TENANTS + 8) {
+                let key = SessionKey::parse(&format!("flood{i}"), "s1").unwrap();
+                scope(key, async { router.capabilities() }).await;
+            }
+            assert!(
+                !router.cells.lock().unwrap().cells.contains_key("acme"),
+                "the flood evicted acme's cell"
+            );
+            assert_eq!(complete_as(&router, "acme").await, "from-free");
+        }
+
         // positive: two verified tenants get DIFFERENT fleets built from their own
         // cards — A routes to A's upstream, B to B's, and the two inner routers are
         // distinct instances (no shared global fleet).
@@ -1184,5 +1334,62 @@ mod tests {
                 "acme keeps its last good fleet through a registry error"
             );
         }
+    }
+
+    // ---- per-tenant spend ledgers (gap §8.7 item 7) -------------------------
+
+    /// The ledger map at its cap: which of the `(spent, pinned)` incumbents a
+    /// newcomer prunes, and whether the newcomer gets its own ledger or the
+    /// shared overflow one. `pinned` = a live cell still holds the ledger.
+    #[rstest::rstest]
+    #[case::positive_idle_ledgers_are_pruned_for_a_newcomer(0.0, false, true, 1)]
+    #[case::negative_a_ledger_with_spend_is_never_forgotten(2.0, false, false, MAX_SPEND_LEDGERS)]
+    #[case::negative_a_ledger_a_live_cell_holds_is_kept(0.0, true, false, MAX_SPEND_LEDGERS)]
+    #[case::adversarial_full_of_spenders_newcomer_shares_the_overflow(
+        1.0,
+        true,
+        false,
+        MAX_SPEND_LEDGERS
+    )]
+    fn ledger_map_prunes_only_idle_ledgers(
+        #[case] spent: f64,
+        #[case] pinned: bool,
+        #[case] own_ledger: bool,
+        #[case] len_after: usize,
+    ) {
+        let mut m = LedgerMap::default();
+        let pins: Vec<_> = (0..MAX_SPEND_LEDGERS)
+            .map(|i| {
+                let l = m.get_or_create(&format!("t{i}"), 0);
+                l.add(0, spent);
+                l
+            })
+            .collect();
+        if !pinned {
+            drop(pins);
+        }
+        let got = m.get_or_create("newcomer", 0);
+        assert_eq!(!Arc::ptr_eq(&got, &m.overflow), own_ledger);
+        assert_eq!(m.ledgers.len(), len_after);
+    }
+
+    #[test]
+    fn corner_the_same_tenant_always_gets_the_same_ledger() {
+        let mut m = LedgerMap::default();
+        let a = m.get_or_create("acme", 0);
+        assert!(Arc::ptr_eq(&a, &m.get_or_create("acme", 0)));
+        assert!(!Arc::ptr_eq(&a, &m.get_or_create("globex", 0)));
+    }
+
+    #[test]
+    fn boundary_a_ledger_whose_hour_rolled_off_is_idle() {
+        let mut m = LedgerMap::default();
+        for i in 0..MAX_SPEND_LEDGERS {
+            m.get_or_create(&format!("t{i}"), 0).add(0, 1.0);
+        }
+        // An hour later every booking has rolled off: all prunable.
+        let got = m.get_or_create("newcomer", 60 * 60_000);
+        assert!(!Arc::ptr_eq(&got, &m.overflow));
+        assert_eq!(m.ledgers.len(), 1);
     }
 }

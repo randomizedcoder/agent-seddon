@@ -88,6 +88,7 @@ fn policy() -> Policy {
             spill_to: vec![],
         },
         max_cost: None,
+        max_spend_per_hour: None,
     }
 }
 

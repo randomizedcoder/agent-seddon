@@ -45,6 +45,11 @@ pub struct Hint {
     pub est_output_tokens: u32,
     /// Tier floor; `None` = any tier.
     pub tier: Option<PoolTier>,
+    /// The policy's hourly spend budget is used up (gap §8.7 item 7): only
+    /// **unpriced** upstreams (both card costs `0` — e.g. a local GPU) stay
+    /// eligible, so an exhausted budget can't spend more. Set by the router
+    /// from its own ledger, never carried on a request.
+    pub budget_exhausted: bool,
     /// An explicit upstream id that wins *when eligible* — it can never select an
     /// upstream the hard filter rejected (a model-supplied override can't escape).
     pub override_upstream: Option<String>,
@@ -281,6 +286,23 @@ pub struct Policy {
     /// (the effective cap is the lower of the two), never lift it. `None` = no
     /// ceiling. Already sanitized (see [`policy_cap`]).
     pub max_cost: Option<f32>,
+    /// Hourly spend budget in USD (gap §8.7 item 7) over a rolling 60-minute
+    /// window of what this policy's router has spent (the task-router's
+    /// `SpendLedger`). Once spent, only unpriced
+    /// upstreams stay eligible. `None` = no budget. Already sanitized (see
+    /// [`policy_budget`]).
+    pub max_spend_per_hour: Option<f64>,
+}
+
+/// Fail-closed reading of a configured spend budget, like [`policy_cap`]:
+/// `+∞` is "no budget"; NaN or a negative value budgets `0` (only unpriced
+/// upstreams), never "unlimited".
+pub fn policy_budget(b: Option<f64>) -> Option<f64> {
+    match b? {
+        b if b == f64::INFINITY => None,
+        b if b.is_nan() || b < 0.0 => Some(0.0),
+        b => Some(b),
+    }
 }
 
 /// Fail-closed reading of a configured cost ceiling: `+∞` is "no cap"
@@ -332,6 +354,7 @@ impl Policy {
                 .collect(),
             default_prefer: prefer(&spec.default_prefer),
             max_cost: policy_cap(spec.max_cost),
+            max_spend_per_hour: policy_budget(spec.max_spend_per_hour),
         }
     }
 
@@ -391,6 +414,7 @@ impl Policy {
                     || u.context_window >= hint.min_context)
                 && hint.tier.is_none_or(|t| u.tier >= t)
                 && max_cost.is_none_or(|mc| u.input_cost <= mc)
+                && (!hint.budget_exhausted || (u.input_cost == 0.0 && u.output_cost == 0.0))
         });
 
         // 2. The first matching rule sets the ordering (else the default
@@ -494,6 +518,7 @@ mod tests {
             )],
             default_prefer: Prefer::default(),
             max_cost: None,
+            max_spend_per_hour: None,
         };
         let hint = Hint {
             role: Role::Review,
@@ -523,6 +548,7 @@ mod tests {
                 ..Default::default()
             },
             max_cost: None,
+            max_spend_per_hour: None,
         };
         let hint = Hint {
             task_mode: Some(TaskMode::Review),
@@ -549,6 +575,7 @@ mod tests {
                 ..Default::default()
             },
             max_cost: None,
+            max_spend_per_hour: None,
         };
         // No mode on the hint ⇒ fall to the default, never guess.
         assert_eq!(policy.resolve(&Hint::default(), &fleet())[0], "mi50");
@@ -579,6 +606,7 @@ mod tests {
                 ..Default::default()
             },
             max_cost: None,
+            max_spend_per_hour: None,
         };
         let both = Hint {
             role: Role::Judge,
@@ -652,6 +680,48 @@ mod tests {
         assert_eq!(policy_cap(c), want);
     }
 
+    #[rstest::rstest]
+    #[case::positive_finite_kept(Some(5.0), Some(5.0))]
+    #[case::corner_unset_is_no_budget(None, None)]
+    #[case::corner_infinity_is_no_budget(Some(f64::INFINITY), None)]
+    #[case::boundary_zero_kept(Some(0.0), Some(0.0))]
+    #[case::adversarial_nan_fails_closed_to_zero(Some(f64::NAN), Some(0.0))]
+    #[case::adversarial_negative_fails_closed_to_zero(Some(-1.0), Some(0.0))]
+    #[case::adversarial_neg_infinity_fails_closed_to_zero(Some(f64::NEG_INFINITY), Some(0.0))]
+    fn policy_budget_reads_a_configured_budget(#[case] b: Option<f64>, #[case] want: Option<f64>) {
+        assert_eq!(policy_budget(b), want);
+    }
+
+    #[test]
+    fn adversarial_corrupt_spec_budget_fails_closed_via_from_spec() {
+        let spec = agent_core::RoutePolicySpec {
+            max_spend_per_hour: Some(f64::NAN),
+            ..Default::default()
+        };
+        assert_eq!(Policy::from_spec(&spec).max_spend_per_hour, Some(0.0));
+    }
+
+    /// An exhausted budget leaves only unpriced upstreams: both card rates must
+    /// be `0` — an output-only price still spends.
+    #[rstest::rstest]
+    #[case::positive_within_budget_all_eligible(false, &["glm", "kimi", "mi50", "outonly"])]
+    #[case::negative_exhausted_unpriced_only(true, &["mi50"])]
+    fn budget_exhausted_filters_to_unpriced(#[case] exhausted: bool, #[case] want: &[&str]) {
+        let mut f = fleet();
+        let mut out_only = f[2];
+        out_only.id = "outonly";
+        out_only.input_cost = 0.0;
+        out_only.output_cost = 4.0;
+        f.push(out_only);
+        let hint = Hint {
+            budget_exhausted: exhausted,
+            ..Default::default()
+        };
+        let mut got = Policy::default().resolve(&hint, &f);
+        got.sort();
+        assert_eq!(got, want);
+    }
+
     #[test]
     fn adversarial_corrupt_spec_cap_fails_closed_via_from_spec() {
         // A spec that skipped validation (a corrupt store) must not silently
@@ -685,6 +755,7 @@ mod tests {
                 ..Default::default()
             },
             max_cost: None,
+            max_spend_per_hour: None,
         };
         let order = policy.resolve(&Hint::default(), &fleet());
         assert_eq!(order.first().map(String::as_str), Some("mi50")); // default put mi50 first
@@ -726,6 +797,7 @@ mod tests {
             ],
             default_prefer: Prefer::default(),
             max_cost: None,
+            max_spend_per_hour: None,
         };
         let hint = Hint {
             role: Role::Review,
@@ -829,6 +901,7 @@ mod tests {
             ],
             default_prefer: Prefer::default(),
             max_cost: None,
+            max_spend_per_hour: None,
         }
     }
 
@@ -997,6 +1070,7 @@ mod tests {
                 ..Default::default()
             },
             max_cost: None,
+            max_spend_per_hour: None,
         }
     }
 
@@ -1038,6 +1112,7 @@ mod tests {
                 ..Default::default()
             },
             max_cost: None,
+            max_spend_per_hour: None,
         };
         assert_eq!(p.resolve(&Hint::default(), &fleet)[0], "slow");
     }

@@ -10080,6 +10080,11 @@
           "type": "number",
           "format": "float",
           "description": "Policy-wide per-Mtok input-cost ceiling: an upstream whose input_cost\nexceeds it is never eligible; a request's RouteHint.max_cost can only\ntighten it. Unset ⇒ no ceiling. Must be finite and non-negative."
+        },
+        "maxSpendPerHour": {
+          "type": "number",
+          "format": "double",
+          "description": "Hourly spend budget in USD over a rolling 60-minute window: once the\npolicy's router has spent it, only unpriced upstreams stay eligible\n(none ⇒ refused). Unset ⇒ no budget. Must be finite and non-negative."
         }
       },
       "description": "The declarative routing policy: ordered rules + the default preference, plus\nthe router-wide breaker settings (0 ⇒ the built-in default)."

@@ -1804,6 +1804,13 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
             tracing::info!(role, "task-router spilled onto the reserve tier");
             m.on_route_decision("-", "spilled");
         }
+        RouteEvent::OverBudget { role } => {
+            tracing::warn!(
+                role,
+                "task-router spend budget exhausted: unpriced upstreams only"
+            );
+            m.on_route_decision("-", "over_budget");
+        }
         RouteEvent::Exhausted => {
             tracing::warn!("router exhausted every candidate");
             m.on_route_decision("-", "exhausted");

@@ -187,6 +187,7 @@ async fn stress_concurrent_mixed_fleet_stays_live_and_accounted() {
             ..Default::default()
         },
         max_cost: None,
+        max_spend_per_hour: None,
     };
 
     // A racing fake clock: every call advances time, so breaker cooldowns

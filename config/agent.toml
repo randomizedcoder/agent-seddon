@@ -765,6 +765,10 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # #   ceiling — an upstream whose input_cost is above it is never routed to. A request's
 # #   own max_cost can only tighten it. Unpriced ($0) upstreams always pass. With
 # #   source = "registry" this seeds the registry policy, where each tenant sets its own.
+# # max_spend_per_hour = 5.0  (gap §8.7 item 7, a [route] key): a USD budget over a rolling
+# #   60-minute window of routed spend. Once spent, only unpriced upstreams (input_cost and
+# #   output_cost both 0, e.g. a local GPU) are routed to; none ⇒ the request is refused.
+# #   Checked before each turn (a turn may overshoot); per tenant with per_tenant + registry.
 #
 # # source = "registry" (model-router 04): the fleet + policy come from the LIVE
 # # [registry] store — this TOML seeds it when empty, and a control-plane
