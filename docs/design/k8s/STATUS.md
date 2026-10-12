@@ -10,7 +10,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 (live import on l2 at K3 Slice 9) |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ✅ | #580, #581, #583, #587, #588, #589, #591, #596, #600, #604, #605, #607 |
-| K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ✅ | #PRNUM |
+| K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ✅ | #613 |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
 | K7 | Privileged sandbox sidecar | agent-seddon | ⬜ | |
