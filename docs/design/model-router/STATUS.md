@@ -53,6 +53,9 @@ leak) and must pass `nix develop -c nix flake check`.
   rate × prompt estimate + output rate × `max_tokens`) rather than the input rate alone.
   A policy-wide `max_cost` ceiling (`[route] max_cost` / registry `RoutePolicy.max_cost`,
   per tenant under `per_tenant`) caps eligibility; a hint's `max_cost` can only tighten it.
+  An hourly spend budget (`[route] max_spend_per_hour` / `RoutePolicy.max_spend_per_hour`,
+  rolling 60-minute ledger per router cell) narrows routing to unpriced upstreams once
+  spent, refusing when there are none.
 - **02: engine + fixed-role router only — hint threading deferred to [02b](02b-hint-threading.md)**
   (the code says so explicitly). As built: `Hint`/`Match` carry `role + min_context` (+
   capability/cost/tier filters) but **no `task_mode`**; `Prefer` orders by explicit

@@ -109,6 +109,10 @@ message RoutePolicy {
   // exceeds it is never eligible; a request's RouteHint.max_cost can only
   // tighten it. Unset ⇒ no ceiling. Must be finite and non-negative.
   optional float max_cost = 5;
+  // Hourly spend budget in USD over a rolling 60-minute window: once the
+  // policy's router has spent it, only unpriced upstreams stay eligible
+  // (none ⇒ refused). Unset ⇒ no budget. Must be finite and non-negative.
+  optional double max_spend_per_hour = 6;
 }
 
 // The whole model-router config as ONE message: this is what a `*.textproto`

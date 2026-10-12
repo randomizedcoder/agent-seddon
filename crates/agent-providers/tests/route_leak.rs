@@ -99,6 +99,7 @@ async fn routed_complete_with_failover_does_not_leak() {
             ..Default::default()
         },
         max_cost: None,
+        max_spend_per_hour: None,
     };
     // A generous breaker threshold keeps the hop on the hot path every time
     // (an open breaker would reorder it away and quietly measure less).

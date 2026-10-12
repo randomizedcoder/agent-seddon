@@ -86,6 +86,9 @@ pub fn decide(cfg: &ModelRouterConfig, hint: &RouteHint) -> RouteDecision {
         est_output_tokens: 0,
         tier: hint.tier,
         override_upstream: hint.override_upstream.clone(),
+        // Spend is live router state the store doesn't hold: the preview shows
+        // the within-budget route.
+        budget_exhausted: false,
     };
     let (order, rule) = policy.resolve_with_rule(&engine_hint, &fleet);
     let overridden = matches!(
@@ -325,6 +328,7 @@ pub(crate) mod testdata {
                 failure_threshold: 0,
                 cooldown_secs: 0,
                 max_cost: None,
+                max_spend_per_hour: None,
             },
         }
     }

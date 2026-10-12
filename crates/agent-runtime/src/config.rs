@@ -1202,6 +1202,14 @@ pub struct RouteCfg {
     /// it seeds the registry policy, where each tenant can set its own.
     #[serde(default)]
     pub max_cost: Option<f32>,
+    /// Hourly spend budget in USD (gap §8.7 item 7) over a rolling 60-minute
+    /// window of routed spend: once used up, only unpriced upstreams (both
+    /// card costs 0) are routed to; none ⇒ the request is refused. Unset = no
+    /// budget. Must be finite and non-negative (rejected at build otherwise).
+    /// With `source = "registry"` it seeds the registry policy, where each
+    /// tenant can set its own.
+    #[serde(default)]
+    pub max_spend_per_hour: Option<f64>,
 }
 
 impl Default for RouteCfg {
@@ -1218,6 +1226,7 @@ impl Default for RouteCfg {
             on_saturation: default_route_on_saturation(),
             saturation_wait_ms: default_saturation_wait_ms(),
             max_cost: None,
+            max_spend_per_hour: None,
         }
     }
 }
@@ -5356,6 +5365,15 @@ mod tests {
     fn positive_route_max_cost_parses() {
         let cfg: RouteCfg = toml::from_str("max_cost = 2.5").unwrap();
         assert_eq!(cfg.max_cost, Some(2.5));
+    }
+
+    /// `[route] max_spend_per_hour` (gap §8.7 item 7) parses as the budget;
+    /// unset by default.
+    #[test]
+    fn positive_route_spend_budget_parses() {
+        let cfg: RouteCfg = toml::from_str("max_spend_per_hour = 5.0").unwrap();
+        assert_eq!(cfg.max_spend_per_hour, Some(5.0));
+        assert_eq!(RouteCfg::default().max_spend_per_hour, None);
     }
 
     /// `[route] on_saturation` → the router's policy: soft/empty = `None`, the

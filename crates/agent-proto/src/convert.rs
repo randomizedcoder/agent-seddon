@@ -3201,6 +3201,7 @@ impl From<agent_core::RoutePolicySpec> for pb::RoutePolicy {
             failure_threshold: p.failure_threshold,
             cooldown_secs: p.cooldown_secs,
             max_cost: p.max_cost,
+            max_spend_per_hour: p.max_spend_per_hour,
         }
     }
 }
@@ -3213,6 +3214,7 @@ impl From<pb::RoutePolicy> for agent_core::RoutePolicySpec {
             failure_threshold: p.failure_threshold,
             cooldown_secs: p.cooldown_secs,
             max_cost: p.max_cost,
+            max_spend_per_hour: p.max_spend_per_hour,
         };
         out.sanitize();
         out
@@ -5498,6 +5500,7 @@ mod tests {
                 failure_threshold: 3,
                 cooldown_secs: 30,
                 max_cost: Some(4.5),
+                max_spend_per_hour: Some(12.5),
             },
         }
     }
@@ -5651,8 +5654,13 @@ mod tests {
             failure_threshold: 0,
             cooldown_secs: 0,
             max_cost: Some(f32::NAN),
+            max_spend_per_hour: Some(f64::NAN),
         };
         let spec = agent_core::RoutePolicySpec::from(wire);
+        assert!(
+            spec.max_spend_per_hour.is_some_and(f64::is_nan),
+            "a hostile budget decodes as-is (for validation to refuse), never as unset"
+        );
         // A hostile ceiling decodes as-is and is refused by validation (the
         // registry's write path), never silently dropped into "no cap".
         assert!(

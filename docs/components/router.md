@@ -336,7 +336,6 @@ non-negative); the loop records a stamped cost as `actual` and only falls back t
   the blended `input + output` rate. Like every policy it is a tie-break, never a
   filter — refusing on price is `max_cost`'s job.
 - Set `output_cost` beside `input_cost` on `[[route.upstreams]]` or the registry card.
-  **Not yet** (rest of gap §8.7 item 7): per-tenant spend budgets.
 - **Policy-wide cost ceiling.** `[route] max_cost` (or `max_cost` on the registry
   `RoutePolicy`) is a per-Mtok **input**-cost ceiling owned by whoever owns the policy:
   a fleet process sets it in its own `[route]`; with `source = "registry"` and
@@ -349,6 +348,44 @@ non-negative); the loop records a stamped cost as `actual` and only falls back t
   the engine anyway (a corrupt store) caps at `0` — fail closed, never "no cap". The
   registry `Route` preview applies it too. A changed ceiling rebuilds the router on the
   next refresh (the snapshot fingerprint covers the whole policy).
+- **Hourly spend budget.** `[route] max_spend_per_hour` (or `max_spend_per_hour` on
+  the registry `RoutePolicy`, proto field 6) is a USD budget over a **rolling 60-minute
+  window** of what the router has spent — every priced turn (card-stamped or
+  provider-reported, the same figure `agent_router_cost_usd_total` records) is booked
+  into one-minute buckets. Ownership follows `max_cost`: a fleet's own `[route]`, or
+  each tenant's own policy under `[tenancy] per_tenant` (every tenant cell keeps its
+  own ledger). Once the hour's spend reaches the budget, only **unpriced** upstreams
+  (both card rates `0`, e.g. a local GPU) stay eligible — an override can't escape it —
+  and with none the request is refused (`spend budget exhausted`, terminal, nothing
+  dialed). Each such request bumps `agent_route_decisions_total{decision="over_budget"}`.
+  Spend rolls off minute by minute, so priced upstreams return as the window slides.
+  - Admission is an atomic **reservation**: a dispatch to a priced upstream holds its
+    estimated cost (card rates × the prompt estimate and `max_tokens`) until the turn
+    ends, and is admitted only while spend **plus every in-flight hold plus its own
+    estimate** fits in the budget — so neither concurrent turns (a stale "under budget"
+    read) nor one huge `max_tokens` can be admitted past it. A refused priced candidate
+    is skipped (an unpriced one may still serve); with none left the request is refused
+    terminally. A turn can still overshoot only by what its estimate missed: a prompt
+    larger than the chars/4 estimate (e.g. media blocks, which it skips).
+  - The ledger outlives a rebuild (a card or policy edit doesn't forgive the hour) and
+    a cell eviction: tenant ledgers live outside the bounded 1024-tenant cell cache (a
+    client minting tenant ids under `mode = "none"` can evict cells, not forgive spend),
+    in a map of up to 4096 that only drops a ledger when forgetting it is exact (nothing
+    spent in the window, nothing held, no live cell). Past that a new tenant books into
+    one shared overflow ledger — a flood shares a budget rather than minting fresh
+    ones. It is in-process: a restart starts afresh, and N processes each enforce their
+    own budget.
+  - Fail closed: a non-finite / negative budget is a config / `PutPolicy` error, and
+    one that reaches the engine anyway budgets `0`. On a priced card the card is the
+    floor: a turn books the larger of the provider's reported total and the card price
+    for its usage, so a NaN, negative, zero or lowball report can't make a priced
+    upstream cheap (`+∞` exhausts the hour), and a turn that reports no usage at all
+    books its pre-turn estimate — as does a turn the caller cancels mid-call (it may
+    already be billed upstream); an upstream that answers with an error books nothing,
+    so failover doesn't burn budget. A streamed turn is booked when the stream is dropped —
+    drained, failed mid-way, or abandoned — so a consumer that stops polling can't skip
+    the booking.
+  - The registry `Route` preview has no ledger, so it shows the within-budget route.
 
 ## The provider registry (`[registry]`, `--serve-provider-registry`)
 

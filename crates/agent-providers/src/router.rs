@@ -167,6 +167,10 @@ pub enum RouteEvent<'a> {
     /// breaker-open), so the request spilled onto the matched rule's `spill_to`
     /// reserve tier (gap §8.7 item 8).
     Spilled { role: &'a str },
+    /// The policy's hourly spend budget is used up, so this `role`'s request
+    /// was routed among unpriced upstreams only (or refused when there were
+    /// none) (gap §8.7 item 7). Task-router only.
+    OverBudget { role: &'a str },
     /// Every candidate was exhausted.
     Exhausted,
     /// The task-router's policy decision (02b): `chosen` won for this
@@ -674,6 +678,7 @@ mod tests {
                     RouteEvent::SkippedSaturated { target } => format!("saturated:{target}"),
                     RouteEvent::Shed { role } => format!("shed:{role}"),
                     RouteEvent::Spilled { role } => format!("spilled:{role}"),
+                    RouteEvent::OverBudget { role } => format!("over-budget:{role}"),
                     RouteEvent::Exhausted => "exhausted".into(),
                     RouteEvent::Decided { chosen, .. } => format!("decided:{chosen}"),
                     RouteEvent::NoCandidate { role } => format!("no-candidate:{role}"),

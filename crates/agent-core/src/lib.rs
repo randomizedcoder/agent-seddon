@@ -3057,6 +3057,11 @@ pub struct RoutePolicySpec {
     /// `RouteHint.max_cost` can only tighten it. `None` = no ceiling. Must be
     /// finite and non-negative ([`Self::validate`]).
     pub max_cost: Option<f32>,
+    /// Hourly spend budget in USD (gap §8.7 item 7) over a rolling 60-minute
+    /// window: once the policy's router has spent it, only unpriced upstreams
+    /// stay eligible (none ⇒ refused). `None` = no budget. Must be finite and
+    /// non-negative ([`Self::validate`]).
+    pub max_spend_per_hour: Option<f64>,
 }
 
 impl RoutePolicySpec {
@@ -3074,6 +3079,14 @@ impl RoutePolicySpec {
         if self.max_cost.is_some_and(|c| !c.is_finite() || c < 0.0) {
             return Err(Error::Registry(
                 "policy max_cost must be finite and non-negative".into(),
+            ));
+        }
+        if self
+            .max_spend_per_hour
+            .is_some_and(|b| !b.is_finite() || b < 0.0)
+        {
+            return Err(Error::Registry(
+                "policy max_spend_per_hour must be finite and non-negative".into(),
             ));
         }
         if self.rules.len() > MAX_ROUTE_RULES {
@@ -7436,6 +7449,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(spec.validate().is_ok(), ok, "{max_cost:?}");
+    }
+
+    #[rstest]
+    #[case::positive_unset(None, true)]
+    #[case::positive_finite(Some(5.0), true)]
+    #[case::boundary_zero(Some(0.0), true)]
+    #[case::negative_negative(Some(-0.01), false)]
+    #[case::adversarial_nan(Some(f64::NAN), false)]
+    #[case::adversarial_infinity(Some(f64::INFINITY), false)]
+    fn route_policy_spend_budget_validation(#[case] budget: Option<f64>, #[case] ok: bool) {
+        let spec = RoutePolicySpec {
+            max_spend_per_hour: budget,
+            ..Default::default()
+        };
+        assert_eq!(spec.validate().is_ok(), ok, "{budget:?}");
     }
 
     #[rstest]
