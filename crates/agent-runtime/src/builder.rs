@@ -2496,9 +2496,13 @@ pub(crate) fn build_route_policy(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if cfg.max_cost.is_some_and(|c| !c.is_finite() || c < 0.0) {
+        anyhow::bail!("[route] max_cost must be finite and non-negative");
+    }
     Ok(Policy {
         rules,
         default_prefer: prefer(&cfg.default_prefer),
+        max_cost: cfg.max_cost,
     })
 }
 
@@ -3103,6 +3107,7 @@ fn route_policy_spec_from_toml(
         default_prefer: prefer(&cfg.default_prefer),
         failure_threshold: u32::try_from(cfg.failure_threshold).unwrap_or(u32::MAX),
         cooldown_secs: u32::try_from(cfg.cooldown_secs).unwrap_or(u32::MAX),
+        max_cost: cfg.max_cost,
     };
     spec.sanitize();
     spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -4444,6 +4449,33 @@ mod route_policy_tests {
         assert_eq!(policy.rules[0].match_.role, None);
         assert_eq!(policy.rules[0].match_.task_mode, None);
     }
+
+    /// `[route] max_cost` (gap §8.7 item 7) becomes the policy-wide ceiling; a
+    /// value that can't be a ceiling is a config error, never "no cap".
+    #[rstest::rstest]
+    #[case::positive_carried(Some(2.5), Ok(Some(2.5)))]
+    #[case::corner_unset(None, Ok(None))]
+    #[case::boundary_zero(Some(0.0), Ok(Some(0.0)))]
+    #[case::negative_negative(Some(-1.0), Err(()))]
+    #[case::adversarial_nan(Some(f32::NAN), Err(()))]
+    #[case::adversarial_infinity(Some(f32::INFINITY), Err(()))]
+    fn route_max_cost_builds_the_policy_ceiling(
+        #[case] max_cost: Option<f32>,
+        #[case] want: Result<Option<f32>, ()>,
+    ) {
+        let cfg = RouteCfg {
+            max_cost,
+            ..Default::default()
+        };
+        match (build_route_policy(&cfg), want) {
+            (Ok(p), Ok(w)) => assert_eq!(p.max_cost, w),
+            (Err(e), Err(())) => assert!(e.to_string().contains("max_cost"), "{e}"),
+            (got, w) => panic!(
+                "{max_cost:?}: got {:?}, want {w:?}",
+                got.map(|p| p.max_cost)
+            ),
+        }
+    }
 }
 
 /// Build the config-selected content scanner, or `None` when `[scanner] rules`
@@ -5265,6 +5297,26 @@ mod registry_seed_tests {
         cfg.default_prefer.spill_to = vec!["cloud".into()];
         let spec = route_policy_spec_from_toml(&cfg).expect("seeds");
         assert_eq!(spec.default_prefer.spill_to, vec!["cloud"]);
+    }
+
+    #[test]
+    fn positive_policy_seed_carries_max_cost() {
+        let cfg = crate::config::RouteCfg {
+            max_cost: Some(2.5),
+            ..Default::default()
+        };
+        let spec = route_policy_spec_from_toml(&cfg).expect("seeds");
+        assert_eq!(spec.max_cost, Some(2.5));
+    }
+
+    #[test]
+    fn adversarial_policy_seed_refuses_a_nan_max_cost() {
+        let cfg = crate::config::RouteCfg {
+            max_cost: Some(f32::NAN),
+            ..Default::default()
+        };
+        let err = route_policy_spec_from_toml(&cfg).expect_err("NaN never seeds");
+        assert!(format!("{err:#}").contains("max_cost"), "{err:#}");
     }
 
     #[tokio::test]

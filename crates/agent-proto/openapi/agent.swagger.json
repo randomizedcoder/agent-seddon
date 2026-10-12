@@ -10075,6 +10075,11 @@
         "cooldownSecs": {
           "type": "integer",
           "format": "int64"
+        },
+        "maxCost": {
+          "type": "number",
+          "format": "float",
+          "description": "Policy-wide per-Mtok input-cost ceiling: an upstream whose input_cost\nexceeds it is never eligible; a request's RouteHint.max_cost can only\ntighten it. Unset ⇒ no ceiling. Must be finite and non-negative."
         }
       },
       "description": "The declarative routing policy: ordered rules + the default preference, plus\nthe router-wide breaker settings (0 ⇒ the built-in default)."
