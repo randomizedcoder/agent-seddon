@@ -141,6 +141,20 @@ presented on the next connection, with no restart.
   reload. A reload never drops the client identity: whether one is presented is fixed by the
   configured paths.
 
+### As built (K4): reload on file change
+
+A renewer that cannot send a signal (a Kubernetes Secret volume, rotated by a `..data` symlink
+swap) is covered by `[grpc.tls] reload_poll_secs` ([k8s 05](../k8s/05-identity-and-pki.md#reload-on-file-change-new-k4)).
+
+- **What:** every N seconds, hash the exact files a SIGHUP reloads (the listener's `cert`/`key`/
+  `client_ca`, `[grpc.tls.client]`, the `[auth.token]` keys), reading at most the loaders'
+  1 MiB cap of each. On any difference, run the same reload as SIGHUP, once per tick.
+- **Failures:** the new state is kept only when every part reloaded, so a torn read or a
+  renewal still being written is retried on the next tick. `0` (the default) spawns nothing.
+- **Counted:** `agent_tls_reload_total{part, trigger=sighup|poll, result=ok|error}`.
+- **Where:** [`crates/agent-cli/src/reload.rs`](../../../crates/agent-cli/src/reload.rs)
+  (`Poller`, `watch_poll`).
+
 ## Test matrix
 
 The transport matrix ([`transport.rs`](../../../crates/agent-grpc/src/transport.rs) tests and the

@@ -82,6 +82,7 @@ generic per-RPC tower layer — chosen so `agent-grpc` stays free of any `agent-
 | `agent_config_store_ops_total` | `collection` (one per card kind), `op` (get\|list\|count\|put\|delete\|ensure_tenant), `outcome` (ok\|error), `tenant` | `MeteredBackend` decorator over `agent_config_store::Backend` |
 | `agent_config_store_op_seconds` | `op` (get\|list\|count\|apply) — call-level health latency, **un-tenanted** (hostile secs clamped) | `MeteredBackend` |
 | `agent_auth_verify_total` | `outcome` (ok\|error) — **no tenant** (pre-identity; a rejected token has no verified tenant) | `AuthObserver` on `AuthLayer` |
+| `agent_tls_reload_total` | `part` (tls\|client_tls\|signing_key), `trigger` (sighup\|poll), `result` (ok\|error) — **no tenant** (process upkeep) | `ReloadRecorder` in `agent-cli` `reload.rs` (S20 + K4) |
 | `agent_authz_decisions_total` | `action`, `resource_type`, `decision` (allow\|deny) — **no tenant** (rides the `grpc.server` span, which carries it) | `OnceLock<AuthzObserver>` in `authz::require` |
 | `agent_grpc_server_rpc_total` | `rpc` (path; high-water bounded → `other`), `outcome` (canonical gRPC code name), `tenant` | `MetricsLayer` tower service (inside `AuthLayer`) |
 | `agent_grpc_server_rpc_seconds` | `rpc` (health latency, **un-tenanted**; hostile secs clamped) | `MetricsLayer` |

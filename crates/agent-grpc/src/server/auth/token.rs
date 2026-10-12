@@ -450,6 +450,17 @@ impl TokenService {
         Ok(service)
     }
 
+    /// The key files [`Self::reload`] reads (`signing_key`, then `previous_key`);
+    /// empty when the keys were not loaded from files (K4).
+    pub fn key_files(&self) -> Vec<PathBuf> {
+        self.key_files.as_ref().map_or_else(Vec::new, |f| {
+            std::iter::once(&f.signing)
+                .chain(&f.previous)
+                .cloned()
+                .collect()
+        })
+    }
+
     /// Re-read `signing_key` and `previous_key` and use them from now on. A rotation
     /// is: move the old key to `previous_key`, write the new one to `signing_key`,
     /// reload. Tokens signed by the old key keep verifying (as the previous key) until

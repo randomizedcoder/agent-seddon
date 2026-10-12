@@ -45,6 +45,8 @@ let
     cert = "/etc/agent/tls/tls.crt"
     key = "/etc/agent/tls/tls.key"
     client_ca = "/etc/agent/tls/ca.crt"
+    # The Secret renews with no signal; reload on file change (K4).
+    reload_poll_secs = ${toString k8sLib.tlsReloadPollSecs}
 
     [metrics]
     listen = "0.0.0.0:${toString gw.metrics_port}"

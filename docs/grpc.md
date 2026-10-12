@@ -176,6 +176,12 @@ by `[grpc.tls]` (security-hardening S4,
   a bad file fails the start, not the first handshake. A private key readable by
   group/other logs a warning. Unknown keys under `[grpc.tls]` are errors (a
   misspelt `client_ca` would otherwise silently turn mTLS off).
+- **Renewal** — a SIGHUP reloads the listener's and the client's files and the
+  `[auth.token]` keys with no restart (S20). Where nothing can send a signal (a
+  Kubernetes Secret volume), `reload_poll_secs = 30` hashes those same files every
+  30 s and reloads on a change (K4); `0`, the default, leaves SIGHUP as the only
+  trigger. A failed reload keeps the old material. Both count
+  `agent_tls_reload_total{part, trigger, result}`.
 
 **Certificates.** `nix run .#pki-dev` mints an offline development PKI with
 smallstep's `step certificate create` (no `step-ca` daemon, no network) into

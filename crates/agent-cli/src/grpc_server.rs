@@ -895,6 +895,15 @@ fn auth_verify_observer(agent: &Agent) -> agent_grpc::server::AuthObserver {
     std::sync::Arc::new(move |outcome: &str| metrics.record_auth_verify(outcome))
 }
 
+/// Recorder bridging each reloaded part into
+/// `agent_tls_reload_total{part, trigger, result}` ([`crate::reload`]).
+fn tls_reload_recorder(agent: &Agent) -> crate::reload::ReloadRecorder {
+    let metrics = agent.metrics();
+    std::sync::Arc::new(move |part: &str, trigger: &str, result: &str| {
+        metrics.record_tls_reload(part, trigger, result);
+    })
+}
+
 /// Register the process-global authz observer once, bridging each RBAC decision into
 /// `agent_authz_decisions_total{action,resource_type,decision}`. Idempotent (an
 /// `OnceLock` behind `set_authz_observer`), so calling it from every serve entry point
@@ -1003,7 +1012,8 @@ fn auth_layer(
 /// [`listener_tls`] says so (security-hardening S4). Logs the transport mode once.
 /// The caller passes the returned TLS to `Bound::serve` and uses it to say which
 /// endpoint a client must dial. A SIGHUP reloads the TLS files and the signing keys
-/// ([`crate::reload`], S20).
+/// ([`crate::reload`], S20), and so does a change to them with `[grpc.tls]
+/// reload_poll_secs` (K4).
 async fn serve_base(
     agent: &Agent,
     listen: &Endpoint,
@@ -1027,7 +1037,10 @@ async fn serve_base(
         Some(rpc_observer(agent)),
     )
     .await;
-    crate::reload::watch_sighup(tls.clone(), auth.clone());
+    let reloader =
+        crate::reload::Reloader::new(tls.clone(), auth.clone(), tls_reload_recorder(agent));
+    crate::reload::watch_sighup(reloader.clone());
+    crate::reload::watch_poll(agent.grpc_tls().reload_poll_secs, reloader);
     // `[auth.token]` ⇒ this listener also serves `AuthService` (exchange, key set,
     // who-am-I) beside whatever seams the caller adds.
     Ok((auth.serve_auth_service(router), health, tls))

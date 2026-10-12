@@ -10,7 +10,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K1 | k3s platform on l2 (Cilium, cert-manager, ArgoCD) | `~/nixos` | ✅ | #577 (`rendered/k3s/apps` root), #578 (verified) |
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 (live import on l2 at K3 Slice 9) |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ✅ | #580, #581, #583, #587, #588, #589, #591, #596, #600, #604, #605, #607 |
-| K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ⬜ | |
+| K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ✅ | #613 |
 | K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
 | K7 | Privileged sandbox sidecar | agent-seddon | ⬜ | |
@@ -384,8 +384,8 @@ below, and the original slice plan is kept in [Remaining K3 slices](#remaining-k
     (`nix run .#k8s-images` + `nix run .#k8s-render-manifests`) restores the fixed point. Any
     Rust change that lands on main between a release and the import repeats this.
   - **Known follow-up (not a blocker).** The role certs are 24h, and **K4**
-    (`[grpc.tls] reload_poll_secs`) isn't built. A long-running pod therefore needs a restart at
-    renewal until K4 lands.
+    (`[grpc.tls] reload_poll_secs`) wasn't built yet. A long-running pod needed a restart at
+    renewal until K4 landed ([below](#k4--reload-on-file-change-2026-10-11)).
   - **Known follow-up (not a blocker).** The agent warns that `/etc/agent/tls/tls.key` is mode
     `644`: the `tls-<role>` Secret volume uses the default `defaultMode`. Tightening it needs a
     `defaultMode` the non-root uid can still read (e.g. `0440` + `fsGroup`); left for K5, with the
@@ -414,3 +414,38 @@ The `[auth.mtls] bindings` that consume the SPIFFE SANs, and the cert-manager ap
 would constrain which SANs a requester may obtain, are **K5**, not remaining K3 work. The policy /
 Namespace objects (and the `CiliumNetworkPolicy` and default-deny render-test rows that would cover
 them) land with their own component, tracked separately.
+
+### K4 — reload on file change (2026-10-11)
+
+- **`[grpc.tls] reload_poll_secs`** ([05](05-identity-and-pki.md#reload-on-file-change-new-k4)).
+  Every N seconds, `Poller` in `crates/agent-cli/src/reload.rs` hashes the exact files a SIGHUP
+  reloads: the listener's `cert`/`key`/`client_ca`, `[grpc.tls.client]` and the `[auth.token]`
+  keys.
+  - Reads are capped at the loaders' 1 MiB. Any difference runs the same `reload_all` as SIGHUP,
+    once per tick.
+  - The new state is kept only when every part reloaded, so a torn read is retried on the next
+    tick.
+  - `0` (the default) spawns nothing. The maximum is 86400.
+  - New accessors `ServerTls::files`, `ClientTls::files` and `AuthLayer::key_files` name the
+    watched paths, so a sibling file never triggers a reload.
+- **Counted:** `agent_tls_reload_total{part, trigger=sighup|poll, result}`, on both triggers. It is
+  in the mt-audit `health` list and the metric census.
+- **Turned on for the roles** (pulled forward from K5's "`reload_poll_secs` on"):
+  - `k8sLib.tlsReloadPollSecs = 30` in each role's `[grpc.tls]`;
+  - new render-test invariant **`tls-reload-polls`**: wherever `[grpc.tls] cert` is set, an integer
+    in `1..=3600`, read by parsing the TOML;
+  - its `adversarial_` rows cover a dropped, `0`, too-slow, string, negative, commented-out and
+    mis-tabled value, and unparseable TOML.
+- **Tag release in the same PR.** The new ConfigMaps carry a `[grpc.tls]` key that the running
+  image (`i9pgccif…`) refuses (`deny_unknown_fields`). So the PR also bumps the tag to
+  `h5b2lzbinjsmq4vvf2xvnl46kksrh3pd`, which must be imported on l2 before the roles restart.
+- **Live on native, 2026-10-11** (`agent --serve-all`, the gateway's rendered `agent.toml` with
+  `reload_poll_secs = 2`, files in a kubelet-shaped `..data` symlink layout):
+  - swapping `..data` to a new leaf with no signal made `openssl s_client` see `CN=gen1` → `CN=gen2`
+    within one tick, logged `reloaded what="tls" trigger="poll"`;
+  - a cert/key mismatch kept serving the old cert and warned each tick;
+  - `/metrics` showed `agent_tls_reload_total{part="tls",trigger="poll",result="ok"} 1`, and a
+    SIGHUP added the `trigger="sighup"` series.
+- **Found (for K8):** a serve mode binds `/metrics` to `127.0.0.1:<role metrics port>` and only
+  with `[metrics] enabled = true`. The roles' rendered `[metrics] listen = "0.0.0.0:…"` is
+  therefore ignored, and their metrics endpoint is off in the cluster today.

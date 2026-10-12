@@ -145,6 +145,8 @@ pub struct GrpcTlsSettings {
     pub key: String,
     /// Set ⇒ client certificates chaining to this CA are required (mTLS).
     pub client_ca: String,
+    /// `[grpc.tls] reload_poll_secs`: reload on file change every N seconds; `0` ⇒ off.
+    pub reload_poll_secs: u64,
 }
 
 /// How the scheduler is wired (config C2c-2). The registry half is served either

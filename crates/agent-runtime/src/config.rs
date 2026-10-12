@@ -3116,6 +3116,13 @@ pub struct GrpcTlsCfg {
     /// CA bundle (PEM) that client certificates must chain to. Set ⇒ mTLS required.
     #[serde(default)]
     pub client_ca: String,
+    /// Every this many seconds, hash the files a SIGHUP reloads (this table's
+    /// `cert`/`key`/`client_ca`, `[grpc.tls.client]` and the `[auth.token]` keys)
+    /// and reload them when they change, with no signal (K4: a Kubernetes Secret
+    /// rotates by a symlink swap that sends none). `0` (the default) is off. At most
+    /// [`GrpcTlsCfg::MAX_RELOAD_POLL_SECS`].
+    #[serde(default)]
+    pub reload_poll_secs: u64,
     #[serde(default)]
     pub client: GrpcTlsClientCfg,
 }
@@ -3146,9 +3153,20 @@ pub struct GrpcTlsClientCfg {
 }
 
 impl GrpcTlsCfg {
+    /// The longest `reload_poll_secs`: a day. A longer interval would outlive a
+    /// short-lived certificate (the K3 role certs are 24h, renewed 8h early).
+    pub const MAX_RELOAD_POLL_SECS: u64 = 86_400;
+
     /// Structural checks at load; the files themselves are read (size-capped,
     /// PEM-checked, parsed) when a process starts serving or dialing.
     pub fn validate(&self) -> Result<(), String> {
+        if self.reload_poll_secs > Self::MAX_RELOAD_POLL_SECS {
+            return Err(format!(
+                "[grpc.tls] `reload_poll_secs` {} is over the maximum {} (0 turns polling off)",
+                self.reload_poll_secs,
+                Self::MAX_RELOAD_POLL_SECS
+            ));
+        }
         let set = |s: &str| !s.trim().is_empty();
         if set(&self.cert) != set(&self.key) {
             return Err("[grpc.tls] `cert` and `key` must be set together".into());
@@ -5818,6 +5836,21 @@ mod tests {
     #[case::adversarial_misspelt_client_ca_refused(
         "[grpc.tls]\ncert = \"c\"\nkey = \"k\"\nclient_cA = \"ca\"\n",
         Some("unknown field `client_cA`")
+    )]
+    #[case::positive_reload_poll("[grpc.tls]\nreload_poll_secs = 30\n", None)]
+    #[case::corner_reload_poll_zero_is_off("[grpc.tls]\nreload_poll_secs = 0\n", None)]
+    #[case::boundary_reload_poll_at_max("[grpc.tls]\nreload_poll_secs = 86400\n", None)]
+    #[case::boundary_reload_poll_over_max(
+        "[grpc.tls]\nreload_poll_secs = 86401\n",
+        Some("over the maximum 86400")
+    )]
+    #[case::negative_reload_poll_negative(
+        "[grpc.tls]\nreload_poll_secs = -1\n",
+        Some("reload_poll_secs")
+    )]
+    #[case::adversarial_reload_poll_huge(
+        "[grpc.tls]\nreload_poll_secs = 18446744073709551615\n",
+        Some("reload_poll_secs")
     )]
     fn grpc_tls_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
         let doc =

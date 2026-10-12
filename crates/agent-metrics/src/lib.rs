@@ -170,6 +170,7 @@ pub struct Metrics {
     config_store_ops: IntCounterVec,
     config_store_op_seconds: HistogramVec,
     auth_verify: IntCounterVec,
+    tls_reload: IntCounterVec,
     authz_decisions: IntCounterVec,
     grpc_server_rpc: IntCounterVec,
     grpc_server_rpc_seconds: HistogramVec,
@@ -1020,6 +1021,14 @@ impl Metrics {
             &["outcome"],
         )
         .unwrap();
+        let tls_reload = IntCounterVec::new(
+            Opts::new(
+                "agent_tls_reload_total",
+                "TLS material and signing-key reloads, by part (tls|client_tls|signing_key), trigger (sighup|poll) and result (ok|error)",
+            ),
+            &["part", "trigger", "result"],
+        )
+        .unwrap();
         let authz_decisions = IntCounterVec::new(
             Opts::new(
                 "agent_authz_decisions_total",
@@ -1651,6 +1660,7 @@ impl Metrics {
             Box::new(config_store_ops.clone()),
             Box::new(config_store_op_seconds.clone()),
             Box::new(auth_verify.clone()),
+            Box::new(tls_reload.clone()),
             Box::new(authz_decisions.clone()),
             Box::new(grpc_server_rpc.clone()),
             Box::new(grpc_server_rpc_seconds.clone()),
@@ -1813,6 +1823,7 @@ impl Metrics {
             config_store_ops,
             config_store_op_seconds,
             auth_verify,
+            tls_reload,
             authz_decisions,
             grpc_server_rpc,
             grpc_server_rpc_seconds,
@@ -2914,6 +2925,16 @@ impl Metrics {
     /// successful one is attributed on the `grpc.server` span.
     pub fn record_auth_verify(&self, outcome: &str) {
         self.auth_verify.with_label_values(&[outcome]).inc();
+    }
+
+    /// Count one reloaded part `{part, trigger, result}` (`tls`|`client_tls`|
+    /// `signing_key`; `sighup`|`poll`; `ok`|`error`). All three are fixed strings
+    /// from `agent-cli`'s reload module, so the series stay bounded. Process-level
+    /// upkeep: no tenant.
+    pub fn record_tls_reload(&self, part: &str, trigger: &str, result: &str) {
+        self.tls_reload
+            .with_label_values(&[part, trigger, result])
+            .inc();
     }
 
     /// Count one RBAC authorization decision `{action, resource_type, decision}` — all
@@ -4776,6 +4797,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[rstest]
+    // desc: a polled listener reload that worked.
+    #[case::positive_poll_ok("tls", "poll", "ok")]
+    // desc (negative): a SIGHUP reload that kept the old material.
+    #[case::negative_sighup_error("client_tls", "sighup", "error")]
+    // desc (corner): the signing keys count as their own part.
+    #[case::corner_signing_key("signing_key", "poll", "ok")]
+    fn tls_reload_recorder(#[case] part: &str, #[case] trigger: &str, #[case] result: &str) {
+        let m = Metrics::new();
+        m.record_tls_reload(part, trigger, result);
+        m.record_tls_reload(part, trigger, result);
+        let text = m.encode_text();
+        let line = line_with(
+            &text,
+            "agent_tls_reload_total",
+            &[("part", part), ("trigger", trigger), ("result", result)],
+        )
+        .unwrap_or_else(|| panic!("no tls reload series:\n{text}"));
+        assert!(line.ends_with(" 2"), "{line}");
+        // Boundary: process upkeep, never tenant-labelled.
+        assert!(!line.contains("tenant="), "{line}");
     }
 
     #[test]

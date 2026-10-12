@@ -306,6 +306,7 @@ health = [
   "agent_structured_validate_seconds",
   "agent_tasks_closed",
   "agent_tasks_open",
+  "agent_tls_reload_total",
   "agent_tool_errors_total",
   "agent_tool_exec_seconds",
   "agent_transport_post_seconds",

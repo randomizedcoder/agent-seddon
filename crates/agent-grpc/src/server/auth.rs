@@ -365,6 +365,15 @@ impl AuthLayer {
         self.tokens.as_ref().map(|t| t.reload())
     }
 
+    /// The signing key files [`Self::reload_keys`] reads; empty without
+    /// `[auth.token]` (K4).
+    #[cfg(feature = "auth")]
+    pub fn key_files(&self) -> Vec<std::path::PathBuf> {
+        self.tokens
+            .as_ref()
+            .map_or_else(Vec::new, |t| t.key_files())
+    }
+
     /// Turn on browser sign-in (`AuthService.Issuers` / `Begin` and code
     /// exchanges, S13) for this layer's `AuthService`. `None` leaves it off.
     #[cfg(feature = "auth")]
