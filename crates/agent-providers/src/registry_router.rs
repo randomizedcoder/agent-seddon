@@ -20,8 +20,8 @@
 //! locally in the synthesizer from `api_key_ref` — never from registry payload.
 
 use crate::route::{Policy, Saturation};
-use crate::router::RouteObserver;
-use crate::task_router::{RouterUpstream, SpendLedger, TaskRouter};
+use crate::router::{Health, RouteObserver};
+use crate::task_router::{LiveStats, RouterUpstream, SpendLedger, TaskRouter};
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider, ModelCapabilities,
     ProviderRegistry, Result, RoutePolicySpec, Upstream,
@@ -74,6 +74,18 @@ struct RouterCell {
     /// This tenant's hourly spend (gap §8.7 item 7), handed to every rebuilt
     /// router so a card or policy edit doesn't forgive the hour's spend.
     spend: Arc<SpendLedger>,
+    /// Circuit breakers keyed like `providers` (connection identity), carried
+    /// across rebuilds so an edit doesn't close an open breaker (gap §8.7 item
+    /// 6). Per tenant on purpose: a failure can be credential-specific, and a
+    /// shared breaker would let one tenant's bad card open another's.
+    health: Mutex<HashMap<u64, Arc<Health>>>,
+    /// Live load (in-flight + latency) keyed by [`RegistryRouter::endpoint_key`],
+    /// carried across rebuilds so an edit doesn't zero the count of calls still
+    /// running (gap §8.7 item 6), and pruned of retired endpoints like
+    /// `providers`. Per tenant on purpose, and so bounded by this tenant's own
+    /// cards: a shared map would let one tenant's load (or card flood) decide
+    /// another's admission.
+    stats: Mutex<HashMap<u64, Arc<LiveStats>>>,
 }
 
 impl RouterCell {
@@ -84,6 +96,8 @@ impl RouterCell {
             last_refresh_ms: AtomicU64::new(0),
             fingerprint: AtomicU64::new(0),
             spend,
+            health: Mutex::new(HashMap::new()),
+            stats: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -277,6 +291,26 @@ impl RegistryRouter {
         h.finish()
     }
 
+    /// The capacity a card's load counts against within its tenant's cell: the
+    /// endpoint plus (for a keyed card, whose capacity is its account's, not
+    /// the host's) its `api_key_ref`. Unlike [`Self::provider_key`] it leaves
+    /// out the card `id`, so one tenant's cards for one pod share a count. It
+    /// is never shared across tenants (the map lives in the cell): one tenant
+    /// holding long calls open must not decide whether another's call is
+    /// admitted (cross-tenant capacity is fairness, gap §8.7 items 4–5). The
+    /// URL is normalised (scheme/host case, default port, trailing `/`) on a
+    /// best-effort basis: a card spelling the same pod differently only
+    /// splits its own count.
+    fn endpoint_key(u: &Upstream) -> u64 {
+        let raw = u.base_url.trim();
+        let url = reqwest::Url::parse(raw)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|_| raw.to_string());
+        let mut h = DefaultHasher::new();
+        (&u.kind, url.trim_end_matches('/'), &u.model, &u.api_key_ref).hash(&mut h);
+        h.finish()
+    }
+
     /// Whole-snapshot fingerprint: any visible change (cards or policy)
     /// triggers a rebuild; identical snapshots rebuild nothing.
     fn config_fingerprint(cards: &[Upstream], policy: &RoutePolicySpec) -> u64 {
@@ -352,10 +386,13 @@ impl RegistryRouter {
         fingerprint: u64,
     ) -> Option<TaskRouter> {
         let mut upstreams = Vec::new();
+        let (mut health, mut live) = (Vec::new(), Vec::new());
         let mut cache = cell
             .providers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut breakers = cell.health.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut stats = cell.stats.lock().unwrap_or_else(PoisonError::into_inner);
         for card in cards.iter().filter(|c| c.enabled) {
             // Defense in depth: the store validated on ingest, but a remote
             // registry is untrusted — re-validate before building anything.
@@ -383,6 +420,13 @@ impl RegistryRouter {
                     }
                 },
             };
+            health.push(
+                breakers
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(Health::new()))
+                    .clone(),
+            );
+            live.push(stats.entry(Self::endpoint_key(&card)).or_default().clone());
             upstreams.push(RouterUpstream {
                 id: card.id.clone(),
                 tags: card.tags.clone(),
@@ -403,6 +447,13 @@ impl RegistryRouter {
             .map(Self::provider_key)
             .collect();
         cache.retain(|k, _| live_keys.contains(k));
+        breakers.retain(|k, _| live_keys.contains(k));
+        let live_endpoints: std::collections::HashSet<u64> = cards
+            .iter()
+            .filter(|c| c.enabled)
+            .map(Self::endpoint_key)
+            .collect();
+        stats.retain(|k, _| live_endpoints.contains(k));
         if upstreams.is_empty() {
             return None;
         }
@@ -423,7 +474,8 @@ impl RegistryRouter {
             .with_retry_budget(retry_budget)
             .with_saturation(self.saturation, self.saturation_wait_ms)
             .with_snapshot_version(fingerprint)
-            .with_spend_ledger(cell.spend.clone());
+            .with_spend_ledger(cell.spend.clone())
+            .with_shared_state(health, live);
         if let Some(o) = &self.observer {
             router = router.with_observer(o.clone());
         }
@@ -1334,6 +1386,107 @@ mod tests {
                 "acme keeps its last good fleet through a registry error"
             );
         }
+
+        // positive (gap §8.7 item 6): within one tenant, two cards (different
+        // ids, differently spelled URLs) that dial one pod share its cap —
+        // the running call on a-kimi fills it, so the next call is shed onto
+        // the free upstream rather than stacking a second call via b-kimi.
+        #[tokio::test]
+        async fn positive_one_tenants_cards_on_a_pod_share_its_cap() {
+            let rig = rig();
+            let reg = tenants(vec![(
+                "acme",
+                vec![
+                    at("a-kimi", "http://kimi.lan/v1", "hold", 1),
+                    at("b-kimi", "HTTP://Kimi.LAN:80/v1/", "hold", 1),
+                    card("z-free"),
+                ],
+            )]);
+            let (_, now) = clock();
+            let router = Arc::new(
+                RegistryRouter::new(reg, rig.synth.clone())
+                    .with_refresh_ms(0)
+                    .with_per_tenant(true)
+                    .with_clock(now)
+                    .with_saturation(Some(Saturation::Shed), 0),
+            );
+            let r = router.clone();
+            let held = tokio::spawn(scope(
+                SessionKey::parse("acme", "s1").unwrap(),
+                async move { r.complete(CompletionRequest::default()).await },
+            ));
+            wait_entered(&rig.entered, 1).await;
+            let next = scope(SessionKey::parse("acme", "s2").unwrap(), answer(&router)).await;
+            assert_eq!(next, "from-z-free");
+            assert_eq!(rig.entered.load(Ordering::SeqCst), 1, "one call on the pod");
+            rig.gate.add_permits(1);
+            held.await.unwrap().expect("the held call completes");
+        }
+
+        // adversarial (gap §8.7 item 6): load is never shared across tenants,
+        // keyless pod or keyed account alike — acme holding the pod's only
+        // slot must not shed globex's call to the same pod, else one tenant
+        // could pin another's capacity by holding long calls open.
+        // Cross-tenant capacity is fairness's job (item 5), not first-come.
+        #[rstest::rstest]
+        #[case::keyless_pod("")]
+        #[case::keyed_account("env:KIMI_KEY")]
+        #[tokio::test]
+        async fn adversarial_a_tenant_cant_hold_anothers_capacity(#[case] key: &str) {
+            let rig = rig();
+            let pod = |id: &str| Upstream {
+                api_key_ref: key.into(),
+                ..at(id, "http://kimi.lan/v1", "hold", 1)
+            };
+            let reg = tenants(vec![
+                ("acme", vec![pod("a-kimi"), card("z-free")]),
+                ("globex", vec![pod("b-kimi"), card("z-free")]),
+            ]);
+            let (_, now) = clock();
+            let router = Arc::new(
+                RegistryRouter::new(reg, rig.synth.clone())
+                    .with_refresh_ms(0)
+                    .with_per_tenant(true)
+                    .with_clock(now)
+                    .with_saturation(Some(Saturation::Shed), 0),
+            );
+            let r = router.clone();
+            let held = tokio::spawn(scope(
+                SessionKey::parse("acme", "s1").unwrap(),
+                async move { r.complete(CompletionRequest::default()).await },
+            ));
+            wait_entered(&rig.entered, 1).await;
+            let r = router.clone();
+            let globex = tokio::spawn(scope(
+                SessionKey::parse("globex", "s1").unwrap(),
+                async move { r.complete(CompletionRequest::default()).await },
+            ));
+            wait_entered(&rig.entered, 2).await;
+            rig.gate.add_permits(2);
+            let globex = globex.await.unwrap().expect("globex served");
+            assert_eq!(globex.message.content_text(), "from-b-kimi");
+            held.await.unwrap().expect("acme's call completes");
+        }
+
+        // adversarial (gap §8.7 item 6): the breaker is NOT shared across
+        // tenants, even for byte-identical cards — acme's failures (its bad
+        // key, its junk requests) open only acme's breaker; globex still
+        // routes to the upstream first.
+        #[tokio::test]
+        async fn adversarial_one_tenants_failures_do_not_open_anothers_breaker() {
+            let rig = rig();
+            let fleet = || vec![at("a", "http://kimi.lan/v1", "fail-acme", 0), card("z")];
+            let reg = tenants(vec![("acme", fleet()), ("globex", fleet())]);
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg, rig.synth.clone())
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now)
+                .with_breaker(1, 60_000);
+            assert_eq!(complete_as(&router, "acme").await, "from-z");
+            assert_eq!(rig.failed.load(Ordering::SeqCst), 1);
+            assert_eq!(complete_as(&router, "globex").await, "from-a");
+        }
     }
 
     // ---- per-tenant spend ledgers (gap §8.7 item 7) -------------------------
@@ -1391,5 +1544,285 @@ mod tests {
         let got = m.get_or_create("newcomer", 60 * 60_000);
         assert!(!Arc::ptr_eq(&got, &m.overflow));
         assert_eq!(m.ledgers.len(), 1);
+    }
+
+    // ---- shared upstream state (gap §8.7 item 6) ------------------------------
+    //
+    // Live load is per *endpoint* and process-wide (it outlives a rebuild and is
+    // shared by every tenant dialling the pod); the breaker outlives a rebuild
+    // but stays in its tenant's cell. Synth below picks behaviour by `model`:
+    // `hold` blocks on the gate, `fail` always fails, `fail-acme` fails only for
+    // tenant acme, anything else answers `from-<id>`.
+
+    fn caps() -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: true,
+            context_window: 1000,
+            supports_response_format: false,
+            supports_vision: false,
+        }
+    }
+
+    struct Behaving {
+        model: String,
+        answer: String,
+        gate: Arc<tokio::sync::Semaphore>,
+        entered: Arc<std::sync::atomic::AtomicUsize>,
+        failed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl LlmProvider for Behaving {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps()
+        }
+        async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+            let fail = match self.model.as_str() {
+                "hold" => {
+                    self.entered.fetch_add(1, Ordering::SeqCst);
+                    let _p = self.gate.acquire().await.expect("gate");
+                    false
+                }
+                "fail" => true,
+                "fail-acme" => agent_core::current_tenant() == "acme",
+                _ => false,
+            };
+            if fail {
+                self.failed.fetch_add(1, Ordering::SeqCst);
+                return Err(Error::Provider("http 503: unavailable".into()));
+            }
+            Ok(final_turn(&self.answer))
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            Err(Error::Provider("no stream".into()))
+        }
+    }
+
+    struct Rig {
+        gate: Arc<tokio::sync::Semaphore>,
+        entered: Arc<std::sync::atomic::AtomicUsize>,
+        failed: Arc<std::sync::atomic::AtomicUsize>,
+        synth: UpstreamSynth,
+    }
+
+    fn rig() -> Rig {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::<std::sync::atomic::AtomicUsize>::default();
+        let failed = Arc::<std::sync::atomic::AtomicUsize>::default();
+        let (g, e, f) = (gate.clone(), entered.clone(), failed.clone());
+        let synth: UpstreamSynth = Arc::new(move |c: &Upstream| {
+            Ok(Arc::new(Behaving {
+                model: c.model.clone(),
+                answer: format!("from-{}", c.id),
+                gate: g.clone(),
+                entered: e.clone(),
+                failed: f.clone(),
+            }) as Arc<dyn LlmProvider>)
+        });
+        Rig {
+            gate,
+            entered,
+            failed,
+            synth,
+        }
+    }
+
+    /// A card dialling `url` for `model`, capped at `cap` concurrent calls.
+    fn at(id: &str, url: &str, model: &str, cap: u32) -> Upstream {
+        Upstream {
+            base_url: url.into(),
+            model: model.into(),
+            max_concurrency: cap,
+            ..card(id)
+        }
+    }
+
+    async fn wait_entered(entered: &std::sync::atomic::AtomicUsize, n: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while entered.load(Ordering::SeqCst) < n {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the held call never reached its upstream");
+    }
+
+    /// A call that must not be dispatched to a held upstream: bounded so a
+    /// regression fails instead of hanging.
+    async fn answer(router: &RegistryRouter) -> String {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.complete(CompletionRequest::default()),
+        )
+        .await
+        .expect("dispatched to the held (saturated) upstream")
+        .expect("served")
+        .message
+        .content_text()
+    }
+
+    /// A registry edit rebuilds the fleet, but the call still running on `a`
+    /// keeps counting against `a`'s cap — the rebuilt router sees `a` full and
+    /// sends the next call to `z` (before item 6 it saw 0 and over-admitted).
+    #[tokio::test]
+    async fn positive_in_flight_survives_a_registry_edit() {
+        let rig = rig();
+        let url = "http://kimi.lan/v1";
+        let reg = registry_with(vec![at("a", url, "hold", 1), card("z")]);
+        let (t, now) = clock();
+        let router = Arc::new(
+            RegistryRouter::new(reg.clone(), rig.synth.clone())
+                .with_refresh_ms(0)
+                .with_clock(now)
+                .with_saturation(Some(Saturation::Shed), 0),
+        );
+        let r = router.clone();
+        let held = tokio::spawn(async move { r.complete(CompletionRequest::default()).await });
+        wait_entered(&rig.entered, 1).await;
+        let before = router.snapshot().await.unwrap();
+
+        let mut edited = at("a", url, "hold", 1);
+        edited.tags = vec!["edited".into()];
+        reg.put(edited).await.unwrap();
+        t.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(answer(&router).await, "from-z");
+        assert!(
+            !Arc::ptr_eq(&before, &router.snapshot().await.unwrap()),
+            "the edit rebuilt the fleet"
+        );
+        assert_eq!(rig.entered.load(Ordering::SeqCst), 1);
+
+        rig.gate.add_permits(1);
+        held.await.unwrap().expect("the held call completes");
+    }
+
+    /// An open breaker stays open across an edit: the dead `a` stays behind `z`
+    /// instead of being retried as if new.
+    #[tokio::test]
+    async fn corner_breaker_survives_a_registry_edit() {
+        let rig = rig();
+        let url = "http://dead.lan/v1";
+        let reg = registry_with(vec![at("a", url, "fail", 0), card("z")]);
+        let (t, now) = clock();
+        let router = RegistryRouter::new(reg.clone(), rig.synth.clone())
+            .with_refresh_ms(0)
+            .with_clock(now)
+            .with_breaker(1, 60_000);
+        assert_eq!(answer(&router).await, "from-z");
+        assert_eq!(rig.failed.load(Ordering::SeqCst), 1, "a failed, z served");
+
+        let mut edited = at("a", url, "fail", 0);
+        edited.tags = vec!["edited".into()];
+        reg.put(edited).await.unwrap();
+        t.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(answer(&router).await, "from-z");
+        assert_eq!(
+            rig.failed.load(Ordering::SeqCst),
+            1,
+            "a's open breaker kept it behind z after the rebuild"
+        );
+    }
+
+    /// Retiring a card drops its endpoint's stats from the cell, so the map
+    /// is bounded by the tenant's live cards rather than growing forever.
+    #[tokio::test]
+    async fn corner_a_retired_card_releases_its_stats() {
+        let reg = registry_with(vec![card("a"), card("z")]);
+        let (synth, _) = counting_synth("ok");
+        let (t, now) = clock();
+        let router = RegistryRouter::new(reg.clone(), synth)
+            .with_refresh_ms(0)
+            .with_clock(now);
+        router.complete(CompletionRequest::default()).await.unwrap();
+        let key = RegistryRouter::endpoint_key(&card("a"));
+        let held = |r: &RegistryRouter| {
+            let cell = r.cell_for_current();
+            let stats = cell.stats.lock().unwrap();
+            stats.get(&key).map(Arc::strong_count)
+        };
+        assert!(held(&router) > Some(1), "the live fleet holds a's stats");
+
+        reg.delete("a").await.unwrap();
+        t.fetch_add(1, Ordering::SeqCst);
+        router.complete(CompletionRequest::default()).await.unwrap();
+        assert_eq!(
+            held(&router),
+            None,
+            "a retired endpoint's stats are dropped"
+        );
+    }
+
+    /// Which URLs count as one endpoint. Normalising scheme/host case, the
+    /// default port and a trailing `/` is best-effort; anything that could be a
+    /// different server (host, port, path, model, kind) stays apart.
+    #[rstest::rstest]
+    #[case::positive_identical("http://kimi/v1", "m", "http://kimi/v1", "m", true)]
+    #[case::corner_trailing_slash("http://kimi/v1/", "m", "http://kimi/v1", "m", true)]
+    #[case::corner_scheme_and_host_case("HTTP://KIMI/v1", "m", "http://kimi/v1", "m", true)]
+    #[case::boundary_explicit_default_port(
+        "https://kimi:443/v1",
+        "m",
+        "https://kimi/v1",
+        "m",
+        true
+    )]
+    #[case::corner_unparseable_compares_raw("not a url/", "m", "not a url", "m", true)]
+    #[case::negative_another_model("http://kimi/v1", "m", "http://kimi/v1", "n", false)]
+    #[case::negative_another_host("http://kimi/v1", "m", "http://glm/v1", "m", false)]
+    #[case::negative_another_port("http://kimi:8000/v1", "m", "http://kimi:8001/v1", "m", false)]
+    #[case::negative_path_case_is_significant("http://kimi/V1", "m", "http://kimi/v1", "m", false)]
+    #[case::adversarial_empty_url_is_not_a_real_endpoint("", "m", "http://kimi/v1", "m", false)]
+    fn endpoint_key_normalises(
+        #[case] a_url: &str,
+        #[case] a_model: &str,
+        #[case] b_url: &str,
+        #[case] b_model: &str,
+        #[case] same: bool,
+    ) {
+        let a = at("x", a_url, a_model, 0);
+        let b = at("y", b_url, b_model, 0);
+        assert_eq!(
+            RegistryRouter::endpoint_key(&a) == RegistryRouter::endpoint_key(&b),
+            same
+        );
+    }
+
+    #[test]
+    fn negative_another_kind_is_another_endpoint() {
+        let a = at("x", "http://kimi/v1", "m", 0);
+        let b = Upstream {
+            kind: "anthropic".into(),
+            ..a.clone()
+        };
+        assert_ne!(
+            RegistryRouter::endpoint_key(&a),
+            RegistryRouter::endpoint_key(&b)
+        );
+    }
+
+    /// Within a tenant's cell, which cards share a count: a keyed card only
+    /// with cards on the same credential ref (its capacity is the account's).
+    /// Across tenants nothing is shared — the map lives in each cell, see
+    /// `adversarial_a_tenant_cant_hold_anothers_capacity`.
+    #[rstest::rstest]
+    #[case::positive_keyless_shares("", "", true)]
+    #[case::positive_same_key_shares("env:K", "env:K", true)]
+    #[case::negative_other_key("env:K", "env:J", false)]
+    #[case::corner_keyed_never_shares_with_keyless("env:K", "", false)]
+    #[case::boundary_whitespace_ref_is_a_credential(" ", "", false)]
+    #[case::adversarial_ref_case_is_significant("env:k", "env:K", false)]
+    fn endpoint_key_is_scoped_to_the_key(
+        #[case] a_key: &str,
+        #[case] b_key: &str,
+        #[case] same: bool,
+    ) {
+        let keyed = |k: &str| Upstream {
+            api_key_ref: k.into(),
+            ..at("x", "https://api.example.com/v1", "m", 0)
+        };
+        assert_eq!(
+            RegistryRouter::endpoint_key(&keyed(a_key))
+                == RegistryRouter::endpoint_key(&keyed(b_key)),
+            same
+        );
     }
 }

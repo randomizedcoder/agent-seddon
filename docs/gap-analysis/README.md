@@ -520,8 +520,8 @@ across N pools × models × prices needs.
 |---|---|---|---|---|---|
 | `Router` (failover) | `InOrder` / `RoundRobin` | passive breaker: 3 failures / 30 s cooldown; open upstreams are **reordered to the back, not excluded** | ❌ no in-flight, no `max_concurrency` | ❌ | [router.rs](../../crates/agent-providers/src/router.rs):37-45, 66-104, 245-262 |
 | `LlmPool` / `PoolProvider` | `Cost` (default) / `RoundRobin` / `LeastLoaded` (raw in-flight) / `Weighted` | active probe = a **billed 1-token completion** every 15 s | per-member `max_concurrency`, hard; ~~check and increment not atomic~~ **Fixed — now a single `PoolMember::try_reserve` CAS (atomic check-and-reserve), so the cap holds under concurrent dispatch; closed the `eligible()`→`call_member` TOCTOU** | `Saturation::{Shed, Wait ≤ 30 s}` then error; no queue, no spillover | [pool.rs](../../crates/agent-providers/src/pool.rs):62-80, 231-233, 316-323, 401, 440-466, 471-482, 716-723 |
-| `TaskRouter` (the routed generator path) | filters health / tools / vision / `min_context` / tier / `max_cost` (input cost only); live signals `cost` / `latency` / `least-loaded` **reorder only, never admit or refuse** | no active probe; `healthy: true` hard-coded in `meta()` | soft by default; **opt-in hard cap** (`[route] on_saturation`, CAS admission — §8.7 item 3) | ~~❌~~ opt-in `shed` / bounded `wait` (§8.7 item 3); `prefer.spill_to` reserve tier (§8.7 item 8) | [route.rs](../../crates/agent-providers/src/route.rs):124-141, 283-292; [task_router.rs](../../crates/agent-providers/src/task_router.rs):233; [05-capacity-aware.md](../design/model-router/05-capacity-aware.md):27 "Soft, not a cap" |
-| `RegistryRouter` / `RouterCell` | rebuilds `TaskRouter` on any card change (5 s refresh), **resetting breaker + in-flight stats**; per-tenant cells → load is invisible across tenants | — | — | — | [registry_router.rs](../../crates/agent-providers/src/registry_router.rs):43-66, 149-176, 213-265, 338 |
+| `TaskRouter` (the routed generator path) | filters health / tools / vision / `min_context` / tier / `max_cost` (input cost only; a policy-wide ceiling from `[route]` or the tenant's registry policy, which a request can only tighten — §8.7 item 7); live signals `cost` / `cost-per-task` / `latency` / `least-loaded` order the eligible set; **admission** is the opt-in hard cap and the hourly spend budget (`max_spend_per_hour`: once spent, only unpriced upstreams stay eligible, none ⇒ refused — §8.7 item 7) | no active probe; `healthy: true` hard-coded in `meta()`; passive breaker per upstream | soft by default; **opt-in hard cap** (`[route] on_saturation`, CAS admission — §8.7 item 3) | ~~❌~~ opt-in `shed` / bounded `wait` (§8.7 item 3); `prefer.spill_to` reserve tier (§8.7 item 8) | [route.rs](../../crates/agent-providers/src/route.rs):283-292, 400-418; [task_router.rs](../../crates/agent-providers/src/task_router.rs) `meta`, `SpendLedger`; [05-capacity-aware.md](../design/model-router/05-capacity-aware.md):27 "Soft, not a cap" |
+| `RegistryRouter` / `RouterCell` | rebuilds `TaskRouter` on any card change (5 s refresh); ~~resetting breaker + in-flight stats~~ — **since §8.7 item 6** in-flight + latency are one counter per endpoint (`kind` + normalised `base_url` + `model`) and `api_key_ref` in the tenant's cell, and the breaker is reused per tenant cell, so neither resets on an edit; load is still not shared across tenants (deliberately — items 4–5); the spend ledger outlives the cell (§8.7 item 7) | — | — | — | [registry_router.rs](../../crates/agent-providers/src/registry_router.rs) `StatsMap`, `endpoint_key`, `build_router` |
 | `ConsensusProvider`, `BranchingProvider` | fan-out | — | multiply load, ungated; ~~`branch_leak` fork/cancel gate flaked RED ("heap grew across cycles")~~ **Fixed — not a branch strand: dhat shows the fork/cancel heap is flat at 300 iters; the "growth" was an under-warmed test baseline mistaking tokio's one-time multi-thread / `parking_lot` working-set ramp (~15 KB, grown lazily as workers first park) for per-cycle growth. The test now warms to steady state (convergence, not a magic count) before baselining. As a structured-teardown correctness improvement, `BranchingProvider::complete` also drains its `JoinSet` after `abort_all()` so cancelled branches (captured provider `Arc`s / request clones) are reaped before return, not at the scheduler's leisure** | — | consensus.rs:22-24; branching.rs:522-530 (drain); branch_leak.rs |
 | `reach` | free `GET /models` probe | used by doctor / preflight, **not** by the pool | — | — | [reach.rs](../../crates/agent-providers/src/reach.rs):1-40 |
 | Retry | ~~in-provider full-jitter backoff ≤ 20 s per attempt, `max_retries` times, **before** any failover~~ **router-owned on the routed path (§8.7 item 9).** Routed upstreams build **fail-fast** (`max_retries: 0`); the `TaskRouter` owns retry as a bounded whole-fleet re-pass budget, so a 429 fails over to a headroom upstream at once | — | — | ~~a 429 on Kimi can burn minutes before GLM is tried~~ **fixed** — sleepless failover within a pass; one jittered backoff between passes, budget-capped | [agent-retry/src/lib.rs](../../crates/agent-retry/src/lib.rs):59-60, 114-116; [task_router.rs](../../crates/agent-providers/src/task_router.rs) `route`/`one_pass`/`with_retry_budget`; openai_compat.rs:58, 86-161 |
@@ -645,8 +645,17 @@ Each item names the seam to extend; order is roughly cheapest-and-highest-levera
    `builder.rs`): a bounded priority queue keyed on role (Main > Review > Summarize / Classify) and tenant.
 5. **Per-tenant LLM fairness:** port `scheduler_driver`'s ceiling + round-robin + per-tenant cap to
    the LLM path.
-6. **Hoist `LiveStats` / `Health` / permits process-wide keyed by `provider_key`**
-   (registry_router.rs:183-198) so they survive registry edits and span tenants.
+6. ~~**Hoist `LiveStats` / `Health` / permits process-wide keyed by `provider_key`**
+   so they survive registry edits~~ (**done** — in-flight counts and the latency
+   average live in each tenant's `RouterCell` next to its breakers, keyed by endpoint
+   (`kind` + normalised `base_url` + `model`) + `api_key_ref`, so a registry
+   edit no longer zeroes them and one tenant's cards on a pod share its cap; the
+   breaker is reused across rebuilds per tenant cell, keyed by `provider_key`.
+   See [router.md](../components/router.md#shared-upstream-load-gap-87-item-6).)
+   ~~and span tenants~~ — **deliberately not done here:** a counter shared across
+   tenants lets one tenant hold long calls open to decide whether another's call is
+   admitted (a cross-tenant DoS the security review caught, for keyed and keyless
+   pods alike). Dividing one pod's capacity between tenants moves to items 4–5.
 7. **Cost- and budget-aware selection** (**done** — every part below): ~~`OrderPolicy::CostPerTask` (input × estimated prompt +
    output × `max_tokens`)~~ (**done** — `prefer.policy = "cost-per-task"`, weights derived from the
    request, a tie-break like the other policies), ~~`RouteHint.max_cost` set by fleet and tenancy~~ (**done** —
@@ -825,7 +834,8 @@ links its own sub-docs.
 
 - ~~Fix streamed in-flight accounting (§8.7 item 2).~~ **Done.**
 - Fleet on the task-router with registry cards (item 1).
-- Hard per-upstream capacity + process-wide admission queue with role / tenant priority (items 3–5).
+- Hard per-upstream capacity + process-wide admission queue with role / tenant priority (items 3–5;
+  item 3 **done**; item 6 **done** — per-endpoint load survives rebuilds; cross-tenant capacity is left to 4–5).
 - ~~Card-fed `PriceTable` so cost is real (item 7)~~ **done** (§8.2); Grafana panels for router / pool / cost (item 16).
 
 **P2 — product**
@@ -841,7 +851,7 @@ links its own sub-docs.
 
 **P2 — routing / scale, larger**
 
-- Durable claim lease + parallel prep for a multi-process fleet; cost / budget-aware ordering and
+- Durable claim lease + parallel prep for a multi-process fleet; ~~cost / budget-aware ordering~~ (done, §8.7 item 7) and
   ~~spillover tiers~~ (done, §8.7 item 8); capacity probes + adaptive effective capacity; prefix-cache affinity; lever 3
   map-reduce; `PoolAsProvider`.
 
