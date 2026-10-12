@@ -199,6 +199,12 @@ let
   # Where a role's cert-manager Secret is mounted (and the probe reads it from).
   tlsMountPath = "/etc/agent/tls";
 
+  # `[grpc.tls] reload_poll_secs` for every role (K4). The role certs are 24h,
+  # renewed 8h early (components/pki.nix), and the kubelet rotates a mounted
+  # Secret by swapping its `..data` symlink, which sends no signal. Polling every
+  # 30s picks the renewal up long before the old cert expires.
+  tlsReloadPollSecs = 30;
+
   # A readiness/liveness/startup probe that checks the standard
   # `grpc.health.v1.Health` the agent serves on the role's port.
   #
@@ -509,6 +515,7 @@ in
     syncWave
     grpcProbe
     roleBaseToml
+    tlsReloadPollSecs
     deployment
     service
     configMapFromToml

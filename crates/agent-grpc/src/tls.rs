@@ -133,6 +133,20 @@ impl ServerTls {
         Ok(())
     }
 
+    /// The files [`Self::reload`] reads (cert, key, then the client CA), in that
+    /// order; empty for an in-memory config. A `[grpc.tls] reload_poll_secs` watcher
+    /// hashes exactly these paths, so nothing else in their directory triggers a
+    /// reload (K4).
+    pub fn files(&self) -> Vec<PathBuf> {
+        self.files.as_deref().map_or_else(Vec::new, |f| {
+            [Some(&f.cert), Some(&f.key), f.client_ca.as_ref()]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect()
+        })
+    }
+
     /// Whether client certificates are required (a client CA was configured).
     pub fn is_mutual(&self) -> bool {
         self.mutual
@@ -324,6 +338,15 @@ impl ClientTls {
         let config = files.build()?;
         self.config.store(Arc::new(config));
         Ok(())
+    }
+
+    /// The files [`Self::reload`] reads (the CA, then the client cert and key);
+    /// empty for an in-memory config (K4, see [`ServerTls::files`]).
+    pub fn files(&self) -> Vec<PathBuf> {
+        self.files.as_deref().map_or_else(Vec::new, |f| {
+            let identity = f.identity.iter().flat_map(|(c, k)| [c, k]);
+            f.ca.iter().chain(identity).cloned().collect()
+        })
     }
 
     /// Whether this client presents a certificate (mTLS).
@@ -610,5 +633,49 @@ mod tests {
         assert!(client_tls().is_some());
         set_client_tls(None);
         assert!(client_tls().is_none());
+    }
+
+    /// `files()` names exactly what a reload reads, in a stable order, so a
+    /// `reload_poll_secs` watcher hashes nothing else (K4).
+    #[rstest]
+    #[case::positive_mtls_listener(true, &["s.crt", "s.key", "ca.crt"][..])]
+    #[case::boundary_plain_listener(false, &["s.crt", "s.key"][..])]
+    fn server_files_cases(#[case] mutual: bool, #[case] want: &[&str]) {
+        let pki = TestPki::new("ca");
+        let dir = agent_testkit::tempdir();
+        let (cert, key) = pki.issue(&LeafSpec::service("seam")).write_to(&dir, "s");
+        let ca = pki.write_ca(&dir, "ca");
+        let tls = ServerTls::load(&cert, &key, mutual.then_some(ca.as_path())).unwrap();
+        let want: Vec<_> = want.iter().map(|n| dir.join(n)).collect();
+        assert_eq!(tls.files(), want);
+    }
+
+    #[rstest]
+    #[case::positive_ca_and_identity(true, true, &["ca.crt", "c.crt", "c.key"][..])]
+    #[case::corner_ca_only(true, false, &["ca.crt"][..])]
+    #[case::corner_identity_only(false, true, &["c.crt", "c.key"][..])]
+    fn client_files_cases(#[case] ca: bool, #[case] identity: bool, #[case] want: &[&str]) {
+        let pki = TestPki::new("ca");
+        let dir = agent_testkit::tempdir();
+        let (cert, key) = pki.issue(&LeafSpec::service("c")).write_to(&dir, "c");
+        let ca_path = pki.write_ca(&dir, "ca");
+        let tls = ClientTls::load(
+            ca.then_some(ca_path.as_path()),
+            identity.then_some(cert.as_path()),
+            identity.then_some(key.as_path()),
+            None,
+        )
+        .unwrap();
+        let want: Vec<_> = want.iter().map(|n| dir.join(n)).collect();
+        assert_eq!(tls.files(), want);
+    }
+
+    #[test]
+    fn negative_in_memory_configs_watch_no_files() {
+        let pki = TestPki::new("ca");
+        let leaf = pki.issue(&LeafSpec::service("seam"));
+        let server = ServerTls::from_pem(&leaf.cert_pem, &leaf.key_pem, None::<&str>).unwrap();
+        assert!(server.files().is_empty());
+        assert!(ClientTls::default().files().is_empty());
     }
 }

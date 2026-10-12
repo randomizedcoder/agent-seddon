@@ -663,6 +663,27 @@ pub fn check_exec_seam_exclude(ms: &[Manifest]) -> Vec<Finding> {
     out
 }
 
+/// Each ConfigMap's `agent.toml`, parsed: `(path, Ok(table))`, or the parse error.
+/// Checks read the TOML rather than grep it, so a key in a comment or under another
+/// table does not count.
+fn agent_tomls(ms: &[Manifest]) -> impl Iterator<Item = (&str, Result<toml::Value, String>)> {
+    ms.iter()
+        .filter(|m| m.kind() == Some("ConfigMap"))
+        .filter_map(|m| {
+            let text = dig(&m.doc, &["data"])?.get("agent.toml")?.as_str()?;
+            Some((
+                m.path.as_str(),
+                toml::from_str(text).map_err(|e| e.to_string()),
+            ))
+        })
+}
+
+/// The value at `path` in a parsed `agent.toml`.
+fn toml_at<'a>(cfg: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
+    path.iter()
+        .try_fold(cfg, |v, k| v.as_table().and_then(|t| t.get(*k)))
+}
+
 /// `[auth] allow_insecure_listen = true` (the K3 interim posture until K5's
 /// `mode = "oidc"`) is only acceptable on a strict-mTLS listener: the same agent.toml
 /// must set `[grpc.tls]` `cert`, `key` and `client_ca`, so the "any peer can claim any
@@ -671,45 +692,83 @@ pub fn check_exec_seam_exclude(ms: &[Manifest]) -> Vec<Finding> {
 pub fn check_insecure_listen_needs_mtls(ms: &[Manifest]) -> Vec<Finding> {
     const ID: &str = "insecure-listen-needs-mtls";
     let mut out = Vec::new();
-    for m in ms.iter().filter(|m| m.kind() == Some("ConfigMap")) {
-        let Some(text) = dig(&m.doc, &["data"])
-            .and_then(|d| d.get("agent.toml"))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        let cfg: toml::Value = match toml::from_str(text) {
+    for (path, cfg) in agent_tomls(ms) {
+        let cfg = match cfg {
             Ok(v) => v,
             Err(e) => {
                 out.push(Finding::new(
                     ID,
-                    &m.path,
+                    path,
                     format!("agent.toml did not parse as TOML: {e}"),
                 ));
                 continue;
             }
         };
-        let get = |path: &[&str]| {
-            path.iter()
-                .try_fold(&cfg, |v, k| v.as_table().and_then(|t| t.get(*k)))
-        };
-        if get(&["auth", "allow_insecure_listen"]).and_then(toml::Value::as_bool) != Some(true) {
+        if toml_at(&cfg, &["auth", "allow_insecure_listen"]).and_then(toml::Value::as_bool)
+            != Some(true)
+        {
             continue;
         }
         for key in ["cert", "key", "client_ca"] {
-            let set = get(&["grpc", "tls", key])
+            let set = toml_at(&cfg, &["grpc", "tls", key])
                 .and_then(toml::Value::as_str)
                 .is_some_and(|s| !s.trim().is_empty());
             if !set {
                 out.push(Finding::new(
                     ID,
-                    &m.path,
+                    path,
                     format!(
                         "`[auth] allow_insecure_listen = true` without `[grpc.tls] {key}`: \
                          the listener would not be strict mTLS"
                     ),
                 ));
             }
+        }
+    }
+    out
+}
+
+/// The longest `[grpc.tls] reload_poll_secs` a role may run: an hour, well inside
+/// the role certs' 8h `renewBefore` window (components/pki.nix).
+pub const MAX_ROLE_RELOAD_POLL_SECS: i64 = 3600;
+
+/// A role serving a cert-manager certificate (`[grpc.tls] cert`) must reload it on
+/// file change (K4): the kubelet rotates the mounted Secret by a symlink swap that
+/// sends no signal, so without `reload_poll_secs` the pod serves the old 24h cert
+/// until it expires. The value must be an integer in
+/// `1..=`[`MAX_ROLE_RELOAD_POLL_SECS`]; `0` is off.
+pub fn check_tls_reload_polls(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "tls-reload-polls";
+    let mut out = Vec::new();
+    for (path, cfg) in agent_tomls(ms) {
+        let cfg = match cfg {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(Finding::new(
+                    ID,
+                    path,
+                    format!("agent.toml did not parse as TOML: {e}"),
+                ));
+                continue;
+            }
+        };
+        let serves_tls = toml_at(&cfg, &["grpc", "tls", "cert"])
+            .and_then(toml::Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !serves_tls {
+            continue;
+        }
+        match toml_at(&cfg, &["grpc", "tls", "reload_poll_secs"]) {
+            Some(toml::Value::Integer(n)) if (1..=MAX_ROLE_RELOAD_POLL_SECS).contains(n) => {}
+            got => out.push(Finding::new(
+                ID,
+                path,
+                format!(
+                    "`[grpc.tls] cert` is set, so `reload_poll_secs` must be an integer in \
+                     1..={MAX_ROLE_RELOAD_POLL_SECS} (the Secret renews with no signal); \
+                     got {got:?}"
+                ),
+            )),
         }
     }
     out
@@ -1074,7 +1133,7 @@ pub fn check_no_secret_material(ms: &[Manifest]) -> Vec<Finding> {
 }
 
 /// Every invariant, in the order the suite reports them.
-pub const ALL_CHECKS: [(&str, CheckFn); 14] = [
+pub const ALL_CHECKS: [(&str, CheckFn); 15] = [
     ("security-context", check_security_context),
     ("no-privilege", check_no_privilege),
     ("probes", check_probes),
@@ -1092,6 +1151,7 @@ pub const ALL_CHECKS: [(&str, CheckFn); 14] = [
         "insecure-listen-needs-mtls",
         check_insecure_listen_needs_mtls,
     ),
+    ("tls-reload-polls", check_tls_reload_polls),
 ];
 
 /// The rendered `k3s` target root: `$AGENT_RENDERED_K3S` when set (the flake check points
@@ -1400,6 +1460,43 @@ mod tests {
         set_toml(cm, |t| format!("{t}\n[auth\n"));
     }
 
+    // A role serving the 24h cert that would never pick up its renewal (K4).
+    const RELOAD_POLL_LINE: &str = "reload_poll_secs = 30";
+    fn brk_drop_reload_poll(cm: &mut Value) {
+        set_toml(cm, |t| t.replace(RELOAD_POLL_LINE, ""));
+    }
+    fn brk_reload_poll_off(cm: &mut Value) {
+        set_toml(cm, |t| t.replace(RELOAD_POLL_LINE, "reload_poll_secs = 0"));
+    }
+    fn brk_reload_poll_too_slow(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(RELOAD_POLL_LINE, "reload_poll_secs = 86400")
+        });
+    }
+    fn brk_reload_poll_as_string(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(RELOAD_POLL_LINE, "reload_poll_secs = \"30\"")
+        });
+    }
+    fn brk_reload_poll_negative(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(RELOAD_POLL_LINE, "reload_poll_secs = -30")
+        });
+    }
+    fn brk_reload_poll_only_in_comment(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(RELOAD_POLL_LINE, &format!("# {RELOAD_POLL_LINE}"))
+        });
+    }
+    fn brk_reload_poll_under_other_table(cm: &mut Value) {
+        set_toml(cm, |t| {
+            format!(
+                "{}\n[grpc.other]\n{RELOAD_POLL_LINE}\n",
+                t.replace(RELOAD_POLL_LINE, "")
+            )
+        });
+    }
+
     // -- positive: the real tree satisfies every invariant -----------------------------
 
     #[rstest]
@@ -1417,6 +1514,7 @@ mod tests {
     #[case::component_application(check_component_application)]
     #[case::no_secret_material(check_no_secret_material)]
     #[case::insecure_listen_needs_mtls(check_insecure_listen_needs_mtls)]
+    #[case::tls_reload_polls(check_tls_reload_polls)]
     fn positive_real_tree_is_clean(#[case] check: Check) {
         let findings = check(&tree());
         assert!(
@@ -1595,6 +1693,38 @@ mod tests {
         brk_unparseable_toml,
         check_insecure_listen_needs_mtls
     )]
+    #[case::without_reload_poll(is_gateway_configmap, brk_drop_reload_poll, check_tls_reload_polls)]
+    #[case::reload_poll_off(is_gateway_configmap, brk_reload_poll_off, check_tls_reload_polls)]
+    #[case::reload_poll_too_slow(
+        is_gateway_configmap,
+        brk_reload_poll_too_slow,
+        check_tls_reload_polls
+    )]
+    #[case::reload_poll_as_string(
+        is_gateway_configmap,
+        brk_reload_poll_as_string,
+        check_tls_reload_polls
+    )]
+    #[case::reload_poll_negative(
+        is_gateway_configmap,
+        brk_reload_poll_negative,
+        check_tls_reload_polls
+    )]
+    #[case::reload_poll_only_in_comment(
+        is_gateway_configmap,
+        brk_reload_poll_only_in_comment,
+        check_tls_reload_polls
+    )]
+    #[case::reload_poll_under_other_table(
+        is_gateway_configmap,
+        brk_reload_poll_under_other_table,
+        check_tls_reload_polls
+    )]
+    #[case::reload_poll_unparseable_toml(
+        is_gateway_configmap,
+        brk_unparseable_toml,
+        check_tls_reload_polls
+    )]
     fn adversarial_mutation_is_flagged(
         #[case] pred: Pred,
         #[case] brk: Breaker,
@@ -1647,6 +1777,44 @@ mod tests {
                     .map(str::to_owned)
             })
             .filter(|t| t.contains("allow_insecure_listen = true"))
+            .count();
+        assert_eq!(n, ROLES.len());
+    }
+
+    #[test]
+    fn corner_configmap_without_tls_needs_no_reload_poll() {
+        // The invariant binds a served cert: no `[grpc.tls] cert`, nothing to reload.
+        let mut ms = tree();
+        let cm = ms
+            .iter_mut()
+            .find(|m| is_gateway_configmap(m))
+            .expect("gateway ConfigMap");
+        set_toml(&mut cm.doc, |t| t.replace("[grpc.tls]", "[grpc.tls_off]"));
+        assert!(check_tls_reload_polls(&ms).is_empty());
+    }
+
+    #[rstest]
+    #[case::boundary_one_second(1, true)]
+    #[case::boundary_at_the_max(MAX_ROLE_RELOAD_POLL_SECS, true)]
+    #[case::boundary_one_over_the_max(MAX_ROLE_RELOAD_POLL_SECS + 1, false)]
+    fn boundary_reload_poll_range(#[case] secs: i64, #[case] ok: bool) {
+        let mut ms = tree();
+        let cm = ms
+            .iter_mut()
+            .find(|m| is_gateway_configmap(m))
+            .expect("gateway ConfigMap");
+        set_toml(&mut cm.doc, |t| {
+            t.replace(RELOAD_POLL_LINE, &format!("reload_poll_secs = {secs}"))
+        });
+        assert_eq!(check_tls_reload_polls(&ms).is_empty(), ok);
+    }
+
+    #[test]
+    fn boundary_every_role_configmap_polls_for_its_renewal() {
+        // All three roles serve the 24h cert, so the check above is never vacuous.
+        let n = agent_tomls(&tree())
+            .filter_map(|(_, cfg)| cfg.ok())
+            .filter(|cfg| toml_at(cfg, &["grpc", "tls", "reload_poll_secs"]).is_some())
             .count();
         assert_eq!(n, ROLES.len());
     }

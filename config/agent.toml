@@ -1074,6 +1074,7 @@ job         = "agent-seddon"
 # cert      = "/run/user/1000/agent-seddon/pki/agent/cert.pem"
 # key       = "/run/user/1000/agent-seddon/pki/agent/key.pem"
 # client_ca = "/run/user/1000/agent-seddon/pki/ca/root.crt"   # set ⇒ mTLS required
+# reload_poll_secs = 30   # reload these + [grpc.tls.client] + [auth.token] keys on change; 0 ⇒ SIGHUP only
 # [grpc.tls.client]
 # ca     = "/run/user/1000/agent-seddon/pki/ca/root.crt"      # the ONLY trust anchor; empty ⇒ web roots
 # cert   = "/run/user/1000/agent-seddon/pki/cli/cert.pem"     # client identity for mTLS

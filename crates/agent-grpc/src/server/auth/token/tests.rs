@@ -669,3 +669,21 @@ fn negative_service_built_from_keys_has_nothing_to_reload() {
     let e = service_at(NOW, key_a(), None).reload().unwrap_err();
     assert!(e.contains("nothing to reload"), "{e}");
 }
+
+/// `key_files()` names what a reload reads, so a `reload_poll_secs` watcher sees
+/// a rotation of either key (K4).
+#[rstest]
+#[case::positive_signing_and_previous(true)]
+#[case::boundary_signing_only(false)]
+fn key_files_name_what_reload_reads(#[case] with_previous: bool) {
+    let previous_pem = fresh_key_pem();
+    let keys = KeyDir::new(
+        &fresh_key_pem(),
+        with_previous.then_some(previous_pem.as_str()),
+    );
+    let mut want = vec![keys.signing.clone()];
+    if with_previous {
+        want.push(keys.previous.clone());
+    }
+    assert_eq!(keys.svc.key_files(), want);
+}

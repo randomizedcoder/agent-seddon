@@ -1468,6 +1468,7 @@ pub async fn build_agent_with_mode(
             cert: cfg.grpc.tls.cert.trim().to_owned(),
             key: cfg.grpc.tls.key.trim().to_owned(),
             client_ca: cfg.grpc.tls.client_ca.trim().to_owned(),
+            reload_poll_secs: cfg.grpc.tls.reload_poll_secs,
         },
         // Multi-tenant deployment (`[tenancy] per_tenant`); arms the C29 ConfigService
         // operator-config write guard on the serve path. `false` = Tier-0 (unchanged).

@@ -135,3 +135,17 @@ container, a shared PID namespace and a signal-sending permission, all to do wha
   - a symlink redirected outside the directory reloads only what the configured path names (paths
     are operator config);
   - a file flapping every tick does not reload more than once per tick.
+
+**As built (K4).**
+- `Poller` and `watch_poll` in [`reload.rs`](../../../crates/agent-cli/src/reload.rs). Each tick
+  hashes the exact paths the loaders read. `ServerTls::files`, `ClientTls::files` and
+  `AuthLayer::key_files` name them, so a sibling file in the same directory never triggers a
+  reload.
+- The new state is kept only when every part reloaded. A torn read is therefore retried on the
+  next tick, and a part that stays broken warns every tick until it is fixed.
+- `0` returns before spawning. `[grpc.tls] reload_poll_secs` is at most 86400.
+- Each role's `agent.toml` sets `reload_poll_secs = 30` (`k8sLib.tlsReloadPollSecs`). The
+  render-test invariant **`tls-reload-polls`** requires an integer in `1..=3600` wherever
+  `[grpc.tls] cert` is set, read by parsing the TOML.
+- Every test listed above is a row in `reload.rs`, including one that rotates a Secret-shaped
+  directory under a live 1 s poll with no signal.
