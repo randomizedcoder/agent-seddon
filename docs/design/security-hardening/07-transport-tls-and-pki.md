@@ -155,6 +155,13 @@ swap) is covered by `[grpc.tls] reload_poll_secs` ([k8s 05](../k8s/05-identity-a
 - **Where:** [`crates/agent-cli/src/reload.rs`](../../../crates/agent-cli/src/reload.rs)
   (`Poller`, `watch_poll`).
 
+### As built (K5): group-readable keys
+
+A private key (the listener's, `[grpc.tls.client]`'s or `[auth.token]`'s) warns when the group can
+write it or anyone else can access it (`mode & 0o037`). Group read alone is quiet: a Kubernetes
+Secret mounted `defaultMode: 0440` with the pod's `fsGroup` is how a non-root uid reads a
+root-owned key ([k8s 05](../k8s/05-identity-and-pki.md)).
+
 ## Test matrix
 
 The transport matrix ([`transport.rs`](../../../crates/agent-grpc/src/transport.rs) tests and the

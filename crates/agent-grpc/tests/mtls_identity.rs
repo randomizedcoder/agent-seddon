@@ -76,6 +76,14 @@ enum Client {
     Plaintext,
 }
 
+/// Whether the rig has a login issuer.
+#[derive(Clone, Copy, Debug)]
+enum Login {
+    Issuer,
+    /// Service-only `[auth]` (k8s K5).
+    None,
+}
+
 struct Rig {
     pki: TestPki,
     idp: FakeIssuer,
@@ -88,6 +96,12 @@ struct Rig {
 impl Rig {
     /// Both listeners share one layer (one signer, one session store).
     async fn start() -> Self {
+        Self::start_with(Login::Issuer).await
+    }
+
+    /// `Login::None` is service-only (k8s K5): no login issuer and no operator
+    /// subjects, so the only sign-in is a bound service's certificate.
+    async fn start_with(login: Login) -> Self {
         let pki = TestPki::new("agent test CA");
         let idp = FakeIssuer::start(TestKey::Rsa);
         let keys = agent_testkit::tempdir();
@@ -99,23 +113,30 @@ impl Rig {
             tenant: TENANT.into(),
             roles: vec![role.into()],
         };
+        let (issuers, operator_subjects) = match login {
+            Login::Issuer => (
+                vec![IssuerParams {
+                    name: "kc".into(),
+                    issuer: idp.issuer().into(),
+                    audience: AUD.into(),
+                    jwks_url: idp.jwks_url(),
+                    trust_roles_claim: Some(true),
+                    ..IssuerParams::default()
+                }],
+                vec!["email:root@example.com".into()],
+            ),
+            Login::None => (vec![], vec![]),
+        };
         let layer = AuthLayer::from_params(AuthParams {
             mode: "oidc".into(),
-            issuers: vec![IssuerParams {
-                name: "kc".into(),
-                issuer: idp.issuer().into(),
-                audience: AUD.into(),
-                jwks_url: idp.jwks_url(),
-                trust_roles_claim: Some(true),
-                ..IssuerParams::default()
-            }],
+            issuers,
             token: Some(TokenParams {
                 issuer: "https://agent.test".into(),
                 audience: "agent-seddon".into(),
                 signing_key: signing_key.to_string_lossy().into_owned(),
                 ..TokenParams::default()
             }),
-            operator_subjects: vec!["email:root@example.com".into()],
+            operator_subjects,
             mtls: vec![
                 binding(FLEET_SAN, "fleet", "svc_fleet"),
                 binding(RELAY_SAN, "relay", "svc_seam"),
@@ -400,4 +421,54 @@ async fn negative_bearer_source_with_an_unbound_certificate_gets_nothing() {
     let source = rig.source(Client::Laptop);
     assert!(source.refresh().await.is_err());
     assert!(source.bearer().is_none());
+}
+
+/// Service-only `[auth]` (k8s K5): with no login issuer, a bound service still
+/// trades its certificate for a `svc:` token, and every other way in is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_service_only_exchange_mints_svc_token() {
+    let rig = Rig::start_with(Login::None).await;
+    let token = service_token(&rig, Client::Fleet).await.access_token;
+    let ch = rig.channel(Client::Fleet);
+    let me = who_am_i(&ch, &token).await.expect("who am i");
+    assert_eq!(me.subject, "svc:fleet");
+    assert_eq!(me.amr, ["mtls"]);
+    assert_eq!(count(&ch, &token).await.expect("served"), 7);
+    // And through the bearer source a serve mode installs.
+    let source = rig.source(Client::Fleet);
+    source.refresh().await.expect("refresh");
+    assert!(source.bearer().is_some());
+}
+
+/// Service-only refusals: a person's login has no issuer to verify it, and a
+/// certificate still has to be bound.
+#[rstest]
+// desc: an ID token from an IdP the agent does not know (there is none).
+#[case::adversarial_login_id_token_refused_in_service_only(Client::Fleet, true, false)]
+// desc: the same, over an unbound certificate.
+#[case::adversarial_login_over_unbound_cert_refused(Client::Laptop, true, false)]
+// desc: a certificate from the same CA that no binding names.
+#[case::adversarial_unbound_cert_refused_in_service_only(Client::Laptop, false, true)]
+// desc: no TLS, so no certificate to trade.
+#[case::negative_no_client_cert_refused(Client::Plaintext, false, true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn service_only_refusals(
+    #[case] who: Client,
+    #[case] with_id_token: bool,
+    #[case] use_client_cert: bool,
+) {
+    let rig = Rig::start_with(Login::None).await;
+    let id_token = if with_id_token {
+        rig.idp.mint(&json!({
+            "iss": rig.idp.issuer(), "aud": AUD, "sub": "alice", "org": TENANT,
+            "roles": ["operator"], "exp": now() + 600,
+        }))
+    } else {
+        String::new()
+    };
+    let err = exchange(&rig.channel(who), id_token, use_client_cert)
+        .await
+        .expect_err("refused");
+    assert_eq!(err.code(), Code::Unauthenticated);
+    assert!(rig.witness.0.lock().unwrap().is_empty(), "no seam ran");
 }

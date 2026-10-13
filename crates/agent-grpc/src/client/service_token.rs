@@ -113,6 +113,13 @@ impl MtlsBearerSource {
             loop {
                 let wait = match self.refresh().await {
                     Ok(next) => {
+                        // One line per exchange (every two thirds of a lifetime),
+                        // so an operator can see the service is signed in.
+                        tracing::info!(
+                            next_refresh_secs = next.as_secs(),
+                            after_failures = failures,
+                            "service token: exchanged"
+                        );
                         failures = 0;
                         next
                     }

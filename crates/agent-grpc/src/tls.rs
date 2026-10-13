@@ -496,17 +496,28 @@ pub(crate) fn read_pem(path: &Path) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// A private key readable by group/other is worth a warning (not a refusal: a
-/// deployment may deliberately share it with a group-owned sidecar).
+/// Whether a private key's mode is worth a warning: group write/execute or any
+/// access by others. Group read alone is fine (k8s K5): a Secret volume with
+/// `defaultMode: 0440` and the pod's `fsGroup` is how a non-root uid reads a
+/// root-owned key, so `0440`/`0640` stay quiet and `0644` still warns. Only the
+/// permission bits count; setuid/setgid/sticky are ignored.
+pub(crate) fn key_mode_is_exposed(mode: u32) -> bool {
+    mode & 0o037 != 0
+}
+
+/// A private key that others can read, or the group can write, is worth a
+/// warning (not a refusal: a deployment may deliberately share it with a
+/// group-owned sidecar).
 pub(crate) fn warn_if_key_is_readable(key: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(key) {
         let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
+        if key_mode_is_exposed(mode) {
             tracing::warn!(
                 key = %key.display(),
                 mode = format!("{mode:o}"),
-                "a gRPC TLS private key is group/world-accessible; consider `chmod 600`"
+                "a private key is group-writable or world-accessible; consider `chmod 600` \
+                 (or `0440` with a dedicated group)"
             );
         }
     }
@@ -517,6 +528,26 @@ mod tests {
     use super::*;
     use agent_testkit::pki::{LeafSpec, TestPki};
     use rstest::rstest;
+
+    #[rstest]
+    #[case::positive_owner_only_0400(0o400, false)]
+    #[case::positive_owner_rw_0600(0o600, false)]
+    #[case::positive_group_read_0440(0o440, false)]
+    #[case::positive_group_read_0640(0o640, false)]
+    #[case::negative_world_read_0644(0o644, true)]
+    #[case::negative_group_write_0660(0o660, true)]
+    #[case::negative_world_only_0604(0o604, true)]
+    #[case::boundary_group_read_bit_alone(0o040, false)]
+    #[case::boundary_group_write_bit_alone(0o020, true)]
+    #[case::boundary_group_exec_bit_alone(0o010, true)]
+    #[case::boundary_world_exec_bit_alone(0o001, true)]
+    #[case::corner_no_bits(0o000, false)]
+    #[case::adversarial_setuid_world_open(0o4777, true)]
+    #[case::adversarial_special_bits_do_not_warn(0o7440, false)]
+    #[case::adversarial_full_file_type_bits(0o100_440, false)]
+    fn key_mode_exposure(#[case] mode: u32, #[case] exposed: bool) {
+        assert_eq!(key_mode_is_exposed(mode), exposed, "mode {mode:o}");
+    }
 
     #[rstest]
     #[case::positive_hostname("seam.internal", true)]

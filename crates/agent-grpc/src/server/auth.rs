@@ -181,6 +181,22 @@ impl std::fmt::Debug for SessionBackend {
 }
 
 impl AuthParams {
+    /// Service-only `oidc` (k8s K5): no login issuer, a token service and at
+    /// least one mTLS binding, and nothing that needs a person's login
+    /// (`redirect_uris`, `operator_subjects`). The only sign-in is a bound
+    /// service trading its client certificate; every login token is refused.
+    pub fn is_service_only(&self) -> bool {
+        self.mode.trim() == "oidc"
+            && [&self.issuer, &self.audience, &self.jwks_url]
+                .iter()
+                .all(|v| v.trim().is_empty())
+            && self.issuers.is_empty()
+            && self.token.is_some()
+            && !self.mtls.is_empty()
+            && self.redirect_uris.is_empty()
+            && self.operator_subjects.is_empty()
+    }
+
     /// Every configured issuer: the single-issuer form (as `default`) first, then
     /// `issuers` in order.
     pub fn issuer_list(&self) -> Vec<IssuerParams> {
@@ -449,7 +465,15 @@ impl AuthLayer {
             "oidc" => {
                 #[cfg(feature = "auth")]
                 {
-                    let login = jwt::MultiIssuerVerifier::from_params(&params)?;
+                    let login = if params.is_service_only() {
+                        tracing::info!(
+                            "service-only `[auth]`: no login issuer, so login tokens are \
+                             refused; only `[auth.mtls]` services can sign in"
+                        );
+                        jwt::MultiIssuerVerifier::none()
+                    } else {
+                        jwt::MultiIssuerVerifier::from_params(&params)?
+                    };
                     let Some(t) = &params.token else {
                         tracing::warn!(
                             "`[auth] mode = \"oidc\"` without `[auth.token]`: seams accept IdP \

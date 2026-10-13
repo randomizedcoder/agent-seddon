@@ -416,6 +416,15 @@ impl MultiIssuerVerifier {
 }
 
 impl MultiIssuerVerifier {
+    /// No login issuer: every login token is refused (service-only `[auth]`,
+    /// [`AuthParams::is_service_only`]). [`new`](Self::new) still refuses an
+    /// empty list, so this is never reached by a half-filled config.
+    pub fn none() -> Self {
+        Self {
+            verifiers: Vec::new(),
+        }
+    }
+
     /// Whether any login issuer accepts tokens carrying `iss`.
     pub fn accepts(&self, iss: &str) -> bool {
         self.verifiers.iter().any(|v| v.accepts(iss))

@@ -129,6 +129,12 @@ bound certificate is rejected.
 - **Plaintext refusal.** `oidc` on a non-loopback TCP listener without `[grpc.tls]` refuses to
   start. `allow_insecure_listen = true` overrides it with a warning at every start.
 
+**As built (k8s K5): service-only `[auth]`.** A deployment with no login IdP (the k3s cluster
+before K6) runs `mode = "oidc"` with `[auth.token]` and `[auth.mtls] bindings` and no issuer at
+all. Every login token is refused; the only sign-in is a bound service's `Exchange{use_client_cert}`.
+Anything that needs a person (`redirect_uris`, `operator_subjects`) or a half-filled issuer block
+keeps the "needs `issuer`" error ([k8s 05](../k8s/05-identity-and-pki.md)).
+
 ## Testing auth and credential passing
 
 | Tier | What | How |
