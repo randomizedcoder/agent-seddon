@@ -6,8 +6,8 @@
 # `k8s-rendered` proves rendered/ is fresh, `k8s-render-tests` proves its invariants,
 # `k8s-kubeconform` proves its schema — none of them run the agent. This one does,
 # per role, straight from the COMMITTED manifests:
-#   - the ConfigMap's `agent.toml` is the config (only the TLS mount path is rewritten,
-#     to a minted test PKI). The 0.0.0.0 bind is kept as committed: the startup listen
+#   - the ConfigMap's `agent.toml` is the config (only the TLS and token mount paths are
+#     rewritten, to a minted test PKI + signing key). The 0.0.0.0 bind is kept as committed: the startup listen
 #     guard (S1) treats loopback as trusted, so a loopback rewrite hid a role that a pod
 #     refuses to start (the first l2 live accept crash-looped on exactly that);
 #   - the Deployment's container `args` are the argv;
@@ -48,11 +48,18 @@ pkgs.runCommand "k8s-role-boot"
     openssl req -x509 -new -key "$work/ca.key" -subj "/CN=k8s-role-boot-ca" \
       -days 1 -out "$work/ca.crt"
 
+    # The shared agent-token signing key (K5): cert-manager's `token-signer` Secret,
+    # here a throwaway P-256 key. Every role mounts it at /etc/agent/token and signs
+    # + verifies agent tokens with it, so a role refuses to start without it.
+    openssl ecparam -name prime256v1 -genkey -noout -out "$work/token.key"
+
     for role in ${lib.concatStringsSep " " roles}; do
       dir="${src}/rendered/k3s/$role"
       tls="$work/$role/tls"
+      token="$work/$role/token"
       home="$work/$role/home"
-      mkdir -p "$tls" "$home"
+      mkdir -p "$tls" "$token" "$home"
+      cp "$work/token.key" "$token/tls.key"
 
       # The role's leaf, shaped like its cert-manager Certificate.
       cp "$work/ca.crt" "$tls/ca.crt"
@@ -70,7 +77,7 @@ pkgs.runCommand "k8s-role-boot"
       # (0.0.0.0, a routable address to the S1 listen guard); the build sandbox's
       # private network namespace keeps it unreachable from outside.
       yq -e '.data["agent.toml"]' "$dir/configmap-$role.yaml" \
-        | sed -e "s#/etc/agent/tls#$tls#g" \
+        | sed -e "s#/etc/agent/token#$token#g" -e "s#/etc/agent/tls#$tls#g" \
         > "$work/$role/agent.toml"
       grep -q '"0\.0\.0\.0:' "$work/$role/agent.toml" \
         || { echo "FAIL: [$role] expected the committed 0.0.0.0 bind" >&2; exit 1; }

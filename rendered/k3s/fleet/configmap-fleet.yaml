@@ -14,25 +14,51 @@ data:
     base_url = "http://127.0.0.1:1/v1"
     model = "unwired-until-k8"
 
-    # Until K5 renders `mode = "oidc"` + `[auth.mtls] bindings`, the roles run
-    # `mode = "none"` on a routable pod address, which the S1 listen guard refuses
-    # unless accepted here. The listener stays strict mTLS (`[grpc.tls] client_ca`,
-    # enforced by k8s-render-tests `insecure-listen-needs-mtls`): only a cluster-CA
-    # cert holder connects, but such a peer can assert any tenant. Warns every start.
+    # Service-only: no login issuer until K6. Only a certificate bound below can
+    # sign in, and only over the strict-mTLS listener.
     [auth]
-    allow_insecure_listen = true
+    mode = "oidc"
+
+    [auth.token]
+    issuer = "spiffe://agent.l2"
+    audience = "agent-seddon"
+    signing_key = "/etc/agent/token/tls.key"
+
+    [auth.mtls]
+    token_endpoint = "https://gateway.agent-seddon.svc:50100"
+
+    [[auth.mtls.bindings]]
+    san = "spiffe://agent.l2/svc/gateway"
+    service = "gateway"
+    tenant = "agent-seddon"
+    roles = ["svc_seam"]
+
+    [[auth.mtls.bindings]]
+    san = "spiffe://agent.l2/svc/sessions"
+    service = "sessions"
+    tenant = "agent-seddon"
+    roles = ["svc_seam"]
+
+    [[auth.mtls.bindings]]
+    san = "spiffe://agent.l2/svc/fleet"
+    service = "fleet"
+    tenant = "agent-seddon"
+    roles = ["svc_fleet"]
 
     [grpc.fleet]
     listen = "0.0.0.0:50086"
 
-    # rustls mTLS from the cert-manager Secret `tls-fleet` (kubernetes.io/tls),
-    # mounted read-only at /etc/agent/tls. Cilium must never terminate this.
     [grpc.tls]
     cert = "/etc/agent/tls/tls.crt"
     key = "/etc/agent/tls/tls.key"
     client_ca = "/etc/agent/tls/ca.crt"
     # The Secret renews with no signal; reload on file change (K4).
     reload_poll_secs = 30
+
+    [grpc.tls.client]
+    ca = "/etc/agent/tls/ca.crt"
+    cert = "/etc/agent/tls/tls.crt"
+    key = "/etc/agent/tls/tls.key"
 
     [metrics]
     listen = "0.0.0.0:9636"

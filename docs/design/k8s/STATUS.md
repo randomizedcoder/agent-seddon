@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 (live import on l2 at K3 Slice 9) |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ✅ | #580, #581, #583, #587, #588, #589, #591, #596, #600, #604, #605, #607 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ✅ | #613 |
-| K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | 🟡 | Slice 1 (service-only `[auth]`) |
+| K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | 🟡 | Slices 1–2 (service-only `[auth]`, rendered) |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
 | K7 | Privileged sandbox sidecar | agent-seddon | ⬜ | |
 | K8 | Observability + l2 cut-over | both | ⬜ | |
@@ -490,3 +490,44 @@ acceptance on l2; (4) cert-manager approver-policy.
   - Tests: `auth_cfg_validate_cases` (service-only rows), `from_params_service_only_cases`,
     `service_only_layer_tokens`, `key_mode_exposure`, and in `tests/mtls_identity.rs` a
     service-only rig (`positive_service_only_exchange_mints_svc_token`, `service_only_refusals`).
+
+- **Slice 2 — the cluster config, rendered.** The roles now render the service-only `[auth]` from
+  Slice 1 instead of the interim `allow_insecure_listen` (#607), with the identity material to back
+  it.
+  - `nix/k8s/lib.nix`: `roleBaseToml` renders `[auth] mode = "oidc"`, `[auth.token]` (issuer
+    `spiffe://agent.l2`, audience `agent-seddon`, `signing_key = /etc/agent/token/tls.key`),
+    `[auth.mtls]` with one `[[bindings]]` per role (gateway/sessions → `svc_seam`, fleet →
+    `svc_fleet`), and `[grpc.tls.client]` from the role's own leaf. `fleet` alone sets
+    `token_endpoint = https://gateway.agent-seddon.svc:50100`.
+  - `deployment`: pod `securityContext` `runAsUser/runAsGroup/fsGroup = 10001`; the `tls` Secret
+    volume mounts `defaultMode: 288` (0440); a new read-only `token` volume from Secret
+    `token-signer` (just `tls.key`) at `/etc/agent/token`.
+  - `nix/k8s/components/pki.nix`: a `token-signer` Certificate (ECDSA P-256, `rotationPolicy: Never`,
+    90d, SAN `spiffe://agent.l2/svc/token-signer`, `usages: [digital signature]` only, Secret
+    `token-signer`, wave 0). The key is never an mTLS identity and no binding names its SAN.
+  - `crates/agent-k8s-render`: `check_insecure_listen_needs_mtls` is retired; five checks replace it
+    — `role-auth`, `mtls-bindings`, `secret-modes`, `token-signer`, `token-endpoint` — each with
+    `brk_*` breakers and `adversarial_mutation_is_flagged` rows (117 tests, incl. the `defaultMode`
+    0440/0444 boundary and a setuid+group-read corner). Meta-check: hand-reverting a ConfigMap to
+    `allow_insecure_listen` reddens `k8s-render-tests` (`role-auth` + the service-only boundary),
+    then reverts clean.
+  - `nix/checks/k8s-role-boot.nix`: each role now also mints a throwaway P-256 signing key, copies
+    it to the role's token mount, and the config rewrite re-points both `/etc/agent/token` and
+    `/etc/agent/tls`; all three roles still boot from their committed manifests → SERVING over mTLS,
+    plaintext probe refused.
+  - Re-released the image tag (Slice 1's Rust staled it) and re-rendered: the tag, the three
+    ConfigMaps/Deployments and `pki/certificate-token-signer.yaml` are the diff.
+  - Docs: `05` (service-only identity, the token-signer, key modes), `04` (interim text dropped),
+    `07` (`defaultMode: 0440` + `fsGroup`).
+  - **Security-review note — the shared signing key is a known, bounded grant.** All three roles
+    mount the one `token-signer` private key, so a compromised role could forge a validly-*signed*
+    `svc:` token. This does **not** grant cross-role authority, because authorization is anchored to
+    the client certificate, not to the signature: (a) a `cnf`-bound token is honoured only on a
+    connection that presents its leaf (`auth/mtls.rs` `cnf_allows`); (b) roles are resolved from the
+    presenter's SAN → `[auth.mtls] binding`, not from token claims (`trust_roles_claim` defaults
+    false). So forging a token still requires the *target's* per-role certificate key — a separate,
+    non-shared Secret (mode 0440). The residual risk is that a role with the key can mint tokens
+    bound to its *own* identity with arbitrary TTL/claims the binding would otherwise shape; the
+    tighter split (a verify-only public key in the two non-minting roles) needs a new `[auth.token]`
+    field and verify path and is a hardening follow-up, not Slice 2. The key never acts as an mTLS
+    identity (`digital signature` usage only, no binding names its SAN).

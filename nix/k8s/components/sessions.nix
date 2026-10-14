@@ -6,7 +6,7 @@
 # the driving AgentSessionService + the idle reaper) on :50080. Sync wave 4 — it
 # comes up after the gateway (wave 3), with which it exchanges a `svc:` token. It
 # terminates its own rustls mTLS from the cert-manager Secret; Cilium never sees
-# the plaintext. Auth/JWKS wiring to the gateway lands with K5.
+# the plaintext. It signs in with its own certificate (`[auth.mtls]`, K5).
 {
   lib,
   k8sLib,
@@ -24,19 +24,11 @@ let
     # sessions role — rendered by nix/k8s/components/sessions.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
-    ${k8sLib.roleBaseToml}
+    ${k8sLib.roleBaseToml { inherit (target) deployment; }}
     [grpc.sessions]
     listen = "0.0.0.0:${toString s.port}"
 
-    # rustls mTLS from the cert-manager Secret `tls-sessions` (kubernetes.io/tls),
-    # mounted read-only at /etc/agent/tls. Cilium must never terminate this.
-    [grpc.tls]
-    cert = "/etc/agent/tls/tls.crt"
-    key = "/etc/agent/tls/tls.key"
-    client_ca = "/etc/agent/tls/ca.crt"
-    # The Secret renews with no signal; reload on file change (K4).
-    reload_poll_secs = ${toString k8sLib.tlsReloadPollSecs}
-
+    ${k8sLib.roleTlsToml}
     [metrics]
     listen = "0.0.0.0:${toString s.metrics_port}"
   '';
