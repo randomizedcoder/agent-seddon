@@ -211,6 +211,9 @@ The CLI is hand-parsed with a bare-word subcommand pattern
   (`sub = "svc:fleet"`). Its downstream calls then forward that token like any other caller's.
 - A service token is bound to its certificate (`cnf` claim = certificate thumbprint) and is rejected
   over a connection that does not present that certificate.
+- With no login IdP at all, `mode = "oidc"` still works **service-only** when `[auth.token]` and
+  `[auth.mtls] bindings` are set: services sign in, people cannot (k8s K5,
+  [04](04-service-integration.md#mtls-between-services)).
 - An IdP service account (Google: ID token with `target_audience`; Keycloak: `client_credentials`)
   is an alternative `BearerSource` kind for deployments that already manage service accounts in the
   IdP; it is documented, not built in this track.

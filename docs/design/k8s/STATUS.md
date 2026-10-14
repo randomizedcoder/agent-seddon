@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 (live import on l2 at K3 Slice 9) |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ✅ | #580, #581, #583, #587, #588, #589, #591, #596, #600, #604, #605, #607 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ✅ | #613 |
-| K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ⬜ | |
+| K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | 🟡 | Slice 1 (service-only `[auth]`) |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
 | K7 | Privileged sandbox sidecar | agent-seddon | ⬜ | |
 | K8 | Observability + l2 cut-over | both | ⬜ | |
@@ -468,3 +468,25 @@ them) land with their own component, tracked separately.
 - **Found (for K8):** a serve mode binds `/metrics` to `127.0.0.1:<role metrics port>` and only
   with `[metrics] enabled = true`. The roles' rendered `[metrics] listen = "0.0.0.0:…"` is
   therefore ignored, and their metrics endpoint is off in the cluster today.
+
+### K5 — identity in the cluster (2026-10-12 →)
+
+Plan, in slices: (1) the agent accepts the cluster's auth shape; (2) render it (signer,
+bindings, `token_endpoint`, key modes) and drop the interim `allow_insecure_listen`; (3) live
+acceptance on l2; (4) cert-manager approver-policy.
+
+- **Slice 1 — service-only `[auth]` and the key-mode warning.**
+  - `[auth.token]` needs `mode = "oidc"`, and `oidc` needed a login IdP. The cluster has none
+    until K6. `mode = "oidc"` with **no** login issuer is now accepted when `[auth.token]` and at
+    least one `[auth.mtls]` binding are set and nothing needs a person's login (no
+    `redirect_uris`, no `operator_subjects`, no half-filled issuer block). The only sign-in is then
+    a bound service trading its certificate (`Exchange{use_client_cert}`); every login token is
+    refused (`MultiIssuerVerifier::none()`).
+  - Checked twice, as before: at load (`AuthCfg::is_service_only` in `validate`) and when the
+    layer is built (`AuthParams::is_service_only` in `AuthLayer::from_params`).
+  - `warn_if_key_is_readable` now tolerates group read (`key_mode_is_exposed` = `mode & 0o037`):
+    `0440`/`0640` are quiet, `0644` and group-writable keys still warn. This is what lets Slice 2
+    mount keys `0440` with the pod's `fsGroup` without a warning per start and reload.
+  - Tests: `auth_cfg_validate_cases` (service-only rows), `from_params_service_only_cases`,
+    `service_only_layer_tokens`, `key_mode_exposure`, and in `tests/mtls_identity.rs` a
+    service-only rig (`positive_service_only_exchange_mints_svc_token`, `service_only_refusals`).

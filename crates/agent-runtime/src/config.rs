@@ -3615,6 +3615,23 @@ impl AuthCfg {
         }
     }
 
+    /// Service-only `oidc` (k8s K5): no login issuer, an `[auth.token]` and at
+    /// least one `[auth.mtls]` binding, so the only sign-in is a bound service
+    /// trading its client certificate. Anything that needs a person's login
+    /// (`redirect_uris`, `operator_subjects`) or a half-filled issuer block
+    /// rules it out, and the usual "needs `issuer`" error applies.
+    pub fn is_service_only(&self) -> bool {
+        self.mode.trim() == "oidc"
+            && [&self.issuer, &self.audience, &self.jwks_url]
+                .iter()
+                .all(|v| v.trim().is_empty())
+            && self.issuers.is_empty()
+            && self.token.is_some()
+            && self.mtls.as_ref().is_some_and(|m| !m.bindings.is_empty())
+            && self.redirect_uris.is_empty()
+            && self.operator_subjects.is_empty()
+    }
+
     /// The largest accepted `leeway_secs`. A larger skew window would let an
     /// expired token keep working for longer than the token's own lifetime.
     pub const MAX_LEEWAY_SECS: u64 = 300;
@@ -3680,7 +3697,10 @@ impl AuthCfg {
                 }
                 // The single-issuer form is used when `issuer` is set, or when no
                 // `[[auth.issuers]]` exist (so a half-filled block names what is missing).
-                if !self.issuer.trim().is_empty() || self.issuers.is_empty() {
+                // Service-only (k8s K5) has no login issuer at all.
+                if !self.is_service_only()
+                    && (!self.issuer.trim().is_empty() || self.issuers.is_empty())
+                {
                     for (key, value) in [
                         ("issuer", &self.issuer),
                         ("audience", &self.audience),
@@ -3688,7 +3708,8 @@ impl AuthCfg {
                     ] {
                         if value.trim().is_empty() {
                             return Err(format!(
-                                "`[auth] mode = \"oidc\"` needs `{key}` (or `[[auth.issuers]]`)"
+                                "`[auth] mode = \"oidc\"` needs `{key}` (or `[[auth.issuers]]`, \
+                                 or `[auth.token]` + `[auth.mtls] bindings` for service-only)"
                             ));
                         }
                     }
@@ -5609,6 +5630,26 @@ mod tests {
         }
     }
 
+    /// Service-only `oidc` (k8s K5): a token service and two bound services, no
+    /// login issuer.
+    fn service_only() -> AuthCfg {
+        AuthCfg {
+            mode: "oidc".into(),
+            token: Some(token_cfg()),
+            mtls: Some(AuthMtlsCfg {
+                bindings: vec![
+                    mtls_binding(FLEET_SAN),
+                    AuthMtlsBindingCfg {
+                        service: "gateway".into(),
+                        ..mtls_binding("spiffe://agent.example/svc/gateway")
+                    },
+                ],
+                token_endpoint: String::new(),
+            }),
+            ..AuthCfg::default()
+        }
+    }
+
     fn google_entry() -> AuthIssuerCfg {
         AuthIssuerCfg {
             name: "google".into(),
@@ -5733,6 +5774,24 @@ mod tests {
     #[case::adversarial_operator_subject_control_char(AuthCfg { operator_subjects: vec!["email:root@example.com\u{7}".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("operator_subjects` entry"))]
     #[case::boundary_session_ttl_above_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_001, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
     #[case::adversarial_entry_jwks_credentials(issuers(vec![AuthIssuerCfg { jwks_url: "https://u:p@idp.example/k".into(), ..google_entry() }]), true, Some("credentials"))]
+    // --- service-only `oidc` (k8s K5): no login issuer ---
+    #[case::positive_service_only_oidc(service_only(), true, None)]
+    #[case::boundary_one_binding_is_enough(AuthCfg { mtls: Some(AuthMtlsCfg { bindings: vec![mtls_binding(FLEET_SAN)], ..AuthMtlsCfg::default() }), ..service_only() }, true, None)]
+    #[case::negative_service_only_without_auth_feature(
+        service_only(),
+        false,
+        Some("`auth` feature")
+    )]
+    #[case::negative_no_issuer_without_mtls_bindings(AuthCfg { mtls: None, ..service_only() }, true, Some("needs `issuer`"))]
+    #[case::negative_no_issuer_with_empty_bindings(AuthCfg { mtls: Some(AuthMtlsCfg::default()), ..service_only() }, true, Some("needs `issuer`"))]
+    #[case::negative_no_issuer_without_token(AuthCfg { token: None, ..service_only() }, true, Some("needs `[auth.token]`"))]
+    #[case::negative_no_issuer_with_redirect_uris(AuthCfg { redirect_uris: vec!["https://portal.example/".into()], ..service_only() }, true, Some("needs `issuer`"))]
+    #[case::negative_no_issuer_with_operator_subjects(AuthCfg { operator_subjects: vec!["email:root@example.com".into()], ..service_only() }, true, Some("needs `issuer`"))]
+    #[case::corner_half_filled_issuer_still_errors(AuthCfg { audience: "agent".into(), ..service_only() }, true, Some("needs `issuer`"))]
+    #[case::corner_jwks_without_issuer_still_errors(AuthCfg { jwks_url: GOOD_JWKS.into(), ..service_only() }, true, Some("needs `issuer`"))]
+    #[case::corner_service_only_plus_login_issuer(AuthCfg { mtls: service_only().mtls, token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::adversarial_service_only_bad_binding_still_refused(AuthCfg { mtls: Some(AuthMtlsCfg { bindings: vec![mtls_binding("https://agent.example/svc/fleet")], ..AuthMtlsCfg::default() }), ..service_only() }, true, Some("spiffe://"))]
+    #[case::adversarial_service_only_mode_none(AuthCfg { mode: "none".into(), ..service_only() }, true, Some("requires `[auth] mode"))]
     fn auth_cfg_validate_cases(
         #[case] cfg: AuthCfg,
         #[case] verifier_compiled: bool,

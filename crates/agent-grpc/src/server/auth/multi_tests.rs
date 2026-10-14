@@ -469,3 +469,84 @@ async fn from_params_operator_subjects_cases(
         (got, want) => panic!("got {:?}, want {want:?}", got.map(|_| "a layer")),
     }
 }
+
+fn fleet_binding() -> super::MtlsBindingParams {
+    super::MtlsBindingParams {
+        san: "spiffe://agent.test/svc/fleet".into(),
+        service: "fleet".into(),
+        tenant: "acme".into(),
+        roles: vec!["svc_fleet".into()],
+    }
+}
+
+/// Service-only `oidc` (k8s K5): a token service and mTLS bindings, no login
+/// issuer. Anything that needs a person's login keeps the "needs an issuer"
+/// refusal.
+fn service_only() -> AuthParams {
+    AuthParams {
+        token: Some(token_params(AGENT_ISS, signing_key_file())),
+        mtls: vec![fleet_binding()],
+        ..oidc(vec![])
+    }
+}
+
+#[rstest]
+#[case::positive_service_only(service_only(), None)]
+#[case::negative_no_issuer_without_bindings(AuthParams { mtls: vec![], ..service_only() }, Some("needs `issuer`"))]
+#[case::negative_no_issuer_without_token(AuthParams { token: None, ..service_only() }, Some("needs `[auth.token]`"))]
+#[case::negative_no_issuer_with_redirect_uris(AuthParams { redirect_uris: vec!["https://portal.example/".into()], ..service_only() }, Some("needs `issuer`"))]
+#[case::negative_no_issuer_with_operator_subjects(AuthParams { operator_subjects: vec!["email:root@example.com".into()], ..service_only() }, Some("needs `issuer`"))]
+#[case::corner_half_filled_issuer_is_not_service_only(AuthParams { audience: AUD.into(), ..service_only() }, Some("needs `issuer`"))]
+#[case::adversarial_mode_none_with_token(AuthParams { mode: "none".into(), ..service_only() }, Some("requires"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn from_params_service_only_cases(
+    #[case] params: AuthParams,
+    #[case] want_err: Option<&str>,
+) {
+    match (AuthLayer::from_params(params), want_err) {
+        (Ok(layer), None) => assert!(layer.is_enabled() && layer.auth_service.is_some()),
+        (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+        (got, want) => panic!("got {:?}, want {want:?}", got.map(|_| "a layer")),
+    }
+}
+
+/// A service-only layer refuses every login token at a seam (there is no login
+/// issuer to verify it) but still takes its own agent tokens.
+#[rstest]
+#[case::positive_agent_token_accepted(true, None)]
+#[case::adversarial_login_token_refused(false, Some("16"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn service_only_layer_tokens(#[case] agent_token: bool, #[case] want_status: Option<&str>) {
+    let fake = FakeIssuer::start(TestKey::Rsa);
+    let key = signing_key_file();
+    let layer = AuthLayer::from_params(AuthParams {
+        token: Some(token_params(AGENT_ISS, key.clone())),
+        ..service_only()
+    })
+    .expect("layer");
+    let bearer = if agent_token {
+        let tokens = super::token::TokenService::from_params(&token_params(AGENT_ISS, key), 0)
+            .expect("tokens");
+        let id = super::VerifiedIdentity {
+            tenant: "acme".into(),
+            subject: "u-1".into(),
+            roles: vec![agent_core::ROLE_AGENT_USER.into()],
+            issuer: "kc".into(),
+            email: None,
+            email_verified: false,
+            expires_at: now() + 600,
+            sid: None,
+            cnf: None,
+        };
+        let grant = super::token::Grant::from_login(&id, "sid-1");
+        tokens.mint(&grant, &[]).expect("mint").token
+    } else {
+        fake.mint(&claims(
+            fake.issuer(),
+            &json!({"org": "acme", "roles": ["agent_user"]}),
+        ))
+    };
+    let (status, _) =
+        call_through(&layer, "/agent.v1.EmbedService/EmbedQuery", Some(&bearer)).await;
+    assert_eq!(status.as_deref(), want_status);
+}
