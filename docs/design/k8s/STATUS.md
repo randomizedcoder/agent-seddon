@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`10-increments.md`](10-increments
 | K2 | Nix-built images + `k8s-images` | agent-seddon | ✅ | #579 (live import on l2 at K3 Slice 9) |
 | K3 | Renderer, `rendered/k3s/`, GitOps, secrets, gate, `[grpc.gateway] exclude` | agent-seddon | ✅ | #580, #581, #583, #587, #588, #589, #591, #596, #600, #604, #605, #607 |
 | K4 | `[grpc.tls] reload_poll_secs` | agent-seddon | ✅ | #613 |
-| K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | 🟡 | Slices 1–2 (service-only `[auth]`, rendered) |
+| K5 | cert-manager SPIFFE identity in the cluster | agent-seddon | ✅ | Slices 1–4, live on l2 (approver-policy bounds SAN issuance) |
 | K6 | Edge (Envoy + portal-web) in the cluster | both | ⬜ | |
 | K7 | Privileged sandbox sidecar | agent-seddon | ⬜ | |
 | K8 | Observability + l2 cut-over | both | ⬜ | |
@@ -588,9 +588,25 @@ acceptance on l2; (4) cert-manager approver-policy.
     CN, unbound SA, non-`use` verb) plus `corner_exactly_five_request_policies` and
     `boundary_no_policy_admits_an_unknown_san` — 128 render tests. `k8s-kubeconform` vendors the
     `policy.cert-manager.io` + `rbac.../v1` schemas (28/28 valid).
-  - **Platform (pending user review, `~/nixos/desktop/l2`):** install cert-manager approver-policy
-    and disable the built-in approver (`--controllers=*,-certificaterequests-approver`) so policy is
-    the only approver. **Rollout order:** the policies must be synced *before* that flag flips, or an
-    unmatched request would block.
-  - **Live (pending):** a `Certificate` requesting `spiffe://agent.l2/svc/intruder` in `agent-seddon`
-    is **Denied** while role certs still renew. Then the K5 row goes ✅.
+  - **Platform (`~/nixos/desktop/l2/k3s.nix`, deployed 2026-10-14):** the approver-policy chart
+    (`v0.21.0`, rendered offline through the existing `renderChart` secret-scan) installs the CRD +
+    controller, and a `disableBuiltinApprover` toggle injects
+    `--controllers=*,-certificaterequests-approver` into the cert-manager Deployment (via `yq`; the
+    container is named `cert-manager-controller`, and the render asserts the flag landed) so policy is
+    the only approver. **Rollout order held:** deployed with the toggle `false` first, let ArgoCD sync
+    the five policies (an application-controller restart was needed so it discovered the new
+    `policy.cert-manager.io/v1alpha1` group), then flipped the toggle — so no request was ever left
+    without an approver.
+  - **Live acceptance on l2 (2026-10-14). Both criteria pass.**
+    - **Intruder refused.** A `Certificate` for `spiffe://agent.l2/svc/intruder` in `agent-seddon` is
+      **Denied**: *"No policy approved this request"* — each leaf policy rejected the unknown URI SAN,
+      and `allow-agent-seddon-ca` correctly didn't apply (its selector scopes it to the bootstrap
+      issuer in `cert-manager`).
+    - **Legitimate renewals still succeed.** `cmctl renew -n agent-seddon gateway sessions fleet
+      token-signer` bumped every revision (gateway 14→15, sessions 13→14, fleet 14→15, token-signer
+      1→2), all `Ready=True`, and the new `CertificateRequest`s are `Approved=True` with reason
+      `policy.cert-manager.io` — i.e. approver-policy, not the now-disabled built-in approver, did the
+      approving. The three role pods stayed `RESTARTS=0` (certs hot-reloaded).
+  - **K5 row → ✅.** The acceptance (`10-increments.md:14`) is met end to end: fleet gets a `svc:`
+    token over mTLS, `cmctl renew` is picked up with no restart, a certless pod is refused, and the
+    issuer no longer mints an identity outside the allowed SAN set.
