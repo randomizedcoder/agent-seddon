@@ -4,5 +4,5 @@
 # these so an unrelated Rust PR never changes rendered/ and fails the drift check
 # (docs/design/k8s/03-images-and-registry.md).
 {
-  agent = "99m66calmh064vwic9ssjzb35dx2h5l0";
+  agent = "lb8ww6n8sqw05zfn44b4gxh80db7349x";
 }
