@@ -27,7 +27,7 @@ spec:
             - "--serve-fleet"
             - "--config"
             - /etc/agent/agent.toml
-          image: "agent-seddon/agent:yv37blpmarcw2in1vbi9js8r51340k6q"
+          image: "agent-seddon/agent:99m66calmh064vwic9ssjzb35dx2h5l0"
           livenessProbe:
             exec:
               command:
@@ -101,17 +101,32 @@ spec:
             - mountPath: /etc/agent/tls
               name: tls
               readOnly: true
+            - mountPath: /etc/agent/token
+              name: token
+              readOnly: true
             - mountPath: /tmp
               name: tmp
             - mountPath: /home/agent
               name: home
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsUser: 10001
       volumes:
         - configMap:
             name: fleet-config
           name: config
         - name: tls
           secret:
+            defaultMode: 288
             secretName: tls-fleet
+        - name: token
+          secret:
+            defaultMode: 288
+            items:
+              - key: tls.key
+                path: tls.key
+            secretName: token-signer
         - emptyDir: {}
           name: tmp
         - emptyDir: {}

@@ -18,7 +18,8 @@
 #
 # Each role Certificate carries the SPIFFE URI SAN the agent enforces as the peer
 # principal (`spiffe://<trust-domain>/svc/<role>`); the `[auth.mtls] bindings` that
-# map those SANs to tenants and roles are rendered into the role configs at K5.
+# map those SANs to tenants and roles are rendered from the same `k8sLib.roleSan`
+# (K5), and the shared `token-signer` signing key is issued here too.
 # Short 24h lifetimes keep the K4 reload path exercised every day.
 #
 # Security note (SAN forgery): a cert-manager CA issuer signs whatever SAN a
@@ -53,13 +54,7 @@ let
   # The CA chain and every role cert apply before the workloads (which are wave 3+).
   wave = 0;
 
-  # The three agent roles that terminate mTLS (gateway, sessions, fleet). The exec
-  # seams never run as a cluster Service, so they get no certificate.
-  roles = [
-    "gateway"
-    "sessions"
-    "fleet"
-  ];
+  inherit (k8sLib) roles;
 
   clusterIssuer =
     { name, spec }:
@@ -100,7 +95,7 @@ let
       };
       duration = "24h";
       renewBefore = "8h";
-      uris = [ "spiffe://${trustDomain}/svc/${role}" ];
+      uris = [ (k8sLib.roleSan target.deployment role) ];
       dnsNames = [
         role
         "${role}.${ns}"
@@ -111,6 +106,43 @@ let
         "client auth"
         "digital signature"
       ];
+    };
+  };
+
+  # The agent-token signing key (K5), shared by every role: each one signs the
+  # tokens it mints and verifies the others' with it. cert-manager generates the
+  # key in the cluster, so it never touches a disk outside it; the certificate
+  # around it is only a carrier and is never mounted.
+  #   - `rotationPolicy: Never` keeps the key across renewals, so a renewal never
+  #     invalidates live tokens. Rotating the key is a deliberate operator step
+  #     (`[auth.token] previous_key`, docs/design/k8s/05).
+  #   - `digital signature` only, no `server auth`/`client auth`: it can never act
+  #     as an mTLS identity, and no `[auth.mtls]` binding names its SAN.
+  tokenSignerCertificate = {
+    apiVersion = "cert-manager.io/v1";
+    kind = "Certificate";
+    metadata = {
+      name = k8sLib.tokenSignerSecret;
+      namespace = ns;
+      labels = labels k8sLib.tokenSignerSecret;
+      annotations = syncWave wave;
+    };
+    spec = {
+      secretName = k8sLib.tokenSignerSecret;
+      issuerRef = {
+        kind = "ClusterIssuer";
+        name = caName;
+        group = "cert-manager.io";
+      };
+      privateKey = {
+        algorithm = "ECDSA";
+        size = 256;
+        rotationPolicy = "Never";
+      };
+      duration = "2160h"; # 90 days; renewing keeps the key
+      renewBefore = "360h";
+      uris = [ "spiffe://${trustDomain}/svc/${k8sLib.tokenSignerSecret}" ];
+      usages = [ "digital signature" ];
     };
   };
 
@@ -168,6 +200,7 @@ in
   ]
   ++ map (role: manifest "pki/certificate-${role}.yaml" (roleCertificate role)) roles
   ++ [
+    (manifest "pki/certificate-${k8sLib.tokenSignerSecret}.yaml" tokenSignerCertificate)
     (manifest "apps/application-pki.yaml" (application {
       component = "pki";
       namespace = ns;

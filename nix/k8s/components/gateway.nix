@@ -31,7 +31,7 @@ let
     # gateway role — rendered by nix/k8s/components/gateway.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
-    ${k8sLib.roleBaseToml}
+    ${k8sLib.roleBaseToml { inherit (target) deployment; }}
     # `--serve-all` hosts every enabled seam on one port. On a cluster Service the
     # exec seams must not get a listener (docs/design/k8s/08); an unknown name here
     # is a config-load error (crates/agent-cli, #580).
@@ -39,15 +39,7 @@ let
     listen = "0.0.0.0:${toString gw.port}"
     exclude = ["sandbox", "pty", "forge"]
 
-    # rustls mTLS from the cert-manager Secret `tls-gateway` (kubernetes.io/tls),
-    # mounted read-only at /etc/agent/tls. Cilium must never terminate this.
-    [grpc.tls]
-    cert = "/etc/agent/tls/tls.crt"
-    key = "/etc/agent/tls/tls.key"
-    client_ca = "/etc/agent/tls/ca.crt"
-    # The Secret renews with no signal; reload on file change (K4).
-    reload_poll_secs = ${toString k8sLib.tlsReloadPollSecs}
-
+    ${k8sLib.roleTlsToml}
     [metrics]
     listen = "0.0.0.0:${toString gw.metrics_port}"
   '';

@@ -47,7 +47,11 @@ is a follow-up: no Deployment mounts one of these app Secrets yet — that wirin
 `[forge]`/signing-key config, alongside the mount.
 
 **In the pods:**
-- Secrets are mounted as files (`defaultMode: 0400`), never as environment variables.
+- Secrets are mounted as files (`defaultMode: 0440`, group-readable), never as environment
+  variables. The pod runs as a non-root UID with an `fsGroup` that owns the mounted files, so the
+  agent reads them as its group without `0400`-style root ownership; the key-mode warning tolerates
+  group-read and bites only on group-write or world bits (`mode & 0o037`,
+  [05](05-identity-and-pki.md), K5).
 - The agent reads them through `file:` references. S17's confinement rules
   ([08-data-plane-and-secrets](../security-hardening/08-data-plane-and-secrets.md)) apply, with the
   mount root as an allowed secret directory.

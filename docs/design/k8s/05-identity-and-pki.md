@@ -93,9 +93,67 @@ spec:
 - **Short lifetimes on purpose.** A 24-hour certificate renews every day, so the reload path is
   exercised all the time rather than once a year.
 - The `[auth.mtls] bindings` in each role's rendered config name exactly these SANs. The renderer
-  tests check that every binding has a matching Certificate, and the reverse.
-- The **token signing key** (`[auth.token] signing_key`) is not a certificate. It is a Secret created
-  from a local file ([07](07-secrets.md)) and reloads the same way.
+  tests check that every binding has a matching Certificate, and the reverse (`mtls-bindings`).
+
+## Service-only identity in the cluster (new: K5)
+
+The cluster has no login IdP until K6, so the roles run `mode = "oidc"` in its **service-only**
+form: `[auth.token]` and one `[auth.mtls] binding` per role, and *no* login issuer. Login tokens
+are refused (`MultiIssuerVerifier::none`); only a service presenting a bound client certificate can
+sign in. The config loader and the gRPC `from_params` both gate this form on there being a token, at
+least one binding, and no `redirect_uris`/`operator_subjects`, as defense in depth
+([config.rs](../../../crates/agent-runtime/src/config.rs), [auth.rs](../../../crates/agent-grpc/src/server/auth.rs)).
+
+As rendered by `k8sLib.roleBaseToml` (one head per role):
+
+```toml
+[auth]
+mode = "oidc"
+[auth.token]
+issuer = "spiffe://agent.l2"
+audience = "agent-seddon"
+signing_key = "/etc/agent/token/tls.key"
+[auth.mtls]
+# fleet also sets token_endpoint = "https://gateway.agent-seddon.svc:50100"
+[[auth.mtls.bindings]]
+san = "spiffe://agent.l2/svc/gateway"
+service = "gateway"
+tenant = "agent-seddon"
+roles = ["svc_seam"]
+# … one binding per role: gateway/sessions = svc_seam, fleet = svc_fleet
+```
+
+`fleet` carries `[auth.mtls] token_endpoint` pointing at the gateway's Service DNS name and grpc
+port (the `role-auth`/`token-endpoint` render-tests check the host is one of the gateway cert's
+`dnsNames`); the client identity (`[grpc.tls.client]` ca/cert/key, the role's own leaf) is what the
+`MtlsBearerSource` presents to `Exchange` for a `svc:` token. gateway and sessions do not call out,
+so they set no `token_endpoint`.
+
+### The shared token-signing key (`token-signer`)
+
+The `[auth.token] signing_key` is **not** a role identity — it signs and verifies the `svc:` tokens
+the roles exchange, and every role must agree on it. In the cluster it is one cert-manager
+Certificate, `token-signer`, whose private key all three roles mount at `/etc/agent/token/tls.key`:
+
+- `rotationPolicy: Never`, long `duration` (90d): renewing the certificate keeps the same key, so a
+  renewal never invalidates a live token. Rotating the key is a deliberate operator step
+  (`[auth.token] previous_key` accepts the old key during an overlap); it is not automatic because
+  of `rotationPolicy: Never`.
+- `usages: [ digital signature ]` only — **no** `server auth`/`client auth`. It can never act as an
+  mTLS identity, and no `[auth.mtls] binding` names its SAN (`spiffe://agent.l2/svc/token-signer`).
+  The `token-signer` render-test asserts the rotation policy, the absence of auth usages, and that
+  it is mounted only by the role Deployments, read-only, at the token mount.
+- cert-manager generates the key in the cluster, so it never touches a disk outside it. The agent's
+  `from_pem` loads its SEC1 `EC PRIVATE KEY`.
+
+### Key file modes in the pod
+
+The Secrets mount `defaultMode: 0440` (group-readable, decimal `288`), the pod runs as a non-root
+UID with a matching `fsGroup`, and the private-key warning tolerates group-read — it bites only on
+group-write or any world bit (`key_mode_is_exposed(mode) = mode & 0o037 != 0`,
+[tls.rs](../../../crates/agent-grpc/src/tls.rs)). The `secret-modes` render-test asserts every
+Deployment sets `fsGroup` and every Secret volume a `defaultMode` with `mode & 0o037 == 0`
+([07](07-secrets.md)).
 
 ## Reload on file change (new: K4)
 

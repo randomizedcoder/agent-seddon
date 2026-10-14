@@ -44,10 +44,12 @@ Each component in `nix/k8s/components/` is a function:
 - a shared `[agent]`/`[provider]` head on every role's `agent.toml` (`k8sLib.roleBaseToml`). The
   config loader requires both; no K3 role calls a model, so the provider points at a closed
   loopback port until K8;
-- `[auth] allow_insecure_listen = true` in the same head, the interim posture until K5 renders
-  `mode = "oidc"` + `[auth.mtls] bindings`. Without it the S1 listen guard refuses `mode = "none"`
-  on the pod's routable `0.0.0.0` bind. The `insecure-listen-needs-mtls` render-test keeps the
-  flag on strict-mTLS listeners only (`[grpc.tls]` `cert`/`key`/`client_ca`);
+- `[auth] mode = "oidc"` in the same head, in the **service-only** form (K5): `[auth.token]` plus
+  one `[auth.mtls] binding` per role and no login issuer, so the S1 listen guard is satisfied on
+  the pod's routable `0.0.0.0` bind without the retired `allow_insecure_listen` interim flag. The
+  `role-auth` render-test asserts `mode = "oidc"`, no `allow_insecure_listen`, a `signing_key`
+  under the token mount and `[grpc.tls] client_ca` set; `mtls-bindings` cross-checks the binding
+  SANs against the role Certificates (both directions);
 - resource requests; memory limits;
 - labels `app.kubernetes.io/{name,part-of=agent-seddon,component}`.
 

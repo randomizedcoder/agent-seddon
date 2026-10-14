@@ -61,6 +61,23 @@ pub const EXEC_SEAM_PORTS: [i64; 6] = [50066, 50067, 50068, 9616, 9617, 9618];
 pub const HEALTH_PROBE_BIN: &str = "/bin/grpc-health-probe";
 /// Where each role's `tls-<role>` Secret is mounted (nix/k8s/lib.nix `tlsMountPath`).
 pub const TLS_MOUNT: &str = "/etc/agent/tls";
+/// Where the shared `token-signer` key is mounted (nix/k8s/lib.nix `tokenMountPath`).
+pub const TOKEN_MOUNT: &str = "/etc/agent/token";
+/// The Secret (and Certificate) holding the shared agent-token signing key.
+pub const TOKEN_SIGNER: &str = "token-signer";
+/// The gateway's gRPC port (nix/constants.nix), where fleet trades its certificate.
+pub const GATEWAY_GRPC_PORT: i64 = 50100;
+/// The single cluster tenant every service binding acts in (nix/k8s/lib.nix).
+pub const CLUSTER_TENANT: &str = PART_OF;
+/// A role token's `sub = svc:<service>`; its roles are `svc_fleet` for fleet and
+/// `svc_seam` for the rest (agent-core rbac.rs, nix/k8s/lib.nix `serviceRoles`).
+fn service_roles_for(role: &str) -> &'static [&'static str] {
+    if role == "fleet" {
+        &["svc_fleet"]
+    } else {
+        &["svc_seam"]
+    }
+}
 /// Every workload container carries all three.
 pub const PROBE_KINDS: [&str; 3] = ["readinessProbe", "livenessProbe", "startupProbe"];
 /// The `-name=value` flags a role health probe may pass. Anything else — `-tls-no-verify`,
@@ -684,44 +701,430 @@ fn toml_at<'a>(cfg: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
         .try_fold(cfg, |v, k| v.as_table().and_then(|t| t.get(*k)))
 }
 
-/// `[auth] allow_insecure_listen = true` (the K3 interim posture until K5's
-/// `mode = "oidc"`) is only acceptable on a strict-mTLS listener: the same agent.toml
-/// must set `[grpc.tls]` `cert`, `key` and `client_ca`, so the "any peer can claim any
-/// tenant" risk is confined to cluster-CA cert holders. Read by parsing the TOML — a
-/// `client_ca` in a comment or under another table does not count.
-pub fn check_insecure_listen_needs_mtls(ms: &[Manifest]) -> Vec<Finding> {
-    const ID: &str = "insecure-listen-needs-mtls";
+/// Parse a ConfigMap's `agent.toml`, pushing a parse-error finding under `id` and
+/// returning `None` if it does not parse.
+fn parse_or_flag(
+    id: &'static str,
+    path: &str,
+    cfg: Result<toml::Value, String>,
+    out: &mut Vec<Finding>,
+) -> Option<toml::Value> {
+    match cfg {
+        Ok(v) => Some(v),
+        Err(e) => {
+            out.push(Finding::new(
+                id,
+                path,
+                format!("agent.toml did not parse as TOML: {e}"),
+            ));
+            None
+        }
+    }
+}
+
+/// Every role runs service-only `oidc` (K5): no login IdP in the cluster until K6, so
+/// a role signs in only by trading its certificate. Each `agent.toml` must set
+/// `[auth] mode = "oidc"`, must not carry the retired `allow_insecure_listen`, must
+/// sign tokens with a key under the read-only token mount (`[auth.token] signing_key`),
+/// and must require a client certificate on its listener (`[grpc.tls] client_ca`).
+/// Read by parsing the TOML — a key in a comment or under another table does not count.
+pub fn check_role_auth(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "role-auth";
     let mut out = Vec::new();
     for (path, cfg) in agent_tomls(ms) {
-        let cfg = match cfg {
-            Ok(v) => v,
-            Err(e) => {
+        let Some(cfg) = parse_or_flag(ID, path, cfg, &mut out) else {
+            continue;
+        };
+        match toml_at(&cfg, &["auth", "mode"]).and_then(toml::Value::as_str) {
+            Some("oidc") => {}
+            got => out.push(Finding::new(
+                ID,
+                path,
+                format!("`[auth] mode` must be \"oidc\" (service-only, K5); got {got:?}"),
+            )),
+        }
+        if toml_at(&cfg, &["auth", "allow_insecure_listen"]).is_some() {
+            out.push(Finding::new(
+                ID,
+                path,
+                "`[auth] allow_insecure_listen` is the retired K3 interim posture; \
+                 service-only oidc replaces it",
+            ));
+        }
+        match toml_at(&cfg, &["auth", "token", "signing_key"]).and_then(toml::Value::as_str) {
+            Some(k) if k.starts_with(&format!("{TOKEN_MOUNT}/")) => {}
+            got => out.push(Finding::new(
+                ID,
+                path,
+                format!("`[auth.token] signing_key` must lie under {TOKEN_MOUNT}/; got {got:?}"),
+            )),
+        }
+        let client_ca = toml_at(&cfg, &["grpc", "tls", "client_ca"])
+            .and_then(toml::Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !client_ca {
+            out.push(Finding::new(
+                ID,
+                path,
+                "`[grpc.tls] client_ca` must be set: the listener must require a client \
+                 certificate (no plaintext or server-only peer)",
+            ));
+        }
+    }
+    out
+}
+
+/// The `[auth.mtls] bindings` in each role config name exactly the role Certificates'
+/// SPIFFE SANs — both directions — with the right service name and roles, no duplicate
+/// SAN, and never the `token-signer` SAN (the signing key is not an mTLS identity).
+pub fn check_mtls_bindings(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "mtls-bindings";
+    let mut out = Vec::new();
+
+    // The SANs the PKI actually issues to a role, keyed by SAN → role name.
+    let want: HashMap<String, String> = role_certificates(ms)
+        .iter()
+        .filter_map(|m| {
+            let san = dig(&m.doc, &["spec", "uris"])
+                .and_then(Value::as_sequence)
+                .and_then(|u| u.first())
+                .and_then(Value::as_str)?;
+            Some((san.to_string(), m.name()?.to_string()))
+        })
+        .collect();
+    let signer_san = ms
+        .iter()
+        .find(|m| m.kind() == Some("Certificate") && m.name() == Some(TOKEN_SIGNER))
+        .and_then(|m| {
+            dig(&m.doc, &["spec", "uris"])
+                .and_then(Value::as_sequence)
+                .and_then(|u| u.first())
+                .and_then(Value::as_str)
+        })
+        .map(String::from);
+
+    for (path, cfg) in agent_tomls(ms) {
+        let Some(cfg) = parse_or_flag(ID, path, cfg, &mut out) else {
+            continue;
+        };
+        let bindings = toml_at(&cfg, &["auth", "mtls", "bindings"]).and_then(toml::Value::as_array);
+        let Some(bindings) = bindings else {
+            out.push(Finding::new(
+                ID,
+                path,
+                "no `[[auth.mtls.bindings]]`: a service-only role accepts no certificate",
+            ));
+            continue;
+        };
+        let mut seen: HashSet<&str> = HashSet::new();
+        for b in bindings {
+            let san = b.get("san").and_then(toml::Value::as_str).unwrap_or("");
+            if Some(san) == signer_san.as_deref() {
                 out.push(Finding::new(
                     ID,
                     path,
-                    format!("agent.toml did not parse as TOML: {e}"),
+                    format!("binding names the token-signer SAN {san:?}, which is not an identity"),
                 ));
                 continue;
             }
-        };
-        if toml_at(&cfg, &["auth", "allow_insecure_listen"]).and_then(toml::Value::as_bool)
-            != Some(true)
-        {
-            continue;
-        }
-        for key in ["cert", "key", "client_ca"] {
-            let set = toml_at(&cfg, &["grpc", "tls", key])
-                .and_then(toml::Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty());
-            if !set {
+            let Some(role) = want.get(san) else {
+                out.push(Finding::new(
+                    ID,
+                    path,
+                    format!("binding SAN {san:?} has no matching role Certificate"),
+                ));
+                continue;
+            };
+            if !seen.insert(san) {
+                out.push(Finding::new(
+                    ID,
+                    path,
+                    format!("duplicate binding SAN {san:?}"),
+                ));
+            }
+            let service = b.get("service").and_then(toml::Value::as_str).unwrap_or("");
+            if service != role {
+                out.push(Finding::new(
+                    ID,
+                    path,
+                    format!("binding for {san:?} names service {service:?}, expected {role:?}"),
+                ));
+            }
+            let tenant = b.get("tenant").and_then(toml::Value::as_str).unwrap_or("");
+            if tenant != CLUSTER_TENANT {
                 out.push(Finding::new(
                     ID,
                     path,
                     format!(
-                        "`[auth] allow_insecure_listen = true` without `[grpc.tls] {key}`: \
-                         the listener would not be strict mTLS"
+                        "binding for {san:?} names tenant {tenant:?}, expected {CLUSTER_TENANT:?}"
                     ),
                 ));
+            }
+            let roles: Vec<&str> = b
+                .get("roles")
+                .and_then(toml::Value::as_array)
+                .map(|a| a.iter().filter_map(toml::Value::as_str).collect())
+                .unwrap_or_default();
+            if roles.as_slice() != service_roles_for(role) {
+                out.push(Finding::new(
+                    ID,
+                    path,
+                    format!(
+                        "binding for {san:?} has roles {roles:?}, expected {:?}",
+                        service_roles_for(role)
+                    ),
+                ));
+            }
+        }
+        // Every issued role SAN must be bound (so any role can verify any peer).
+        for san in want.keys() {
+            if !seen.contains(san.as_str()) {
+                out.push(Finding::new(
+                    ID,
+                    path,
+                    format!("role SAN {san:?} is issued but has no binding"),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The signing key and every TLS Secret reach the non-root agent as group-read only:
+/// each Deployment pins an `fsGroup`, and every Secret volume sets a `defaultMode`
+/// with no world bits and no group-write/execute (`mode & 0o037 == 0`, the same mask
+/// as the agent's own key-mode warning). 0o440 (decimal 288) passes; 0o444 or 0o660
+/// does not.
+pub fn check_secret_modes(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "secret-modes";
+    let mut out = Vec::new();
+    for m in deployments(ms) {
+        if dig(
+            &m.doc,
+            &["spec", "template", "spec", "securityContext", "fsGroup"],
+        )
+        .and_then(Value::as_i64)
+        .is_none()
+        {
+            out.push(Finding::new(
+                ID,
+                &m.path,
+                "Deployment pod sets no `securityContext.fsGroup`; a group-read Secret \
+                 would be unreadable by the non-root agent",
+            ));
+        }
+        for v in pod_volumes(m) {
+            let Some(secret) = v.get("secret") else {
+                continue;
+            };
+            let name = v.get("name").and_then(Value::as_str).unwrap_or("?");
+            match secret.get("defaultMode").and_then(Value::as_i64) {
+                None => out.push(Finding::new(
+                    ID,
+                    &m.path,
+                    format!("Secret volume {name:?} sets no `defaultMode` (defaults to world-readable 0644)"),
+                )),
+                Some(mode) if mode & 0o037 != 0 => out.push(Finding::new(
+                    ID,
+                    &m.path,
+                    format!(
+                        "Secret volume {name:?} `defaultMode` {mode} (0o{mode:o}) is group-writable \
+                         or world-accessible; use 0o440 (288)"
+                    ),
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+    out
+}
+
+/// The `token-signer` Certificate is a stable signing key, never an mTLS identity:
+/// `rotationPolicy: Never` (so a renewal keeps the key and live tokens survive), and
+/// its usages carry no `server auth` / `client auth`. Its Secret is mounted only by
+/// role Deployments, read-only at the token mount, and only its `tls.key` item.
+pub fn check_token_signer(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "token-signer";
+    let mut out = Vec::new();
+    match ms
+        .iter()
+        .find(|m| m.kind() == Some("Certificate") && m.name() == Some(TOKEN_SIGNER))
+    {
+        None => out.push(Finding::new(
+            ID,
+            TOKEN_SIGNER,
+            "the token-signer Certificate is missing",
+        )),
+        Some(cert) => {
+            if dig(&cert.doc, &["spec", "privateKey", "rotationPolicy"]).and_then(Value::as_str)
+                != Some("Never")
+            {
+                out.push(Finding::new(
+                    ID,
+                    &cert.path,
+                    "token-signer must set `privateKey.rotationPolicy: Never` (a renewal must \
+                     keep the key, or live tokens stop verifying)",
+                ));
+            }
+            for usage in dig(&cert.doc, &["spec", "usages"])
+                .and_then(Value::as_sequence)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                if matches!(usage.as_str(), Some("server auth" | "client auth")) {
+                    out.push(Finding::new(
+                        ID,
+                        &cert.path,
+                        format!(
+                            "token-signer must not carry the {usage:?} usage: it is a signing \
+                                 key, never an mTLS identity"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    // Wherever the token-signer Secret is mounted, it is by a role Deployment, at the
+    // token mount, read-only.
+    for m in ms.iter().filter(|m| m.kind() == Some("Deployment")) {
+        let is_role = m.name().is_some_and(|n| ROLES.contains(&n));
+        let mounts_signer = pod_volumes(m).iter().any(|v| {
+            v.get("secret")
+                .and_then(|s| s.get("secretName"))
+                .and_then(Value::as_str)
+                == Some(TOKEN_SIGNER)
+        });
+        if !mounts_signer {
+            if is_role {
+                out.push(Finding::new(
+                    ID,
+                    &m.path,
+                    "a role Deployment does not mount the token-signer key",
+                ));
+            }
+            continue;
+        }
+        if !is_role {
+            out.push(Finding::new(
+                ID,
+                &m.path,
+                "a non-role Deployment mounts the token-signer key",
+            ));
+        }
+        // The volume name used for the token secret, then its mount in the container.
+        let vol = pod_volumes(m).iter().find(|v| {
+            v.get("secret")
+                .and_then(|s| s.get("secretName"))
+                .and_then(Value::as_str)
+                == Some(TOKEN_SIGNER)
+        });
+        let vol_name = vol.and_then(|v| v.get("name")).and_then(Value::as_str);
+        let mount = containers(m)
+            .iter()
+            .flat_map(|c| {
+                c.get("volumeMounts")
+                    .and_then(Value::as_sequence)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+            })
+            .find(|vm| vm.get("name").and_then(Value::as_str) == vol_name);
+        match mount {
+            None => out.push(Finding::new(
+                ID,
+                &m.path,
+                "the token-signer volume is declared but never mounted",
+            )),
+            Some(vm) => {
+                if vm.get("mountPath").and_then(Value::as_str) != Some(TOKEN_MOUNT) {
+                    out.push(Finding::new(
+                        ID,
+                        &m.path,
+                        format!("the token-signer key must mount at {TOKEN_MOUNT}"),
+                    ));
+                }
+                if vm.get("readOnly").and_then(Value::as_bool) != Some(true) {
+                    out.push(Finding::new(
+                        ID,
+                        &m.path,
+                        "the token-signer mount must be read-only",
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fleet trades its certificate for a `svc:` token at the gateway: its
+/// `[auth.mtls] token_endpoint` is `https://` to the gateway Service DNS name — which
+/// must be a `dnsName` on the gateway Certificate, so the mTLS dial verifies — and the
+/// gateway gRPC port. No other role sets `token_endpoint` in K5.
+pub fn check_token_endpoint(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "token-endpoint";
+    let mut out = Vec::new();
+    let gateway_dns: HashSet<String> = ms
+        .iter()
+        .find(|m| m.kind() == Some("Certificate") && m.name() == Some("gateway"))
+        .and_then(|m| dig(&m.doc, &["spec", "dnsNames"]).and_then(Value::as_sequence))
+        .map(|ns| {
+            ns.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for m in ms.iter().filter(|m| m.kind() == Some("ConfigMap")) {
+        let Some(text) = dig(&m.doc, &["data"]).and_then(|d| d.get("agent.toml")?.as_str()) else {
+            continue;
+        };
+        let cfg: toml::Value = match toml::from_str(text) {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(Finding::new(
+                    ID,
+                    &m.path,
+                    format!("agent.toml did not parse: {e}"),
+                ));
+                continue;
+            }
+        };
+        let endpoint =
+            toml_at(&cfg, &["auth", "mtls", "token_endpoint"]).and_then(toml::Value::as_str);
+        let is_fleet = m.name() == Some("fleet-config");
+        match (is_fleet, endpoint) {
+            (false, Some(e)) => out.push(Finding::new(
+                ID,
+                &m.path,
+                format!("only fleet sets `token_endpoint` in K5; found {e:?}"),
+            )),
+            (false, None) => {}
+            (true, None) => out.push(Finding::new(
+                ID,
+                &m.path,
+                "fleet must set `[auth.mtls] token_endpoint` to trade for a `svc:` token",
+            )),
+            (true, Some(e)) => {
+                let want = format!("https://gateway.{PART_OF}.svc:{GATEWAY_GRPC_PORT}");
+                if e != want {
+                    out.push(Finding::new(
+                        ID,
+                        &m.path,
+                        format!("fleet `token_endpoint` must be {want:?}; got {e:?}"),
+                    ));
+                }
+                // The host must be a SAN on the gateway cert, or the dial won't verify.
+                let host = e
+                    .strip_prefix("https://")
+                    .and_then(|r| r.split(':').next())
+                    .unwrap_or("");
+                if !gateway_dns.is_empty() && !gateway_dns.contains(host) {
+                    out.push(Finding::new(
+                        ID,
+                        &m.path,
+                        format!("`token_endpoint` host {host:?} is not a dnsName on the gateway Certificate"),
+                    ));
+                }
             }
         }
     }
@@ -1133,7 +1536,7 @@ pub fn check_no_secret_material(ms: &[Manifest]) -> Vec<Finding> {
 }
 
 /// Every invariant, in the order the suite reports them.
-pub const ALL_CHECKS: [(&str, CheckFn); 15] = [
+pub const ALL_CHECKS: [(&str, CheckFn); 19] = [
     ("security-context", check_security_context),
     ("no-privilege", check_no_privilege),
     ("probes", check_probes),
@@ -1147,10 +1550,11 @@ pub const ALL_CHECKS: [(&str, CheckFn); 15] = [
     ("ca-chain", check_ca_chain),
     ("component-application", check_component_application),
     ("no-secret-material", check_no_secret_material),
-    (
-        "insecure-listen-needs-mtls",
-        check_insecure_listen_needs_mtls,
-    ),
+    ("role-auth", check_role_auth),
+    ("mtls-bindings", check_mtls_bindings),
+    ("secret-modes", check_secret_modes),
+    ("token-signer", check_token_signer),
+    ("token-endpoint", check_token_endpoint),
     ("tls-reload-polls", check_tls_reload_polls),
 ];
 
@@ -1234,6 +1638,12 @@ mod tests {
     }
     fn is_gateway_configmap(m: &Manifest) -> bool {
         m.kind() == Some("ConfigMap") && m.name() == Some(GATEWAY_CONFIGMAP)
+    }
+    fn is_fleet_configmap(m: &Manifest) -> bool {
+        m.kind() == Some("ConfigMap") && m.name() == Some("fleet-config")
+    }
+    fn is_token_signer_cert(m: &Manifest) -> bool {
+        m.kind() == Some("Certificate") && m.name() == Some(TOKEN_SIGNER)
     }
 
     // breakers — one hostile mutation each
@@ -1431,8 +1841,8 @@ mod tests {
         *at_mut(cm, &["binaryData"]) = Value::Mapping(mm);
     }
 
-    // The K3 interim auth posture is only safe on strict mTLS: each of these leaves
-    // `allow_insecure_listen = true` on a listener that is no longer strict mTLS.
+    // Service-only oidc needs a mTLS listener: each of these drops the client CA so
+    // the listener would no longer require a client certificate (check_role_auth).
     const CLIENT_CA_LINE: &str = "client_ca = \"/etc/agent/tls/ca.crt\"";
     fn brk_drop_client_ca(cm: &mut Value) {
         set_toml(cm, |t| t.replace(CLIENT_CA_LINE, ""));
@@ -1458,6 +1868,140 @@ mod tests {
     }
     fn brk_unparseable_toml(cm: &mut Value) {
         set_toml(cm, |t| format!("{t}\n[auth\n"));
+    }
+
+    // -- K5: service-only auth, bindings, secret modes, token signer -------------------
+
+    // role-auth: the listener drops back to a mode/posture the cluster must never run.
+    fn brk_mode_not_oidc(cm: &mut Value) {
+        set_toml(cm, |t| t.replace("mode = \"oidc\"", "mode = \"none\""));
+    }
+    fn brk_reintroduce_insecure_listen(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(
+                "mode = \"oidc\"",
+                "mode = \"oidc\"\nallow_insecure_listen = true",
+            )
+        });
+    }
+    fn brk_signing_key_outside_mount(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(
+                "signing_key = \"/etc/agent/token/tls.key\"",
+                "signing_key = \"/etc/agent/tls/tls.key\"",
+            )
+        });
+    }
+
+    // mtls-bindings: a binding that no longer matches the issued role identities.
+    fn brk_binding_wrong_service(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace("service = \"fleet\"", "service = \"intruder\"")
+        });
+    }
+    fn brk_binding_wrong_roles(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace("roles = [\"svc_fleet\"]", "roles = [\"svc_seam\"]")
+        });
+    }
+    fn brk_drop_gateway_binding(cm: &mut Value) {
+        // Drop the gateway binding block, leaving its issued role SAN unbound. Walk
+        // lines, skipping the `[[auth.mtls.bindings]]` header that owns the gateway
+        // `san` line and that block's four body lines.
+        set_toml(cm, |t| {
+            let lines: Vec<&str> = t.lines().collect();
+            let mut keep = vec![true; lines.len()];
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim() == "san = \"spiffe://agent.l2/svc/gateway\"" {
+                    // the header above and the four body lines (san..roles)
+                    let lo = i.saturating_sub(1);
+                    let hi = (i + 3).min(lines.len() - 1);
+                    keep[lo..=hi].fill(false);
+                }
+            }
+            lines
+                .iter()
+                .zip(keep)
+                .filter_map(|(l, k)| k.then_some(*l))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    }
+    fn brk_binding_names_token_signer(cm: &mut Value) {
+        set_toml(cm, |t| {
+            format!(
+                "{t}\n[[auth.mtls.bindings]]\nsan = \"spiffe://agent.l2/svc/token-signer\"\n\
+                 service = \"token-signer\"\ntenant = \"agent-seddon\"\nroles = [\"svc_seam\"]\n"
+            )
+        });
+    }
+
+    // secret-modes: a Secret the non-root agent could not read, or anyone could.
+    fn first_secret_volume_mut(d: &mut Value) -> &mut serde_yaml_ng::Mapping {
+        at_mut(d, &["spec", "template", "spec", "volumes"])
+            .as_sequence_mut()
+            .expect("volumes")
+            .iter_mut()
+            .find_map(|v| {
+                let is_secret = v.get("secret").is_some();
+                is_secret.then(|| v.as_mapping_mut().expect("volume mapping"))
+            })
+            .expect("a secret volume")
+    }
+    fn brk_drop_fsgroup(d: &mut Value) {
+        remove_at(
+            d,
+            &["spec", "template", "spec", "securityContext"],
+            "fsGroup",
+        );
+    }
+    fn brk_world_readable_secret(d: &mut Value) {
+        let secret = first_secret_volume_mut(d)
+            .get_mut(Value::String("secret".into()))
+            .expect("secret")
+            .as_mapping_mut()
+            .expect("secret mapping");
+        secret.insert(
+            Value::String("defaultMode".into()),
+            Value::Number(420.into()),
+        );
+    }
+    fn brk_no_default_mode(d: &mut Value) {
+        let secret = first_secret_volume_mut(d)
+            .get_mut(Value::String("secret".into()))
+            .expect("secret")
+            .as_mapping_mut()
+            .expect("secret mapping");
+        secret.remove(Value::String("defaultMode".into()));
+    }
+
+    // token-signer: the stable signing key turned into something rotatable or an identity.
+    fn brk_signer_rotation_always(c: &mut Value) {
+        *at_mut(c, &["spec", "privateKey", "rotationPolicy"]) = Value::String("Always".into());
+    }
+    fn brk_signer_client_auth(c: &mut Value) {
+        at_mut(c, &["spec", "usages"])
+            .as_sequence_mut()
+            .expect("usages")
+            .push(Value::String("client auth".into()));
+    }
+
+    // token-endpoint: fleet dialing the wrong place, or a role that should not dial out.
+    fn brk_fleet_endpoint_foreign_host(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(
+                "https://gateway.agent-seddon.svc:50100",
+                "https://evil.example:50100",
+            )
+        });
+    }
+    fn brk_extra_token_endpoint(cm: &mut Value) {
+        set_toml(cm, |t| {
+            t.replace(
+                "[auth.mtls]",
+                "[auth.mtls]\ntoken_endpoint = \"https://gateway.agent-seddon.svc:50100\"",
+            )
+        });
     }
 
     // A role serving the 24h cert that would never pick up its renewal (K4).
@@ -1513,7 +2057,11 @@ mod tests {
     #[case::ca_chain(check_ca_chain)]
     #[case::component_application(check_component_application)]
     #[case::no_secret_material(check_no_secret_material)]
-    #[case::insecure_listen_needs_mtls(check_insecure_listen_needs_mtls)]
+    #[case::role_auth(check_role_auth)]
+    #[case::mtls_bindings(check_mtls_bindings)]
+    #[case::secret_modes(check_secret_modes)]
+    #[case::token_signer(check_token_signer)]
+    #[case::token_endpoint(check_token_endpoint)]
     #[case::tls_reload_polls(check_tls_reload_polls)]
     fn positive_real_tree_is_clean(#[case] check: Check) {
         let findings = check(&tree());
@@ -1663,35 +2211,74 @@ mod tests {
         brk_pem_in_binarydata,
         check_no_secret_material
     )]
-    #[case::insecure_listen_without_client_ca(
-        is_gateway_configmap,
-        brk_drop_client_ca,
-        check_insecure_listen_needs_mtls
-    )]
-    #[case::insecure_listen_client_ca_only_in_comment(
+    // role-auth (K5)
+    #[case::role_auth_without_client_ca(is_gateway_configmap, brk_drop_client_ca, check_role_auth)]
+    #[case::role_auth_client_ca_only_in_comment(
         is_gateway_configmap,
         brk_client_ca_only_in_comment,
-        check_insecure_listen_needs_mtls
+        check_role_auth
     )]
-    #[case::insecure_listen_client_ca_under_other_table(
+    #[case::role_auth_client_ca_under_other_table(
         is_gateway_configmap,
         brk_client_ca_under_other_table,
-        check_insecure_listen_needs_mtls
+        check_role_auth
     )]
-    #[case::insecure_listen_blank_client_ca(
+    #[case::role_auth_blank_client_ca(is_gateway_configmap, brk_empty_client_ca, check_role_auth)]
+    #[case::role_auth_without_tls_table(is_gateway_configmap, brk_drop_tls_table, check_role_auth)]
+    #[case::role_auth_unparseable_toml(is_gateway_configmap, brk_unparseable_toml, check_role_auth)]
+    #[case::role_auth_mode_not_oidc(is_gateway_configmap, brk_mode_not_oidc, check_role_auth)]
+    #[case::role_auth_reintroduces_insecure_listen(
         is_gateway_configmap,
-        brk_empty_client_ca,
-        check_insecure_listen_needs_mtls
+        brk_reintroduce_insecure_listen,
+        check_role_auth
     )]
-    #[case::insecure_listen_without_tls_table(
+    #[case::role_auth_signing_key_outside_mount(
         is_gateway_configmap,
-        brk_drop_tls_table,
-        check_insecure_listen_needs_mtls
+        brk_signing_key_outside_mount,
+        check_role_auth
     )]
-    #[case::insecure_listen_unparseable_toml(
+    // mtls-bindings (K5)
+    #[case::binding_wrong_service(
         is_gateway_configmap,
-        brk_unparseable_toml,
-        check_insecure_listen_needs_mtls
+        brk_binding_wrong_service,
+        check_mtls_bindings
+    )]
+    #[case::binding_wrong_roles(is_gateway_configmap, brk_binding_wrong_roles, check_mtls_bindings)]
+    #[case::binding_dropped_role_unbound(
+        is_gateway_configmap,
+        brk_drop_gateway_binding,
+        check_mtls_bindings
+    )]
+    #[case::binding_names_token_signer(
+        is_gateway_configmap,
+        brk_binding_names_token_signer,
+        check_mtls_bindings
+    )]
+    // secret-modes (K5)
+    #[case::secret_without_fsgroup(is_deployment, brk_drop_fsgroup, check_secret_modes)]
+    #[case::secret_world_readable(is_deployment, brk_world_readable_secret, check_secret_modes)]
+    #[case::secret_no_default_mode(is_deployment, brk_no_default_mode, check_secret_modes)]
+    // token-signer (K5)
+    #[case::signer_rotation_always(
+        is_token_signer_cert,
+        brk_signer_rotation_always,
+        check_token_signer
+    )]
+    #[case::signer_as_mtls_identity(
+        is_token_signer_cert,
+        brk_signer_client_auth,
+        check_token_signer
+    )]
+    // token-endpoint (K5)
+    #[case::fleet_endpoint_foreign_host(
+        is_fleet_configmap,
+        brk_fleet_endpoint_foreign_host,
+        check_token_endpoint
+    )]
+    #[case::non_fleet_dials_out(
+        is_gateway_configmap,
+        brk_extra_token_endpoint,
+        check_token_endpoint
     )]
     #[case::without_reload_poll(is_gateway_configmap, brk_drop_reload_poll, check_tls_reload_polls)]
     #[case::reload_poll_off(is_gateway_configmap, brk_reload_poll_off, check_tls_reload_polls)]
@@ -1745,28 +2332,9 @@ mod tests {
     }
 
     #[test]
-    fn corner_insecure_listen_off_needs_no_tls() {
-        // The invariant binds the flag, not every ConfigMap: with the flag gone, a
-        // listener without [grpc.tls] is the S1 guard's job, not this check's.
-        let mut ms = tree();
-        let cm = ms
-            .iter_mut()
-            .find(|m| is_gateway_configmap(m))
-            .expect("gateway ConfigMap");
-        set_toml(&mut cm.doc, |t| {
-            t.replace(
-                "allow_insecure_listen = true",
-                "allow_insecure_listen = false",
-            )
-            .replace("[grpc.tls]", "[grpc.tls_off]")
-        });
-        assert!(check_insecure_listen_needs_mtls(&ms).is_empty());
-    }
-
-    #[test]
-    fn boundary_every_role_configmap_takes_the_interim_posture() {
-        // All three roles ship `allow_insecure_listen` (else the S1 guard refuses the
-        // 0.0.0.0 bind) — so the check above is never vacuous over the real tree.
+    fn boundary_every_role_is_service_only_oidc() {
+        // All three roles render `mode = "oidc"` with the bindings table (K5), so the
+        // role-auth and mtls-bindings checks are never vacuous over the real tree.
         let n = tree()
             .iter()
             .filter(|m| m.kind() == Some("ConfigMap"))
@@ -1776,9 +2344,36 @@ mod tests {
                     .as_str()
                     .map(str::to_owned)
             })
-            .filter(|t| t.contains("allow_insecure_listen = true"))
+            .filter(|t| t.contains("mode = \"oidc\"") && t.contains("[[auth.mtls.bindings]]"))
             .count();
         assert_eq!(n, ROLES.len());
+    }
+
+    #[rstest]
+    #[case::corner_mode_0440(288, true)]
+    #[case::boundary_group_read_only(0o440, true)]
+    #[case::boundary_world_read(0o444, false)]
+    #[case::boundary_group_write(0o460, false)]
+    #[case::adversarial_setuid_group_read(0o4440, true)]
+    fn boundary_secret_default_mode(#[case] mode: i64, #[case] ok: bool) {
+        // The mask is `& 0o037` (the same the agent's key-mode warning uses): group
+        // read is fine, group-write / world bits are not; the file-type/setuid bits
+        // above 0o777 are masked away.
+        let mut ms = tree();
+        let d = ms
+            .iter_mut()
+            .find(|m| is_deployment(m))
+            .expect("a Deployment");
+        let secret = first_secret_volume_mut(&mut d.doc)
+            .get_mut(Value::String("secret".into()))
+            .expect("secret")
+            .as_mapping_mut()
+            .expect("secret mapping");
+        secret.insert(
+            Value::String("defaultMode".into()),
+            Value::Number(mode.into()),
+        );
+        assert_eq!(check_secret_modes(&ms).is_empty(), ok, "mode 0o{mode:o}");
     }
 
     #[test]

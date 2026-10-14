@@ -199,6 +199,44 @@ let
   # Where a role's cert-manager Secret is mounted (and the probe reads it from).
   tlsMountPath = "/etc/agent/tls";
 
+  # Where the shared `token-signer` Secret's key is mounted (K5): the
+  # `[auth.token] signing_key` every role signs and verifies agent tokens with.
+  tokenMountPath = "/etc/agent/token";
+  tokenSignerSecret = "token-signer";
+
+  # The agent's uid/gid in the image (nix/k8s/images.nix). The pod's `fsGroup` is
+  # this gid, so the mounted keys can be group-read (0440) by the agent and by the
+  # exec probe, and by no one else.
+  agentUid = 10001;
+
+  # 0440 as the decimal k8s wants for a Secret volume's `defaultMode`: owner and
+  # the pod's `fsGroup` read, nothing else. Not 0400: the kubelet owns projected
+  # Secret files as root, so only the group bit reaches the non-root agent.
+  secretDefaultMode = 288;
+
+  # The three agent roles that terminate mTLS. The exec seams never run as a
+  # cluster Service, so they get no certificate and no binding.
+  roles = [
+    "gateway"
+    "sessions"
+    "fleet"
+  ];
+
+  # A role's SPIFFE URI SAN (security-hardening 07's convention): the principal
+  # its certificate carries and its `[auth.mtls]` binding names.
+  roleSan = deployment: role: "spiffe://agent.${deployment}/svc/${role}";
+
+  # The roles a service token carries (agent-core rbac.rs): fleet writes review
+  # drafts as `svc_fleet`; the other roles call seams as `svc_seam`.
+  serviceRoles = role: if role == "fleet" then [ "svc_fleet" ] else [ "svc_seam" ];
+
+  # The tenant the roles' services act in. One cluster, one tenant until K8 brings
+  # per-tenant stores.
+  clusterTenant = partOf;
+
+  # The audience every role's agent tokens carry and expect.
+  tokenAudience = partOf;
+
   # `[grpc.tls] reload_poll_secs` for every role (K4). The role certs are 24h,
   # renewed 8h early (components/pki.nix), and the kubelet rotates a mounted
   # Secret by swapping its `..data` symlink, which sends no signal. Polling every
@@ -251,23 +289,69 @@ let
   # by the config loader; K3 roles serve their seams' control planes and reach no
   # model, so the provider points at a closed loopback port until K8 wires the real
   # providers (and their keys, docs/design/k8s/07) in.
-  roleBaseToml = ''
-    # Placeholder model wiring until K8: the loader requires [agent] + [provider],
-    # but no K3 role calls a model, so the provider is a closed loopback port.
-    [agent]
-    provider = "openai-compat"
+  #
+  # `[auth]` is service-only oidc (K5): there is no login IdP in the cluster until
+  # K6, so login tokens are refused, and a role signs in only by trading its
+  # cert-manager certificate (`[auth.mtls] bindings`, one per role) for an agent
+  # token signed with the shared `token-signer` key. `tokenEndpoint`, when set, is
+  # where this role does that trade for the calls it makes on its own.
+  roleBaseToml =
+    {
+      deployment,
+      tokenEndpoint ? "",
+    }:
+    ''
+      # Placeholder model wiring until K8: the loader requires [agent] + [provider],
+      # but no K3 role calls a model, so the provider is a closed loopback port.
+      [agent]
+      provider = "openai-compat"
 
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model = "unwired-until-k8"
+      [provider]
+      base_url = "http://127.0.0.1:1/v1"
+      model = "unwired-until-k8"
 
-    # Until K5 renders `mode = "oidc"` + `[auth.mtls] bindings`, the roles run
-    # `mode = "none"` on a routable pod address, which the S1 listen guard refuses
-    # unless accepted here. The listener stays strict mTLS (`[grpc.tls] client_ca`,
-    # enforced by k8s-render-tests `insecure-listen-needs-mtls`): only a cluster-CA
-    # cert holder connects, but such a peer can assert any tenant. Warns every start.
-    [auth]
-    allow_insecure_listen = true
+      # Service-only: no login issuer until K6. Only a certificate bound below can
+      # sign in, and only over the strict-mTLS listener.
+      [auth]
+      mode = "oidc"
+
+      [auth.token]
+      issuer = "spiffe://agent.${deployment}"
+      audience = "${tokenAudience}"
+      signing_key = "${tokenMountPath}/tls.key"
+
+      [auth.mtls]
+    ''
+    + lib.optionalString (tokenEndpoint != "") ''
+      token_endpoint = "${tokenEndpoint}"
+    ''
+    + concatStrings (
+      map (role: ''
+
+        [[auth.mtls.bindings]]
+        san = "${roleSan deployment role}"
+        service = "${role}"
+        tenant = "${clusterTenant}"
+        roles = [${lib.concatMapStringsSep ", " (r: "\"${r}\"") (serviceRoles role)}]
+      '') roles
+    );
+
+  # A role's `[grpc.tls]`: rustls mTLS from its cert-manager Secret `tls-<role>`
+  # (kubernetes.io/tls), mounted read-only at `tlsMountPath`, as the listener and
+  # as the identity it dials with. The same cluster CA is the only trust anchor
+  # both ways. Cilium must never terminate this.
+  roleTlsToml = ''
+    [grpc.tls]
+    cert = "${tlsMountPath}/tls.crt"
+    key = "${tlsMountPath}/tls.key"
+    client_ca = "${tlsMountPath}/ca.crt"
+    # The Secret renews with no signal; reload on file change (K4).
+    reload_poll_secs = ${toString tlsReloadPollSecs}
+
+    [grpc.tls.client]
+    ca = "${tlsMountPath}/ca.crt"
+    cert = "${tlsMountPath}/tls.crt"
+    key = "${tlsMountPath}/tls.key"
   '';
 
   # The single hardened securityContext every non-sandbox container gets.
@@ -318,6 +402,13 @@ let
         template = {
           metadata.labels = labels component;
           spec = {
+            # The image's own uid/gid, pinned so `fsGroup` (the group the kubelet
+            # gives the mounted Secret files) is the agent's group.
+            securityContext = {
+              runAsUser = agentUid;
+              runAsGroup = agentUid;
+              fsGroup = agentUid;
+            };
             containers = [
               {
                 name = "agent";
@@ -364,6 +455,11 @@ let
                     readOnly = true;
                   }
                   {
+                    name = "token";
+                    mountPath = tokenMountPath;
+                    readOnly = true;
+                  }
+                  {
                     name = "tmp";
                     mountPath = "/tmp";
                   }
@@ -381,7 +477,25 @@ let
               }
               {
                 name = "tls";
-                secret.secretName = tlsSecretName;
+                secret = {
+                  secretName = tlsSecretName;
+                  defaultMode = secretDefaultMode;
+                };
+              }
+              # Only the signing key: the token-signer's certificate is never an
+              # identity and never needs to be read.
+              {
+                name = "token";
+                secret = {
+                  secretName = tokenSignerSecret;
+                  defaultMode = secretDefaultMode;
+                  items = [
+                    {
+                      key = "tls.key";
+                      path = "tls.key";
+                    }
+                  ];
+                };
               }
               {
                 name = "tmp";
@@ -515,6 +629,11 @@ in
     syncWave
     grpcProbe
     roleBaseToml
+    roleTlsToml
+    roles
+    roleSan
+    tokenSignerSecret
+    tokenMountPath
     tlsReloadPollSecs
     deployment
     service

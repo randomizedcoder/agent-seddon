@@ -25,19 +25,16 @@ let
     # fleet role — rendered by nix/k8s/components/fleet.nix.
     # Do not edit by hand; run `nix run .#k8s-render-manifests`.
 
-    ${k8sLib.roleBaseToml}
+    ${k8sLib.roleBaseToml {
+      inherit (target) deployment;
+      # Fleet's own calls (polls, reconcile) carry a `svc:fleet` token, traded at
+      # the gateway for its certificate. The DNS name is a SAN on the gateway cert.
+      tokenEndpoint = "https://gateway.${ns}.svc:${toString constants.grpc.gateway.port}";
+    }}
     [grpc.fleet]
     listen = "0.0.0.0:${toString f.port}"
 
-    # rustls mTLS from the cert-manager Secret `tls-fleet` (kubernetes.io/tls),
-    # mounted read-only at /etc/agent/tls. Cilium must never terminate this.
-    [grpc.tls]
-    cert = "/etc/agent/tls/tls.crt"
-    key = "/etc/agent/tls/tls.key"
-    client_ca = "/etc/agent/tls/ca.crt"
-    # The Secret renews with no signal; reload on file change (K4).
-    reload_poll_secs = ${toString k8sLib.tlsReloadPollSecs}
-
+    ${k8sLib.roleTlsToml}
     [metrics]
     listen = "0.0.0.0:${toString f.metrics_port}"
   '';
