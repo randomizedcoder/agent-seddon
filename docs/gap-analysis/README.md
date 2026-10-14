@@ -49,8 +49,9 @@ PR-time and feature-time reuse) and is closed by the
 - **LLM awareness:** the system prompts omit the AST/index tools, one personality actively forbids
   them, and the fleet reviewer cannot call them at all.
 - **Routing/scale:** every routing mechanism is per call and per process; live signals reorder but
-  never admit or refuse; streamed calls under-count in-flight load; the production fleet bypasses the
-  router entirely; non-Claude/GPT upstreams are priced at $0. One measured number exists
+  never admit or refuse; streamed calls under-count in-flight load; the production fleet bypassed the
+  router entirely (**since §8.7 item 1** it can run on the task-router — an example fleet config plus a
+  review-mode main loop that routes as `role = review`); non-Claude/GPT upstreams are priced at $0. One measured number exists
   (~109 reviews/h from one process on one upstream). Reaching ~300/h needs admission control, real
   capacity accounting, cost-aware routing and a multi-process claim lease.
 - **Docs:** 252 of 262 in-scope Markdown files are reachable from `README.md`, but 8 design tracks
@@ -540,10 +541,13 @@ Two structural facts:
   (`.fleet-demo/agent-fleet-runpod-host.toml` (local, untracked):28), so previously least-loaded
   saw Kimi as idle while it was generating. Confirmed by reading; regression-tested.
 
-**The production fleet uses none of the routing layers.** Its config is `provider = "openai-compat"`
+**The production fleet used none of the routing layers.** Its config was `provider = "openai-compat"`
 with a single Kimi `[provider]` and a one-member `[pool]` for the MI50 (agent-fleet-runpod-host.toml:16,
-49-51, 98-106, `max_total = 8` at :113). Failover, task routing and registry cards are all built, and
-all bypassed.
+49-51, 98-106, `max_total = 8` at :113). Failover, task routing and registry cards were all built, and
+all bypassed. **Fixed (§8.7 item 1):** the tracked example [`config/fleet-review-router.toml`](../../config/fleet-review-router.toml)
+runs the fleet on the task-router (`provider = "task-router"`, `source = "registry"`), and a review-mode
+main loop routes as `role = review` so the review rule governs the review generation (not only the
+pool-side digest/summary helpers).
 
 ### 8.2 Registry and control plane
 
@@ -628,8 +632,15 @@ Estimates (not measurements):
 
 Each item names the seam to extend; order is roughly cheapest-and-highest-leverage first.
 
-1. **Put the fleet on the router:** `[agent] provider = "task-router"`, `[route] source = "registry"`,
-   cards for Kimi / GLM / cloud, a `role = review` rule with least-loaded ordering.
+1. ~~**Put the fleet on the router:** `[agent] provider = "task-router"`, `[route] source = "registry"`,
+   cards for Kimi / GLM / cloud, a `role = review` rule with least-loaded ordering.~~ **Done** — a
+   ready-to-fill example fleet config ([`config/fleet-review-router.toml`](../../config/fleet-review-router.toml))
+   runs the review fleet behind the task-router with `source = "registry"`, Kimi/GLM/local-floor cards,
+   a `role = "review"` rule preferring the heavy reasoner and `default_prefer.policy = "least-loaded"`.
+   The rule governs the *actual* review generation, not just the pool-side digest/summary helpers: a
+   review-mode session's main loop now stamps `RouteRole::Review` (was unconditionally `Main`) — see
+   `loop_route_role` in `agent.rs` and [router.md](../components/router.md#putting-the-review-fleet-on-the-router-gap-87-item-1).
+   Every non-review mode is unchanged.
 2. ~~**Fix streamed in-flight accounting:** move `InFlightGuard` into the returned `ChunkStream` so it
    drops on stream end (task_router.rs:308-311, metered.rs:956).~~ **Done** — the guard is owned and
    moved into the returned stream; released on drain / drop, regression-tested in `task_router.rs`.
@@ -833,7 +844,7 @@ links its own sub-docs.
 **P1 — routing / scale, cheap and high leverage**
 
 - ~~Fix streamed in-flight accounting (§8.7 item 2).~~ **Done.**
-- Fleet on the task-router with registry cards (item 1).
+- ~~Fleet on the task-router with registry cards (item 1).~~ **Done** — example `config/fleet-review-router.toml` + a review-mode main loop that routes as `role = review`.
 - Hard per-upstream capacity + process-wide admission queue with role / tenant priority (items 3–5;
   item 3 **done**; item 6 **done** — per-endpoint load survives rebuilds; cross-tenant capacity is left to 4–5).
 - ~~Card-fed `PriceTable` so cost is real (item 7)~~ **done** (§8.2); Grafana panels for router / pool / cost (item 16).

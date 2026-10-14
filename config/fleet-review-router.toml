@@ -1,0 +1,204 @@
+# =============================================================================
+# Review fleet ON THE TASK-ROUTER  (gap §8.7 item 1)
+# `agent --serve-fleet --config config/fleet-review-router.toml`
+#
+# This is the routed counterpart of the single-upstream fleet config. Instead of
+# `[agent] provider = "openai-compat"` wired straight at one pod, the fleet runs
+# behind the TASK-ROUTER: a whole fleet (Kimi / GLM / a local floor) as ONE
+# provider, with health/capacity/cost/breaker signals and fast failover — all the
+# machinery of gap §8.7 items 2/3/6/7/8/9 — now in front of real review traffic.
+#
+# The fleet + policy come from the LIVE provider-registry store (`source =
+# "registry"`), so an operator can Put/Enable/PutPolicy a card over gRPC
+# (`agent --serve-provider-registry`) and it takes effect within the registry
+# refresh window, no fleet restart. The `[[route.upstreams]]` below SEED that
+# store once, the first time it is empty.
+#
+# SECURITY: no secret is in this file. Keys are REFERENCES only —
+# `api_key_file = "~/…"` (or `api_key_env` / the registry's `api_key_ref`
+# `file:…` / `env:…`). A raw key is rejected at startup. The remote pod URLs are
+# PLACEHOLDERS — RunPod proxy URLs rotate, so fill in the live ones from
+# `.fleet-demo/llm-endpoints.md` (or edit the registry card at runtime).
+# =============================================================================
+
+[agent]
+provider = "task-router"         # -> TaskRouter/RegistryRouter (fleet as one provider)
+working_dir = ""
+context  = "sliding-window"
+policy   = "auto-approve"        # unattended, no TTY
+
+max_iterations = 40
+# Reviewers reason inline and are verbose; give generous output room so turns
+# finish=stop (a small cap truncates the review → finish=length). run_loop also
+# floors a review turn's max_tokens (REVIEW_MAX_TOKENS_FLOOR), but set it here too.
+max_tokens     = 8192
+temperature    = 0.4
+context_window = 32768
+reserve_output = 8192
+keep_recent_tokens = 4000
+
+stream         = true
+parallel_tools = true
+tool_timeout_secs = 600
+
+subagents          = false
+subagent_max_depth = 2
+
+system_prompt = """
+You are an unattended code-review agent. You are given a pull request's grounded
+facts (the diff, the changed files, and mechanized checks) directly in context —
+base your review on those. You may make a FEW tool calls to confirm a specific
+detail, but do NOT exhaustively browse the repository; that wastes your limited
+iterations. Within a handful of steps, STOP calling tools and output your FINAL
+review as plain text.
+
+Produce a precise, actionable review: call out correctness bugs, security issues,
+and clear simplifications, citing file:line. Be concise and specific. Your final
+message (no tool calls) is the review that will be posted.
+"""
+
+# The task-router ignores the single [provider] block, but the config loader still
+# requires the section to be present — a routed turn never dials it.
+[provider]
+base_url     = "http://localhost:8095/v1"
+model        = "unused-by-the-router"
+max_retries  = 0
+
+# --- The routed fleet ---------------------------------------------------------
+# A review session's main loop now stamps `role = review` (seed_review sets the
+# session mode to Review, and the loop routes a review-mode turn as Review), so the
+# `role = "review"` rule below GOVERNS the review generation — not just the
+# pool-side digest/summary helpers. Judging (consensus critic / fork judge) goes to
+# GLM via the `role = "judge"` rule.
+[route]
+source = "registry"              # fleet + policy from the LIVE [registry] store;
+                                 # the upstreams below seed it once when empty.
+retry_budget      = 2            # routed upstreams fail fast; the router retries the
+                                 # whole fleet up to this many times (one jittered
+                                 # backoff between passes) — fast 429 failover (item 9).
+on_saturation     = "soft"       # "shed" | "wait" turn max_concurrency into a HARD cap.
+failure_threshold = 3            # passive breaker: open after N failures,
+cooldown_secs     = 30           # retry after this cooldown.
+# max_cost = 2.0                 # policy-wide per-Mtok INPUT-cost ceiling (item 7).
+# max_spend_per_hour = 5.0       # rolling-hour USD budget per tenant (item 7).
+
+# Kimi = the preferred GENERATOR (the stronger reasoner → drives reviews).
+[[route.upstreams]]
+name = "kimi"
+endpoint = "https://REPLACE-ME-kimi.proxy.runpod.net/v1"   # see llm-endpoints.md
+model = "moonshotai/Kimi-K3"
+api_key_file = "~/Downloads/runpod/glm/kimi-api-key"       # REFERENCE, never a key
+context_window = 131072
+tags = ["reasoning", "long-context"]
+tier = "heavy"
+max_concurrency = 24             # a gateway LB'ing ~3× B300s: set ~3× one card's
+                                 # slots so "least-loaded" sends it ~3× the traffic.
+
+# GLM = the JUDGE. Reach it over VERIFIED TLS: front the pod with a properly-
+# certificated proxy, exactly like the kimi RunPod HTTPS proxy above, and point
+# `endpoint` at that. `insecure_tls = true` is the only TLS override the schema has
+# (there is no CA-pinning field yet); it disables certificate verification wholesale
+# — MITM-able — and merely warns at load, so it stays OFF in a committed config.
+# Set it by hand ONLY for a throwaway local experiment against a self-signed pod,
+# never against anything carrying real traffic or a real key.
+[[route.upstreams]]
+name = "glm"
+endpoint = "https://REPLACE-ME-glm.proxy.runpod.net/v1"    # verified TLS; see llm-endpoints.md
+model = "/model"
+api_key_file = "~/Downloads/runpod/glm/glm-api-key"
+tags = ["reasoning", "judge"]
+tier = "heavy"
+
+# Local floor: always up (no remote pod to rotate) — keeps the loop alive if BOTH
+# remote endpoints are down/forbidden. Weaker, so last in the failover order.
+[[route.upstreams]]
+name = "mi50"
+endpoint = "http://localhost:8095/v1"
+model = "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
+tier = "light"
+
+# Review generation → the heavy reasoner (Kimi, tagged "reasoning").
+[[route.rules]]
+match  = { role = "review" }
+prefer = { tags = ["reasoning"], tier = "heavy" }
+
+# Judging → GLM (tagged "judge").
+[[route.rules]]
+match  = { role = "judge" }
+prefer = { tags = ["judge"] }
+
+# No rule matched: prefer Kimi → GLM → local floor, broken by live load.
+[route.default_prefer]
+upstreams = ["kimi", "glm", "mi50"]
+policy    = "least-loaded"       # in-flight normalised by max_concurrency
+
+# The provider-registry control plane the router reads (model-router 03). The
+# [[route.upstreams]] above seed this file store once; edit cards live over gRPC
+# with `agent --serve-provider-registry`.
+[registry]
+store = "file"
+file  = ".agent/model-router.textproto"
+refresh_secs = 5
+
+[memory]
+backend       = "file"
+episodic_path = ".fleet-demo/as-state/episodic.jsonl"
+semantic_dir  = ".fleet-demo/as-state/memory"
+recall_limit  = 5
+
+# Lean, read-only review toolset (matches the baked review defaults, and the set
+# seed_review restricts a review session to).
+[tools]
+enabled = [
+    "read_file", "grep", "find", "ls",
+    "git_diff", "git_read", "git_log", "git_grep", "git_status", "git_tree",
+]
+
+[search]
+backends   = ["tantivy"]
+index_dir  = ".fleet-demo/as-state/index"
+auto_index = true
+
+# (No [ast] section: a grounded diff review leans on the read-only git/grep tools
+# below, not the code graph. Add `[ast] backends = ["scip"]` + `scip_langs` if a
+# reviewer should resolve cross-language symbols — needs the ast-scip build.)
+
+[git]
+backend         = "cli"
+pr_ref_template = "refs/pull/{n}/head"   # GitHub PR head ref
+max_worktrees   = 8
+push_policy     = "never"
+
+[review]
+backend             = "local"
+in_loop             = false
+context_budget_bytes = 65536
+
+# The default cognition graph references a `glm` critic PROVIDER (a graph edge, not
+# a route rule). This routed fleet defines its providers through [route], so disable
+# the graph rather than make agent-build fail closed on "unknown provider glm".
+[graph]
+store = ""
+
+# --- The fleet itself ---------------------------------------------------------
+[review_fleet]
+root       = ".fleet-demo/as-workspaces"
+store      = "file"
+file       = ".fleet-demo/agent-seddon-roster.json"
+max_total    = 8
+max_per_user = 8
+
+[tokenizer]
+backend = "approx"
+
+[prompts]
+backend = "file"
+dir = "prompts"
+
+# DRAFT-ONLY posture: review end-to-end, persist the draft, never post.
+[forge]
+backend = ""
+dry_run = true
+
+[policy]
+guard = "off"
