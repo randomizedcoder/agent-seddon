@@ -249,6 +249,45 @@ bounded poll:
   on every rebuild). An upstream with `max_concurrency = 0` is uncapped in every mode.
 - **Spill** to a reserve tier when saturated — see below (gap §8.7 item 8).
 
+### Shared upstream load (gap §8.7 item 6)
+
+On the registry-backed fleet the load counters belong to the **endpoint**, not to
+one built router, so a registry edit no longer resets them:
+
+- **A registry edit keeps the count.** Re-tagging or re-pricing a card rebuilds the
+  fleet, but calls still running on the old fleet keep counting against the
+  endpoint's `max_concurrency`; the rebuilt router can't see it as idle and
+  over-admit. The breaker likewise stays open across the rebuild.
+- **One tenant's cards on a pod share its count.** Two cards (different ids, or a
+  differently spelled URL) that dial the same pod with the same key see one count.
+- **Never shared across tenants.** Every count is scoped to its tenant (and, for a
+  keyed card, to its `api_key_ref`, since a keyed card's capacity is its account's,
+  not the host's). One tenant holding long calls open on a pod must not decide
+  whether another tenant's call is admitted, so two tenants on one pod each count
+  only their own load, as before. Dividing a pod's capacity between tenants is
+  fairness (gap §8.7 items 4 and 5), not first-come, first-served.
+
+| State | Keyed by | Shared by |
+|---|---|---|
+| in-flight count, latency average | endpoint (`kind` + `base_url` + `model`) + `api_key_ref`, in the tenant's cell | that tenant's cards on that pod and key, across rebuilds |
+| circuit breaker | the card's connection identity (id, URL, model, key ref, …) | that tenant's fleets, across rebuilds |
+
+- **The breaker stays per tenant on purpose.** A failure can belong to one
+  credential (a 401 on a bad key), and a key reference resolves per tenant, so a
+  shared breaker would let one tenant's bad card or junk requests open another
+  tenant's breaker.
+- **URL matching is best-effort.** Scheme and host case, an explicit default port
+  and a trailing `/` are normalised; anything else (host, port, path) counts as a
+  different endpoint. A card that spells a pod differently only splits its own
+  tenant's count.
+- **Bounded per tenant.** The counters live in the tenant's own fleet cell, next to
+  its breakers, and a rebuild drops those of endpoints no live card dials any more,
+  so a tenant holds at most one per card it has. There is no process-wide map for
+  one tenant's card flood to fill and degrade for everyone else. An evicted cell
+  (past 1024 cached tenants) starts its counts afresh, as its breakers do.
+- The static `[route]` fleet is built once and never rebuilt, so it already had one
+  count per upstream and is unchanged.
+
 ### Spillover tiers — `prefer.spill_to` (gap §8.7 item 8)
 
 `spill_to = ["cloud"]` on a rule's `prefer` (or `[route.default_prefer]`, or the registry

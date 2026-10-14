@@ -440,8 +440,12 @@ impl Drop for InFlightGuard {
 /// and fails over on a retryable error — the drop-in generator for task-aware routing.
 pub struct TaskRouter {
     upstreams: Vec<RouterUpstream>,
-    health: Vec<Health>,
-    live: Vec<LiveStats>,
+    /// Per-upstream breaker and live load, index-aligned with `upstreams`.
+    /// `Arc` so a [`crate::RegistryRouter`] can carry them across rebuilds and
+    /// share one endpoint's load between tenants (gap §8.7 item 6); a plain
+    /// `new()` gives each upstream its own.
+    health: Vec<Arc<Health>>,
+    live: Vec<Arc<LiveStats>>,
     policy: Policy,
     role: Role,
     failure_threshold: usize,
@@ -492,8 +496,8 @@ impl TaskRouter {
                 }
             }
         }
-        let health = upstreams.iter().map(|_| Health::new()).collect();
-        let live = upstreams.iter().map(|_| LiveStats::default()).collect();
+        let health = upstreams.iter().map(|_| Arc::new(Health::new())).collect();
+        let live = upstreams.iter().map(|_| Arc::default()).collect();
         Ok(Self {
             upstreams,
             health,
@@ -567,6 +571,25 @@ impl TaskRouter {
     /// Book spend into `ledger` instead of a router-private one, so the hourly
     /// budget survives a rebuild (a `RegistryRouter` passes each tenant
     /// cell's ledger to every fleet it builds).
+    /// Use `health` / `live` (index-aligned with the upstreams) instead of the
+    /// fresh per-router state, so breaker state and in-flight load survive a
+    /// rebuild and one endpoint's load is counted once across the routers that
+    /// share it (gap §8.7 item 6). A length mismatch is a caller bug: it keeps
+    /// the fresh state rather than misattributing (or indexing past) an upstream.
+    pub(crate) fn with_shared_state(
+        mut self,
+        health: Vec<Arc<Health>>,
+        live: Vec<Arc<LiveStats>>,
+    ) -> Self {
+        let n = self.upstreams.len();
+        if health.len() == n && live.len() == n {
+            self.health = health;
+            self.live = live;
+        } else {
+            tracing::warn!(upstreams = n, "ignoring misaligned shared router state");
+        }
+        self
+    }
     pub fn with_spend_ledger(mut self, ledger: Arc<SpendLedger>) -> Self {
         self.spend = ledger;
         self
@@ -3626,5 +3649,32 @@ mod tests {
         // And an override naming a primary still wins over the explicit order.
         let resp = r.complete(over("local")).await.unwrap();
         assert_eq!(resp.message.content_text(), "from-local");
+    }
+
+    // --- shared upstream state (gap §8.7 item 6) ------------------------------
+
+    /// Shared state wires each upstream to the handed-in breaker and load; a
+    /// misaligned hand-in is ignored whole (the router keeps its own) rather
+    /// than leaving an upstream without state or attributing one to another.
+    #[rstest::rstest]
+    #[case::positive_aligned_state_is_used(2, true)]
+    #[case::negative_too_few_is_ignored(1, false)]
+    #[case::boundary_none_is_ignored(0, false)]
+    #[case::corner_too_many_is_ignored(3, false)]
+    fn with_shared_state_takes_only_aligned_state(#[case] n: usize, #[case] used: bool) {
+        let fleet = || {
+            vec![
+                up("a", Arc::new(FailProvider::new("503"))),
+                up("b", Arc::new(FailProvider::new("503"))),
+            ]
+        };
+        let health: Vec<_> = (0..n).map(|_| Arc::new(Health::new())).collect();
+        let live: Vec<Arc<LiveStats>> = (0..n).map(|_| Arc::default()).collect();
+        let r = router(fleet(), prefer(&[])).with_shared_state(health.clone(), live.clone());
+        assert_eq!(r.health.len(), 2);
+        assert_eq!(r.live.len(), 2);
+        let shared = r.health.iter().zip(&health).all(|(a, b)| Arc::ptr_eq(a, b))
+            && r.live.iter().zip(&live).all(|(a, b)| Arc::ptr_eq(a, b));
+        assert_eq!(shared && n == 2, used);
     }
 }
