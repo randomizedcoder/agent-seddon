@@ -531,3 +531,38 @@ acceptance on l2; (4) cert-manager approver-policy.
     tighter split (a verify-only public key in the two non-minting roles) needs a new `[auth.token]`
     field and verify path and is a hardening follow-up, not Slice 2. The key never acts as an mTLS
     identity (`digital signature` usage only, no binding names its SAN).
+
+- **Slice 3 — live acceptance on l2 (2026-10-14). All three K5 criteria pass.** Image
+  `lb8ww6n8sqw05zfn44b4gxh80db7349x` imported into l2's `k8s.io` containerd (the
+  `streamLayeredImage` piped over `ssh root@l2 'k3s ctr -n k8s.io images import -'`; the tar is
+  self-contained, so l2 needs none of the builder's store). The tag was re-released on merged main
+  first (**#620**, `e2e41072`) because the providers PR #618 landed after #619 and moved the agent
+  binary's hash; ArgoCD was a commit behind and the un-imported `99m66ca…` tag was in
+  `ImagePullBackOff`, so a `argocd.argoproj.io/refresh=hard` moved all five Applications to
+  `e2e41072` (Synced + Healthy). The `token-signer` Secret was issued by cert-manager; all three
+  roles rolled to 1/1 with **restartCount 0**, no `allow_insecure_listen` warning, no key-mode
+  warning, and the `service-only [auth]` startup line on each.
+  - **(1) Fleet gets a `svc:` token over mTLS.** Gateway audit:
+    `auth.exchange: service token issued tenant=agent-seddon subject=svc:fleet
+    peer_san=spiffe://agent.l2/svc/fleet`; fleet logged `service token: exchanged` against
+    `https://gateway.agent-seddon.svc:50100` (after 3 startup-race `Unimplemented` retries while the
+    gateway's `AuthService` was still coming up — `agent-retry` recovered on the 4th).
+  - **(2) `cmctl renew` picked up with no restart.** `cmctl renew -n agent-seddon gateway fleet` →
+    both certs to revision 14; the 30 s poller reloaded in-process (`trigger="poll"`: tls cert/key/
+    client-CA, client trust anchors + client cert, and the signing key) at 14:04:31 (gateway) and
+    14:05:01 (fleet); **restartCount stayed 0**. The signing-key `kid` was identical on both roles
+    and unchanged across the renewal — the shared `token-signer` key is stable (`rotationPolicy:
+    Never`). The renewed fleet cert mints a `svc:fleet` token (control `Exchange` below).
+  - **(3) A pod without a certificate is refused.** With no client cert, the strict-mTLS handshake
+    is refused (the in-pod `grpc-health-probe` can't connect). A CA-signed certificate for an
+    **unbound** SAN (`spiffe://agent.l2/svc/intruder`, which the CA issues freely today — no
+    approver-policy until Slice 4) completes the TLS handshake but its `Exchange` is refused
+    `Unauthenticated`; the gateway audits
+    `exchange refused: the client certificate is not a bound service
+    sans=["spiffe://agent.l2/svc/intruder"]`. The fleet control cert, by contrast, returns
+    `tokenType: Bearer, subject: svc:fleet`. Identity is bound at `Exchange`, not merely at TLS. The
+    intruder Certificate/Secret were deleted after the test. (grpcurl 1.9.4 via `nix run
+    nixpkgs#grpcurl` on l2; `agent.v1.AuthService/Exchange` with
+    `{"use_client_cert":true,"client_kind":"service"}`.)
+  - **K5 row stays 🟡** until Slice 4 (cert-manager approver-policy) bounds SAN issuance — the
+    intruder cert being issued at all is the gap that slice closes.
