@@ -566,3 +566,31 @@ acceptance on l2; (4) cert-manager approver-policy.
     `{"use_client_cert":true,"client_kind":"service"}`.)
   - **K5 row stays 🟡** until Slice 4 (cert-manager approver-policy) bounds SAN issuance — the
     intruder cert being issued at all is the gap that slice closes.
+
+- **Slice 4 — approver-policy bounds SAN issuance (in-repo render).** A new component
+  `nix/k8s/components/approver-policy.nix` renders five `CertificateRequestPolicy` objects plus the
+  RBAC that activates them, into `rendered/k3s/approver-policy/`. No Rust, so the image tag is
+  unchanged.
+  - **One narrow policy per identity**, each a precise superset of exactly what the live
+    `CertificateRequest` carries (dumped from l2: gateway = 3 usages/24h/leaf, token-signer = `digital
+    signature`/2160h/leaf, root CA = *no* `spec.usages`/87600h/isCA): `allow-{gateway,sessions,fleet}`
+    (URI SAN + DNS names, `isCA:false`, ECDSA P-256, 24h, the `agent-seddon-ca` issuer in
+    `agent-seddon`); `allow-token-signer` (URI SAN only, `digital signature` only, 2160h);
+    `allow-agent-seddon-ca` (`isCA:true`, CN pinned, the `selfsigned-bootstrap` issuer in
+    `cert-manager`, 87600h). Keyed by **namespace + issuer**, because the requester is the
+    cert-manager controller SA, not the role — documented in `05`.
+  - **Activation.** A `ClusterRole` grants the `use` verb on exactly these five policies, bound to
+    `cert-manager/cert-manager` by a `ClusterRoleBinding`; nothing else grants `use`.
+  - **Render check `check_approver_policy`** (20th check): every issued identity SAN is allowed by
+    *exactly one* leaf policy; no leaf policy admits a non-identity SAN (no wildcard, no stray); the
+    root keeps its own narrow allowance; every policy is covered by a bound `use` ClusterRole. Eight
+    `adversarial_` rows (intruder SAN, wildcard URI, wrong issuer, leaf-as-CA, wrong namespace, root
+    CN, unbound SA, non-`use` verb) plus `corner_exactly_five_request_policies` and
+    `boundary_no_policy_admits_an_unknown_san` — 128 render tests. `k8s-kubeconform` vendors the
+    `policy.cert-manager.io` + `rbac.../v1` schemas (28/28 valid).
+  - **Platform (pending user review, `~/nixos/desktop/l2`):** install cert-manager approver-policy
+    and disable the built-in approver (`--controllers=*,-certificaterequests-approver`) so policy is
+    the only approver. **Rollout order:** the policies must be synced *before* that flag flips, or an
+    unmatched request would block.
+  - **Live (pending):** a `Certificate` requesting `spiffe://agent.l2/svc/intruder` in `agent-seddon`
+    is **Denied** while role certs still renew. Then the K5 row goes ✅.

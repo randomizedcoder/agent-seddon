@@ -11,7 +11,7 @@ this repo; its STATUS row records the commit there.
 | K2 | **Images.** `nix/k8s/images.nix`, `image-tags.nix`, `nix run .#k8s-images` (import and push), `k8s-image-smoke` ([03](03-images-and-registry.md)) | agent-seddon | The gate builds the images; on l2, `crictl images` lists them after `--import` |
 | K3 | **Renderer and GitOps.** `nix/k8s/{default,lib,helm}.nix`, gateway, sessions and fleet components, `targets/k3s.nix`, `rendered/k3s/`, `k8s-render-manifests`, the `k8s-rendered`, `k8s-render-tests` and `k8s-kubeconform` checks, `k8s-secrets`, `k8s-status`, and the Rust `[grpc.gateway] exclude` so the cluster gateway never hosts exec seams ([04](04-manifests-and-gitops.md), [07](07-secrets.md), [08](08-sandbox.md#exec-seams-on-the-gateway-must-fix-before-the-cluster)). Plaintext is not an option, so K3 ships behind K5's PKI: K3 renders the CA chain and Certificates too. | agent-seddon | ArgoCD syncs; the three roles are Ready; `k8s-status` is green |
 | K4 | **Reload on file change.** `[grpc.tls] reload_poll_secs` ([05](05-identity-and-pki.md#reload-on-file-change-new-k4)) | agent-seddon | Rust tests; live on native: rotate the files and see the new certificate with no SIGHUP. ✅ done ([STATUS](STATUS.md#k4--reload-on-file-change-2026-10-11)) |
-| K5 | **Identity in the cluster.** Per-role SPIFFE Certificates, `[auth.mtls] bindings`, `reload_poll_secs` on, 24-hour certificates | agent-seddon | Fleet gets a `svc:` token over mTLS; `cmctl renew` is picked up with no restart; a pod without a certificate is refused |
+| K5 | **Identity in the cluster.** Per-role SPIFFE Certificates, `[auth.mtls] bindings`, `reload_poll_secs` on, 24-hour certificates, and cert-manager approver-policy (`CertificateRequestPolicy`) bounding which SANs the CA issuer will mint ([05](05-identity-and-pki.md#who-may-mint-an-identity-new-k5-slice-4)) | agent-seddon | Fleet gets a `svc:` token over mTLS; `cmctl renew` is picked up with no restart; a pod without a certificate is refused |
 | K6 | **Edge.** `portal_envoy.py` upstream host and port, render-only mode; edge and portal-web components; JWKS ConfigMap; LB IPAM and L2 announcement; route allowlist ([09](09-edge-and-observability.md)) | both (the LB pool goes in `~/nixos`) | `portal-auth-e2e`-style checks against the LB address: 401 without a token, 200 with one, a grpc-web round trip; portal from `l` signs in |
 | K7 | **Sandbox.** Privileged sidecar with the minimum-privilege search; renderer privilege tests ([08](08-sandbox.md)) | agent-seddon | [08 § verification](08-sandbox.md#verification-k7) |
 | K8 | **Observability and l2 cut-over.** OTLP and ClickHouse wiring, NodePort scrapes, Hubble metrics, downward-API resource attributes; stop the `nohup` roles; run the S18 ClickHouse matrix through the cluster ([09](09-edge-and-observability.md#observability)) | both | Fleet drafts reach ClickHouse from a pod; Grafana shows per-pod series; Hubble shows no drops in normal use |
@@ -22,9 +22,6 @@ this repo; its STATUS row records the commit there.
 - `nixosModules.agent-seddon`: the native roles as hardened systemd units ([01](01-deployment-targets.md)).
 - ArgoCD `PreSync` migration Jobs ([09](09-edge-and-observability.md)).
 - trust-manager root-rotation bundle ([05](05-identity-and-pki.md)).
-- cert-manager approver-policy (`CertificateRequestPolicy`) to constrain which SPIFFE SANs each
-  requester may obtain from the CA issuer, so SAN forgery is bounded by policy and not only by RBAC
-  ([05](05-identity-and-pki.md#ca-chain-wave-0)).
 - `toFQDNs` egress ([06](06-network-policy.md)).
 - external-secrets or sops ([07](07-secrets.md)).
 - cgroup-v2 delegation for sandbox limits, and a Tier-2 runtime class ([08](08-sandbox.md)).

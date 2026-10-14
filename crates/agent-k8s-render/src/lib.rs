@@ -1131,6 +1131,274 @@ pub fn check_token_endpoint(ms: &[Manifest]) -> Vec<Finding> {
     out
 }
 
+/// The namespace the role + token-signer Certificates are requested in (and the only
+/// namespace a leaf CertificateRequestPolicy may select).
+const IDENTITY_NAMESPACE: &str = PART_OF;
+/// The cert-manager controller's ServiceAccount — the requester of every
+/// CertificateRequest, so the identity a policy must be bound to with `use`.
+const APPROVER_SA: (&str, &str) = ("cert-manager", "cert-manager");
+
+/// A Certificate's (first) URI SAN as a string, if any.
+fn cert_uri(m: &Manifest) -> Option<&str> {
+    dig(&m.doc, &["spec", "uris"])
+        .and_then(Value::as_sequence)
+        .and_then(|u| u.first())
+        .and_then(Value::as_str)
+}
+
+/// A CertificateRequestPolicy's `spec.allowed.uris.values`, as a set.
+fn policy_allowed_uris(m: &Manifest) -> HashSet<&str> {
+    dig(&m.doc, &["spec", "allowed", "uris", "values"])
+        .and_then(Value::as_sequence)
+        .map(|vs| vs.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// approver-policy bounds *what* identity a requester may obtain, so a cert-manager
+/// CA ClusterIssuer (which signs whatever SAN a Certificate asks for) cannot mint an
+/// arbitrary role (docs/design/k8s/05). This check proves the rendered policy set is
+/// both sufficient and tight:
+///   * every agent-seddon-ca leaf (the three roles + token-signer) has its SPIFFE URI
+///     SAN allowed by *exactly one* CertificateRequestPolicy;
+///   * every leaf policy is scoped to the agent-seddon namespace and the
+///     agent-seddon-ca ClusterIssuer, is `isCA:false`, and allows *only* known
+///     identity SANs — no wildcard, no stray (the anti-forgery property);
+///   * the root CA has its own policy (`isCA:true`, CN agent-seddon-ca, the
+///     selfsigned-bootstrap issuer in the cert-manager namespace);
+///   * every rendered policy is activated by a ClusterRole granting the `use` verb on
+///     it, bound to the cert-manager controller SA by a ClusterRoleBinding — nothing
+///     else grants `use`, so no unlisted policy is ever consulted.
+pub fn check_approver_policy(ms: &[Manifest]) -> Vec<Finding> {
+    const ID: &str = "approver-policy";
+    let mut out = Vec::new();
+
+    let policies: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| m.kind() == Some("CertificateRequestPolicy"))
+        .collect();
+
+    // The SPIFFE SANs the PKI issues under agent-seddon-ca: the role leaves and the
+    // token-signer. Each one must be bounded by exactly one leaf policy.
+    let identity_sans: HashSet<&str> = ms
+        .iter()
+        .filter(|m| {
+            m.kind() == Some("Certificate")
+                && dig(&m.doc, &["spec", "issuerRef", "name"]).and_then(Value::as_str)
+                    == Some(CA_NAME)
+        })
+        .filter_map(cert_uri)
+        .collect();
+
+    // Partition the policies by the issuer they select: leaves (agent-seddon-ca) vs
+    // the root (selfsigned-bootstrap). A policy selecting neither is a stray.
+    let issuer_of = |p: &Manifest| -> Option<String> {
+        dig(&p.doc, &["spec", "selector", "issuerRef", "name"])
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    let leaf_policies: Vec<&&Manifest> = policies
+        .iter()
+        .filter(|p| issuer_of(p).as_deref() == Some(CA_NAME))
+        .collect();
+
+    // Anti-forgery: no leaf policy may allow a SAN that is not a known identity (a
+    // wildcard or stray `values` entry would re-open SAN forgery). Also pin the
+    // scope: agent-seddon namespace, isCA:false.
+    for p in &leaf_policies {
+        for san in policy_allowed_uris(p) {
+            if !identity_sans.contains(san) {
+                out.push(Finding::new(
+                    ID,
+                    &p.path,
+                    format!("leaf policy allows URI SAN {san:?}, which is not an issued identity"),
+                ));
+            }
+        }
+        if dig(&p.doc, &["spec", "allowed", "isCA"]).and_then(Value::as_bool) != Some(false) {
+            out.push(Finding::new(
+                ID,
+                &p.path,
+                "a leaf policy must set `allowed.isCA: false` (a role is never a CA)",
+            ));
+        }
+        let nss: Vec<&str> = dig(&p.doc, &["spec", "selector", "namespace", "matchNames"])
+            .and_then(Value::as_sequence)
+            .map(|vs| vs.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if nss != [IDENTITY_NAMESPACE] {
+            out.push(Finding::new(
+                ID,
+                &p.path,
+                format!(
+                    "a leaf policy must select only the {IDENTITY_NAMESPACE:?} namespace; got {nss:?}"
+                ),
+            ));
+        }
+    }
+
+    // Sufficiency + tightness: every identity SAN is allowed by exactly one leaf policy.
+    for san in &identity_sans {
+        let n = leaf_policies
+            .iter()
+            .filter(|p| policy_allowed_uris(p).contains(san))
+            .count();
+        if n != 1 {
+            out.push(Finding::new(
+                ID,
+                "approver-policy",
+                format!("identity SAN {san:?} is allowed by {n} policies, expected exactly 1"),
+            ));
+        }
+    }
+
+    // The root CA keeps its own narrow allowance: isCA:true, the exact CN, and the
+    // selfsigned-bootstrap issuer in the cert-manager namespace.
+    let root_policies: Vec<&&Manifest> = policies
+        .iter()
+        .filter(|p| {
+            dig(&p.doc, &["spec", "allowed", "isCA"]).and_then(Value::as_bool) == Some(true)
+        })
+        .collect();
+    match root_policies.as_slice() {
+        [root] => {
+            if issuer_of(root).as_deref() != Some(BOOTSTRAP_ISSUER) {
+                out.push(Finding::new(
+                    ID,
+                    &root.path,
+                    format!("the root-CA policy must select the {BOOTSTRAP_ISSUER:?} issuer"),
+                ));
+            }
+            if dig(&root.doc, &["spec", "allowed", "commonName", "value"]).and_then(Value::as_str)
+                != Some(CA_NAME)
+            {
+                out.push(Finding::new(
+                    ID,
+                    &root.path,
+                    format!("the root-CA policy must pin `allowed.commonName.value: {CA_NAME}`"),
+                ));
+            }
+            let nss: Vec<&str> = dig(&root.doc, &["spec", "selector", "namespace", "matchNames"])
+                .and_then(Value::as_sequence)
+                .map(|vs| vs.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if nss != [CA_NAMESPACE] {
+                out.push(Finding::new(
+                    ID,
+                    &root.path,
+                    format!("the root-CA policy must select only the {CA_NAMESPACE:?} namespace"),
+                ));
+            }
+        }
+        [] => out.push(Finding::new(
+            ID,
+            "approver-policy",
+            "no root-CA policy (`allowed.isCA: true`): the CA's own renewal would be denied",
+        )),
+        many => out.push(Finding::new(
+            ID,
+            "approver-policy",
+            format!("expected one root-CA policy, found {}", many.len()),
+        )),
+    }
+
+    // Activation: a ClusterRole granting `use` on certificaterequestpolicies, covering
+    // every rendered policy, bound to the cert-manager controller SA. Without it,
+    // approver-policy never consults the policy and the request is denied.
+    let policy_names: HashSet<&str> = policies.iter().filter_map(|p| p.name()).collect();
+    let use_roles: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| m.kind() == Some("ClusterRole"))
+        .filter(|m| {
+            dig(&m.doc, &["rules"])
+                .and_then(Value::as_sequence)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .any(rule_grants_policy_use)
+        })
+        .collect();
+    // The names a `use` rule covers: a rule with no resourceNames covers all policies.
+    let mut covered: HashSet<&str> = HashSet::new();
+    let mut any_bound = false;
+    for role in &use_roles {
+        let bound = ms.iter().any(|m| {
+            m.kind() == Some("ClusterRoleBinding")
+                && dig(&m.doc, &["roleRef", "name"]).and_then(Value::as_str) == role.name()
+                && binding_targets_approver_sa(m)
+        });
+        if !bound {
+            out.push(Finding::new(
+                ID,
+                &role.path,
+                "the `use` ClusterRole is not bound to the cert-manager controller SA",
+            ));
+            continue;
+        }
+        any_bound = true;
+        for r in dig(&role.doc, &["rules"])
+            .and_then(Value::as_sequence)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|r| rule_grants_policy_use(r))
+        {
+            match r.get("resourceNames").and_then(Value::as_sequence) {
+                None => covered.extend(policy_names.iter().copied()),
+                Some(names) => covered.extend(names.iter().filter_map(Value::as_str)),
+            }
+        }
+    }
+    if !any_bound && !policies.is_empty() {
+        out.push(Finding::new(
+            ID,
+            "approver-policy",
+            "no bound ClusterRole grants `use` on the policies; none would be consulted",
+        ));
+    } else {
+        for name in &policy_names {
+            if !covered.contains(name) {
+                out.push(Finding::new(
+                    ID,
+                    "approver-policy",
+                    format!("policy {name:?} is never granted via a bound `use` ClusterRole"),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// A ClusterRole rule granting the `use` verb on `certificaterequestpolicies`.
+fn rule_grants_policy_use(rule: &Value) -> bool {
+    let has = |key: &str, want: &str| {
+        rule.get(key)
+            .and_then(Value::as_sequence)
+            .map(|vs| {
+                vs.iter()
+                    .filter_map(Value::as_str)
+                    .any(|s| s == want || s == "*")
+            })
+            .unwrap_or(false)
+    };
+    has("apiGroups", "policy.cert-manager.io")
+        && has("resources", "certificaterequestpolicies")
+        && has("verbs", "use")
+}
+
+/// A ClusterRoleBinding whose subjects include the cert-manager controller SA.
+fn binding_targets_approver_sa(m: &Manifest) -> bool {
+    dig(&m.doc, &["subjects"])
+        .and_then(Value::as_sequence)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .any(|s| {
+            s.get("kind").and_then(Value::as_str) == Some("ServiceAccount")
+                && s.get("namespace").and_then(Value::as_str) == Some(APPROVER_SA.0)
+                && s.get("name").and_then(Value::as_str) == Some(APPROVER_SA.1)
+        })
+}
+
 /// The longest `[grpc.tls] reload_poll_secs` a role may run: an hour, well inside
 /// the role certs' 8h `renewBefore` window (components/pki.nix).
 pub const MAX_ROLE_RELOAD_POLL_SECS: i64 = 3600;
@@ -1536,7 +1804,7 @@ pub fn check_no_secret_material(ms: &[Manifest]) -> Vec<Finding> {
 }
 
 /// Every invariant, in the order the suite reports them.
-pub const ALL_CHECKS: [(&str, CheckFn); 19] = [
+pub const ALL_CHECKS: [(&str, CheckFn); 20] = [
     ("security-context", check_security_context),
     ("no-privilege", check_no_privilege),
     ("probes", check_probes),
@@ -1555,6 +1823,7 @@ pub const ALL_CHECKS: [(&str, CheckFn); 19] = [
     ("secret-modes", check_secret_modes),
     ("token-signer", check_token_signer),
     ("token-endpoint", check_token_endpoint),
+    ("approver-policy", check_approver_policy),
     ("tls-reload-polls", check_tls_reload_polls),
 ];
 
@@ -1644,6 +1913,18 @@ mod tests {
     }
     fn is_token_signer_cert(m: &Manifest) -> bool {
         m.kind() == Some("Certificate") && m.name() == Some(TOKEN_SIGNER)
+    }
+    fn is_gateway_policy(m: &Manifest) -> bool {
+        m.kind() == Some("CertificateRequestPolicy") && m.name() == Some("allow-gateway")
+    }
+    fn is_root_policy(m: &Manifest) -> bool {
+        m.kind() == Some("CertificateRequestPolicy") && m.name() == Some("allow-agent-seddon-ca")
+    }
+    fn is_approver_clusterrole(m: &Manifest) -> bool {
+        m.kind() == Some("ClusterRole")
+    }
+    fn is_approver_binding(m: &Manifest) -> bool {
+        m.kind() == Some("ClusterRoleBinding")
     }
 
     // breakers — one hostile mutation each
@@ -2041,6 +2322,46 @@ mod tests {
         });
     }
 
+    // -- K5: approver-policy — re-open SAN forgery, or de-activate the policy ----------
+    fn policy_uri_values(p: &mut Value) -> &mut Vec<Value> {
+        at_mut(p, &["spec", "allowed", "uris", "values"])
+            .as_sequence_mut()
+            .expect("allowed.uris.values")
+    }
+    fn brk_policy_allows_intruder(p: &mut Value) {
+        policy_uri_values(p).push(Value::String("spiffe://agent.l2/svc/intruder".into()));
+    }
+    fn brk_policy_wildcard_uri(p: &mut Value) {
+        *at_mut(p, &["spec", "allowed", "uris", "values"]) =
+            Value::Sequence(vec![Value::String("*".into())]);
+    }
+    fn brk_policy_wrong_issuer(p: &mut Value) {
+        *at_mut(p, &["spec", "selector", "issuerRef", "name"]) =
+            Value::String("some-other-issuer".into());
+    }
+    fn brk_policy_leaf_is_ca(p: &mut Value) {
+        *at_mut(p, &["spec", "allowed", "isCA"]) = Value::Bool(true);
+    }
+    fn brk_policy_wrong_namespace(p: &mut Value) {
+        *at_mut(p, &["spec", "selector", "namespace", "matchNames"]) =
+            Value::Sequence(vec![Value::String("kube-system".into())]);
+    }
+    fn brk_root_policy_wrong_cn(p: &mut Value) {
+        *at_mut(p, &["spec", "allowed", "commonName", "value"]) = Value::String("evil-ca".into());
+    }
+    fn brk_binding_wrong_sa(b: &mut Value) {
+        let subjects = at_mut(b, &["subjects"])
+            .as_sequence_mut()
+            .expect("subjects");
+        let subj = subjects.get_mut(0).expect("a subject");
+        *at_mut(subj, &["name"]) = Value::String("evil".into());
+    }
+    fn brk_clusterrole_wrong_verb(r: &mut Value) {
+        let rules = at_mut(r, &["rules"]).as_sequence_mut().expect("rules");
+        let rule = rules.get_mut(0).expect("a rule");
+        *at_mut(rule, &["verbs"]) = Value::Sequence(vec![Value::String("get".into())]);
+    }
+
     // -- positive: the real tree satisfies every invariant -----------------------------
 
     #[rstest]
@@ -2062,6 +2383,7 @@ mod tests {
     #[case::secret_modes(check_secret_modes)]
     #[case::token_signer(check_token_signer)]
     #[case::token_endpoint(check_token_endpoint)]
+    #[case::approver_policy(check_approver_policy)]
     #[case::tls_reload_polls(check_tls_reload_polls)]
     fn positive_real_tree_is_clean(#[case] check: Check) {
         let findings = check(&tree());
@@ -2092,6 +2414,39 @@ mod tests {
             .collect();
         names.sort_unstable();
         assert_eq!(names, ["fleet", "gateway", "sessions"]);
+    }
+
+    #[test]
+    fn corner_exactly_five_request_policies() {
+        // One per issued identity (gateway/sessions/fleet/token-signer) plus the root CA.
+        let ms = tree();
+        let n = ms
+            .iter()
+            .filter(|m| m.kind() == Some("CertificateRequestPolicy"))
+            .count();
+        assert_eq!(n, ROLES.len() + 2);
+    }
+
+    #[test]
+    fn boundary_no_policy_admits_an_unknown_san() {
+        // The anti-forgery property, stated directly: `spiffe://agent.l2/svc/intruder`
+        // (the live-acceptance probe SAN) appears in no policy's allowed URI set.
+        let ms = tree();
+        let intruder = format!("spiffe://{TRUST_DOMAIN}/svc/intruder");
+        for m in ms
+            .iter()
+            .filter(|m| m.kind() == Some("CertificateRequestPolicy"))
+        {
+            let vals: Vec<&str> = dig(&m.doc, &["spec", "allowed", "uris", "values"])
+                .and_then(Value::as_sequence)
+                .map(|vs| vs.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            assert!(
+                !vals.iter().any(|v| *v == intruder || *v == "*"),
+                "{} admits the intruder SAN",
+                m.path
+            );
+        }
     }
 
     #[test]
@@ -2311,6 +2666,31 @@ mod tests {
         is_gateway_configmap,
         brk_unparseable_toml,
         check_tls_reload_polls
+    )]
+    // approver-policy (K5)
+    #[case::policy_allows_intruder_san(
+        is_gateway_policy,
+        brk_policy_allows_intruder,
+        check_approver_policy
+    )]
+    #[case::policy_wildcard_uri(is_gateway_policy, brk_policy_wildcard_uri, check_approver_policy)]
+    #[case::policy_wrong_issuer(is_gateway_policy, brk_policy_wrong_issuer, check_approver_policy)]
+    #[case::leaf_policy_as_ca(is_gateway_policy, brk_policy_leaf_is_ca, check_approver_policy)]
+    #[case::policy_wrong_namespace(
+        is_gateway_policy,
+        brk_policy_wrong_namespace,
+        check_approver_policy
+    )]
+    #[case::root_policy_wrong_common_name(
+        is_root_policy,
+        brk_root_policy_wrong_cn,
+        check_approver_policy
+    )]
+    #[case::use_binding_wrong_sa(is_approver_binding, brk_binding_wrong_sa, check_approver_policy)]
+    #[case::clusterrole_not_use_verb(
+        is_approver_clusterrole,
+        brk_clusterrole_wrong_verb,
+        check_approver_policy
     )]
     fn adversarial_mutation_is_flagged(
         #[case] pred: Pred,

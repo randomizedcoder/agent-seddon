@@ -40,11 +40,15 @@ let
   crdSchemaUrl =
     name: "https://raw.githubusercontent.com/datreeio/CRDs-catalog/${crdSchemaRev}/${name}";
 
-  # Core kinds rendered at K3: Deployment (apps/v1), Service + ConfigMap (v1).
+  # Core kinds rendered at K3: Deployment (apps/v1), Service + ConfigMap (v1). The
+  # approver-policy RBAC (K5) adds ClusterRole + ClusterRoleBinding (rbac.../v1); the
+  # KindSuffix shortens the group to its first label, so `clusterrole-rbac-v1.json`.
   coreSchemas = {
     "deployment-apps-v1.json" = "sha256-NyV4L7AePyfYvi2lZeLWU9e3i/bevlRAgEzqmTyHuPk=";
     "service-v1.json" = "sha256-i/AZhU2u1RHnwXSJaomBc/pl2I7Fk3xoejcwPUzJNRs=";
     "configmap-v1.json" = "sha256-4Ord69Z3wIqgkrLaImTYasT8NO7RErn6wpRbPwDB6bE=";
+    "clusterrole-rbac-v1.json" = "sha256-B3f5HE+gi9OYm224xZ2tBCmmPeyPWeiD/1XJR6FNDV8=";
+    "clusterrolebinding-rbac-v1.json" = "sha256-5ESY8OrWkzO/HQZt7DVHD4v1SJjsJkfJ5g+Dlqom8Eo=";
   };
 
   # Custom resources rendered at K3: cert-manager Certificate + ClusterIssuer,
@@ -53,6 +57,9 @@ let
     "cert-manager.io/certificate_v1.json" = "sha256-/jjlcrX9nsSWMQRLbEIHhjEm0EZc6bbgZzziAPykcbo=";
     "cert-manager.io/clusterissuer_v1.json" = "sha256-qvQgdTNYmO9YieA3C+yEMlET44hjW+G49yDRFpHN/Lo=";
     "argoproj.io/application_v1alpha1.json" = "sha256-mcN4d7Bibq8h9C9w9PxDKkuCDeVI2I7ZDMdTga31GSw=";
+    # approver-policy (K5): the CertificateRequestPolicy that bounds SAN forgery.
+    "policy.cert-manager.io/certificaterequestpolicy_v1alpha1.json" =
+      "sha256-gIOaf9flIwo/cndjuGiR2oa4kga3vWOeUkdIOXQNp+U=";
   };
 
   # Assemble a flat directory of the core schemas (yannh `<kind><suffix>.json`

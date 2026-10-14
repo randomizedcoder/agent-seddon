@@ -1,0 +1,42 @@
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/component: allow-gateway
+    app.kubernetes.io/name: allow-gateway
+    app.kubernetes.io/part-of: agent-seddon
+  name: allow-gateway
+spec:
+  allowed:
+    dnsNames:
+      required: true
+      values:
+        - gateway
+        - gateway.agent-seddon
+        - gateway.agent-seddon.svc
+    isCA: false
+    uris:
+      required: true
+      values:
+        - "spiffe://agent.l2/svc/gateway"
+    usages:
+      - server auth
+      - client auth
+      - digital signature
+  constraints:
+    maxDuration: 24h
+    privateKey:
+      algorithm: ECDSA
+      maxSize: 256
+      minSize: 256
+  selector:
+    issuerRef:
+      group: cert-manager.io
+      kind: ClusterIssuer
+      name: agent-seddon-ca
+    namespace:
+      matchNames:
+        - agent-seddon

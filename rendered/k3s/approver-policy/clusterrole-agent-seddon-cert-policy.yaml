@@ -1,0 +1,24 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/component: agent-seddon-cert-policy
+    app.kubernetes.io/name: agent-seddon-cert-policy
+    app.kubernetes.io/part-of: agent-seddon
+  name: agent-seddon-cert-policy
+rules:
+  - apiGroups:
+      - policy.cert-manager.io
+    resourceNames:
+      - allow-gateway
+      - allow-sessions
+      - allow-fleet
+      - allow-token-signer
+      - allow-agent-seddon-ca
+    resources:
+      - certificaterequestpolicies
+    verbs:
+      - use

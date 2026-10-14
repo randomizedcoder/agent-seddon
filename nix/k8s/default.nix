@@ -31,6 +31,7 @@ let
   # Certificates) applies at wave 0, before the workloads; edge/portal-web are K6.
   components = [
     ./components/pki.nix
+    ./components/approver-policy.nix
     ./components/gateway.nix
     ./components/sessions.nix
     ./components/fleet.nix
