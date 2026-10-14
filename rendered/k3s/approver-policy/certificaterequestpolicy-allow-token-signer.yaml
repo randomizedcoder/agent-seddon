@@ -1,0 +1,34 @@
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/component: allow-token-signer
+    app.kubernetes.io/name: allow-token-signer
+    app.kubernetes.io/part-of: agent-seddon
+  name: allow-token-signer
+spec:
+  allowed:
+    isCA: false
+    uris:
+      required: true
+      values:
+        - "spiffe://agent.l2/svc/token-signer"
+    usages:
+      - digital signature
+  constraints:
+    maxDuration: 2160h
+    privateKey:
+      algorithm: ECDSA
+      maxSize: 256
+      minSize: 256
+  selector:
+    issuerRef:
+      group: cert-manager.io
+      kind: ClusterIssuer
+      name: agent-seddon-ca
+    namespace:
+      matchNames:
+        - agent-seddon

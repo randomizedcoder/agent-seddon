@@ -54,13 +54,12 @@ ClusterIssuer selfsigned-bootstrap
   the CRD prunes unknown fields), so this is not pinned into the cert. It holds structurally — the
   root is the only `isCA` certificate and every role cert is a leaf — and who may request an `isCA`
   cert is constrained by RBAC today and by approver-policy (`CertificateRequestPolicy`) in K5 (below).
-- **SAN forgery is bounded by RBAC, not by the issuer.** A cert-manager CA issuer signs whatever SAN
-  a `Certificate` requests, so holding the right to create a `Certificate` that references
-  `agent-seddon-ca` is the right to mint any role identity (e.g. `spiffe://agent.l2/svc/gateway`).
-  Today only the operator and ArgoCD have that RBAC; the agent pods do not. Constraining *which* SANs
-  a given requester may obtain needs cert-manager **approver-policy** (`CertificateRequestPolicy`),
-  one policy per role keyed to the requesting ServiceAccount/namespace — a K5 / hardening follow-up
-  ([10](10-increments.md#follow-ups-not-scheduled)), not a property of the CA issuer itself.
+- **SAN forgery is bounded by RBAC *and* (K5 Slice 4) by approver-policy.** A cert-manager CA issuer
+  signs whatever SAN a `Certificate` requests, so holding the right to create a `Certificate` that
+  references `agent-seddon-ca` is the right to mint any role identity (e.g.
+  `spiffe://agent.l2/svc/gateway`). RBAC limits *who* may create a `Certificate` (only the operator
+  and ArgoCD; the agent pods cannot); approver-policy limits *what* they may ask for — see
+  [Who may mint an identity](#who-may-mint-an-identity-new-k5-slice-4) below.
 - **Root rotation** is a planned event, not automatic: issue the new root, trust both during the
   overlap, then remove the old one. A later increment adds trust-manager to publish a bundle holding
   both.
@@ -154,6 +153,41 @@ group-write or any world bit (`key_mode_is_exposed(mode) = mode & 0o037 != 0`,
 [tls.rs](../../../crates/agent-grpc/src/tls.rs)). The `secret-modes` render-test asserts every
 Deployment sets `fsGroup` and every Secret volume a `defaultMode` with `mode & 0o037 == 0`
 ([07](07-secrets.md)).
+
+## Who may mint an identity (new: K5 Slice 4)
+
+RBAC bounds *who* may create a `Certificate`; cert-manager **approver-policy** bounds *what* they may
+ask for, so the CA ClusterIssuer can no longer be used to mint an arbitrary SAN. It is rendered as
+its own component ([`nix/k8s/components/approver-policy.nix`](../../../nix/k8s/components/approver-policy.nix)).
+
+- **Keyed by namespace + issuer, not by the workload.** A `Certificate`'s `CertificateRequest` is
+  created by the *cert-manager controller* (requester `system:serviceaccount:cert-manager:cert-manager`),
+  not by the role's ServiceAccount — so a `CertificateRequestPolicy` selects on the request's
+  namespace and `issuerRef`, never on the workload identity. approver-policy consults a policy only
+  for a requester that holds the `use` verb on it, and **approves** a request only when at least one
+  such policy allows *every* attribute; otherwise it is **denied**.
+- **The built-in approver is disabled on the platform** (`--controllers=*,-certificaterequests-approver`
+  on the cert-manager controller, [`~/nixos/desktop/l2`](../../../README.md)), so approver-policy is
+  the *only* approver. Until that flag is set, cert-manager's built-in approver approves everything
+  and these policies have no effect.
+- **One narrow policy per allowed identity**, each a precise superset of exactly what the live
+  `CertificateRequest` carries (grounded against the running cluster), so no policy can be reused to
+  mint a different role:
+  - the three role leaves (`allow-gateway`/`allow-sessions`/`allow-fleet`): their SPIFFE URI SAN and
+    the three in-cluster DNS names, `isCA: false`, `server auth`/`client auth`/`digital signature`,
+    `maxDuration: 24h`, ECDSA P-256, the `agent-seddon-ca` issuer in the `agent-seddon` namespace;
+  - the shared `allow-token-signer`: its URI SAN only (no DNS), `digital signature` only, `isCA:
+    false`, `maxDuration: 2160h` — a request for this SAN can never obtain an mTLS-capable cert;
+  - `allow-agent-seddon-ca`: `isCA: true`, CN `agent-seddon-ca`, the `selfsigned-bootstrap` issuer in
+    the `cert-manager` namespace, `maxDuration: 87600h` (the CA request carries no `spec.usages`, so
+    the policy allows none).
+- **Activation.** A `ClusterRole` grants the `use` verb on exactly these five policies, bound to the
+  cert-manager controller SA by a `ClusterRoleBinding`. Nothing else grants `use`, so no unlisted
+  policy is ever consulted.
+- The `approver-policy` render-test asserts every issued identity SAN is allowed by *exactly one*
+  leaf policy, that no leaf policy admits a SAN that is not an issued identity (no wildcard, no
+  stray), that the root keeps its own narrow allowance, and that every policy is covered by a bound
+  `use` ClusterRole. `nix/checks/k8s-kubeconform.nix` vendors the `policy.cert-manager.io` schema.
 
 ## Reload on file change (new: K4)
 
