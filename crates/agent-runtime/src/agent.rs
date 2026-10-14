@@ -2257,11 +2257,12 @@ impl Agent {
                 // separate helper path (parity spec 16).
                 response_format: None,
                 // The per-request routing signals (model-router 02b): the turn's
-                // classified task mode + the Main role. Ignored by non-routing
-                // providers; a `task-router` provider routes on them.
+                // classified task mode + the loop role (Review in a review
+                // session, else Main — see `loop_route_role`). Ignored by
+                // non-routing providers; a `task-router` provider routes on them.
                 route: Some(agent_core::RouteHint {
                     task_mode: Some(mode),
-                    role: Some(agent_core::RouteRole::Main),
+                    role: Some(loop_route_role(mode)),
                     ..Default::default()
                 }),
             };
@@ -2843,7 +2844,7 @@ impl Agent {
             response_format: None,
             route: Some(agent_core::RouteHint {
                 task_mode: Some(mode),
-                role: Some(agent_core::RouteRole::Main),
+                role: Some(loop_route_role(mode)),
                 ..Default::default()
             }),
         };
@@ -3234,6 +3235,20 @@ fn recall_dims_for(mode: agent_core::TaskMode) -> &'static [&'static str] {
         Design => &["project", "docs"],
         Explain => &["user"],
         Other => &[],
+    }
+}
+
+/// The [`agent_core::RouteRole`] the main loop stamps for a turn in `mode`. A
+/// review-mode session (seeded by `seed_review`, or classified `Review`) IS
+/// review work, so it routes as `Review` — that is the signal a `task-router`
+/// `role = "review"` rule matches, so putting the review fleet on the router
+/// (gap §8.7 item 1) actually governs the review generation, not just the
+/// pool-side digest/summary helpers. Every other mode keeps the `Main` slot.
+/// Shared by the in-loop and finalize turns so the two never drift.
+fn loop_route_role(mode: agent_core::TaskMode) -> agent_core::RouteRole {
+    match mode {
+        agent_core::TaskMode::Review => agent_core::RouteRole::Review,
+        _ => agent_core::RouteRole::Main,
     }
 }
 
@@ -4418,6 +4433,160 @@ mod tests {
         let mut session = agent.session();
         session.seed_review(None);
         assert!(session.prompt_context().contains("skill:code-review"));
+    }
+
+    // ---- gap §8.7 item 1: a review-mode main loop routes as `Review` --------
+
+    // The mode→role mapping both loop sites share: review mode IS review work.
+    #[test]
+    fn positive_review_mode_stamps_review_role() {
+        assert_eq!(
+            loop_route_role(TaskMode::Review),
+            agent_core::RouteRole::Review,
+            "a review-mode turn must route as Review so a `role = \"review\"` rule fires"
+        );
+    }
+
+    // Every non-review mode keeps the `Main` slot (default routing is unchanged).
+    #[rstest]
+    #[case::implement(TaskMode::Implement)]
+    #[case::debug(TaskMode::Debug)]
+    #[case::design(TaskMode::Design)]
+    #[case::explain(TaskMode::Explain)]
+    #[case::other(TaskMode::Other)]
+    fn boundary_non_review_modes_stamp_main(#[case] mode: TaskMode) {
+        assert_eq!(
+            loop_route_role(mode),
+            agent_core::RouteRole::Main,
+            "{mode:?} must keep the Main slot"
+        );
+    }
+
+    // Build an agent whose provider records the `RouteHint` of every request it is
+    // sent — the double used to prove the loop's per-turn routing signals.
+    fn route_capturing_agent(
+        seen: Arc<std::sync::Mutex<Vec<Option<agent_core::RouteHint>>>>,
+    ) -> Arc<Agent> {
+        let sink = seen;
+        Arc::new(Agent::new(
+            Arc::new(FnProvider::new(move |req: &CompletionRequest| {
+                sink.lock().unwrap().push(req.route.clone());
+                final_turn("ok")
+            })),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ))
+    }
+
+    // The real end-to-end: a `seed_review` session's main-loop turn carries
+    // `RouteRole::Review`, so a task-router `role = "review"` rule governs the
+    // fleet's review generation (gap §8.7 item 1); an unseeded session keeps Main.
+    #[tokio::test]
+    async fn positive_review_session_main_loop_carries_review_role() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent = route_capturing_agent(seen.clone());
+
+        let mut review = agent.session();
+        review.seed_review(None);
+        assert_eq!(review.send("review this diff").await.unwrap(), "ok");
+
+        let mut plain = agent.session();
+        assert_eq!(plain.send("do something else").await.unwrap(), "ok");
+
+        let roles: Vec<Option<agent_core::RouteRole>> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.as_ref().and_then(|r| r.role))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                Some(agent_core::RouteRole::Review),
+                Some(agent_core::RouteRole::Main),
+            ],
+            "a review session routes as Review, a plain session as Main"
+        );
+    }
+
+    // A read-only tool double whose name is in REVIEW_READONLY_TOOLS, so it
+    // survives `seed_review`'s tool restriction (unlike `echo`) and a review
+    // session can actually keep tool-calling until the step budget is exhausted.
+    struct GrepDouble;
+    #[async_trait::async_trait]
+    impl Tool for GrepDouble {
+        fn name(&self) -> &str {
+            "grep"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "grep".into(),
+                description: "test double".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> agent_core::Result<Observation> {
+            Ok(Observation::ok("hit".to_string()))
+        }
+    }
+
+    // The forced finalize turn (reached when the step budget is exhausted) must
+    // stamp the SAME role as the in-loop turns — both go through `loop_route_role`,
+    // so a review session's finalize is also `Review`. Guards the two sites against
+    // drift (one hard-coding `Main` again).
+    #[tokio::test]
+    async fn corner_finalize_turn_matches_in_loop_role() {
+        let seen: Arc<std::sync::Mutex<Vec<Option<agent_core::RouteRole>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        // tools present ⇒ an in-loop turn; tools empty ⇒ the finalize turn.
+        let provider = FnProvider::new(move |req: &CompletionRequest| {
+            sink.lock()
+                .unwrap()
+                .push(req.route.as_ref().and_then(|r| r.role));
+            if req.tools.is_empty() {
+                final_turn("done")
+            } else {
+                tool_turn(vec![tool_call("t0", "grep")])
+            }
+        });
+        // max_iterations = 1: one in-loop turn (tools) then the finalize turn (none).
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(GrepDouble));
+        let mut s = settings(false);
+        s.max_iterations = 1;
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        let mut review = agent.session();
+        review.seed_review(None);
+        let _ = review.send("review this diff").await;
+
+        let roles = seen.lock().unwrap().clone();
+        assert!(
+            roles.len() >= 2,
+            "expected an in-loop turn and a finalize turn, got {roles:?}"
+        );
+        assert!(
+            roles
+                .iter()
+                .all(|r| *r == Some(agent_core::RouteRole::Review)),
+            "every turn of a review session — in-loop AND finalize — must route as Review: {roles:?}"
+        );
     }
 
     // A decisive verdict switches the session mode and records the switch.

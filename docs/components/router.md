@@ -179,6 +179,28 @@ with hostile hints — liveness + exact decision accounting + post-storm
 recovery) and a dhat leak budget (`route_leak`: failover path frees all
 scratch, <120 blocks/call) gate it alongside the Ir ceilings.
 
+### Putting the review fleet on the router (gap §8.7 item 1)
+
+The unattended code-review fleet (`agent --serve-fleet`) can run behind the
+task-router instead of straight at one upstream, so review traffic gets the same
+capacity caps, cross-rebuild load/breaker state, cost/budget selection, fast 429
+failover and spillover as everything else. Wire it with `[agent] provider =
+"task-router"`, `[route] source = "registry"` (the fleet + policy come from the
+live `[registry]` store, seeded once from the TOML, editable over gRPC with no
+restart), cards for Kimi / GLM / a local floor, and a `role = "review"` rule that
+prefers the heavy reasoner with `default_prefer.policy = "least-loaded"`. A
+ready-to-fill example is [`config/fleet-review-router.toml`](../../config/fleet-review-router.toml).
+
+The `role = "review"` rule actually governs the review generation because a
+**review-mode session's main loop routes as `review`**. When a session is seeded
+for review (`seed_review` — the fleet does this per PR, and the in-loop reviewer
+too), its turns run in review mode, and the main loop stamps
+`RouteRole::Review` on each completion (not the default `Main` — see
+`loop_route_role` in `agent.rs`). So the rule steers the *actual* review turns, not
+only the pool-side digest/summary helpers (which already carry the role). Every
+non-review mode is unchanged (still `Main`), and a config with no role rules routes
+exactly as before. A per-call hint still wins over the stamp.
+
 ### Fast 429 failover — router-owned retry (gap §8.7 item 9)
 
 On the routed path, **retry lives on the router, not inside each upstream.** Routed
