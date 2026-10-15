@@ -56,6 +56,14 @@ pub struct CliBackend {
     /// PR number; empty ⇒ `fetch_pr` errs. Operator-owned and forge-agnostic, so
     /// the forge kind is never inferred from the ref.
     pr_ref_template: String,
+    /// Optional clone/fetch credential as a complete `Authorization: Basic <b64>`
+    /// header value (forge-auth F2b; set by [`CliBackend::with_github_token`]). It is
+    /// injected into remote `git` invocations as a command-scoped `http.extraHeader`
+    /// through [`ExecSpec::env_set`] — so the token never enters `argv` (and so cannot
+    /// appear in the `args.join(" ")` error strings [`git_bytes`](Self::git_bytes)
+    /// builds) and is never persisted to the mirror's `.git/config`. `None` ⇒ an
+    /// unauthenticated (public) clone, exactly as before.
+    auth_header: Option<agent_core::Secret>,
 }
 
 impl CliBackend {
@@ -75,6 +83,7 @@ impl CliBackend {
             cache,
             sandbox: Arc::new(agent_sandbox::LocalSandbox),
             pr_ref_template: String::new(),
+            auth_header: None,
         }
     }
 
@@ -93,6 +102,32 @@ impl CliBackend {
     #[must_use]
     pub fn with_pr_ref_template(mut self, template: impl Into<String>) -> Self {
         self.pr_ref_template = template.into();
+        self
+    }
+
+    /// Carry a GitHub credential for an authenticated **private** clone/fetch
+    /// (forge-auth F2b). The token is base64-encoded into an `Authorization: Basic`
+    /// header under git's `x-access-token:<token>` basic-auth convention (the form
+    /// GitHub accepts for App/installation tokens *and* PATs), which later rides a
+    /// command-scoped `http.extraHeader` injected through [`ExecSpec::env_set`] — so it
+    /// never touches `argv`, the mirror's `.git/config`, or any error string.
+    ///
+    /// An **empty** token is a no-op (`auth_header` stays `None`), so a public clone is
+    /// byte-for-byte unchanged. base64-encoding also makes the header value pure base64
+    /// (`[A-Za-z0-9+/=]+`), so a token carrying CR/LF/NUL cannot inject a second header
+    /// and cannot trip `env_set`'s NUL refusal — header injection is structurally
+    /// impossible.
+    #[must_use]
+    pub fn with_github_token(mut self, token: &agent_core::Secret) -> Self {
+        if token.is_empty() {
+            return self;
+        }
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(format!("x-access-token:{}", token.expose()));
+        self.auth_header = Some(agent_core::Secret::new(format!(
+            "Authorization: Basic {b64}"
+        )));
         self
     }
 
@@ -122,6 +157,33 @@ impl CliBackend {
         } else {
             &self.remote
         }
+    }
+
+    /// The command-scoped git config that carries the clone/fetch credential as an
+    /// `http[.<remote>].extraHeader`, expressed through git's `GIT_CONFIG_COUNT` /
+    /// `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` env vars (git ≥ 2.31). Empty when no
+    /// credential is configured (the public path, unchanged). The key is **host-scoped**
+    /// to the remote when it parses as `scheme://host/…`, so the header only ever
+    /// reaches our one remote (defense-in-depth against a redirect to another host);
+    /// otherwise it falls back to an unscoped `http.extraHeader`, still fail-safe since
+    /// our invocations only talk to that remote. Routing this through `env_set` (rather
+    /// than `-c`) keeps the credential out of `argv` entirely.
+    fn auth_env(&self) -> Vec<(String, String)> {
+        let Some(header) = &self.auth_header else {
+            return Vec::new();
+        };
+        let key = match scope_prefix(&self.remote) {
+            Some(prefix) => format!("http.{prefix}.extraHeader"),
+            None => "http.extraHeader".to_string(),
+        };
+        vec![
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ("GIT_CONFIG_KEY_0".to_string(), key),
+            (
+                "GIT_CONFIG_VALUE_0".to_string(),
+                header.expose().to_string(),
+            ),
+        ]
     }
 
     /// The upstream URL for the mirror: the configured `remote`, else the working
@@ -198,7 +260,14 @@ impl CliBackend {
         argv.push("-C".into());
         argv.push(cwd.to_string_lossy().into_owned());
         argv.extend(args.iter().map(|a| (*a).to_string()));
-        let spec = ExecSpec::argv(argv, cwd).timeout(GIT_TIMEOUT_SECS);
+        let mut spec = ExecSpec::argv(argv, cwd).timeout(GIT_TIMEOUT_SECS);
+        // Attach the clone/fetch credential (if any) as command-scoped config through
+        // the child env — never as an arg, so the error paths below (which `args.join`)
+        // cannot echo it. Inert for local object reads; applied to remote ops (clone,
+        // fetch) that actually need it.
+        for (k, v) in self.auth_env() {
+            spec = spec.env_set(k, v);
+        }
         let out = self
             .sandbox
             .exec(&spec)
@@ -225,6 +294,20 @@ impl CliBackend {
         let bytes = self.git_bytes(cwd, args).await?;
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
+}
+
+/// `scheme://host/` of a `scheme://host/path` URL (up to and including the third `/`),
+/// used to scope a git `http.<url>.extraHeader` to its remote so the credential only
+/// reaches that host. `None` when `remote` is not of that shape (an scp-style
+/// `host:path` or a local path, which have no scheme), so the caller falls back to an
+/// unscoped header.
+fn scope_prefix(remote: &str) -> Option<String> {
+    // Require the `://` shape first, so a local path or an scp-style remote (no scheme)
+    // does not spuriously match on an embedded slash.
+    let scheme_end = remote.find("://")?;
+    let host_start = scheme_end + 3;
+    let slash = remote[host_start..].find('/')?;
+    Some(remote[..=host_start + slash].to_string())
 }
 
 /// Append `-- <globs...>` pathspecs to an arg vec when any globs are given.
@@ -1029,6 +1112,17 @@ mod tests {
                 .map(|s| s.argv.clone())
                 .collect()
         }
+
+        /// The `env_set` of every `git` call recorded, in order — so a test can assert
+        /// the clone/fetch credential rides the child env (not `argv`).
+        fn all_env_sets(&self) -> Vec<Vec<(String, String)>> {
+            self.all
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.env_set.clone())
+                .collect()
+        }
     }
 
     #[async_trait]
@@ -1297,5 +1391,276 @@ mod tests {
                 "tail `{tail}` must pass safe_segment"
             );
         }
+    }
+
+    // --- forge-auth F2b: authenticated private clone/fetch -------------------
+    // The credential rides a command-scoped `http.extraHeader` injected through
+    // `env_set`, so these assert on the recorded `ExecSpec` (argv **and** env_set)
+    // without a real git/network — the token must reach the child env but never argv,
+    // the clone URL, or an error string.
+
+    /// A backend with a real `remote` and an **absent** mirror, so `ensure_mirror`
+    /// funnels exactly one `git clone --mirror <remote> <mirror>` through the sandbox.
+    fn backend_for_clone(remote: &str) -> (CliBackend, PathBuf) {
+        let dir = agent_testkit::tempdir();
+        let mirror = dir.join("mirror");
+        let b = CliBackend::new(
+            dir.join("root"),
+            mirror.clone(),
+            dir.join("worktrees"),
+            remote,
+        );
+        (b, mirror)
+    }
+
+    /// The `env_set` of a recorded spec as a map, for asserting the injected config.
+    fn env_map(spec: &ExecSpec) -> std::collections::HashMap<String, String> {
+        spec.env_set.iter().cloned().collect()
+    }
+
+    fn tok(s: &str) -> agent_core::Secret {
+        agent_core::Secret::new(s)
+    }
+
+    /// `scope_prefix` derives the `scheme://host/` a header is scoped to, falling back
+    /// to `None` (⇒ unscoped header) for anything not of that shape.
+    #[rstest]
+    #[case::positive_github("https://github.com/owner/repo.git", Some("https://github.com/"))]
+    #[case::positive_ghes_path("https://ghe.example.com/o/r.git", Some("https://ghe.example.com/"))]
+    #[case::positive_http_scheme("http://h/o/r", Some("http://h/"))]
+    #[case::boundary_host_only_no_path("https://github.com", None)]
+    #[case::corner_scp_style_no_scheme("git@github.com:o/r.git", None)]
+    #[case::corner_local_path("/srv/git/r.git", None)]
+    fn scope_prefix_cases(#[case] remote: &str, #[case] want: Option<&str>) {
+        assert_eq!(scope_prefix(remote).as_deref(), want, "remote {remote:?}");
+    }
+
+    /// The token is injected as `GIT_CONFIG_*` env (host-scoped `http.extraHeader`).
+    #[tokio::test]
+    async fn positive_token_sets_extraheader_env() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/owner/repo.git");
+        let b = b.with_sandbox(rec.clone()).with_github_token(&tok("ghs_x"));
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().expect("clone ran");
+        let m = env_map(&spec);
+        assert_eq!(m.get("GIT_CONFIG_COUNT").map(String::as_str), Some("1"));
+        assert_eq!(
+            m.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("http.https://github.com/.extraHeader"),
+            "host-scoped extraHeader key"
+        );
+        assert!(
+            m["GIT_CONFIG_VALUE_0"].starts_with("Authorization: Basic "),
+            "value is a Basic auth header: {:?}",
+            m.get("GIT_CONFIG_VALUE_0")
+        );
+    }
+
+    /// The base64 payload decodes to git's `x-access-token:<token>` basic-auth form.
+    #[tokio::test]
+    async fn positive_header_decodes_to_x_access_token() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let b = b.with_sandbox(rec.clone()).with_github_token(&tok("ghs_x"));
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let val = env_map(&spec).remove("GIT_CONFIG_VALUE_0").unwrap();
+        let payload = val.strip_prefix("Authorization: Basic ").unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(decoded, b"x-access-token:ghs_x");
+    }
+
+    /// The clone URL / argv stay bare — the token is **only** in the env, never a
+    /// command-line argument (so it is never persisted to `.git/config` nor echoed).
+    #[tokio::test]
+    async fn positive_clone_url_and_argv_stay_bare() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/owner/repo.git");
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_github_token(&tok("ghs_secret"));
+        b.ensure_mirror().await.unwrap();
+
+        let flat: Vec<String> = rec.all_argvs().into_iter().flatten().collect();
+        assert!(
+            flat.iter()
+                .any(|a| a == "https://github.com/owner/repo.git"),
+            "the bare URL is the clone remote: {flat:?}"
+        );
+        assert!(
+            !flat.iter().any(|a| a.contains("ghs_secret")),
+            "the token must never appear in argv: {flat:?}"
+        );
+    }
+
+    /// A reused mirror's `fetch` (and its `rev-parse`) also carry the credential.
+    #[tokio::test]
+    async fn positive_fetch_is_also_authenticated() {
+        let rec = RecordingSandbox::new(ok_out(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"));
+        let dir = agent_testkit::tempdir();
+        let mirror = dir.join("mirror");
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        let b = CliBackend::new(
+            dir.join("root"),
+            mirror,
+            dir.join("wt"),
+            "https://github.com/o/r.git",
+        )
+        .with_sandbox(rec.clone())
+        .with_pr_ref_template("refs/pull/{n}/head")
+        .with_github_token(&tok("ghs_x"));
+
+        b.fetch_pr(9).await.unwrap();
+
+        let envs = rec.all_env_sets();
+        assert!(!envs.is_empty(), "the fetch funnelled git calls");
+        for e in &envs {
+            let m: std::collections::HashMap<_, _> = e.iter().cloned().collect();
+            assert_eq!(
+                m.get("GIT_CONFIG_KEY_0").map(String::as_str),
+                Some("http.https://github.com/.extraHeader"),
+                "every remote op carries the header"
+            );
+        }
+    }
+
+    /// No token ⇒ no auth env at all (the public clone is byte-for-byte unchanged).
+    #[tokio::test]
+    async fn positive_public_no_token_no_auth_env() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let b = b.with_sandbox(rec.clone()); // no with_github_token
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().unwrap();
+        assert!(
+            spec.env_set.is_empty(),
+            "a public clone sets no auth env: {:?}",
+            spec.env_set
+        );
+    }
+
+    /// An **empty** token is treated as no token — it must never emit a header.
+    #[tokio::test]
+    async fn negative_empty_token_is_no_auth() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_github_token(&agent_core::Secret::default());
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().unwrap();
+        assert!(spec.env_set.is_empty(), "an empty token emits no header");
+    }
+
+    /// A remote with no `scheme://host/path` shape falls back to an unscoped header
+    /// (still authenticated — our invocations only talk to the one remote).
+    #[tokio::test]
+    async fn boundary_unparseable_remote_falls_back_unscoped() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("github.com/o/r.git"); // no scheme
+        let b = b.with_sandbox(rec.clone()).with_github_token(&tok("ghs_x"));
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let m = env_map(&spec);
+        assert_eq!(
+            m.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("http.extraHeader"),
+            "unscoped fallback key, still authenticated"
+        );
+    }
+
+    /// On a clone failure the token appears in neither the error nor the argv — the
+    /// `git_bytes` error path `args.join`s only the argv, which never holds the token.
+    #[tokio::test]
+    async fn adversarial_token_absent_from_error_on_failure() {
+        let out = ExecOutput {
+            exit_code: 1,
+            stderr: "fatal: could not read Username".into(),
+            ..Default::default()
+        };
+        let rec = RecordingSandbox::new(out);
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_github_token(&tok("ghs_leakme"));
+
+        let err = b.ensure_mirror().await.unwrap_err().to_string();
+        assert!(
+            !err.contains("ghs_leakme"),
+            "token must not leak in error: {err}"
+        );
+        let flat: Vec<String> = rec.all_argvs().into_iter().flatten().collect();
+        assert!(
+            !flat.iter().any(|a| a.contains("ghs_leakme")),
+            "token must not be in argv: {flat:?}"
+        );
+    }
+
+    /// A token carrying CR/LF cannot inject a second header: base64 makes the value
+    /// pure base64 (no raw CR/LF), yet decodes back to the exact bytes.
+    #[tokio::test]
+    async fn adversarial_crlf_token_neutralized_by_base64() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let hostile = "ghs\r\nX-Injected: 1";
+        let b = b.with_sandbox(rec.clone()).with_github_token(&tok(hostile));
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let val = env_map(&spec).remove("GIT_CONFIG_VALUE_0").unwrap();
+        assert!(
+            !val.contains('\r') && !val.contains('\n'),
+            "no raw CR/LF in the header value: {val:?}"
+        );
+        let payload = val.strip_prefix("Authorization: Basic ").unwrap();
+        assert!(
+            payload
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"+/=".contains(&c)),
+            "pure base64 payload: {payload}"
+        );
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(
+            decoded,
+            format!("x-access-token:{hostile}").into_bytes(),
+            "round-trips the exact token bytes"
+        );
+    }
+
+    /// A NUL in the token would be refused by `env_set` if it reached the value raw;
+    /// base64 neutralizes it (the env value is pure base64), yet it round-trips.
+    #[tokio::test]
+    async fn adversarial_nul_token_no_spawn_refusal_via_base64() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let hostile = "gh\0s";
+        let b = b.with_sandbox(rec.clone()).with_github_token(&tok(hostile));
+        b.ensure_mirror().await.unwrap();
+
+        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let val = env_map(&spec).remove("GIT_CONFIG_VALUE_0").unwrap();
+        assert!(
+            !val.contains('\0'),
+            "base64 leaves no raw NUL in the env value: {val:?}"
+        );
+        let payload = val.strip_prefix("Authorization: Basic ").unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(decoded, format!("x-access-token:{hostile}").into_bytes());
     }
 }

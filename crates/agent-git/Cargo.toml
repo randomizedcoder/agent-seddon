@@ -20,6 +20,11 @@ git-hybrid = ["git-cli"]
 
 [dependencies]
 agent-core.workspace = true
+# Encodes the `x-access-token:<token>` basic-auth credential for an authenticated
+# private clone/fetch (forge-auth F2b). Already in-tree via jsonwebtoken, so no new
+# crate for cargo-deny; the token is base64'd into an `http.extraHeader` injected
+# out-of-band through `env_set`, never into argv or `.git/config`.
+base64 = { workspace = true }
 # The execution chokepoint (C24): every git spawn funnels through the `Sandbox`
 # seam rather than a raw `Command`, so a future isolation backend catches it. The
 # default is `LocalSandbox` (behaviour-identical to the old direct spawn); the
