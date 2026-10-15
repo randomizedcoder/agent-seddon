@@ -220,6 +220,10 @@ forge-gitea = ["agent-forge/forge-gitea"]
 # Bitbucket Cloud host (config C36 / D1b): opt-in — NOT folded into `forge`. Enable
 # it (plus `forge`) to build bitbucket cards/rows.
 forge-bitbucket = ["agent-forge/forge-bitbucket"]
+# GitHub App installation-token minting (forge-auth F2): opt-in — NOT folded into
+# `forge`, because it pulls `jsonwebtoken` into `agent-forge`. Enables the `[github_app]`
+# minter + the `ghapp:` resolve path. Implies `forge` so `agent-forge` is built in.
+forge-ghapp = ["forge", "agent-forge/forge-ghapp"]
 # Matrix transport host (config C37 / D2b): opt-in — NOT folded into any default set,
 # so the default build stays Slack-only. Pulls `agent-slack` and turns on its matrix
 # impl, so a card with `kind = "matrix"` builds an outbound transport.
@@ -521,6 +525,8 @@ url.workspace = true
 [dev-dependencies]
 agent-testkit = { workspace = true, features = ["oidc", "pki"] }
 rstest.workspace = true
+# Loopback GitHub-App token endpoint for the `ghapp:` mint-wiring test (forge-auth F2).
+tiny_http.workspace = true
 # The distiller tests drive a real (in-memory) ledger.
 agent-digest = { workspace = true, features = ["digest-sqlite"] }
 # `test-util` enables `start_paused` — the campaign worker's heartbeat / timeout /

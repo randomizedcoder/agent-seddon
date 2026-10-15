@@ -221,6 +221,35 @@ pub async fn build_agent_with(
 }
 
 /// [`build_agent_with`] with an explicit [`BuildMode`] (see [`build_agent_mode`]).
+/// Build the `[github_app]` installation-token minter and install it process-wide
+/// (forge-auth F2). Resolves the App private key in the operator scope; a missing or
+/// malformed key is a startup error (fail closed), with the key bytes never echoed.
+#[cfg(feature = "forge-ghapp")]
+fn install_github_app_minter(ga: &crate::config::GithubAppCfg) -> anyhow::Result<()> {
+    ga.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pem = crate::secrets::resolve(crate::secrets::SecretScope::Operator, &ga.private_key_ref)
+        .map_err(|e| anyhow::anyhow!("[github_app] private_key_ref: {e}"))?;
+    let minter = agent_forge::ghapp::InstallationTokenMinter::new(
+        ga.app_id.clone(),
+        &pem,
+        ga.base(),
+        ga.max_retries,
+        ga.timeout_secs,
+        Arc::new(agent_forge::ghapp::SystemClock),
+    )
+    .map_err(|e| anyhow::anyhow!("building the github-app minter: {e}"))?;
+    crate::secrets::install_github_app(Arc::new(minter));
+    // The operator→installation binding that authorizes minting under `per_tenant`
+    // (the cross-tenant-minting IDOR guard, forge-auth F2).
+    let bindings = ga
+        .installations
+        .iter()
+        .map(|(tenant, ids)| (tenant.clone(), ids.iter().cloned().collect()))
+        .collect();
+    crate::secrets::install_github_app_bindings(bindings);
+    Ok(())
+}
+
 pub async fn build_agent_with_mode(
     registry: &Registry,
     cfg: Config,
@@ -242,6 +271,14 @@ pub async fn build_agent_with_mode(
     // (security-hardening S17): confined to `[secrets] root/<tenant>` when
     // `[tenancy] per_tenant` is on.
     crate::secrets::install_policy(cfg.secrets.policy(cfg.tenancy.per_tenant));
+    // The GitHub App installation-token minter (forge-auth F2): when `[github_app]` is
+    // configured, resolve the App private key (operator scope) and install the process
+    // minter so `ghapp:<installation_id>` forge credentials can be minted. Fail closed —
+    // a bad key or an unreadable reference is a startup error.
+    #[cfg(feature = "forge-ghapp")]
+    if let Some(ga) = &cfg.github_app {
+        install_github_app_minter(ga)?;
+    }
     // The model-router textproto scenario file (model-router 03), applied
     // before any factory reads `[route]`: it REPLACES the TOML fleet+policy
     // wholesale (one authority, never a merge). A missing/unparseable/invalid

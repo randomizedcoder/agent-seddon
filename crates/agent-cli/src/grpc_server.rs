@@ -1235,21 +1235,15 @@ pub async fn serve_fleet(
             None => std::collections::HashMap::new(),
         };
     let forge_check = move |row: &agent_core::FleetSession| {
-        if row.forge_id.is_empty() {
-            agent_runtime::build_session_forge(row)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+        // `check_session_forge` admits a `ghapp:` row on a sync shape + minter-installed
+        // check (the token is minted lazily at first use — async, which this sync
+        // closure cannot do) and probes every other credential by building (forge-auth F2).
+        let card = if row.forge_id.is_empty() {
+            None
         } else {
-            match forge_cards.get(&row.forge_id) {
-                Some(card) => agent_runtime::build_session_forge_from_card(row, card)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                None => Err(format!(
-                    "forge_id `{}` not found in the forge registry",
-                    row.forge_id
-                )),
-            }
-        }
+            forge_cards.get(&row.forge_id)
+        };
+        agent_runtime::check_session_forge(row, card)
     };
     let report = agent_review_fleet::reconcile(
         roster.as_ref(),

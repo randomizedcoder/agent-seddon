@@ -136,8 +136,9 @@ pub use egress::derive_egress_allowlist;
 pub use progress::{progress_channels, TransportProgressFeed};
 #[cfg(feature = "fleet")]
 pub use registry::{
-    build_session_forge, build_session_forge_from_card, resolve_session_forge,
-    resolve_tenant_token_ref, resolve_token_ref,
+    build_session_forge, build_session_forge_async, build_session_forge_from_card,
+    build_session_forge_from_card_async, check_session_forge, mint_or_resolve_tenant_token,
+    resolve_session_forge, resolve_tenant_token_ref, resolve_token_ref,
 };
 pub use registry::{register_builtins, Registry};
 pub use session_events::{SessionEvents, SessionEventsRegistry};
@@ -188,5 +189,8 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
         .map_err(anyhow::Error::msg)?;
     cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
     cfg.campaign.validate().map_err(anyhow::Error::msg)?;
+    if let Some(ga) = &cfg.github_app {
+        ga.validate().map_err(anyhow::Error::msg)?;
+    }
     Ok((cfg, unknown))
 }
