@@ -2737,6 +2737,10 @@ pub trait ConfigStore: Send + Sync {
 pub const MAX_UPSTREAM_URL_LEN: usize = 2_048;
 /// Longest `api_key_ref` (`env:NAME` / `file:/path`) accepted on a card.
 pub const MAX_API_KEY_REF_LEN: usize = 512;
+/// Longest `ghapp:<installation_id>` id accepted. GitHub installation ids are
+/// decimal and `u64::MAX` is 20 digits, so 20 bounds a hostile value without
+/// parsing a range (the ref stays a string; the minter uses it as a URL segment).
+pub const MAX_INSTALLATION_ID_LEN: usize = 20;
 /// Longest `model` / `version` string accepted on a card.
 pub const MAX_UPSTREAM_MODEL_LEN: usize = 256;
 /// Most capability tags per card, and the longest single tag.
@@ -2875,12 +2879,16 @@ pub enum ApiKeyRef<'a> {
     Env(&'a str),
     /// Resolve from this file path (tilde-expanded) on the consuming host.
     File(&'a str),
+    /// `ghapp:<installation_id>` — a GitHub App installation. Resolves by
+    /// *minting* a short-lived token (App JWT → installation token) on the
+    /// consuming host, never by reading a file.
+    GitHubApp(&'a str),
 }
 
 impl<'a> ApiKeyRef<'a> {
     /// Parse the kind-prefixed form. Anything that is neither empty nor
-    /// `env:`/`file:`-prefixed is rejected — a raw value here is exactly the
-    /// "secret in the config" mistake this type exists to prevent, so it fails
+    /// `env:`/`file:`/`ghapp:`-prefixed is rejected — a raw value here is exactly
+    /// the "secret in the config" mistake this type exists to prevent, so it fails
     /// closed (and the error never echoes the value).
     pub fn parse(s: &'a str) -> std::result::Result<Self, String> {
         if s.len() > MAX_API_KEY_REF_LEN {
@@ -2901,8 +2909,28 @@ impl<'a> ApiKeyRef<'a> {
             }
             return Ok(ApiKeyRef::File(path));
         }
+        if let Some(id) = s.strip_prefix("ghapp:") {
+            if id.is_empty() {
+                return Err("api_key_ref `ghapp:` names no installation id".into());
+            }
+            if id.len() > MAX_INSTALLATION_ID_LEN {
+                return Err("api_key_ref `ghapp:` installation id too long".into());
+            }
+            // Decimal ASCII only — stricter than `safe_segment`, and exactly the
+            // GitHub installation-id shape. `is_ascii_digit` (NOT `is_numeric`)
+            // rejects Unicode digit look-alikes, traversal, separators, a leading
+            // `-`, CRLF and percent-escapes before the id can become a URL segment.
+            // The error never echoes the id: it may be an attacker log-injection payload.
+            if !id.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("api_key_ref `ghapp:` installation id must be decimal digits".into());
+            }
+            return Ok(ApiKeyRef::GitHubApp(id));
+        }
         // Never echo the value: it may BE a pasted secret.
-        Err("api_key_ref must be `env:NAME` or `file:/path` (never a raw key)".into())
+        Err(
+            "api_key_ref must be `env:NAME`, `file:/path`, or `ghapp:<id>` (never a raw key)"
+                .into(),
+        )
     }
 }
 
@@ -7316,6 +7344,13 @@ mod tests {
     #[case::positive_env("env:MY_KEY", ApiKeyRef::Env("MY_KEY"))]
     #[case::positive_file("file:/run/secrets/key", ApiKeyRef::File("/run/secrets/key"))]
     #[case::positive_file_tilde("file:~/keys/k", ApiKeyRef::File("~/keys/k"))]
+    #[case::positive_ghapp_numeric("ghapp:12345678", ApiKeyRef::GitHubApp("12345678"))]
+    #[case::positive_ghapp_single_digit("ghapp:7", ApiKeyRef::GitHubApp("7"))]
+    // `ghapp:` is a *shape* check, not a GitHub oracle: a digit-shaped id that
+    // GitHub would never issue (0, leading zeros) parses, and fails later — fail
+    // closed — at the F2 mint. `parse` never normalizes the id (bytes preserved).
+    #[case::corner_ghapp_zero("ghapp:0", ApiKeyRef::GitHubApp("0"))]
+    #[case::corner_ghapp_leading_zeros("ghapp:007", ApiKeyRef::GitHubApp("007"))]
     fn api_key_ref_parses(#[case] s: &str, #[case] expect: ApiKeyRef<'_>) {
         assert_eq!(ApiKeyRef::parse(s).expect("parses"), expect);
     }
@@ -7325,12 +7360,42 @@ mod tests {
     #[case::negative_bare_env_prefix("env:")]
     #[case::negative_bare_file_prefix("file:")]
     #[case::negative_wrong_scheme("vault:secret/llm")]
+    #[case::negative_ghapp_empty_id("ghapp:")]
+    #[case::negative_ghapp_no_colon("ghapp12345")]
+    #[case::negative_raw_numeric("12345678")]
+    #[case::negative_wrong_case("GHAPP:123")]
+    #[case::corner_ghapp_double_scheme("ghapp:ghapp:1")]
+    #[case::adversarial_ghapp_traversal("ghapp:../../heads/main")]
+    #[case::adversarial_ghapp_slash("ghapp:1/../../etc/passwd")]
+    #[case::adversarial_ghapp_percent_encoded("ghapp:%2e%2e%2f")]
+    #[case::adversarial_ghapp_leading_dash("ghapp:-1")]
+    #[case::adversarial_ghapp_unicode_digits("ghapp:\u{0661}\u{0662}\u{0663}")]
+    #[case::adversarial_ghapp_crlf("ghapp:12\r\n34")]
+    #[case::adversarial_ghapp_space("ghapp:12 34")]
+    #[case::adversarial_ghapp_hex("ghapp:0x1f")]
     fn api_key_ref_rejects_malformed(#[case] s: &str) {
         assert!(ApiKeyRef::parse(s).is_err());
     }
 
+    /// `boundary_`: the id cap and the overall `api_key_ref` cap. The overall
+    /// length check runs *first*, so an id longer than the whole cap is rejected
+    /// as "too long" before the per-id digit/length checks ever see it.
+    #[rstest]
+    #[case::boundary_ghapp_id_at_cap("9".repeat(MAX_INSTALLATION_ID_LEN), true)]
+    #[case::boundary_ghapp_id_over_cap("9".repeat(MAX_INSTALLATION_ID_LEN + 1), false)]
+    #[case::boundary_ghapp_ref_over_overall_cap("9".repeat(MAX_API_KEY_REF_LEN + 100), false)]
+    fn boundary_api_key_ref_ghapp_length(#[case] digits: String, #[case] ok: bool) {
+        assert_eq!(
+            ApiKeyRef::parse(&format!("ghapp:{digits}")).is_ok(),
+            ok,
+            "ghapp id of {} digits",
+            digits.len()
+        );
+    }
+
     /// `adversarial_`: a pasted secret must be rejected AND never echoed back in
-    /// the error (the message would land in logs).
+    /// the error (the message would land in logs). The same rule holds for a
+    /// malformed `ghapp:` id — it may be an attacker log-injection payload.
     #[test]
     fn adversarial_api_key_ref_never_echoes_the_value() {
         let secret = "sk-live-abcdef0123456789";
@@ -7344,6 +7409,12 @@ mod tests {
         assert!(
             !err.contains("xxxx"),
             "error must not echo the value: {err}"
+        );
+        let payload = "INJECT\r\nX-Evil: 1";
+        let err = ApiKeyRef::parse(&format!("ghapp:{payload}")).expect_err("bad id rejected");
+        assert!(
+            !err.contains("INJECT"),
+            "error must not echo the ghapp id: {err}"
         );
     }
 

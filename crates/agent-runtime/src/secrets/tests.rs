@@ -168,3 +168,47 @@ fn boundary_admit_returns_the_confined_path() {
     .unwrap();
     assert_eq!(got, Admitted::File(t.root.join("acme").join("key")));
 }
+
+// forge-auth F1: a `ghapp:` ref is *admitted* (classified) but not yet resolved —
+// minting an installation token is F2, so resolution fails closed until then.
+
+/// A `ghapp:` ref is admitted as `GitHubApp` in both an operator scope and a
+/// tenant scope — and in the tenant scope with `allow_env_for_tenants = false`,
+/// proving the env/file-confinement gates do not apply (it is minted, not read).
+#[rstest]
+#[case::positive_admit_ghapp_operator(SecretScope::Operator, false)]
+#[case::positive_admit_ghapp_tenant(SecretScope::Tenant("acme"), true)]
+fn ghapp_ref_is_admitted(#[case] scope: SecretScope<'_>, #[case] per_tenant: bool) {
+    let t = tree();
+    let policy = SecretsPolicy {
+        per_tenant,
+        ..confined(&t, false)
+    };
+    assert_eq!(
+        admit(&policy, scope, "ghapp:12345678").expect("admitted"),
+        Admitted::GitHubApp("12345678".to_string())
+    );
+}
+
+/// Resolution fails closed with a message that points at F2 and never produces an
+/// empty/absent credential (which would silently disable auth).
+#[rstest]
+#[case::negative_resolve_ghapp_operator(SecretScope::Operator)]
+#[case::negative_resolve_ghapp_tenant(SecretScope::Tenant("acme"))]
+fn ghapp_ref_resolution_fails_closed(#[case] scope: SecretScope<'_>) {
+    let t = tree();
+    let err = resolve_with(&confined(&t, true), scope, "ghapp:12345678").expect_err("not minted");
+    assert!(err.contains("F2"), "message should point at F2: {err}");
+}
+
+#[test]
+fn adversarial_resolve_ghapp_bad_id_rejected_at_parse() {
+    // A malformed id is rejected by `ApiKeyRef::parse` inside `admit`, before any
+    // resolver work — so even resolution of a hostile `ghapp:` value fails closed.
+    assert!(resolve_with(
+        &SecretsPolicy::default(),
+        SecretScope::Operator,
+        "ghapp:../x"
+    )
+    .is_err());
+}
