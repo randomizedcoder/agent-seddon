@@ -2737,6 +2737,13 @@ fn route_cfg_from(
             Ok(agent_core::ApiKeyRef::Env(n)) => (n.to_string(), String::new()),
             Ok(agent_core::ApiKeyRef::File(p)) => (String::new(), p.to_string()),
             Ok(agent_core::ApiKeyRef::None) => (String::new(), String::new()),
+            // A `ghapp:` ref is a *forge* credential (minted per installation), never
+            // an LLM provider key — reject it on the provider path, fail closed.
+            Ok(agent_core::ApiKeyRef::GitHubApp(_)) => anyhow::bail!(
+                "model-router config `{path}`: upstream `{}`: a `ghapp:` ref is a forge \
+                 credential, not a provider api_key_ref",
+                u.id
+            ),
             // Unreachable after validate(); kept as a hard error for defense.
             Err(e) => anyhow::bail!("model-router config `{path}`: upstream `{}`: {e}", u.id),
         };
@@ -2908,6 +2915,12 @@ fn synth_key_refs_with(
         Ok(Admitted::Env(n)) => Ok((n, String::new())),
         Ok(Admitted::File(f)) => Ok((String::new(), f.to_string_lossy().into_owned())),
         Ok(Admitted::None) => Ok((String::new(), String::new())),
+        // A `ghapp:` ref is a *forge* credential (minted per installation), never
+        // an LLM provider key — reject it on the provider path, fail closed.
+        Ok(Admitted::GitHubApp(_)) => Err(agent_core::Error::Registry(format!(
+            "card `{}`: a `ghapp:` ref is a forge credential, not a provider api_key_ref",
+            card.id
+        ))),
         Err(e) => Err(agent_core::Error::Registry(format!(
             "card `{}`: {e}",
             card.id
@@ -5615,6 +5628,10 @@ mod synth_secret_tests {
         Err("secrets directory")
     )]
     #[case::adversarial_env_refused(true, "env:KIMI_KEY", Err("allow_env_for_tenants"))]
+    // A `ghapp:` ref is a forge credential, never a provider key — rejected on the
+    // provider path (fail closed), under per_tenant and without it alike.
+    #[case::adversarial_ghapp_refused_per_tenant(true, "ghapp:12345678", Err("forge credential"))]
+    #[case::adversarial_ghapp_refused_operator(false, "ghapp:12345678", Err("forge credential"))]
     fn synth_key_refs_cases(
         #[case] per_tenant: bool,
         #[case] api_key_ref: &str,

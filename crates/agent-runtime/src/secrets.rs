@@ -48,6 +48,10 @@ pub enum Admitted {
     None,
     Env(String),
     File(PathBuf),
+    /// A GitHub App installation id to *mint* a token from (forge-auth F1). It is
+    /// not a file or an env var, so no tenant file-confinement applies; the mint
+    /// itself is deferred to F2, where [`resolve_with`] fails closed until then.
+    GitHubApp(String),
 }
 
 static POLICY: RwLock<Option<Arc<SecretsPolicy>>> = RwLock::new(None);
@@ -81,6 +85,7 @@ pub fn admit(
                 ApiKeyRef::None => Admitted::None,
                 ApiKeyRef::Env(name) => Admitted::Env(name.to_string()),
                 ApiKeyRef::File(path) => Admitted::File(crate::builder::expand_tilde(path).into()),
+                ApiKeyRef::GitHubApp(id) => Admitted::GitHubApp(id.to_string()),
             })
         }
     };
@@ -98,6 +103,10 @@ pub fn admit(
         ApiKeyRef::File(path) => {
             confine_tenant_file(&policy.root, tenant, path).map(Admitted::File)
         }
+        // A `ghapp:` ref resolves by minting, not by reading a tenant file/env, so
+        // the file-confinement and `allow_env_for_tenants` gates do not apply. The
+        // installation is still bound to this tenant (the mint, F2, uses it).
+        ApiKeyRef::GitHubApp(id) => Ok(Admitted::GitHubApp(id.to_string())),
     }
 }
 
@@ -127,6 +136,12 @@ pub fn resolve_with(
                 SecretScope::Operator => format!("reading secret file `{}`: {e}", path.display()),
                 SecretScope::Tenant(_) => format!("reading a tenant secret file: {}", e.kind()),
             }),
+        // forge-auth F1 lands the `ghapp:` ref kind only; minting an installation
+        // token (App JWT → installation token) is F2. Until then, resolution fails
+        // closed rather than silently yielding an empty/absent credential.
+        Admitted::GitHubApp(_) => {
+            Err("ghapp: installation-token minting is not implemented yet (forge-auth F2)".into())
+        }
     }
 }
 
