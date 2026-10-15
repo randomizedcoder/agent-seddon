@@ -112,21 +112,35 @@ pub fn install_github_app_bindings(bindings: GithubAppBindings) {
         .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(bindings));
 }
 
-/// May `tenant` mint installation `id` under the installed policy? Under single-operator
+/// The authorization decision, pure over its inputs so it is tested directly (the
+/// `is_some_and` global-reader wrapper below is a thin shim). Under single-operator
 /// (`per_tenant` off) the operator owns all config, so any id is allowed — mirroring how
 /// `file:`/`env:` refs resolve unconfined there. Under `per_tenant`, only an id the
 /// operator bound to this tenant is allowed; anything else fails closed. This closes the
 /// cross-tenant-minting IDOR in the window before the per-tenant install store (F4).
 #[cfg(feature = "forge-ghapp")]
-pub fn ghapp_installation_allowed(tenant: &str, id: &str) -> bool {
-    if !policy().per_tenant {
+fn ghapp_allowed(
+    per_tenant: bool,
+    bindings: Option<&GithubAppBindings>,
+    tenant: &str,
+    id: &str,
+) -> bool {
+    if !per_tenant {
         return true;
     }
-    GHAPP_BINDINGS
+    bindings.is_some_and(|m| m.get(tenant).is_some_and(|ids| ids.contains(id)))
+}
+
+/// May `tenant` mint installation `id` under the installed policy + bindings? The real
+/// runtime gate (`registry::mint_or_resolve_tenant_token` and `check_session_forge` call
+/// exactly this), delegating to the pure [`ghapp_allowed`] so the decision under test is
+/// the decision that runs.
+#[cfg(feature = "forge-ghapp")]
+pub fn ghapp_installation_allowed(tenant: &str, id: &str) -> bool {
+    let bindings = GHAPP_BINDINGS
         .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(|m| m.get(tenant).is_some_and(|ids| ids.contains(id)))
+        .unwrap_or_else(PoisonError::into_inner);
+    ghapp_allowed(policy().per_tenant, bindings.as_deref(), tenant, id)
 }
 
 /// Check `raw` against `policy` for `scope` and say what it points at. The error

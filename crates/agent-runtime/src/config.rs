@@ -3996,21 +3996,6 @@ impl GithubAppCfg {
         Ok(())
     }
 
-    /// May `tenant` mint installation `id`, given whether `[tenancy] per_tenant` is on?
-    /// Under single-operator (`per_tenant` off) the operator owns all config, so any id
-    /// is allowed — mirroring how `file:`/`env:` refs resolve unconfined there. Under
-    /// `per_tenant`, only an id the operator bound to this tenant in `installations` is
-    /// allowed; anything else fails closed (the cross-tenant-minting IDOR guard, until
-    /// the per-tenant install store F4 lands).
-    pub fn installation_allowed(&self, per_tenant: bool, tenant: &str, id: &str) -> bool {
-        if !per_tenant {
-            return true;
-        }
-        self.installations
-            .get(tenant)
-            .is_some_and(|ids| ids.iter().any(|allowed| allowed == id))
-    }
-
     /// The effective API base, defaulting to github.com.
     pub fn base(&self) -> String {
         if self.base_url.trim().is_empty() {
@@ -5066,47 +5051,6 @@ mod tests {
     fn adversarial_github_app_unknown_field_rejected() {
         let bad = "app_id = \"1\"\nprivate_key_ref = \"file:/k.pem\"\nsurprise = \"x\"";
         assert!(toml::from_str::<GithubAppCfg>(bad).is_err());
-    }
-
-    /// The cross-tenant-minting guard (`installation_allowed`): because the App private
-    /// key is a single operator-global secret, minting is a cross-tenant authority. Under
-    /// `per_tenant` a tenant (a prompt-injectable, tenant-written `token_ref`) may mint
-    /// **only** an installation the operator bound to it; everything else fails closed.
-    /// Under single-operator the operator owns all config, so any id is allowed. The
-    /// adversarial row is the IDOR itself: a tenant naming another tenant's install id.
-    #[rstest::rstest]
-    // tenant, requested id, per_tenant, expected-allowed, description
-    #[case::positive_bound_id_allowed("acme", "123", true, true)]
-    #[case::positive_single_operator_any_id("acme", "999", false, true)]
-    #[case::negative_unbound_id_denied("acme", "777", true, false)]
-    #[case::negative_unknown_tenant_denied("ghost", "123", true, false)]
-    #[case::boundary_bound_id_at_cap("acme", "99999999999999999999", true, true)]
-    #[case::corner_empty_id_not_bound("acme", "", true, false)]
-    #[case::adversarial_cross_tenant_id_denied("acme", "456", true, false)] // 456 is beta's
-    #[case::adversarial_id_substring_not_matched("acme", "12", true, false)] // prefix of 123
-    fn github_app_installation_allowed_cases(
-        #[case] tenant: &str,
-        #[case] id: &str,
-        #[case] per_tenant: bool,
-        #[case] allowed: bool,
-    ) {
-        // acme is bound to 123 + the 20-digit cap id; beta is bound to 456 (the
-        // cross-tenant target). A tenant must not reach another tenant's id.
-        let mut installations = std::collections::BTreeMap::new();
-        installations.insert(
-            "acme".to_string(),
-            vec!["123".to_string(), "99999999999999999999".to_string()],
-        );
-        installations.insert("beta".to_string(), vec!["456".to_string()]);
-        let cfg = GithubAppCfg {
-            installations,
-            ..GithubAppCfg::default()
-        };
-        assert_eq!(
-            cfg.installation_allowed(per_tenant, tenant, id),
-            allowed,
-            "tenant={tenant} id={id} per_tenant={per_tenant}"
-        );
     }
 
     /// `planner_model` is stored on every planner attempt under the seam's
