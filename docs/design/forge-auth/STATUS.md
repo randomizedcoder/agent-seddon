@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 built; F2–F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 built; F2b + F3 remainder + F4–F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -18,8 +18,9 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | # | Slice | Scope | State |
 |---|---|---|---|
 | F1 | `ghapp:` ref kind | `ApiKeyRef::GitHubApp` variant + parser + fail-closed validation (`agent-core`) | ✅ |
-| F2 | Installation-token minter | App JWT → installation token, `agent-retry`, ~55 m cache; wire into the forge-credential resolver **and** the clone-URL builder (`x-access-token`) | ⬜ |
-| F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref`, webhook `secret_ref` (operator-global, per the config two-tier rule) | ⬜ |
+| F2 | Installation-token minter | App JWT → installation token, `agent-retry`, ~55 m cache; wire into the forge-credential resolver (forge **API**). Clone-URL `x-access-token` injection split to **F2b**. | ✅ |
+| F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
+| F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (🟡 landed with F2), webhook `secret_ref` (remainder) | 🟡 |
 | F4 | Per-tenant install store | `{tenant, installation_id, selected_repos[]}` card/registry row, gRPC CRUD, tenant-scoped | ⬜ |
 | F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → roster-row write with a `ghapp:` ref | ⬜ |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
@@ -39,6 +40,22 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   ("a forge credential, not a provider api_key_ref"). No feature flag — nothing activates until F2.
   Full four-class + `adversarial_` parse table (traversal / Unicode-digit / CRLF / over-cap) plus
   resolver and provider-reject tests.
+
+- **F2 (PR #TBD):** the `InstallationTokenMinter` (`crates/agent-forge/src/ghapp.rs`, new opt-in
+  `forge-ghapp` feature — NOT in default `forge`, matching the `forge-gitea`/`forge-bitbucket` precedent).
+  Signs an App JWT (RS256 over `app_id` via `jsonwebtoken` v9 over `ring`; the RUSTSEC-banned `rsa` crate
+  is **not** used), `POST /app/installations/{id}/access_tokens` through `agent-retry` (429/5xx + 403
+  rate-limit retry, honouring `Retry-After`; 401/403/404 fail closed, no hammering), caches the token
+  ~55 m locally (Unix-seconds `Clock` — no date crate; `expires_at` is not parsed). The private key, the
+  App JWT, and the minted token never appear in an error, `Debug`, span, or log. Wired into the fleet
+  forge-credential path via a new **async** `mint_or_resolve_tenant_token` + `*_async` build/resolve
+  variants (`registry.rs`); the sync `secrets::resolve_with` `ghapp:` arm **stays fail-closed** (only the
+  async path mints), and the sync reconcile `forge_check` admits a `ghapp:` row on a shape + minter-installed
+  check without minting. Bootstrap `[github_app]` config (`app_id`, `private_key_ref`, `base_url`) +
+  process-global minter installed by the builder (mirrors `POLICY`). Clone-URL injection deferred to **F2b**,
+  so the forge **API** uses ghapp tokens but **private-repo clone is not yet enabled**. Tables: A (minter,
+  `tiny_http`-mocked, 26 cases incl. `adversarial_`), B (`GithubAppCfg::validate`, 12 + adversarial),
+  C (mint-aware resolver wiring, 5).
 
 ## Links
 

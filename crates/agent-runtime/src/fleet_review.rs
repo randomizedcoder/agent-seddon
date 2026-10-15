@@ -28,7 +28,7 @@ use async_trait::async_trait;
 
 use crate::agent::WorktreeGrounder;
 use crate::config::ReviewCfg;
-use crate::registry::{build_session_forge, build_session_forge_from_card};
+use crate::registry::{build_session_forge_async, build_session_forge_from_card_async};
 
 /// Derive the `git clone` URL for a roster row from its `repo` slug (`owner__name`, or
 /// gitlab subgroups `group__sub__name`), `backend`, and optional API `base_url`.
@@ -252,7 +252,7 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         // persisted card id (`forge_id`, config C36 / D1b); the card then supplies the
         // kind/base_url/credential (its `repo` slug still comes from the row).
         let (backend, base_url, forge) = if row.forge_id.is_empty() {
-            let forge = build_session_forge(row).map_err(|e| {
+            let forge = build_session_forge_async(row).await.map_err(|e| {
                 Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
             })?;
             (row.backend.clone(), row.base_url.clone(), forge)
@@ -269,9 +269,11 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
                     row.id, row.forge_id
                 ))
             })?;
-            let forge = build_session_forge_from_card(row, &card).map_err(|e| {
-                Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
-            })?;
+            let forge = build_session_forge_from_card_async(row, &card)
+                .await
+                .map_err(|e| {
+                    Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
+                })?;
             (card.kind.clone(), card.base_url.clone(), forge)
         };
 

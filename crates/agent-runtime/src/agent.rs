@@ -727,7 +727,8 @@ impl agent_core::FleetApprover for EngineApprover {
             // stays read-only) and read the draft rendered + persisted at `drafted`. The body is
             // already redacted (redaction happened at render time, C13); `draft_path` is a
             // server-generated path under the confined session workspace.
-            let forge = crate::build_session_forge(&row)
+            let forge = crate::build_session_forge_async(&row)
+                .await
                 .map_err(|e| {
                     agent_core::Error::Fleet(format!(
                         "approve: cannot build forge for {:?}: {e}",

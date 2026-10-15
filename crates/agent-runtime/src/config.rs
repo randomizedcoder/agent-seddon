@@ -117,6 +117,11 @@ pub struct Config {
     pub transport_registry: TransportRegistryCfg,
     #[serde(default)]
     pub campaign: CampaignCfg,
+    /// `[github_app]`: GitHub App server credentials used to MINT installation tokens
+    /// for `ghapp:<installation_id>` forge references (forge-auth F2). Absent ⇒ no App
+    /// is configured, so a `ghapp:` ref fails closed when resolved.
+    #[serde(default)]
+    pub github_app: Option<GithubAppCfg>,
     /// Path the config was read from, set by the CLI after parse (never a TOML
     /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
     /// write edits back to the same file. `None` for embedded/test callers that
@@ -3904,6 +3909,110 @@ impl SecretsCfg {
     }
 }
 
+/// `[github_app]`: GitHub App server credentials (forge-auth F2; the minimal slice of
+/// F3). Operator-global bootstrap config (the config two-tier rule). The runtime uses
+/// these to mint short-lived installation tokens for `ghapp:<installation_id>` forge
+/// credential references. Absent ⇒ no App, and a `ghapp:` ref fails closed at resolve.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct GithubAppCfg {
+    /// The App's numeric id — becomes the App-JWT `iss`.
+    #[serde(default)]
+    pub app_id: String,
+    /// Reference to the App private key PEM: `env:NAME` or `file:/path` — never an
+    /// inline key (and never a `ghapp:` ref; the key is read, not minted). Resolved on
+    /// the host at build time.
+    #[serde(default)]
+    pub private_key_ref: String,
+    /// API base; empty ⇒ `https://api.github.com`. A GHES host sets its `/api/v3`.
+    #[serde(default)]
+    pub base_url: String,
+    /// Token-endpoint HTTP timeout (seconds) and retry budget.
+    #[serde(default = "default_github_app_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_github_app_max_retries")]
+    pub max_retries: u32,
+    /// Operator-declared binding of installation ids to tenants, enforced **only** under
+    /// `[tenancy] per_tenant` (forge-auth F2). Because the App private key is a single
+    /// operator-global secret, minting is a cross-tenant authority: without a binding a
+    /// tenant could name `ghapp:<another tenant's install id>` and mint a token into that
+    /// tenant's repos (an IDOR). Under `per_tenant`, a tenant may mint **only** an
+    /// installation listed for it here (empty ⇒ that tenant mints nothing — fail closed);
+    /// under single-operator (`per_tenant` off) the operator owns all config and this map
+    /// is unused. The per-tenant install store (F4) supersedes this operator allowlist.
+    /// Example: `installations = { acme = ["123", "456"] }`.
+    #[serde(default)]
+    pub installations: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl GithubAppCfg {
+    /// Validate the bootstrap shape (not a GitHub oracle — a well-formed but bogus App
+    /// fails closed later at mint time). The `private_key_ref` must be an `env:`/`file:`
+    /// reference, never an inline key or a `ghapp:` mint.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.app_id.is_empty() {
+            return Err("[github_app] app_id is required".into());
+        }
+        if !self.app_id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("[github_app] app_id must be decimal digits".into());
+        }
+        match agent_core::ApiKeyRef::parse(&self.private_key_ref) {
+            Ok(agent_core::ApiKeyRef::Env(_)) | Ok(agent_core::ApiKeyRef::File(_)) => {}
+            Ok(agent_core::ApiKeyRef::None) => {
+                return Err("[github_app] private_key_ref is required (env: or file:)".into())
+            }
+            Ok(agent_core::ApiKeyRef::GitHubApp(_)) => return Err(
+                "[github_app] private_key_ref is a key to read (env:/file:), not a `ghapp:` mint"
+                    .into(),
+            ),
+            Err(e) => return Err(format!("[github_app] private_key_ref: {e}")),
+        }
+        if !self.base_url.trim().is_empty() {
+            let b = self.base_url.trim();
+            if !(b.starts_with("http://") || b.starts_with("https://")) {
+                return Err("[github_app] base_url must be an http(s):// URL".into());
+            }
+        }
+        for (tenant, ids) in &self.installations {
+            if !agent_core::safe_segment(tenant) {
+                return Err("[github_app] installations has an invalid tenant key".into());
+            }
+            for id in ids {
+                if id.is_empty()
+                    || id.len() > agent_core::MAX_INSTALLATION_ID_LEN
+                    || !id.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Err(format!(
+                        "[github_app] installations: each id must be 1..={} decimal digits",
+                        agent_core::MAX_INSTALLATION_ID_LEN
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The effective API base, defaulting to github.com.
+    pub fn base(&self) -> String {
+        if self.base_url.trim().is_empty() {
+            "https://api.github.com".to_string()
+        } else {
+            self.base_url.trim().to_string()
+        }
+    }
+}
+
+fn default_github_app_timeout_secs() -> u64 {
+    30
+}
+fn default_github_app_max_retries() -> u32 {
+    3
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
@@ -4670,6 +4779,7 @@ impl Config {
             forge_registry: ForgeRegistryCfg::default(),
             transport_registry: TransportRegistryCfg::default(),
             campaign: CampaignCfg::default(),
+            github_app: None,
             auth: AuthCfg::default(),
             tenancy: TenancyCfg::default(),
             secrets: SecretsCfg::default(),
@@ -4866,6 +4976,81 @@ mod tests {
                 assert!(err.len() < 200, "error echoes too much: {err:?}");
             }
         }
+    }
+
+    /// `[github_app]` (forge-auth F2): the bootstrap App credentials used to mint
+    /// `ghapp:` installation tokens. Operator input, so the shape checks that run at
+    /// load are table-tested across the four classes + adversarial, with the
+    /// `private_key_ref` restricted to `env:`/`file:` (a key is read, never minted).
+    #[rstest::rstest]
+    #[case::positive_valid(
+        "app_id = \"123456\"\nprivate_key_ref = \"file:/k.pem\"\nbase_url = \"https://api.github.com\"",
+        Ok(())
+    )]
+    #[case::positive_default_base_url("app_id = \"123456\"\nprivate_key_ref = \"file:/k.pem\"", Ok(()))]
+    #[case::positive_env_private_key_ref("app_id = \"1\"\nprivate_key_ref = \"env:APP_KEY\"", Ok(()))]
+    #[case::negative_empty_app_id("private_key_ref = \"file:/k.pem\"", Err("app_id"))]
+    #[case::negative_non_digit_app_id(
+        "app_id = \"abc\"\nprivate_key_ref = \"file:/k.pem\"",
+        Err("app_id")
+    )]
+    #[case::negative_private_key_ref_is_ghapp(
+        "app_id = \"1\"\nprivate_key_ref = \"ghapp:1\"",
+        Err("private_key_ref")
+    )]
+    #[case::boundary_app_id_single_digit("app_id = \"7\"\nprivate_key_ref = \"file:/k.pem\"", Ok(()))]
+    #[case::boundary_base_url_ghes_path(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nbase_url = \"https://ghe.example.com/api/v3\"",
+        Ok(())
+    )]
+    #[case::corner_private_key_ref_empty("app_id = \"1\"", Err("private_key_ref"))]
+    #[case::corner_base_url_trailing_slash(
+        "app_id = \"1\"\nprivate_key_ref = \"file:/k.pem\"\nbase_url = \"https://api.github.com/\"",
+        Ok(())
+    )]
+    #[case::adversarial_bad_base_url_scheme(
+        "app_id = \"1\"\nprivate_key_ref = \"file:/k.pem\"\nbase_url = \"file:///etc/passwd\"",
+        Err("base_url")
+    )]
+    #[case::positive_installations_bound(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\ninstallations = { acme = [\"123\", \"456\"] }",
+        Ok(())
+    )]
+    #[case::boundary_installations_id_at_cap(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\ninstallations = { acme = [\"99999999999999999999\"] }",
+        Ok(())
+    )]
+    #[case::adversarial_installations_tenant_traversal(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\ninstallations = { \"../etc\" = [\"1\"] }",
+        Err("installations")
+    )]
+    #[case::adversarial_installations_non_digit_id(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\ninstallations = { acme = [\"abc\"] }",
+        Err("installations")
+    )]
+    #[case::adversarial_installations_over_cap_id(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\ninstallations = { acme = [\"999999999999999999999\"] }",
+        Err("installations")
+    )]
+    fn github_app_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
+        let cfg: GithubAppCfg = toml::from_str(toml_src).expect("parses");
+        let got = cfg.validate();
+        match want {
+            Ok(()) => assert_eq!(got, Ok(()), "{toml_src}"),
+            Err(needle) => {
+                let err = got.expect_err(toml_src);
+                assert!(err.contains(needle), "{err:?} should name `{needle}`");
+                assert!(err.len() < 200, "error echoes too much: {err:?}");
+            }
+        }
+    }
+
+    /// `deny_unknown_fields`: a stray or injected `[github_app]` key is refused at
+    /// parse, before `validate` ever runs.
+    #[test]
+    fn adversarial_github_app_unknown_field_rejected() {
+        let bad = "app_id = \"1\"\nprivate_key_ref = \"file:/k.pem\"\nsurprise = \"x\"";
+        assert!(toml::from_str::<GithubAppCfg>(bad).is_err());
     }
 
     /// `planner_model` is stored on every planner attempt under the seam's

@@ -1403,6 +1403,11 @@ pub fn resolve_tenant_token_ref(
 /// GitHub `owner__name` (first `__` splits owner/name), GitLab the project path with
 /// `__` standing in for `/`. A backend the binary was not built with (feature off) is a
 /// fail-closed `Err`, not a silent no-forge.
+///
+/// This is the **sync** form: it resolves via the sync [`resolve_tenant_token_ref`], so
+/// a `ghapp:` credential (which needs an async mint) fails closed here. The execution
+/// paths that need a live token use [`build_session_forge_async`] instead; this sync
+/// form stays for the reconcile pre-check (forge-auth F2).
 #[cfg(feature = "fleet")]
 pub fn build_session_forge(
     row: &agent_core::FleetSession,
@@ -1411,33 +1416,11 @@ pub fn build_session_forge(
     if row.backend.is_empty() {
         return Ok(None);
     }
-    // The forge is built through the ONE kind builder (config C36 / D1): the per-kind
-    // default base_url + repo-encoding + SSRF screen live there, and an unknown kind
-    // fails closed listing the known kinds — no hardcoded per-backend match here.
     #[cfg(feature = "forge")]
     {
-        use anyhow::Context;
-        // Resolve first: an unresolvable credential fails the whole build (fail closed).
+        // Resolve first (sync, fail-closed): a `ghapp:` ref fails here — minting is async.
         let token = resolve_tenant_token_ref(&row.user, &row.token_ref)?;
-        let card = agent_core::ForgeCard {
-            id: row.id.clone(),
-            kind: row.backend.clone(),
-            enabled: row.enabled,
-            base_url: row.base_url.clone(),
-            // The token is resolved above and passed directly; the card's own ref is
-            // unused in the build path.
-            token_ref: String::new(),
-            // A fleet row carries no explicit encoding: use the kind's default (a
-            // placeholder for an unknown kind, which fails at the kind check anyway).
-            repo_encoding: agent_forge::expected_encoding(&row.backend)
-                .unwrap_or(agent_core::RepoEncoding::OwnerName),
-            // Sane skeleton HTTP tuning; the row does not carry these (kept minimal).
-            timeout_secs: 30,
-            max_retries: 3,
-        };
-        let forge = agent_forge::build_forge_from_card(&card, &row.repo, token)
-            .with_context(|| format!("fleet row `{}`: building forge", row.id))?;
-        Ok(Some(forge))
+        build_inline_forge_with_token(row, token)
     }
     #[cfg(not(feature = "forge"))]
     {
@@ -1449,15 +1432,72 @@ pub fn build_session_forge(
     }
 }
 
+/// [`build_session_forge`] for an async caller: a `ghapp:` credential is **minted** (the
+/// sync form fails closed on it). Used by the trigger (clone + review) and approve
+/// (post) paths, which run in an async context and need a live token (forge-auth F2).
+#[cfg(feature = "fleet")]
+pub async fn build_session_forge_async(
+    row: &agent_core::FleetSession,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    if row.backend.is_empty() {
+        return Ok(None);
+    }
+    #[cfg(feature = "forge")]
+    {
+        let token = mint_or_resolve_tenant_token(&row.user, &row.token_ref).await?;
+        build_inline_forge_with_token(row, token)
+    }
+    #[cfg(not(feature = "forge"))]
+    {
+        anyhow::bail!(
+            "fleet row `{}`: forge backend `{}` is not built into this binary (enable the `forge` feature)",
+            row.id,
+            row.backend
+        )
+    }
+}
+
+/// Build a row's **inline** forge from an already-resolved token. The forge is built
+/// through the ONE kind builder (config C36 / D1): the per-kind default base_url +
+/// repo-encoding + SSRF screen live there, and an unknown kind fails closed listing the
+/// known kinds. Shared by the sync and async inline paths so the card-shaping lives once
+/// (callers have already checked the backend is non-empty).
+#[cfg(all(feature = "fleet", feature = "forge"))]
+fn build_inline_forge_with_token(
+    row: &agent_core::FleetSession,
+    token: agent_core::Secret,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    use anyhow::Context;
+    let card = agent_core::ForgeCard {
+        id: row.id.clone(),
+        kind: row.backend.clone(),
+        enabled: row.enabled,
+        base_url: row.base_url.clone(),
+        // The token is resolved by the caller and passed directly; the card's own ref is
+        // unused in the build path.
+        token_ref: String::new(),
+        // A fleet row carries no explicit encoding: use the kind's default (a
+        // placeholder for an unknown kind, which fails at the kind check anyway).
+        repo_encoding: agent_forge::expected_encoding(&row.backend)
+            .unwrap_or(agent_core::RepoEncoding::OwnerName),
+        // Sane skeleton HTTP tuning; the row does not carry these (kept minimal).
+        timeout_secs: 30,
+        max_retries: 3,
+    };
+    let forge = agent_forge::build_forge_from_card(&card, &row.repo, token)
+        .with_context(|| format!("fleet row `{}`: building forge", row.id))?;
+    Ok(Some(forge))
+}
+
 /// Build a **session-scoped** forge from a roster row that references a **persisted**
 /// [`agent_core::ForgeCard`] by id (config C36 / D1b). The card supplies the
 /// `kind`/`base_url`/`repo_encoding` and the `token_ref` (resolved here, fail-closed);
 /// the row supplies only the `repo` slug. A disabled card ⇒ `Ok(None)` (the row has no
 /// live forge — poll/post disabled), mirroring an empty inline `backend`.
 ///
-/// The caller fetches the card from the `ForgeRegistry` (an async read) and passes it
-/// in, so this stays sync — usable from the sync reconcile `forge_check` closure as
-/// well as the async paths (via [`resolve_session_forge`]).
+/// The **sync** form resolves via [`resolve_tenant_token_ref`] (a `ghapp:` ref fails
+/// closed), so it stays usable from the sync reconcile `forge_check` closure;
+/// [`build_session_forge_from_card_async`] mints for the async execution paths.
 #[cfg(feature = "fleet")]
 pub fn build_session_forge_from_card(
     row: &agent_core::FleetSession,
@@ -1469,19 +1509,8 @@ pub fn build_session_forge_from_card(
     }
     #[cfg(feature = "forge")]
     {
-        use anyhow::Context;
-        // The credential comes from the CARD's own ref (not the row's inline
-        // token_ref); resolve first so an unresolvable credential fails the whole
-        // build (fail closed).
         let token = resolve_tenant_token_ref(&row.user, &card.token_ref)?;
-        let forge =
-            agent_forge::build_forge_from_card(card, &row.repo, token).with_context(|| {
-                format!(
-                    "fleet row `{}`: building forge from card `{}`",
-                    row.id, card.id
-                )
-            })?;
-        Ok(Some(forge))
+        build_card_forge_with_token(row, card, token)
     }
     #[cfg(not(feature = "forge"))]
     {
@@ -1494,13 +1523,164 @@ pub fn build_session_forge_from_card(
     }
 }
 
+/// [`build_session_forge_from_card`] for an async caller: a `ghapp:` card credential is
+/// **minted** (forge-auth F2).
+#[cfg(feature = "fleet")]
+pub async fn build_session_forge_from_card_async(
+    row: &agent_core::FleetSession,
+    card: &agent_core::ForgeCard,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    if !card.enabled {
+        return Ok(None);
+    }
+    #[cfg(feature = "forge")]
+    {
+        let token = mint_or_resolve_tenant_token(&row.user, &card.token_ref).await?;
+        build_card_forge_with_token(row, card, token)
+    }
+    #[cfg(not(feature = "forge"))]
+    {
+        anyhow::bail!(
+            "fleet row `{}`: forge card `{}` (kind `{}`) needs the `forge` feature",
+            row.id,
+            card.id,
+            card.kind
+        )
+    }
+}
+
+/// Build a card-referencing forge from an already-resolved token. Shared by the sync
+/// and async card paths.
+#[cfg(all(feature = "fleet", feature = "forge"))]
+fn build_card_forge_with_token(
+    row: &agent_core::FleetSession,
+    card: &agent_core::ForgeCard,
+    token: agent_core::Secret,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    use anyhow::Context;
+    let forge = agent_forge::build_forge_from_card(card, &row.repo, token).with_context(|| {
+        format!(
+            "fleet row `{}`: building forge from card `{}`",
+            row.id, card.id
+        )
+    })?;
+    Ok(Some(forge))
+}
+
+/// Resolve a tenant row's `token_ref`, **minting** a `ghapp:<installation_id>` reference
+/// into a short-lived GitHub App installation token (forge-auth F2) and resolving every
+/// other reference kind through the sync [`resolve_tenant_token_ref`]. Fail-closed: a
+/// `ghapp:` ref with no configured `[github_app]` minter is an error, not a silent
+/// no-auth.
+#[cfg(feature = "fleet")]
+pub async fn mint_or_resolve_tenant_token(
+    tenant: &str,
+    token_ref: &str,
+) -> anyhow::Result<agent_core::Secret> {
+    if let Ok(agent_core::ApiKeyRef::GitHubApp(id)) = agent_core::ApiKeyRef::parse(token_ref) {
+        #[cfg(feature = "forge-ghapp")]
+        {
+            // Cross-tenant-minting guard: the App private key is one operator-global
+            // secret, so under `per_tenant` a tenant may mint only an installation the
+            // operator bound to it. An unbound id fails closed (the IDOR guard; F4's
+            // per-tenant install store supersedes this). The error names no id.
+            if !crate::secrets::ghapp_installation_allowed(tenant, id) {
+                anyhow::bail!(
+                    "tenant `{tenant}`: this GitHub App installation is not permitted for \
+                     the tenant"
+                );
+            }
+            let minter = crate::secrets::minter().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tenant `{tenant}`: a `ghapp:` forge credential needs a configured \
+                     `[github_app]` (none installed)"
+                )
+            })?;
+            return minter.token(id).await.map_err(|e| {
+                anyhow::anyhow!("tenant `{tenant}`: minting installation token: {e}")
+            });
+        }
+        #[cfg(not(feature = "forge-ghapp"))]
+        {
+            let _ = id;
+            anyhow::bail!(
+                "tenant `{tenant}`: a `ghapp:` forge credential needs the `forge-ghapp` feature"
+            );
+        }
+    }
+    resolve_tenant_token_ref(tenant, token_ref)
+}
+
+/// The **sync** reconcile pre-check (review-fleet C5; forge-auth F2): can this row's
+/// forge be admitted without minting? A `ghapp:` credential is minted lazily at first
+/// execute/approve (async), which the sync reconcile `forge_check` cannot do — so such a
+/// row is admitted on a shape + minter-installed check (its real failure, e.g. a revoked
+/// install, surfaces fail-closed at first use). Every other credential is probed by
+/// actually building the forge, exactly as before. `card` is the referenced
+/// [`agent_core::ForgeCard`] when `forge_id` is set (else `None`).
+#[cfg(feature = "fleet")]
+pub fn check_session_forge(
+    row: &agent_core::FleetSession,
+    card: Option<&agent_core::ForgeCard>,
+) -> Result<(), String> {
+    // The credential that applies: the card's (if referenced) or the row's inline one.
+    let token_ref = if row.forge_id.is_empty() {
+        row.token_ref.as_str()
+    } else {
+        match card {
+            Some(c) => c.token_ref.as_str(),
+            None => {
+                return Err(format!(
+                    "forge_id `{}` not found in the forge registry",
+                    row.forge_id
+                ))
+            }
+        }
+    };
+    if let Ok(agent_core::ApiKeyRef::GitHubApp(id)) = agent_core::ApiKeyRef::parse(token_ref) {
+        // Admit on minter-installed + tenant-permitted; the mint (and any failure) happens
+        // at first use. The tenant-binding check mirrors the async mint path so a reconcile
+        // never admits a row the tenant could not actually mint (the cross-tenant IDOR
+        // guard, forge-auth F2).
+        #[cfg(feature = "forge-ghapp")]
+        {
+            if !crate::secrets::ghapp_installation_allowed(&row.user, id) {
+                return Err(
+                    "this GitHub App installation is not permitted for the tenant".to_string(),
+                );
+            }
+            return if crate::secrets::minter().is_some() {
+                Ok(())
+            } else {
+                Err("a `ghapp:` forge credential needs a configured `[github_app]`".to_string())
+            };
+        }
+        #[cfg(not(feature = "forge-ghapp"))]
+        {
+            let _ = id;
+            return Err("a `ghapp:` forge credential needs the `forge-ghapp` feature".to_string());
+        }
+    }
+    // Non-`ghapp`: probe by building, the original reconcile behaviour.
+    match card {
+        Some(c) => build_session_forge_from_card(row, c)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        None => build_session_forge(row)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+    }
+}
+
 /// Resolve a roster row's forge, dispatching on whether it references a persisted card.
 ///
-/// - `forge_id` empty ⇒ the **inline** path ([`build_session_forge`]).
+/// - `forge_id` empty ⇒ the **inline** path ([`build_session_forge_async`]).
 /// - `forge_id` set ⇒ fetch that [`agent_core::ForgeCard`] from `registry` (an async
-///   read) and build from it ([`build_session_forge_from_card`]). A set `forge_id` with
-///   **no** registry configured, or an id absent from the registry, is a fail-closed
-///   `Err` (never a silent no-forge).
+///   read) and build from it ([`build_session_forge_from_card_async`]). A set `forge_id`
+///   with **no** registry configured, or an id absent from the registry, is a
+///   fail-closed `Err` (never a silent no-forge).
+///
+/// Async throughout, so a `ghapp:` credential is minted (forge-auth F2).
 #[cfg(feature = "fleet")]
 pub async fn resolve_session_forge(
     row: &agent_core::FleetSession,
@@ -1508,7 +1688,7 @@ pub async fn resolve_session_forge(
 ) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
     use anyhow::Context;
     if row.forge_id.is_empty() {
-        return build_session_forge(row);
+        return build_session_forge_async(row).await;
     }
     let reg = registry.ok_or_else(|| {
         anyhow::anyhow!(
@@ -1523,7 +1703,7 @@ pub async fn resolve_session_forge(
             row.id, row.forge_id
         )
     })?;
-    build_session_forge_from_card(row, &card)
+    build_session_forge_from_card_async(row, &card).await
 }
 
 #[cfg(test)]
@@ -1947,6 +2127,108 @@ mod tests {
                 let r = resolve_session_forge(&forge_id_row("gh", "acme__web"), Some(&reg)).await;
                 assert!(r.is_err(), "an unknown card id fails closed");
             }
+        }
+    }
+
+    // --- forge-auth F2: the mint-aware tenant-token resolver -------------------
+    #[cfg(feature = "fleet")]
+    mod ghapp_wiring {
+        use super::super::mint_or_resolve_tenant_token;
+        use rstest::rstest;
+
+        /// Non-`ghapp` references (and a malformed `ghapp:` id, which fails to parse)
+        /// resolve on the sync path and never touch the minter — deterministic, no
+        /// process-global state. `ok`/`empty` are the expected resolution.
+        #[rstest]
+        #[case::positive_env_delegates("env:AGENT_GHAPP_DELEGATE_TEST", true, false)]
+        #[case::negative_env_absent_is_empty_not_minted("env:AGENT_GHAPP_UNSET_XYZ", true, true)]
+        #[case::adversarial_bad_id_rejected("ghapp:../x", false, false)]
+        #[tokio::test]
+        async fn mint_or_resolve_non_ghapp(
+            #[case] token_ref: &str,
+            #[case] ok: bool,
+            #[case] empty: bool,
+        ) {
+            if token_ref == "env:AGENT_GHAPP_DELEGATE_TEST" {
+                std::env::set_var("AGENT_GHAPP_DELEGATE_TEST", "tok-xyz");
+            }
+            let got = mint_or_resolve_tenant_token("acme", token_ref).await;
+            assert_eq!(got.is_ok(), ok, "{got:?}");
+            if ok {
+                let s = got.unwrap();
+                if empty {
+                    assert_eq!(s.expose(), "", "an unset env is absent, not a mint");
+                } else {
+                    assert_eq!(s.expose(), "tok-xyz");
+                }
+            }
+        }
+
+        /// The **sync** resolver still fails closed on a `ghapp:` ref (only the async
+        /// path mints); the message points at F2.
+        #[test]
+        fn corner_sync_resolve_with_ghapp_fails_closed() {
+            use crate::secrets::{resolve_with, SecretScope, SecretsPolicy};
+            let err = resolve_with(&SecretsPolicy::default(), SecretScope::Operator, "ghapp:1")
+                .expect_err("sync resolve cannot mint");
+            assert!(err.contains("F2"), "{err}");
+        }
+
+        /// With `[github_app]` configured, a `ghapp:` reference is MINTED through the
+        /// installed minter (forge-auth F2). This is the only test that installs the
+        /// process-global minter, so the "no minter" assertion below is race-free.
+        #[cfg(feature = "forge-ghapp")]
+        #[tokio::test]
+        async fn ghapp_resolves_via_installed_minter() {
+            use agent_forge::ghapp::{InstallationTokenMinter, SystemClock};
+            use agent_testkit::oidc::RSA_PRIV_PEM;
+            use std::sync::Arc;
+
+            // negative_ghapp_without_minter_fails_closed: before install, fail closed.
+            let before = mint_or_resolve_tenant_token("acme", "ghapp:12345678").await;
+            let before_err = before.expect_err("no minter -> fail closed").to_string();
+            assert!(before_err.contains("github_app"), "{before_err}");
+
+            // Install a minter pointed at a loopback token endpoint.
+            let base = spawn_token_endpoint();
+            let m = InstallationTokenMinter::new(
+                "123456".into(),
+                &agent_core::Secret::new(RSA_PRIV_PEM),
+                base,
+                0,
+                30,
+                Arc::new(SystemClock),
+            )
+            .expect("minter builds");
+            crate::secrets::install_github_app(Arc::new(m));
+
+            // positive_ghapp_uses_minter: resolves to the minted token.
+            let tok = mint_or_resolve_tenant_token("acme", "ghapp:12345678")
+                .await
+                .expect("mints via the installed minter");
+            assert_eq!(tok.expose(), "ghs_runtime_tok");
+
+            // boundary_ghapp_id_at_cap_resolves: the 20-digit max id reaches HTTP + resolves.
+            let big = format!("ghapp:{}", "9".repeat(agent_core::MAX_INSTALLATION_ID_LEN));
+            assert!(mint_or_resolve_tenant_token("acme", &big).await.is_ok());
+        }
+
+        /// A loopback endpoint that answers every POST with a `201` installation token.
+        #[cfg(feature = "forge-ghapp")]
+        fn spawn_token_endpoint() -> String {
+            use tiny_http::{Response, Server};
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let server = Server::http("127.0.0.1:0").unwrap();
+                tx.send(server.server_addr().to_ip().unwrap().port())
+                    .unwrap();
+                for request in server.incoming_requests() {
+                    let body = r#"{"token":"ghs_runtime_tok","expires_at":"2099-01-01T00:00:00Z"}"#;
+                    let _ = request.respond(Response::from_string(body).with_status_code(201));
+                }
+            });
+            let port = rx.recv().unwrap();
+            format!("http://127.0.0.1:{port}")
         }
     }
 }

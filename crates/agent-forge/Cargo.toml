@@ -15,6 +15,10 @@ forge-gitea = []
 # Bitbucket Cloud host (config C36 / D1b): opt-in — the divergent API (body-envelope
 # paging, no review object, deeply-nested fields, upper-case state vocabulary).
 forge-bitbucket = []
+# GitHub App installation-token minting (forge-auth F2): opt-in — NOT in `default`,
+# because it pulls in `jsonwebtoken` (RS256 over `ring`) for the App JWT. Resolves a
+# `ghapp:<installation_id>` credential by minting a short-lived installation token.
+forge-ghapp = ["dep:jsonwebtoken"]
 # The persisted forge-card registry (config C36 / D1): the `ForgeRegistry` store
 # over the shared `agent-config-store`.
 forge-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]
@@ -30,11 +34,16 @@ serde_json.workspace = true
 agent-config-store = { workspace = true, optional = true }
 agent-proto = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
+# RS256 signing of the GitHub App JWT (forge-auth F2). Over `ring`, already in-tree;
+# the RUSTSEC-banned `rsa` crate is deliberately NOT used.
+jsonwebtoken = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
 rstest.workspace = true
 tiny_http.workspace = true
+# Reuse the embedded RSA test key + JWK (oidc module) to exercise the minter.
+agent-testkit = { workspace = true, features = ["oidc"] }
 
 [lints]
 workspace = true

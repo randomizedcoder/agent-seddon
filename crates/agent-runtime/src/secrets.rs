@@ -70,6 +70,79 @@ pub fn policy() -> Arc<SecretsPolicy> {
         .unwrap_or_default()
 }
 
+/// The process-wide GitHub App installation-token minter (forge-auth F2), installed by
+/// the builder from `[github_app]`. Mirrors the [`POLICY`] pattern. `None` until
+/// installed; a `ghapp:` resolve with no minter fails closed (it never panics).
+#[cfg(feature = "forge-ghapp")]
+static MINTER: RwLock<Option<Arc<agent_forge::ghapp::InstallationTokenMinter>>> = RwLock::new(None);
+
+/// Install the process minter (the builder does, from `[github_app]`).
+#[cfg(feature = "forge-ghapp")]
+pub fn install_github_app(minter: Arc<agent_forge::ghapp::InstallationTokenMinter>) {
+    *MINTER.write().unwrap_or_else(PoisonError::into_inner) = Some(minter);
+}
+
+/// The installed minter, if any. `None` ⇒ no `[github_app]` configured.
+#[cfg(feature = "forge-ghapp")]
+pub fn minter() -> Option<Arc<agent_forge::ghapp::InstallationTokenMinter>> {
+    MINTER
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Tenant → the installation ids the operator bound to it.
+#[cfg(feature = "forge-ghapp")]
+pub type GithubAppBindings = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
+/// Operator-declared binding of installation ids to tenants (`[github_app] installations`),
+/// installed by the builder alongside the minter. The App private key is a single
+/// operator-global secret, so minting is a **cross-tenant authority**: without this
+/// binding a tenant could name `ghapp:<another tenant's install id>` and mint a token into
+/// that tenant's repos (an IDOR). Enforced only under `per_tenant` (forge-auth F2; the
+/// per-tenant install store F4 supersedes it). `None` ⇒ nothing bound.
+#[cfg(feature = "forge-ghapp")]
+static GHAPP_BINDINGS: RwLock<Option<Arc<GithubAppBindings>>> = RwLock::new(None);
+
+/// Install the tenant→installation-id bindings (the builder does, from `[github_app]`).
+#[cfg(feature = "forge-ghapp")]
+pub fn install_github_app_bindings(bindings: GithubAppBindings) {
+    *GHAPP_BINDINGS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(bindings));
+}
+
+/// The authorization decision, pure over its inputs so it is tested directly (the
+/// `is_some_and` global-reader wrapper below is a thin shim). Under single-operator
+/// (`per_tenant` off) the operator owns all config, so any id is allowed — mirroring how
+/// `file:`/`env:` refs resolve unconfined there. Under `per_tenant`, only an id the
+/// operator bound to this tenant is allowed; anything else fails closed. This closes the
+/// cross-tenant-minting IDOR in the window before the per-tenant install store (F4).
+#[cfg(feature = "forge-ghapp")]
+fn ghapp_allowed(
+    per_tenant: bool,
+    bindings: Option<&GithubAppBindings>,
+    tenant: &str,
+    id: &str,
+) -> bool {
+    if !per_tenant {
+        return true;
+    }
+    bindings.is_some_and(|m| m.get(tenant).is_some_and(|ids| ids.contains(id)))
+}
+
+/// May `tenant` mint installation `id` under the installed policy + bindings? The real
+/// runtime gate (`registry::mint_or_resolve_tenant_token` and `check_session_forge` call
+/// exactly this), delegating to the pure [`ghapp_allowed`] so the decision under test is
+/// the decision that runs.
+#[cfg(feature = "forge-ghapp")]
+pub fn ghapp_installation_allowed(tenant: &str, id: &str) -> bool {
+    let bindings = GHAPP_BINDINGS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
+    ghapp_allowed(policy().per_tenant, bindings.as_deref(), tenant, id)
+}
+
 /// Check `raw` against `policy` for `scope` and say what it points at. The error
 /// names the rule, never the path or variable.
 pub fn admit(
@@ -103,9 +176,12 @@ pub fn admit(
         ApiKeyRef::File(path) => {
             confine_tenant_file(&policy.root, tenant, path).map(Admitted::File)
         }
-        // A `ghapp:` ref resolves by minting, not by reading a tenant file/env, so
-        // the file-confinement and `allow_env_for_tenants` gates do not apply. The
-        // installation is still bound to this tenant (the mint, F2, uses it).
+        // A `ghapp:` ref resolves by minting, not by reading a tenant file/env, so the
+        // file-confinement and `allow_env_for_tenants` gates do not apply here. The
+        // cross-tenant-minting guard (a tenant may mint only an operator-bound
+        // installation under `per_tenant`) is enforced on the async mint path by
+        // `ghapp_installation_allowed` (forge-auth F2), since this sync admit is shared
+        // with callers that never mint.
         ApiKeyRef::GitHubApp(id) => Ok(Admitted::GitHubApp(id.to_string())),
     }
 }
@@ -136,12 +212,15 @@ pub fn resolve_with(
                 SecretScope::Operator => format!("reading secret file `{}`: {e}", path.display()),
                 SecretScope::Tenant(_) => format!("reading a tenant secret file: {}", e.kind()),
             }),
-        // forge-auth F1 lands the `ghapp:` ref kind only; minting an installation
-        // token (App JWT → installation token) is F2. Until then, resolution fails
-        // closed rather than silently yielding an empty/absent credential.
-        Admitted::GitHubApp(_) => {
-            Err("ghapp: installation-token minting is not implemented yet (forge-auth F2)".into())
-        }
+        // A `ghapp:` credential is minted (App JWT → installation token), which is an
+        // async HTTP call; this sync resolver cannot do it. The async forge-build path
+        // mints it (forge-auth F2, `mint_or_resolve_tenant_token`). A sync caller that
+        // lands here fails closed rather than silently yielding an empty credential.
+        Admitted::GitHubApp(_) => Err(
+            "ghapp: a GitHub App credential is minted on the async forge path, \
+             not resolved synchronously (forge-auth F2)"
+                .into(),
+        ),
     }
 }
 

@@ -212,3 +212,61 @@ fn adversarial_resolve_ghapp_bad_id_rejected_at_parse() {
     )
     .is_err());
 }
+
+/// The cross-tenant-minting guard, tested on the **exact** decision the runtime uses:
+/// `ghapp_installation_allowed` is a thin global-reader over this pure `ghapp_allowed`,
+/// which `registry::mint_or_resolve_tenant_token` + `check_session_forge` gate on. The App
+/// private key is one operator-global secret, so minting is a cross-tenant authority: under
+/// `per_tenant` a tenant (a prompt-injectable, tenant-written `token_ref`) may mint **only**
+/// an installation the operator bound to it; everything else fails closed. Under
+/// single-operator the operator owns all config, so any id is allowed. The adversarial rows
+/// are the IDOR itself: a tenant naming another tenant's install id, and a substring probe.
+#[cfg(feature = "forge-ghapp")]
+#[rstest]
+// tenant, requested id, per_tenant, expected-allowed, description
+#[case::positive_bound_id_allowed("acme", "123", true, true)]
+#[case::positive_single_operator_any_id("acme", "999", false, true)]
+#[case::positive_single_operator_no_bindings_any_id("ghost", "777", false, true)]
+#[case::negative_unbound_id_denied("acme", "777", true, false)]
+#[case::negative_unknown_tenant_denied("ghost", "123", true, false)]
+#[case::boundary_bound_id_at_cap("acme", "99999999999999999999", true, true)]
+#[case::corner_empty_id_not_bound("acme", "", true, false)]
+#[case::adversarial_cross_tenant_id_denied("acme", "456", true, false)] // 456 is beta's
+#[case::adversarial_id_substring_not_matched("acme", "12", true, false)] // prefix of 123
+fn ghapp_allowed_cases(
+    #[case] tenant: &str,
+    #[case] id: &str,
+    #[case] per_tenant: bool,
+    #[case] allowed: bool,
+) {
+    // acme is bound to 123 + the 20-digit cap id; beta is bound to 456 (the cross-tenant
+    // target). A tenant must not reach another tenant's id.
+    let mut bindings = GithubAppBindings::new();
+    bindings.insert(
+        "acme".to_string(),
+        ["123", "99999999999999999999"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    bindings.insert(
+        "beta".to_string(),
+        ["456"].into_iter().map(str::to_string).collect(),
+    );
+    assert_eq!(
+        ghapp_allowed(per_tenant, Some(&bindings), tenant, id),
+        allowed,
+        "tenant={tenant} id={id} per_tenant={per_tenant}"
+    );
+}
+
+/// `per_tenant` with **no** bindings installed at all (the fail-closed default): every
+/// tenant mints nothing, so even a plausible id is denied — the IDOR guard holds before
+/// the operator has declared a single binding.
+#[cfg(feature = "forge-ghapp")]
+#[test]
+fn boundary_ghapp_allowed_no_bindings_denies_under_per_tenant() {
+    assert!(!ghapp_allowed(true, None, "acme", "123"));
+    // …and the same empty state is fully permissive under single-operator.
+    assert!(ghapp_allowed(false, None, "acme", "123"));
+}

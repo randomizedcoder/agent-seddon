@@ -19,6 +19,11 @@ mod github;
 #[cfg(feature = "forge-gitlab")]
 mod gitlab;
 
+/// GitHub App installation-token minting (forge-auth F2). Behind `forge-ghapp` so the
+/// default build stays free of the `jsonwebtoken` dependency.
+#[cfg(feature = "forge-ghapp")]
+pub mod ghapp;
+
 /// The persisted forge-card registry (config C36 / D1). Behind `forge-store` so the
 /// default host-impl build stays free of the config-store dependency.
 #[cfg(feature = "forge-store")]
