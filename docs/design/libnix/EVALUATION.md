@@ -103,6 +103,66 @@ with separate exact commands and cache states before drawing timing conclusions.
 | 2026-10-14 | M1 | cargo+sccache | cold | `cargo check -p agent-proto` | TBD | TBD | TBD | TBD | TBD |
 | 2026-10-14 | M1 | cargo-libnix | cold | `cargo check -p agent-proto` | TBD | TBD | TBD | TBD | TBD |
 
+## Initial Results
+
+### M2: `cargo test -p agent-core`
+
+Host: `l2`; date: `2026-10-14`; repo commit: `fafe69f3`; working tree: dirty
+(178 paths reported by `git status --porcelain`, including unrelated ongoing
+work); nixpkgs rev: `753cc8a3a87467296ddd1fa93f0cc3e81120ee46`.
+
+| Backend | Toolchain | Exact command | Cache state | Elapsed | Result / notes |
+|---|---|---|---|---:|---|
+| Cargo + sccache | Cargo/rustc 1.97.1; sccache 0.16.0 | `nix develop .#default --command /usr/bin/time -p cargo test -p agent-core` | Existing 201 GB `target/`; first measured run | 14.46s | Pass; 681 tests |
+| Cargo + sccache | Same | Same | Warm repeat 1 | 1.12s | Pass; 681 tests |
+| Cargo + sccache | Same | Same | Warm repeat 2 | 0.95s | Pass; 681 tests |
+| Cargo + sccache | Same | Same | Warm follow-up | 0.97s | Pass; 681 tests rerun |
+| Crane | Cargo/rustc 1.97.1 | `/usr/bin/time -p nix build .#checks.x86_64-linux.agent-core-eval` | Cold derivation realization | 139.02s | Pass; temporary `craneLib.cargoTest` target with `cargoTestExtraArgs = "-p agent-core"`; 56 derivations realized |
+| Crane | Same | Same | Warm Nix-store no-op 1 | 0.23s | Cached derivation; tests did not rerun |
+| Crane | Same | Same | Warm Nix-store no-op 2 | 0.24s | Cached derivation; tests did not rerun |
+| Cargo libnix | Cargo 1.87.0+v4 / rustc 1.87.0 | `nix develop .#libnix --command /usr/bin/time -p cargo test -p agent-core` | First run after LN-04 smoke | 48.53s | Pass; 681 tests; evaluated graph in 33.2s; 4 derivations built |
+| Cargo libnix | Same | Same | Repeat 1 | 47.98s | Pass; 681 tests; 4 derivations built again |
+| Cargo libnix | Same | Same | Repeat 2 | 48.26s | Pass; 681 tests; 4 derivations built again |
+| Cargo libnix | Same | Same | Warm follow-up after M4 | 49.34s | Pass; 681 tests; 4 derivations built again |
+
+These rows are diagnostic, not a performance verdict. The Cargo and Crane runs
+used the repository toolchain (1.97.1), while libnix is pinned to 1.87.0; the
+local Cargo target was already populated, the Crane first run realized a new
+derivation graph, and Crane's repeat rows are Nix-store no-ops that did not
+rerun tests. In contrast, each libnix invocation re-evaluated the 95-unit graph
+and reported four built derivations despite no source edits. Store and target
+size deltas were not captured for these runs. The temporary Crane target was
+removed after measurement; it used `craneLib.cargoTest` with the same
+`commonArgs`, shared `cargoArtifacts`, and `cargoTestExtraArgs = "-p agent-core"`.
+
+Observed warm behavior: local Cargo with sccache reran the test binary in a
+median 0.97s across its three warm runs, Crane returned its already-built
+derivation in a median 0.235s without rerunning tests, and libnix took a median
+48.26s across its three repeated runs while rebuilding four derivations each
+time. This is a warm-to-warm comparison of the same test target, with the
+important distinction that Crane's cached derivation skips test execution. The
+toolchain/cache differences prevent treating these as a
+controlled winner comparison; the repeated libnix rebuild is a concrete item to
+investigate before widening the matrix.
+
+### M4: SQLite feature test
+
+Command: `cargo test -p agent-config-store --features config-store-sqlite`.
+All three backends passed the same 94 tests (plus doc tests):
+
+| Backend | Toolchain | Exact command | Cache state | Elapsed | Notes |
+|---|---|---|---|---:|---|
+| Cargo + sccache | Cargo/rustc 1.97.1 | `nix develop .#default --command /usr/bin/time -p cargo test -p agent-config-store --features config-store-sqlite` | First local feature build | 26.08s | Pass; compiler phase 22.69s |
+| Crane | Cargo/rustc 1.97.1 | `/usr/bin/time -p nix build .#checks.x86_64-linux.agent-config-store-sqlite-eval` | First targeted derivation | 59.30s | Pass; temporary `craneLib.cargoTest` target with `cargoTestExtraArgs = "-p agent-config-store --features config-store-sqlite"` |
+| Cargo libnix | Cargo 1.87.0+v4 / rustc 1.87.0 | `nix develop .#libnix --command /usr/bin/time -p cargo test -p agent-config-store --features config-store-sqlite` | First feature-graph realization | 241.23s | Pass; 163.5s graph evaluation, 148 derivations built |
+
+No native inputs or environment entries were needed for bundled SQLite;
+`libsqlite3-sys` built with the existing minimal dependency file. This is a
+single run per backend and uses different toolchains and cache states, so it
+confirms feature support but does not establish relative performance. The
+temporary Crane target has been removed; its derivation used `commonArgs`, the
+shared `cargoArtifacts`, and the arguments shown above.
+
 ## Evaluation Notes For Upstream
 
 When a libnix run fails, capture:

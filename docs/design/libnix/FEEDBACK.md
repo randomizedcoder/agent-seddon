@@ -26,6 +26,7 @@ No upstream feedback yet. Add rows as implementation proceeds.
 | ID | Type | Summary | Repro | Status |
 |---|---|---|---|---|
 | FB-001 | Unsupported command | libnix-1.87.0+v4 refuses `cargo check` with `cargo 'check' is not supported yet`; build and test probes work. | `CARGO_BACKEND=nix cargo check -p agent-proto` in this workspace; use `cargo build -p agent-proto` as a workaround. | Reproduced; workaround documented |
+| FB-002 | Repeat build reuse | Three unchanged `cargo test -p agent-core` runs each re-evaluated the 95-unit graph and reported four derivations built; elapsed times stayed near 48s. | In `nix develop .#libnix`, run `/usr/bin/time -p cargo test -p agent-core` three times; output reports `Finished 4 built` each time. | Reproduced; investigate before performance claims |
 
 ## Candidate Questions
 

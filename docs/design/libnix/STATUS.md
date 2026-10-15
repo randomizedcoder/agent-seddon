@@ -12,7 +12,7 @@ Design: [`README.md`](README.md) · evaluation: [`EVALUATION.md`](EVALUATION.md)
 | LN-02 | Add opt-in `devShells.libnix` | done | Default `nix develop` unchanged |
 | LN-03 | Add minimal `Cargo.dependencies.nix` | done | `agent-proto`/`PROTOC` only |
 | LN-04 | Run smoke builds | done | `nix run .#libnix-smoke`; v4 `check` limitation documented |
-| LN-05 | Compare default Cargo, Crane, and libnix timings | next | Use `EVALUATION.md` protocol |
+| LN-05 | Compare default Cargo, Crane, and libnix timings | in progress | M2 and M4 recorded; toolchain/cache states differ |
 | LN-06 | Decide whether to add `apps.libnix-smoke` / `checks.libnix-smoke` | next | Promote only after repeated stable runs |
 | LN-07 | Package upstream feedback | next | Summarize failures, wins, missing docs, measurements |
 
@@ -41,6 +41,18 @@ Design: [`README.md`](README.md) · evaluation: [`EVALUATION.md`](EVALUATION.md)
   The first complete run took about 4 minutes for the first graph realization;
   the core test graph took 47.8s and the lean runtime graph took 203s to build.
   No native dependency injection beyond `agent-proto`'s `PROTOC` was needed.
+- **2026-10-14 - LN-05 M2.** Recorded three runs for `cargo test -p agent-core`
+  per backend in `EVALUATION.md`. Warm local Cargo+sccache took 1.12s/0.95s;
+  libnix took 47.98s/48.26s and rebuilt four derivations each time. Crane's
+  first targeted derivation took 139.02s; subsequent Nix-store no-ops took
+  0.23s/0.24s without rerunning tests. Toolchain and cache differences mean
+  this is diagnostic only. Investigate libnix's repeated rebuild before
+  widening the comparison matrix.
+- **2026-10-14 - LN-05 M4.** `cargo test -p agent-config-store --features
+  config-store-sqlite` passed with all three backends (94 tests). The first
+  libnix run took 241.23s including 163.5s graph evaluation; Cargo+sccache took
+  26.08s, and Crane took 59.30s. These are single runs with different toolchain
+  and cache states. Bundled SQLite required no extra libnix native inputs.
 
 ## Decisions
 
