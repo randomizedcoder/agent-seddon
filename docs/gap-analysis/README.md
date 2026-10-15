@@ -853,7 +853,10 @@ links its own sub-docs.
 
 - Inline comments + Approve / RequestChanges; webhooks; GitHub App auth; multi-language analyzers;
   incremental review; per-review cost; reject / wontfix; portal auth + admin pages; packaged
-  deployment (NixOS module or image).
+  deployment (NixOS module or image). **Webhooks + GitHub App auth now have a design of record:**
+  [`../design/forge-auth/README.md`](../design/forge-auth/README.md) — a tenant authorizes the fleet
+  via a GitHub App *installation* (short-lived per-install tokens for both the forge API and the git
+  clone), replacing the operator-pasted PAT; webhooks turn `pull_request` events into fleet triggers.
 
 **P2 — API**
 
