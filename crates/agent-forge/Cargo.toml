@@ -15,10 +15,11 @@ forge-gitea = []
 # Bitbucket Cloud host (config C36 / D1b): opt-in — the divergent API (body-envelope
 # paging, no review object, deeply-nested fields, upper-case state vocabulary).
 forge-bitbucket = []
-# GitHub App installation-token minting (forge-auth F2): opt-in — NOT in `default`,
-# because it pulls in `jsonwebtoken` (RS256 over `ring`) for the App JWT. Resolves a
-# `ghapp:<installation_id>` credential by minting a short-lived installation token.
-forge-ghapp = ["dep:jsonwebtoken"]
+# GitHub App installation-token minting (forge-auth F2) + the webhook HMAC verify
+# primitive (F3): opt-in — NOT in `default`, because it pulls in `jsonwebtoken` (RS256
+# over `ring`) for the App JWT and `ring::hmac` for the `X-Hub-Signature-256` check.
+# Resolves a `ghapp:<installation_id>` credential by minting a short-lived token.
+forge-ghapp = ["dep:jsonwebtoken", "dep:ring"]
 # The persisted forge-card registry (config C36 / D1): the `ForgeRegistry` store
 # over the shared `agent-config-store`.
 forge-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]
@@ -37,6 +38,9 @@ prost = { workspace = true, optional = true }
 # RS256 signing of the GitHub App JWT (forge-auth F2). Over `ring`, already in-tree;
 # the RUSTSEC-banned `rsa` crate is deliberately NOT used.
 jsonwebtoken = { workspace = true, optional = true }
+# Constant-time HMAC-SHA256 for webhook signature verification (forge-auth F3), via
+# `ring::hmac::verify`. Already in-tree (jsonwebtoken rides the same `ring`).
+ring = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

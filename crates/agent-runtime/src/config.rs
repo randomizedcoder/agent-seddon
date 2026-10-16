@@ -3931,6 +3931,14 @@ pub struct GithubAppCfg {
     /// API base; empty ⇒ `https://api.github.com`. A GHES host sets its `/api/v3`.
     #[serde(default)]
     pub base_url: String,
+    /// Reference to the webhook HMAC secret: `env:NAME` or `file:/path` — never an
+    /// inline secret, never a `ghapp:` mint (the secret is read, not minted). Used by
+    /// the webhook receiver (forge-auth F6) to verify GitHub's `X-Hub-Signature-256`
+    /// on each delivery. **Optional** — empty ⇒ webhook verification is unconfigured and
+    /// the receiver fails closed (poll stays the trigger source). Resolved on the host
+    /// by F6, exactly as `private_key_ref` is (`builder.rs`).
+    #[serde(default)]
+    pub webhook_secret_ref: String,
     /// Token-endpoint HTTP timeout (seconds) and retry budget.
     #[serde(default = "default_github_app_timeout_secs")]
     pub timeout_secs: u64,
@@ -3975,6 +3983,22 @@ impl GithubAppCfg {
             let b = self.base_url.trim();
             if !(b.starts_with("http://") || b.starts_with("https://")) {
                 return Err("[github_app] base_url must be an http(s):// URL".into());
+            }
+        }
+        // Optional (empty ⇒ webhook verification unconfigured). When present it is a key
+        // to READ (`env:`/`file:`), never a `ghapp:` mint and never an inline secret — a
+        // raw value falls to the `Err` arm, whose message never echoes the value.
+        if !self.webhook_secret_ref.is_empty() {
+            match agent_core::ApiKeyRef::parse(&self.webhook_secret_ref) {
+                Ok(agent_core::ApiKeyRef::Env(_)) | Ok(agent_core::ApiKeyRef::File(_)) => {}
+                Ok(agent_core::ApiKeyRef::GitHubApp(_)) => return Err(
+                    "[github_app] webhook_secret_ref is a key to read (env:/file:), not a `ghapp:` mint"
+                        .into(),
+                ),
+                Ok(agent_core::ApiKeyRef::None) => {
+                    return Err("[github_app] webhook_secret_ref is required (env: or file:)".into())
+                }
+                Err(e) => return Err(format!("[github_app] webhook_secret_ref: {e}")),
             }
         }
         for (tenant, ids) in &self.installations {
@@ -5031,6 +5055,23 @@ mod tests {
     #[case::adversarial_installations_over_cap_id(
         "app_id = \"1\"\nprivate_key_ref = \"env:K\"\ninstallations = { acme = [\"999999999999999999999\"] }",
         Err("installations")
+    )]
+    #[case::positive_webhook_secret_env(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nwebhook_secret_ref = \"env:WH\"",
+        Ok(())
+    )]
+    #[case::positive_webhook_secret_file(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nwebhook_secret_ref = \"file:/wh\"",
+        Ok(())
+    )]
+    #[case::positive_webhook_secret_absent("app_id = \"1\"\nprivate_key_ref = \"env:K\"", Ok(()))]
+    #[case::negative_webhook_secret_is_ghapp(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nwebhook_secret_ref = \"ghapp:1\"",
+        Err("webhook_secret_ref")
+    )]
+    #[case::adversarial_webhook_secret_inline(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nwebhook_secret_ref = \"s3cr3t-raw\"",
+        Err("webhook_secret_ref")
     )]
     fn github_app_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
         let cfg: GithubAppCfg = toml::from_str(toml_src).expect("parses");

@@ -24,6 +24,13 @@ mod gitlab;
 #[cfg(feature = "forge-ghapp")]
 pub mod ghapp;
 
+/// Webhook signature verification (forge-auth F3). The constant-time HMAC-SHA256 check
+/// of GitHub's `X-Hub-Signature-256` that the webhook receiver (F6) runs on every
+/// attacker-reachable delivery before acting. Behind `forge-ghapp` (the GitHub App
+/// domain), so the default build stays free of the `ring` dependency.
+#[cfg(feature = "forge-ghapp")]
+pub mod webhook;
+
 /// The persisted forge-card registry (config C36 / D1). Behind `forge-store` so the
 /// default host-impl build stays free of the config-store dependency.
 #[cfg(feature = "forge-store")]
