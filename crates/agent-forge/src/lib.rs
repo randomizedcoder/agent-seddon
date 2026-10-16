@@ -36,6 +36,11 @@ pub mod webhook;
 #[cfg(feature = "forge-store")]
 mod store;
 
+/// The per-tenant GitHub-App install registry (forge-auth F4). Behind `forge-store`
+/// (same config-store dependency as the forge-card registry).
+#[cfg(feature = "forge-store")]
+mod github_install_store;
+
 #[cfg(feature = "forge-bitbucket")]
 pub use bitbucket::BitbucketForge;
 #[cfg(feature = "forge-gitea")]
@@ -53,3 +58,7 @@ pub use kind::{
 
 #[cfg(feature = "forge-store")]
 pub use store::{StoreForges, DEFAULT_TENANT};
+// `StoreInstalls` shares the same `local` default-tenant convention as `StoreForges`
+// (re-exported above as `DEFAULT_TENANT`), so only the store type is re-exported here.
+#[cfg(feature = "forge-store")]
+pub use github_install_store::StoreInstalls;

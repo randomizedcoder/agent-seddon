@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F3 built; F2b + F4–F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F3 + F4a built; F2b + F4b + F5–F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -21,7 +21,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2 | Installation-token minter | App JWT → installation token, `agent-retry`, ~55 m cache; wire into the forge-credential resolver (forge **API**). Clone-URL `x-access-token` injection split to **F2b**. | ✅ |
 | F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
-| F4 | Per-tenant install store | `{tenant, installation_id, selected_repos[]}` card/registry row, gRPC CRUD, tenant-scoped | ⬜ |
+| F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: rewire the mint IDOR gate to consult the store (pending). | 🟡 |
 | F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → roster-row write with a `ghapp:` ref | ⬜ |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
@@ -70,6 +70,27 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   `builder.rs`) only when F6 wires the receiver — this slice adds no consumer. Tables: A (`verify_webhook_signature`,
   13 cases incl. `adversarial_` wrong-secret / tampered-body / malformed-header / CRLF), B (5 new
   `GithubAppCfg::validate` cases for `webhook_secret_ref`).
+
+- **F4a (PR #TBD):** the per-tenant GitHub-App **install store** data layer — the per-tenant successor to
+  the operator-global `[github_app] installations` bootstrap allowlist. New core card + registry seam
+  `GithubInstall { installation_id, selected_repos[], installed_at }` + `GithubInstallRegistry`
+  (`crates/agent-core/src/github_install.rs`); the owning tenant is **not** a card field — it is the store's
+  tenant dimension in the `(collection, tenant, id)` key (mirroring `ForgeCard`). `installation_id` is validated
+  by the **shared** `agent_core::valid_installation_id` predicate (factored out of `ApiKeyRef::parse`, so a
+  stored id is always a mintable one); each `selected_repos` slug must pass `safe_segment` (capped at
+  `MAX_SELECTED_REPOS = 512`). Persisted by `StoreInstalls` over `agent_config_store::Backend`
+  (`crates/agent-forge/src/github_install_store.rs`, feature `forge-store`), mirroring `StoreForges` exactly.
+  gRPC control plane `GithubInstallRegistryService` (`crates/agent-grpc/src/server/github_install_registry.rs`
+  + proto `github_install_registry.proto`, REST `/v1/github-installs`) — identity-scoped (`identity_key` +
+  `run_scoped`, fails closed to `local`), mutations gated on `(write|delete, forge_registry)` (installs are
+  forge state → they reuse the forge-registry RBAC resource rather than minting a new one), classified `Scoped`
+  in `identity_policy` + the mt-audit manifest. `PerTenant<dyn GithubInstallRegistry>` routes each caller to
+  their own tenant. **Gate deliberately UNCHANGED**: the mint IDOR check (`ghapp_installation_allowed`) still
+  reads the bootstrap allowlist — rewiring it to consult this store is **F4b** (so F4a carries zero
+  gate-regression risk). **Not yet serve-mounted** on a `--serve-…` CLI flag: the service type + router are
+  built and unit-tested; mounting (config + CLI) lands with the increment that serves it live (F5). Tables:
+  A (`GithubInstall::validate`, four-class + `adversarial_`), B (`StoreInstalls` CRUD + cross-tenant isolation),
+  C (gRPC server identity scoping), plus a `PerTenant` real-store isolation test.
 
 ## Links
 

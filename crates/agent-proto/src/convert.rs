@@ -3037,6 +3037,32 @@ impl TryFrom<pb::ForgeCard> for agent_core::ForgeCard {
     }
 }
 
+// --- GitHub-App install cards (forge-auth F4) ------------------------------
+// Non-secret install state only. `installation_id` + each `selected_repos` slug are
+// validated fail-closed by `GithubInstall::validate` (in the store, before persist
+// and after load); the conversion itself is total (no enum to reject here), so the
+// wire→core direction is infallible and the store is the single validation gate.
+
+impl From<agent_core::GithubInstall> for pb::GithubInstall {
+    fn from(i: agent_core::GithubInstall) -> Self {
+        pb::GithubInstall {
+            installation_id: i.installation_id,
+            selected_repos: i.selected_repos,
+            installed_at: i.installed_at,
+        }
+    }
+}
+
+impl From<pb::GithubInstall> for agent_core::GithubInstall {
+    fn from(i: pb::GithubInstall) -> Self {
+        agent_core::GithubInstall {
+            installation_id: i.installation_id,
+            selected_repos: i.selected_repos,
+            installed_at: i.installed_at,
+        }
+    }
+}
+
 // --- Transport cards (config C37 / D2) -------------------------------------
 // `purpose` rides as a validated string (like a forge card's `repo_encoding`) so the
 // wire stays additive without an enum-prefix lint carve-out; `TryFrom` is the

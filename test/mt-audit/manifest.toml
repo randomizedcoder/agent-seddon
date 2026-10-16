@@ -57,6 +57,10 @@ note = "every RPC scopes via identity_key + run_scoped (mt-audit-04); PerTenant<
 [services.ForgeService]
 class = "stateless"
 
+[services.GithubInstallRegistryService]
+class = "scoped"
+note = "forge-auth F4: every RPC scopes via identity_key + run_scoped; PerTenant<GithubInstallRegistry> routes the caller's tenant's GitHub-App installs"
+
 [services.GraphService]
 class = "scoped"
 

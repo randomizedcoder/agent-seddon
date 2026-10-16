@@ -129,6 +129,11 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         ("ForgeRegistryService", "List" | "Get") => Require(Read, ForgeRegistry),
         ("ForgeRegistryService", "Put") => Require(Write, ForgeRegistry),
         ("ForgeRegistryService", "Delete") => Require(Delete, ForgeRegistry),
+        // GitHub-App installs are forge state (forge-auth F4): they reuse the
+        // forge-registry resource rather than minting a new RBAC resource type.
+        ("GithubInstallRegistryService", "List" | "Get") => Require(Read, ForgeRegistry),
+        ("GithubInstallRegistryService", "Put") => Require(Write, ForgeRegistry),
+        ("GithubInstallRegistryService", "Delete") => Require(Delete, ForgeRegistry),
         ("TransportRegistryService", "List" | "Get") => Require(Read, TransportRegistry),
         ("TransportRegistryService", "Put") => Require(Write, TransportRegistry),
         ("TransportRegistryService", "Delete") => Require(Delete, TransportRegistry),
