@@ -21,12 +21,23 @@ use ring::hmac;
 /// HMAC-SHA256(`secret`, `body`) equals the supplied tag, compared in constant time.
 /// **Fails closed** (`false`) on any malformed header — missing/empty, a non-`sha256=`
 /// algorithm prefix, non-hex characters, or a tag that is not exactly 32 bytes (64 hex
-/// chars). The prefix-strip and hex-decode branch only on the attacker-supplied header,
-/// never on the secret, so they add no secret-dependent timing.
+/// chars), and on an **empty `secret`** — an empty HMAC key authenticates anyone, so an
+/// unconfigured secret is a bypass, never a valid signer. The prefix-strip and hex-decode
+/// branch only on the attacker-supplied header, never on the secret, so they add no
+/// secret-dependent timing.
 ///
-/// `secret` is the raw webhook-secret bytes (the config layer guarantees it is non-empty
-/// and read from an `env:`/`file:` reference, never inline).
+/// `secret` is the raw webhook-secret bytes (read from an `env:`/`file:` reference, never
+/// inline); an empty secret is rejected here as well as treated as "verification off" by
+/// the config layer.
 pub fn verify_webhook_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
+    // Fail closed on an empty key: HMAC with an empty secret is forgeable by anyone
+    // (there is no secret to not know), so an unconfigured/misconfigured secret must
+    // NEVER authenticate a delivery — it is a bypass, not a valid signer. The config
+    // layer already treats an empty `webhook_secret_ref` as "verification off"; this is
+    // the matching guard in the primitive so caller discipline can't reopen the hole.
+    if secret.is_empty() {
+        return false;
+    }
     let Some(hex) = header.strip_prefix("sha256=") else {
         return false;
     };
@@ -93,7 +104,7 @@ mod tests {
     #[case::positive_valid_signature(SECRET, BODY, sign(SECRET, BODY), true)]
     #[case::positive_uppercase_hex_accepted(SECRET, BODY, sign(SECRET, BODY).to_uppercase().replace("SHA256=", "sha256="), true)]
     #[case::boundary_empty_body_valid(SECRET, b"", sign(SECRET, b""), true)]
-    #[case::corner_empty_secret_math_holds(b"", BODY, sign(b"", BODY), true)]
+    #[case::adversarial_empty_secret_fails_closed(b"", BODY, sign(b"", BODY), false)]
     #[case::negative_wrong_secret(SECRET, BODY, sign(b"wrong-secret", BODY), false)]
     #[case::negative_tampered_body(SECRET, b"tampered", sign(SECRET, BODY), false)]
     #[case::adversarial_missing_prefix(SECRET, BODY, sign(SECRET, BODY).trim_start_matches("sha256=").to_string(), false)]
