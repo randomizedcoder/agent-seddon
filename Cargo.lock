@@ -209,6 +209,7 @@ dependencies = [
  "jsonwebtoken",
  "prost",
  "reqwest",
+ "ring",
  "rstest",
  "serde_json",
  "tiny_http",

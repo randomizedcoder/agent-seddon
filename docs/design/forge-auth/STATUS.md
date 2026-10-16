@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 built; F2b + F3 remainder + F4–F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F3 built; F2b + F4–F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -20,7 +20,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F1 | `ghapp:` ref kind | `ApiKeyRef::GitHubApp` variant + parser + fail-closed validation (`agent-core`) | ✅ |
 | F2 | Installation-token minter | App JWT → installation token, `agent-retry`, ~55 m cache; wire into the forge-credential resolver (forge **API**). Clone-URL `x-access-token` injection split to **F2b**. | ✅ |
 | F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
-| F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (🟡 landed with F2), webhook `secret_ref` (remainder) | 🟡 |
+| F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{tenant, installation_id, selected_repos[]}` card/registry row, gRPC CRUD, tenant-scoped | ⬜ |
 | F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → roster-row write with a `ghapp:` ref | ⬜ |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
@@ -56,6 +56,20 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   so the forge **API** uses ghapp tokens but **private-repo clone is not yet enabled**. Tables: A (minter,
   `tiny_http`-mocked, 26 cases incl. `adversarial_`), B (`GithubAppCfg::validate`, 12 + adversarial),
   C (mint-aware resolver wiring, 5).
+
+- **F3 (PR #TBD):** the webhook credential. Added `webhook_secret_ref` to the bootstrap `[github_app]` config
+  (`GithubAppCfg`, `crates/agent-runtime/src/config.rs`) — **optional**, `env:`/`file:` only (a `ghapp:` mint or an
+  inline raw secret is rejected; the error never echoes the value, reusing `ApiKeyRef::parse`), so the
+  `app_id` + `private_key_ref` (F2) + webhook `secret_ref` triple is now complete. Front-loaded the one
+  security-critical piece of the webhook story: a pure, constant-time HMAC-SHA256 verify primitive
+  `verify_webhook_signature(secret, body, header)` (`crates/agent-forge/src/webhook.rs`, behind `forge-ghapp`,
+  via `ring::hmac::verify` — zero new crates, no `rsa`). It checks GitHub's `X-Hub-Signature-256`
+  (`sha256=<64 hex>`) against the raw body and **fails closed** on any malformed header (missing/empty, wrong
+  algorithm prefix, non-hex, wrong length), so the webhook receiver (F6) reduces to the HTTP transport +
+  `safe_segment` + `TriggerSink::enqueue`. The secret is resolved (`secrets::resolve(Operator, …)`, mirroring
+  `builder.rs`) only when F6 wires the receiver — this slice adds no consumer. Tables: A (`verify_webhook_signature`,
+  13 cases incl. `adversarial_` wrong-secret / tampered-body / malformed-header / CRLF), B (5 new
+  `GithubAppCfg::validate` cases for `webhook_secret_ref`).
 
 ## Links
 
