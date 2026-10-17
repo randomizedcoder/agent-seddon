@@ -1,6 +1,7 @@
 # agent-seddon documentation
 
-Everything in `docs/`, grouped by what you are trying to do. Three entry points:
+The [project README](../README.md) summarizes available features. This index links
+the operating guides, component references, and full design catalog. Three entry points:
 
 - **Understanding the design** → [`../DESIGN.md`](../DESIGN.md), then
   [`architecture.md`](architecture.md).
@@ -16,6 +17,7 @@ Everything in `docs/`, grouped by what you are trying to do. Three entry points:
 | [`architecture.md`](architecture.md) | You want the boundary map: which crate owns what |
 | [`extending.md`](extending.md) | You want to add a provider, tool, memory, context strategy, policy or transport |
 | [`features-comparison.md`](features-comparison.md) | You want the full comparison against pi, hermes-agent, opencode and codex (dated snapshot) |
+| [`peer-harnesses.md`](reference/peer-harnesses.md) | You want the peer source/prompt map and reproducible source references used in comparisons |
 | [`../CLAUDE.md`](../CLAUDE.md) | You are contributing — conventions, the security model, the PR shape |
 
 ## Operating it
@@ -60,8 +62,9 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Component | Config key | Doc |
 |---|---|---|
 | Providers | `[agent] provider` | [`providers.md`](components/providers.md) |
-| Model routing and failover | `[router]` | [`router.md`](components/router.md) |
+| Model routing, failover and upstream registry | `[router]`, `[route]` | [`router.md`](components/router.md) |
 | LLM/GPU pool (load-balanced) | `[pool]` | [`pool.md`](components/pool.md) |
+| Generator/critic consensus | `[agent] provider = "consensus"` | [`consensus.md`](components/consensus.md) |
 | Prompt-cache placement | `[cache] strategy` | [`prompt-cache.md`](components/prompt-cache.md) |
 | Tokenizer and cost | `[tokenizer] backend` | [`tokenizer.md`](components/tokenizer.md) |
 | Structured output | `[structured] validator` | [`structured-output.md`](components/structured-output.md) |
@@ -73,8 +76,12 @@ One doc per seam or subsystem. The **config key** column is what you set in
 |---|---|---|
 | Memory (episodic + semantic) | `[memory] backend`, `semantic` | [`memory.md`](components/memory.md) |
 | Dimensional memory (per-step, by dimension) | `[dimensions] store` | [`dimensions.md`](components/dimensions.md) |
+| Background digests | `[digest]` | [`digest.md`](components/digest.md) |
+| Instant compaction | `[agent] context = "instant-window"` | [`instant-compaction.md`](components/instant-compaction.md) |
+| Cognition graphs and parallel branches | `[graph]`, `--cognition-graph` | [`graph.md`](components/graph.md) |
 | Embedder | `[embedder] backend` | [`embedder.md`](components/embedder.md) |
 | Code search | `[agent] search` | [`search.md`](components/search.md) |
+| Code graphs and structural search | `[ast]`; optional `ast-scip` feature | [`ast.md`](components/ast.md) |
 | Git (multi-branch) | `[git]` | [`git.md`](components/git.md) |
 | Language servers | `[lsp] backend` | [`lsp.md`](components/lsp.md) |
 | `@`-reference expansion | `[reference] backend` | [`reference.md`](components/reference.md) |
@@ -88,6 +95,7 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Task / plan tracking | `[tasks] backend` | [`tasks.md`](components/tasks.md) |
 | Scheduler | `[scheduler]` | [`scheduler.md`](components/scheduler.md) |
 | Campaigns (`agent campaign …`) | `[campaign] store` | [`campaigns.md`](components/campaigns.md) |
+| Review fleet | `[review_fleet]`, `--serve-fleet` | [`review-fleet.md`](components/review-fleet.md) |
 | Skill authoring | `[skills] write` | [`skill-authoring.md`](components/skill-authoring.md) |
 
 ### Platform and execution
@@ -98,16 +106,16 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | PTY (interactive terminals) | `[pty] backend` | [`pty.md`](components/pty.md) |
 | Web fetch | `[web] backend` | [`web-fetch.md`](components/web-fetch.md) |
 | Web search | `[web_search] backends` | [`web-search.md`](components/web-search.md) |
-| Forge (GitHub / GitLab) | `[forge] backend` | [`forge.md`](components/forge.md) |
+| Forge (GitHub / GitLab; optional Gitea / Bitbucket) | `[forge] backend` | [`forge.md`](components/forge.md) |
 | Content scanner | `[scanner] rules` | [`scanner.md`](components/scanner.md) |
 | MCP (client and server) | `[[mcp.servers]]` | [`mcp.md`](components/mcp.md) |
 | Retry and backoff | `[provider] max_retries` | [`retry.md`](components/retry.md) |
 
 ### Portal / management seams
 
-Operator/portal-facing seams the loop does **not** consume — served over gRPC for
-the [Agent Portal](design/portal/README.md). They have no impl-swap key; the column
-below is the service flag / `[grpc.<seam>]` block that hosts them.
+Management and observation services used by the [Agent Portal](design/portal/README.md).
+Prompt changes also feed subsequent agent sessions; apply/restart behavior is documented
+per component. The column below identifies the service flag or configuration block.
 
 | Component | Service / config | Doc |
 |---|---|---|
@@ -122,56 +130,89 @@ below is the service flag / `[grpc.<seam>]` block that hosts them.
 |---|---|
 | Testing conventions | [`testing.md`](components/testing.md) |
 | Benchmarking and leak gate | [`benchmarking.md`](components/benchmarking.md) |
+| Multi-tenancy coverage audit | [`mt-audit.md`](components/mt-audit.md) |
 | Doc-link + discoverability gate | [`doc-links.md`](components/doc-links.md) |
 | Cognition-graph value harness (`nix run .#graph-arena`) | [`graph-arena.md`](graph-arena.md) |
 
 ## Gap analysis
 
-[`gap-analysis/`](gap-analysis/README.md) — designed-vs-implemented audit (2026-09-26): multi-tenancy defaults and scoping, product gaps, proto→REST/OpenAPI, test and integration gaps, LLM tool awareness, repo knowledge graph, LLM routing/scale-out, docs discoverability, and a prioritised closing list; the P0 items have an implementation plan in [`design/security-hardening/`](design/security-hardening/README.md). [`gap-analysis/self-improvement.md`](gap-analysis/self-improvement.md) is the narrower companion: what the agent needs in order to work its own gap list (a deterministic, persisted code graph; a cited repo inventory; PR-time and feature-time reuse), closed by [`design/repo-knowledge/`](design/repo-knowledge/README.md); [`design/campaigns/`](design/campaigns/README.md) then turns the gaps into hierarchical, ACID-tracked implementation campaigns that farm leaves out to workers and PRs.
+The [gap analysis](gap-analysis/README.md) records the designed-versus-implemented
+review and its closing work. Security, API coverage, routing, and documentation
+have progressed since the original audit; use the linked implementation logs for
+current scope. The [self-improvement analysis](gap-analysis/self-improvement.md)
+motivated [repository knowledge](design/repo-knowledge/README.md), whose storage
+foundations are implemented, and [campaigns](design/campaigns/README.md), whose
+planner, CLI, worker, PR poller, and observability are available. Their remaining
+integrations are still tracked separately.
 
 ## Design notes
 
-Per-track design documents in [`design/`](design/) — the input to a feature's
-implementation phase, distinct from the shipped `components/` docs. Each carries a
-`STATUS.md` tracking which increments have merged; the tracks below are largely
-**implemented** (see each `STATUS.md`), while `tool-call-verification.md` remains
-forward-looking.
+Design documents explain intent and tradeoffs; component guides describe how to
+use the implementation. The catalog below summarizes the available scope and links
+implementation trackers where present. Some older design introductions and tracker
+rows retain historical branch labels; consult component docs and the later as-built
+logs rather than treating an entire design as an implemented feature.
 
-| Doc | About |
-|---|---|
-| [`tool-call-verification.md`](design/tool-call-verification.md) | A measured, multi-model gate that inspects a tool call before it runs (Allow / Revise / Deny), records every verdict to ClickHouse, and learns which verifier to trust per task type |
-| [`code-review/`](design/code-review/README.md) | The **Code Review Flow**: detect a review task, then a parallel fan-out of mostly-deterministic collectors (file set, diff, Go static analysis, AST/call-graph, style, git state) builds a *grounded* fact-bundle a model can't hallucinate over — driven by a health-checked pool of cheap LLMs, deeply instrumented for duration + parallel-optimization accounting. A 12-doc set with a status table |
-| [`adaptive-cognition/`](design/adaptive-cognition/README.md) | **Adaptive Cognition**: spend cheap local LLMs (GLM-5.2 + MI50) on the agent's own meta-cognition — per-turn **mode** detection with a switch decision, **mode-aware compaction** that reshapes context on a switch (a before/after table of what to keep/shed/pull-in), and **dimensional memory** that summarizes each step *by dimension* into per-dimension histories. The mode switch is the pivot joining all three. Supersedes `code-review/mode-detection.md` |
-| [`gpu-pool/`](design/gpu-pool/README.md) | The **GPU/LLM pool**: extend the health-checked `LlmPool` into a capacity-aware load balancer across many local targets — in-flight-aware selection policies (least-loaded / weighted / round-robin), per-target concurrency cap + fail-soft backpressure, and latency-graded `healthy \| degraded \| dead` routing. Shipped component: [`pool.md`](components/pool.md) |
-| [`model-router/`](design/model-router/README.md) | The **Model Router & Upstream Registry**: evolve the pool from a local-GPU load balancer into a **task-aware router over 10–50 upstream LLMs**. Each upstream carries a **model card** (per-upstream context window, cost, latency, capability tags); a declarative **`RoutePolicy`** you author + live health/load signals decide the pick; a `RouteHint` (TaskMode · role · request requirements · explicit override) rides each request; and the fleet migrates from TOML to a gRPC **`ProviderRegistryService`** control plane (CRUD + swappable storage), with TOML kept as a back-compat seed. Extends `gpu-pool/`. **Design / pre-implementation** |
-| [`loadtest/`](design/loadtest/README.md) | **Overload/backpressure conformance + seam load harness**: a uniform admission layer so every seam sheds overload with `RESOURCE_EXHAUSTED` + a `grpc-retry-pushback-ms` hint (the client already backs off + clamps), plus an opt-in load/conformance harness that drives each service into overload, asserts the contract, and reports throughput/latency. **In progress** |
-| [`portal/`](design/portal/README.md) | The **Agent Portal**: a small Flutter, **gRPC-only** app that launches the observability UIs, lets the operator **see + CRUD every prompt per mode** (system · context.d pre/post-pends · externalized per-mode compaction lenses), gives a live **agent view** (loop narration + a status bar: mode · context · GPU pool · gRPC p50/p99), and — increment [05](design/portal/05-config-and-router.md) — a schema-driven **Settings** editor over the whole `config/agent.toml` (new `ConfigService` seam: `schemars` schema + `toml_edit` write-back, restart-to-apply) and a live **Router** editor over the model-router registry (applies immediately). Adds four seams (`PromptService`, `AgentSessionService`, `MetricsProxyService`, `ConfigService`) + Dart codegen. **Core merged; config/router on a branch** |
-| [`prompts/`](design/prompts/README.md) | The **Prompt Library**: a pre-created, editable library of prompt fragments **selected by the situation** — a base always applied plus **tagged fragments** chosen when the situation supplies their tags (`mode:review` today; `language:`/`tier:`/… as the signals land), composed additively behind a cache-stable base. Stored behind a **swappable backend** (`file` git-legible default · embedded `sqlite` · `grpc`→central catalog), all behind the portal's one `PromptService` CRUD. Realises the portal's deferred *per-mode system prompts* item; drafts the content for all six modes and contrasts hermes/pi/opencode. **Design / pre-implementation** |
-| [`multi-session/`](design/multi-session/README.md) | **Multi-session / multi-user**: make every seam serve many users and concurrent sessions over the existing gRPC architecture — a `(user_id, session_id)` identity that rides gRPC **metadata** (hybrid with typed fields for `SessionRegistry`/`SessionStore`/confined cwd), per-user memory tenancy, a `Backend`/`Session`/`SessionManager` split, fixes for two single-loop state hazards, and session-attributed traces + a curated per-session metric label. Isolation via `confine`/`safe_segment` holds even against a spoofed identity; **authentication is a named follow-up**, not this track. An 8-doc set with a status table. **Design / pre-implementation** |
-| [`config/`](design/config/README.md) | The **Unified configuration architecture**: formalize the **config-card pattern** the codebase already converged on (proto message = document · textproto = file · CRUD service · store trait · `*_ref` secrets · per-tenant wrap), and unify the two config philosophies (static TOML + dynamic registries) under a **two-tier model** (operator bootstrap stays TOML; domain + per-tenant config → cards). Fully specifies the four primitives needed now — **authentication (OIDC/JWT interceptor) + RBAC**, **per-tenant config** (`PerTenant<Store>`, coordinating multi-tenancy C29–C31), **multi-forge** (github/gitlab/gitea/… cards), **generic messaging** (`MessageTransport`, Slack as one impl) — plus a **transactional config data layer** (file→sqlite→**postgres** behind one gRPC-abstracted store, OLTP-separate-from-ClickHouse, atomic multi-card txns) and a comprehensive **testing/integration** design. Components C32–C41. **Design / pre-implementation** |
-| [`observability/`](design/observability/README.md) | **Observability dimensionality**: a repo-wide audit + sweep that brings **tenant** (verified org) and **repo** (review-fleet roster) dimensionality inline across *every* OTEL metric family and span. Reconciles the "who did work" per-tenant metric subset (expanded from multi-session 06) with the seam-*health* families that stay label-less, permits a bounded LRU-capped `repo` label on the fleet families (revising review-fleet 07; **PR stays off labels**, span-only), and puts `tenant`/`repo`/`pr` on span attributes everywhere. Includes a family-by-family [metric census](design/observability/01-metric-census.md) + [span census](design/observability/02-span-census.md). **In progress** |
-| [`cognition-graph/`](design/cognition-graph/README.md) | The **Cognition Graph**: spend the model-router fleet *as we go* — an asymmetric **consensus gate** (generator × cross-family critic, structured verdicts, bounded feedback loop) on every response; a per-session background **distiller** writing per-turn summary + key-facts digests to a `(session_id, seq)` ledger (`DigestStore`: **ClickHouse default** (append-only MergeTree, durable async_insert) · sqlite · grpc); **instant compaction** that assembles from the pre-computed ledger filtered by a current-objective summary instead of summarizing on the critical path; all re-expressed as a user-configurable **node graph** (textproto; MAIN/BACKGROUND/CAPABILITY edges; fork/join **parallel branches** — diverse-lens exploration with all/any/quorum joins and compare/synthesize merges; `DescribeNodeTypes` schema registry sized for a future Flutter drag-drop editor). Weighs five architectures against pi/hermes/opencode/codex + LangGraph/AutoGen/ComfyUI prior art. **Design / pre-implementation** |
-| [`security-hardening/`](design/security-hardening/README.md) | **Security hardening**: the implementation plan for the gap analysis's P0 items — enterprise login (generic OIDC with per-issuer profiles, Google Workspace first) exchanged for an **agent-issued JWT** signed with a key from a local **smallstep** CA, a session store in the config store (Postgres) and an `agent_auth_events` audit stream in ClickHouse, a persona-based **RBAC** model with role bindings and self-escalation-proof permission management, one tower `AuthLayer` for gRPC / grpc-web / REST with bearer forwarding and mTLS-attested inter-service chaining, tenant-from-principal with the `local` fallback removed, TLS on every TCP transport, ClickHouse credential + RLS lockdown, and tenant-confined secret references. Increments S1–S17. **Design / pre-implementation** |
-| [`repo-knowledge/`](design/repo-knowledge/README.md) | **Repo knowledge**: the plan for the self-improvement gap analysis — a **deterministic code graph** (no LLM in the graph) extracted by `syn` + `Cargo.toml`, the Go helper and later `rust-analyzer scip`, persisted in **multi-tenant Postgres** per `(tenant, repo, commit)` with stable natural node keys, shared node bodies and snapshot-scoped edges; a `RepoGraphStore` seam, a `PgAst` engine behind `AstBackend`, one `repo_graph` tool with a `question` enum and bounded recursive-CTE queries; a **cited inventory** of crates, seams, tools, cargo features and tests whose LLM-written summaries are rejected unless every citation names a graph key; a repo profile (entry points, schemas, config keys, factory map, debt, metrics, churn, co-change, change recipes, guard funnels, near-duplicates); and consumers: a measure-gated review collector, a fleet index hook off the critical path, an Implement/Design-mode brief and `agent repo brief --goal`. Increments RK-00–RK-18. **Implementation in progress (RK-01 merged: the `RepoGraphStore` seam, key grammar, `GraphBuilder` and the `MemRepoGraph` double + R1–R3 conformance suite in `agent-core` / `agent-testkit`; RK-02 (Postgres) and RK-03 (extractors) next, in parallel; [`PROGRESS.md`](design/repo-knowledge/PROGRESS.md))** |
-| [`rest-openapi/`](design/rest-openapi/README.md) | **REST + OpenAPI surface**: give the gRPC-only API a low-traffic REST + JSON compatibility surface and a published **OpenAPI** contract, while still recommending gRPC. `google.api.http` annotations on every transcodable RPC (client/bidi-streaming excluded); a committed OpenAPI doc generated by `protoc-gen-openapiv2` and drift-gated exactly like `constants.rs` (`gen-openapi`/`openapi-sync`); and the live REST↔JSON path via **Envoy's `grpc_json_transcoder`** on the Envoy already run for grpc-web — **zero Rust code, zero new crate, zero new process**, and no authz bypass (the transcoded call hits the same `AuthLayer`). The Rust-native in-process gateway (`grpc-gw`/`tonic-rest`) is the deferred Envoy-free option. Realises [gap-analysis §4](gap-analysis/README.md). **Design / pre-implementation** |
-| [`campaigns/`](design/campaigns/README.md) | **Campaigns**: objectives (a gap id, an issue, a feature) as a **hierarchical task tree in one Postgres table** per `(tenant, repo)` — adjacency plus a materialized path whose root is the campaign id, depth ≤ 6, ≤ 8 children, paths never move; every transition is one READ COMMITTED transaction with row locks, a `version` compare-and-swap and an audit row (`task_events`, `task_attempts`) written together; a planner that asks a large model one schema-validated question per node ("execute, split, needs info, or reject?") with the repo-knowledge brief attached, fail-closed validation and caps re-checked under the parent lock; approval gates on the first level and on each PR; a driver with the scheduler's shape (`SKIP LOCKED` claims, leases, heartbeat, reaper, per-tenant and global semaphores) that runs leaves in sandboxed worker subprocesses on fresh worktrees and opens draft PRs; a poller that rolls merged PRs up the tree. Table-driven test matrices per component. Increments CP-00–CP-10. **Implementation in progress (CP-01–CP-06 and CP-08 merged: seam, stores, planner, CLI, driver, PR poller, worker, observability — the first autonomous PR path is built and gated by `campaign-e2e`, every `task_events` row mirrored to ClickHouse and the driver scraped as `agent_campaign_*`; [`campaigns.md`](components/campaigns.md))** |
-| [`k8s/`](design/k8s/README.md) | **Kubernetes deployment**: three targets from one repo — **native** (today's Nix-built binaries and containers, kept first-class), **k3s** (single node on l2) and **full Kubernetes** (3-member etcd, HA apiserver). Nix-built images (`streamLayeredImage`, content-hash tags), a per-component Nix manifest renderer with per-target overlays, a committed `rendered/` tree drift-gated by `nix flake check` and synced by **ArgoCD**, **cert-manager** issuing per-role SPIFFE certificates the agent's own mTLS already understands (plus a file-poll reload, since k8s sends no SIGHUP), **Cilium** for CNI, default-deny policy, WireGuard and Hubble but never TLS termination, secrets from local files only, and the bwrap sandbox as a privileged sidecar on a pod-local socket. Patterns adapted from nix-k8s-examples. Increments K0–K9. **Design / pre-implementation** |
-| [`libnix/`](design/libnix/README.md) | **Cargo libnix experiment**: evaluate `nixcloud/cargo`'s libnix backend as an opt-in Cargo path beside the existing Crane build. Starts with `devShells.libnix`, minimal `Cargo.dependencies.nix`, smoke builds for build-script crates, and a measurement protocol comparing normal Cargo + `sccache`, Crane, and libnix for wall time, store use, and failure quality. **Experiment / pre-implementation** |
+### Agent capabilities
+
+| Design | Implemented scope and remaining work | Tracker |
+|---|---|---|
+| [Adaptive cognition](design/adaptive-cognition/README.md) | Task-mode detection/switching, mode-aware compaction, and optional dimensional memory are implemented. | [Status](design/adaptive-cognition/STATUS.md) |
+| [Code graph](design/code-graph/README.md) | Go type-aware graph queries, structural search, and optional SCIP support; query capabilities depend on the engine. See [AST guide](components/ast.md). | [Status](design/code-graph/STATUS.md) |
+| [Code review](design/code-review/README.md) | Grounded review with parallel collectors, static analysis, code structure, synthesis, and risk assessment. | [Status](design/code-review/STATUS.md) |
+| [Cognition graph](design/cognition-graph/README.md) | Consensus, background digests, instant compaction, configurable graph documents, parallel branches, and graph-arena evaluation are implemented. Consensus streaming and error behavior are bounded in the [component guide](components/consensus.md). | [Status](design/cognition-graph/STATUS.md) |
+| [GPU/LLM pool](design/gpu-pool/README.md) | Health-checked selection, capacity/backpressure, and latency-graded routing across local model targets. | [Status](design/gpu-pool/STATUS.md) |
+| [Model router](design/model-router/README.md) | Task-aware routing and live upstream registry are implemented, including capacity, spillover, cost, and budget controls documented in the [router guide](components/router.md). | [Status](design/model-router/STATUS.md) |
+| [Multi-session](design/multi-session/README.md) | Backend/session split, identity propagation, scoped memory, admission, and lifecycle primitives are implemented; the tracker records remaining state-keying and lifecycle wiring work. | [Status](design/multi-session/STATUS.md) |
+| [Prompt library](design/prompts/README.md) | Mode-selected fragments, editable prompts, named personalities, and portal selection are implemented. Upstream prompt sourcing/refresh is pending; bespoke SQLite version history was retired during store convergence. | [Status](design/prompts/STATUS.md) |
+| [Tool-call verification](design/tool-call-verification.md) | Optional correctness checks with allow/revise/deny verdicts, shadow/enforce modes, and recorded outcomes. See the [implemented verifier](components/verifier.md) for defaults and fail-open behavior. | Component guide |
+
+### Workflows and repository knowledge
+
+| Design | Implemented scope and remaining work | Tracker |
+|---|---|---|
+| [Campaigns](design/campaigns/README.md) | Hierarchical Postgres task store, planner, approval gates, CLI, worker-to-draft-PR path, merge polling, and observability. Repo-knowledge integration, campaign gRPC, and webhook follow-ups remain pending. | [Status](design/campaigns/STATUS.md) · [Progress](design/campaigns/PROGRESS.md) |
+| [Review fleet](design/review-fleet/README.md) | Forge polling and Slack triggers, workspaces, reviews, persisted drafts, feedback, approval/posting, and observability are implemented; child-session inheritance remains deferred. See the [fleet guide](components/review-fleet.md). | [Status](design/review-fleet/STATUS.md) · [Progress](design/review-fleet/PROGRESS.md) |
+| [Fleet grounding](design/fleet-grounding/README.md) | Worktree-rooted review inputs, repository indexing, grounding telemetry, and collector skip/failure reporting. | As-built notes in design |
+| [Review analysis depth](design/review-analysis-depth/README.md) | Nix-provisioned Go/Rust analysis, parallel execution, deduplicated/risk-ranked digests, and overflow-gated model summarization. | [Status](design/review-analysis-depth/STATUS.md) |
+| [Review parallelism](design/review-parallelism/README.md) | Experimental latency investigation, including chunked map-reduce proposals. Cross-review concurrency exists; proposed single-review optimizations are not a shipped-feature commitment. | [Evidence and status](design/review-parallelism/STATUS.md) |
+| [Repository knowledge](design/repo-knowledge/README.md) | Graph model/store interface and Postgres storage are implemented (RK-01/02). Extractors, indexing CLI, agent tools, cited inventory, and briefing consumers remain pending. | [Status](design/repo-knowledge/STATUS.md) · [Progress](design/repo-knowledge/PROGRESS.md) |
+
+### Configuration, security, and deployment
+
+| Design | Implemented scope and remaining work | Tracker |
+|---|---|---|
+| [Unified configuration](design/config/README.md) | Bootstrap TOML plus transactional file/SQLite/Postgres config stores, tenant-scoped registries, durable scheduling, and forge/message-transport cards are implemented. The tracker records remaining consolidation work. | [Status](design/config/STATUS.md) |
+| [Multi-tenancy](design/multi-tenancy/README.md) | Optional bubblewrap isolation, tenant-scoped data/configuration, ClickHouse policies and recall, and coverage audits. Org-tenancy integration remains partial; isolation depends on deployment/configuration. | [Status](design/multi-tenancy/STATUS.md) |
+| [Security hardening](design/security-hardening/README.md) | OIDC/JWT login, RBAC, sessions, TLS/mTLS, auth audit, secret confinement, CLI/browser/desktop sign-in, credential reload, and portal Access controls are implemented. | [Status](design/security-hardening/STATUS.md) |
+| [Forge authorization](design/forge-auth/README.md) | Optional GitHub App API-token minting and tenant installation-registry CRUD are implemented. Mint authority still comes from the operator allowlist; verified onboarding, clone credential injection, and the webhook receiver remain pending. | [Status](design/forge-auth/STATUS.md) |
+| [Kubernetes deployment](design/k8s/README.md) | Nix images, renderer/GitOps, k3s deployment, certificate reload, and SPIFFE identity are implemented (K0–K5). Cluster edge/portal, sandbox sidecar, observability cut-over, and full HA target validation remain pending (K6–K9). | [Status](design/k8s/STATUS.md) |
+| [REST + OpenAPI](design/rest-openapi/README.md) | Implemented annotations, generated OpenAPI contract, Envoy transcoding to the same authenticated gRPC handlers, integration checks, and benchmarks. gRPC remains primary. | [Status](design/rest-openapi/STATUS.md) |
+
+### Operations, portal, and evaluation
+
+| Design | Implemented scope and remaining work | Tracker |
+|---|---|---|
+| [Doctor](design/doctor/README.md) | Implemented `agent doctor` CLI and fleet `Preflight` RPC, including dependency and authentication probes. | Design and implementation notes |
+| [Observability dimensions](design/observability/README.md) | Tenant/repository attribution across metrics, spans, and history, with explicit label-cardinality rules and metric/span censuses. | [Status](design/observability/STATUS.md) |
+| [Portal](design/portal/README.md) | Implemented Flutter launcher, live agent view, prompts/personalities, Settings, Router, graph editor, review fleet, sign-in, and Access management. Later tracks extend the original portal design. | [Status](design/portal/STATUS.md) |
+| [Portal GUI testing](design/portal-gui-testing/README.md) | Widget/contract checks, live integration harnesses, reports, performance tracking, and Envoy instrumentation. | [Status](design/portal-gui-testing/STATUS.md) |
+| [Load testing](design/loadtest/README.md) | Admission/backpressure contract, service conformance/stress harnesses, full-loop concurrency, and wire-load measurements are implemented. | [Status](design/loadtest/STATUS.md) |
+| [Cargo libnix experiment](design/libnix/README.md) | Opt-in libnix Cargo pin, development shell, dependency mapping, and smoke runner are implemented. Evaluation is ongoing; Crane remains the default build. | [Status](design/libnix/STATUS.md) · [Evaluation](design/libnix/EVALUATION.md) · [Feedback](design/libnix/FEEDBACK.md) |
+| [Tokenization cache](design/tokenization-cache.md) | Deferred idea: memoize token counts behind a tokenizer decorator. | Design only |
 
 ## The parity program
 
-Fifty per-feature specs in [`parity/`](parity/README.md). Each was written by
-reading the corresponding implementation **and its test suite** in the peer
-harnesses — pi, hermes-agent, opencode, and (for specs 31–50) **codex**, the
-~130-crate Rust agent that is by far the deepest peer — then laying out an
-`#[rstest]` plan intended to match them, so each spec doubles as an honest record of
-where the peers were ahead.
+The [parity specifications](parity/README.md) record feature designs and test plans
+informed by pi, hermes-agent, opencode, and codex. Peer comparisons are dated source
+snapshots, not current capability rankings.
 
-Specs **01–30** are shipped; specs **31–50** are the **codex-driven depth** round —
-design-of-record only, not yet built. They are design-of-record: written before
-implementation, and the status table in [`parity/README.md`](parity/README.md)
-tracks which shipped, which are partial, and what remains. The accumulated open
-follow-ups are at the foot of that page.
+Specs 01–30 cover the original feature set; specs 31–50 describe deeper follow-ups.
+Some related capabilities have since landed through other tracks (for example,
+`agent doctor` and cross-session recall), so the parity checklist alone is not a
+complete implementation inventory. Use the component guides and the track summaries
+above for available behavior; the parity index retains the original requirements
+and accumulated follow-ups.
 
 ## Conventions
 
