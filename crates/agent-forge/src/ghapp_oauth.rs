@@ -1,17 +1,34 @@
-//! GitHub App **install-time user-OAuth** ownership verification (forge-auth F5).
+//! GitHub App **install-time user-OAuth** installation-access check (forge-auth F5).
 //!
 //! F4b established that a per-tenant install row is *tenant-self-asserted*: any tenant
 //! may `put` any `installation_id` (shape-validated, never ownership-validated), so the
-//! mint gate must not trust a stored row until the tenant has **proven it owns** the
-//! installation. This module is that proof primitive.
+//! mint gate must not trust a stored row until the tenant has **proven its claim** to the
+//! installation. This module is the user-OAuth half of that proof.
 //!
 //! The mechanism is the canonical GitHub App onboarding flow with "Request user
 //! authorization (OAuth) during installation" enabled. The install callback hands us a
-//! one-time `code`; we exchange it for a short-lived *user-to-server* token, call
-//! `GET /user/installations`, and check that the installation in question is one that
-//! user can administer. Ownership is proven **inline, per install** — there is no
-//! persistent tenant↔GitHub-account linkage to maintain (and account login here is
-//! generic OIDC, which carries no GitHub identity).
+//! one-time `code`; we exchange it for a short-lived *user-to-server* token and call
+//! `GET /user/installations` to learn which installations that user can reach.
+//!
+//! ## What this proves — and, crucially, what it does NOT
+//!
+//! `GET /user/installations` returns the installations the authenticated user has
+//! **`:read`/`:write`/`:admin`** access to — *access*, **not ownership/admin**. So a
+//! positive result here means "this user can reach this installation", which is a
+//! **necessary input to** the ownership decision, **not the whole of it**. Treating mere
+//! membership as ownership would be a cross-tenant IDOR: e.g. Org X installed the app
+//! (owned by tenant A); Bob, a read-only member of Org X and also a SaaS user (tenant B),
+//! completes OAuth — Org X's installation appears in *his* `/user/installations`, so a
+//! naive consumer would let Bob bind tenant A's installation into tenant B and mint
+//! tokens for Org X's repos.
+//!
+//! **The consumer (forge-auth F5c) MUST close that gap** before it binds an installation
+//! to a tenant and unions it into the mint gate — by requiring that the installation was
+//! **just created in this very onboarding flow** (creating an installation requires being
+//! an org owner/admin, so a fresh install implies admin) and/or by an explicit admin/owner
+//! check (cross-check the App-JWT `GET /app/installations/{id}` → `account`, then verify
+//! the user's admin role on that account). This primitive deliberately stops at access and
+//! leaves that gate to F5c; it never, by itself, authorises minting.
 //!
 //! Security discipline mirrors [`crate::ghapp`] and [`crate::http`] — the model is
 //! untrusted and a leaked secret or token goes straight to it:
@@ -21,7 +38,7 @@
 //!   response body can echo the request), never a secret and never the raw id.
 //! * **Fail closed.** A non-2xx, a `{"error":…}` token-exchange body (GitHub returns
 //!   HTTP 200 for a bad/used code), or a missing `access_token` is an error — never a
-//!   silent "ownership confirmed".
+//!   silent "access confirmed".
 //! * **Retries go through `agent-retry`** (429/5xx + a rate-limited 403, honouring
 //!   `Retry-After`); a 4xx is permanent and is not hammered.
 //! * The **installation id is validated** ([`agent_core::valid_installation_id`], the
@@ -31,7 +48,8 @@
 //!   so an unbounded `rel="next"` chain cannot spin us forever.
 //!
 //! This slice is the primitive only: it has **no consumer** (the install-callback
-//! endpoint that calls it, and the verified gate union, are later F5 slices).
+//! endpoint that calls it, adds the admin/ownership gate above, and performs the verified
+//! gate union, is a later F5 slice).
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -42,15 +60,18 @@ use crate::http::{next_page_from_link, MAX_BODY_BYTES};
 
 /// How many pages of `/user/installations` we will walk before giving up (DoS bound).
 /// At [`PER_PAGE`] per page this covers far more installations than any real user has.
-const MAX_OWNERSHIP_PAGES: u32 = 10;
+const MAX_INSTALL_PAGES: u32 = 10;
 /// Page size requested from `/user/installations` (GitHub caps this at 100).
 const PER_PAGE: u32 = 100;
 
-/// Proves, via install-time user OAuth, that the user who completed an App install
-/// administers a given installation. One per process is enough; every method is
-/// `&self`. Holds the operator OAuth client credentials; the client secret is a
-/// [`Secret`] and never leaks through `Debug` (this type intentionally has none).
-pub struct InstallationOwnershipVerifier {
+/// Checks, via install-time user OAuth, which installations the user who completed an App
+/// install can **reach** (`:read`/`:write`/`:admin` per `GET /user/installations`). Access
+/// is a *necessary input* to the ownership decision, **not proof of it** — see the module
+/// docs; the F5c consumer adds the admin/ownership gate before trusting the result. One
+/// per process is enough; every method is `&self`. Holds the operator OAuth client
+/// credentials; the client secret is a [`Secret`] and never leaks through `Debug` (this
+/// type intentionally has none).
+pub struct UserInstallationAccess {
     client: reqwest::Client,
     /// User-OAuth web host, e.g. `https://github.com` (GHES: `https://HOST`). The
     /// token *exchange* lives here, NOT on the API host.
@@ -64,7 +85,7 @@ pub struct InstallationOwnershipVerifier {
     retry: agent_retry::RetryPolicy,
 }
 
-impl InstallationOwnershipVerifier {
+impl UserInstallationAccess {
     /// Build a verifier. `client_secret` is the already-resolved OAuth client secret
     /// (the runtime resolves it from `[github_app] client_secret_ref`).
     pub fn new(
@@ -97,7 +118,9 @@ impl InstallationOwnershipVerifier {
         self
     }
 
-    /// The set of installation ids the user who presented `code` can administer.
+    /// The set of installation ids the user who presented `code` can **reach**
+    /// (`:read`/`:write`/`:admin` per `GET /user/installations`) — access, not ownership
+    /// (see the module docs; the F5c consumer adds the admin gate).
     ///
     /// Exchanges `code` for a user token, then walks `GET /user/installations`
     /// (page-capped), keeping only well-formed ids. Fails closed on any error.
@@ -105,7 +128,7 @@ impl InstallationOwnershipVerifier {
         let token = self.exchange_code(code).await?;
         let mut out = BTreeSet::new();
         let mut page = 1u32;
-        for _ in 0..MAX_OWNERSHIP_PAGES {
+        for _ in 0..MAX_INSTALL_PAGES {
             let (items, next) = self.list_page(&token, page).await?;
             for it in &items {
                 // The id GitHub echoes back is untrusted: re-validate before it can
@@ -132,11 +155,13 @@ impl InstallationOwnershipVerifier {
         Ok(out)
     }
 
-    /// Does the user who presented `code` administer `installation_id`?
+    /// Can the user who presented `code` **reach** `installation_id`
+    /// (`:read`/`:write`/`:admin`)? This is *access*, **not** an ownership/admin proof —
+    /// the F5c consumer MUST gate on admin/fresh-install before binding (module docs).
     ///
     /// The id shape is validated **first**, so a hostile id (traversal, over-length)
     /// is rejected before any network call and never reaches a URL.
-    pub async fn administers(&self, code: &str, installation_id: &str) -> Result<bool> {
+    pub async fn user_can_access(&self, code: &str, installation_id: &str) -> Result<bool> {
         if !valid_installation_id(installation_id) {
             return Err(Error::Repo(
                 "github app oauth: invalid installation id".into(),
@@ -394,8 +419,8 @@ mod tests {
         )
     }
 
-    fn verifier(base: &str, max_retries: u32) -> InstallationOwnershipVerifier {
-        InstallationOwnershipVerifier::new(
+    fn verifier(base: &str, max_retries: u32) -> UserInstallationAccess {
+        UserInstallationAccess::new(
             "Iv1.testclientid".to_string(),
             &Secret::new("shhh-client-secret-value"),
             base.to_string(),
@@ -419,20 +444,20 @@ mod tests {
             .count()
     }
 
-    // --- administers / user_installation_ids ----------------------------------
+    // --- user_can_access / user_installation_ids ----------------------------------
 
     #[tokio::test]
-    async fn positive_user_administers_installation() {
+    async fn positive_user_can_access_installation() {
         let (base, _) = spawn(exchange_ok(), vec![installs(&["42", "99"])]);
         let v = verifier(&base, 0);
-        assert!(v.administers("good-code", "42").await.unwrap());
+        assert!(v.user_can_access("good-code", "42").await.unwrap());
     }
 
     #[tokio::test]
     async fn positive_installation_on_second_page() {
         let (base, hits) = spawn(exchange_ok(), vec![installs(&["1"]), installs(&["42"])]);
         let v = verifier(&base, 0);
-        assert!(v.administers("good-code", "42").await.unwrap());
+        assert!(v.user_can_access("good-code", "42").await.unwrap());
         assert_eq!(list_hits(&hits), 2, "walked to the second page");
     }
 
@@ -440,7 +465,7 @@ mod tests {
     async fn negative_user_does_not_administer() {
         let (base, _) = spawn(exchange_ok(), vec![installs(&["1", "2"])]);
         let v = verifier(&base, 0);
-        assert!(!v.administers("good-code", "42").await.unwrap());
+        assert!(!v.user_can_access("good-code", "42").await.unwrap());
     }
 
     #[tokio::test]
@@ -450,7 +475,7 @@ mod tests {
             vec![installs(&["42"])],
         );
         let v = verifier(&base, 0);
-        assert!(v.administers("stale-code", "42").await.is_err());
+        assert!(v.user_can_access("stale-code", "42").await.is_err());
         // Failed exchange ⇒ we never list installations.
         assert_eq!(list_hits(&hits), 0);
     }
@@ -462,7 +487,7 @@ mod tests {
             vec![installs(&["42"])],
         );
         let v = verifier(&base, 3);
-        assert!(v.administers("good-code", "42").await.is_err());
+        assert!(v.user_can_access("good-code", "42").await.is_err());
         // 1 initial + 3 retries = 4 exchange attempts, then fail closed; no listing.
         assert_eq!(hits.lock().unwrap().len(), 4);
         assert_eq!(list_hits(&hits), 0);
@@ -472,19 +497,19 @@ mod tests {
     async fn boundary_empty_installations() {
         let (base, _) = spawn(exchange_ok(), vec![installs(&[])]);
         let v = verifier(&base, 0);
-        assert!(!v.administers("good-code", "42").await.unwrap());
+        assert!(!v.user_can_access("good-code", "42").await.unwrap());
     }
 
     #[tokio::test]
     async fn boundary_pagination_cap() {
-        // 12 pages, none holding 42; the walk must stop at MAX_OWNERSHIP_PAGES.
+        // 12 pages, none holding 42; the walk must stop at MAX_INSTALL_PAGES.
         let pages: Vec<String> = (0..12).map(|_| installs(&["1"])).collect();
         let (base, hits) = spawn(exchange_ok(), pages);
         let v = verifier(&base, 0);
-        assert!(!v.administers("good-code", "42").await.unwrap());
+        assert!(!v.user_can_access("good-code", "42").await.unwrap());
         assert_eq!(
             list_hits(&hits),
-            MAX_OWNERSHIP_PAGES as usize,
+            MAX_INSTALL_PAGES as usize,
             "page walk is capped"
         );
     }
@@ -496,7 +521,7 @@ mod tests {
             vec![installs(&["42"])],
         );
         let v = verifier(&base, 0);
-        assert!(v.administers("good-code", "42").await.is_err());
+        assert!(v.user_can_access("good-code", "42").await.is_err());
     }
 
     #[rstest]
@@ -508,7 +533,7 @@ mod tests {
     async fn adversarial_bad_installation_id_rejected_before_any_request(#[case] id: &str) {
         let (base, hits) = spawn(exchange_ok(), vec![installs(&["1"])]);
         let v = verifier(&base, 0);
-        assert!(v.administers("good-code", id).await.is_err());
+        assert!(v.user_can_access("good-code", id).await.is_err());
         // Rejected pre-flight: no exchange, no listing — the id never reached a URL.
         assert_eq!(hits.lock().unwrap().len(), 0);
     }
@@ -538,7 +563,7 @@ mod tests {
         );
         let v = verifier(&base, 1);
         let err = v
-            .administers("super-secret-code", "42")
+            .user_can_access("super-secret-code", "42")
             .await
             .expect_err("fails closed");
         let msg = format!("{err:?}");
@@ -558,6 +583,6 @@ mod tests {
         let huge = format!(r#"{{"total_count":1,"installations":[{{"id":42,"pad":"{filler}"}}]}}"#);
         let (base, _) = spawn(exchange_ok(), vec![huge]);
         let v = verifier(&base, 0);
-        assert!(v.administers("good-code", "42").await.is_err());
+        assert!(v.user_can_access("good-code", "42").await.is_err());
     }
 }

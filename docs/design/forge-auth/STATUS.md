@@ -126,9 +126,15 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   tenant JWT/`VerifiedIdentity` nor any store records a GitHub login/id. So ownership is instead proven
   **inline per install** via the canonical pattern: the GitHub App enables "Request user authorization
   during installation," the install callback returns a one-time `code`, and
-  `agent_forge::ghapp_oauth::InstallationOwnershipVerifier` (behind `forge-ghapp`) exchanges it for a
-  user-to-server token, walks `GET /user/installations` (page-capped), and asserts the installation is
-  one that user administers — no persistent GitHub-account linkage to maintain. Mirrors the F2 minter's
+  `agent_forge::ghapp_oauth::UserInstallationAccess` (behind `forge-ghapp`) exchanges it for a
+  user-to-server token and walks `GET /user/installations` (page-capped) to learn which installations
+  that user can **reach**. **Security note (review-driven):** `/user/installations` reports installations
+  the user has `:read`/`:write`/`:admin` on — *access*, **not ownership** — so this primitive is a
+  *necessary input* to the ownership decision, **not the whole of it**; the F5c consumer MUST add the
+  admin/ownership gate (require the install was just created in this flow — creating one needs org
+  owner/admin — and/or cross-check the App-JWT `GET /app/installations/{id}` account + the user's admin
+  role) before binding an installation to a tenant, or a mere read-only org member could bind another
+  tenant's installation (cross-tenant IDOR). No persistent GitHub-account linkage to maintain. Mirrors the F2 minter's
   discipline exactly (`agent-retry` 429/5xx + rate-limited-403, `MAX_BODY_BYTES` bound, status-only
   errors that never echo the `code`/client-secret/user-token, `agent_core::valid_installation_id` on
   every id). New operator OAuth-client credentials `client_id` + `client_secret_ref` on `[github_app]`
