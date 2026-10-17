@@ -77,6 +77,7 @@ let
     ${seamConst "ROLE" g.role}
     ${seamConst "FORGE_REGISTRY" g.forge_registry}
     ${seamConst "TRANSPORT_REGISTRY" g.transport_registry}
+    ${seamConst "GITHUB_INSTALL_REGISTRY" g.github_install_registry}
 
     /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
     /// session registry + a driving `AgentSessionService`).

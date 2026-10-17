@@ -116,6 +116,8 @@ pub struct Config {
     #[serde(default)]
     pub transport_registry: TransportRegistryCfg,
     #[serde(default)]
+    pub github_install_registry: GithubInstallRegistryCfg,
+    #[serde(default)]
     pub campaign: CampaignCfg,
     /// `[github_app]`: GitHub App server credentials used to MINT installation tokens
     /// for `ghapp:<installation_id>` forge references (forge-auth F2). Absent ⇒ no App
@@ -295,6 +297,40 @@ impl Default for ForgeRegistryCfg {
 
 fn default_forge_registry_file() -> String {
     ".agent/forges.json".to_string()
+}
+
+/// The `[github_install_registry]` block (forge-auth F4/F5b): where the per-tenant
+/// GitHub-App **install rows** live, served by `--serve-github-install-registry`.
+/// Empty `store` ⇒ no install registry is opened, so this is a no-op until an
+/// operator opts in. A row is tenant-self-asserted (shape-validated, never
+/// ownership-validated), so opening this store never authorizes a `ghapp:` mint:
+/// that gate stays on the operator `[github_app] installations` allowlist.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct GithubInstallRegistryCfg {
+    /// Install-row backend: `"file"` | `"postgres"` (feature `forge-registry-postgres`)
+    /// | `""` (off, the default). Empty ⇒ no store is opened.
+    #[serde(default)]
+    pub store: String,
+    /// JSON row-bundle path (`file` backend only). Tilde-expanded.
+    #[serde(default = "default_github_install_registry_file")]
+    pub file: String,
+}
+
+impl Default for GithubInstallRegistryCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_github_install_registry_file(),
+        }
+    }
+}
+
+fn default_github_install_registry_file() -> String {
+    ".agent/github_installs.json".to_string()
 }
 
 /// The `[transport_registry]` block (config C37 / D2): where the message-transport
@@ -2974,6 +3010,9 @@ pub struct GrpcCfg {
     /// The transport-card seam (`--serve-transport-registry`, config C37 / D2).
     #[serde(default)]
     pub transport_registry: GrpcSeamCfg,
+    /// The GitHub-App install-row seam (`--serve-github-install-registry`, forge-auth F5b).
+    #[serde(default)]
+    pub github_install_registry: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
@@ -4850,6 +4889,7 @@ impl Config {
             role: RoleCfg::default(),
             forge_registry: ForgeRegistryCfg::default(),
             transport_registry: TransportRegistryCfg::default(),
+            github_install_registry: GithubInstallRegistryCfg::default(),
             campaign: CampaignCfg::default(),
             github_app: None,
             auth: AuthCfg::default(),

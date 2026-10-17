@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F2b + the rest of F5 + F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F2b + F5c/F5d + F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -22,7 +22,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
-| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService`. **F5c**: install-callback endpoint + verified snapshot feed + gate union. **F5d**: portal UI. | 🟡 |
+| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c**: install-callback endpoint + verified snapshot feed + gate union. **F5d**: portal UI. | 🟡 |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
@@ -41,7 +41,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   Full four-class + `adversarial_` parse table (traversal / Unicode-digit / CRLF / over-cap) plus
   resolver and provider-reject tests.
 
-- **F2 (PR #TBD):** the `InstallationTokenMinter` (`crates/agent-forge/src/ghapp.rs`, new opt-in
+- **F2 (PR #627):** the `InstallationTokenMinter` (`crates/agent-forge/src/ghapp.rs`, new opt-in
   `forge-ghapp` feature — NOT in default `forge`, matching the `forge-gitea`/`forge-bitbucket` precedent).
   Signs an App JWT (RS256 over `app_id` via `jsonwebtoken` v9 over `ring`; the RUSTSEC-banned `rsa` crate
   is **not** used), `POST /app/installations/{id}/access_tokens` through `agent-retry` (429/5xx + 403
@@ -57,7 +57,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   `tiny_http`-mocked, 26 cases incl. `adversarial_`), B (`GithubAppCfg::validate`, 12 + adversarial),
   C (mint-aware resolver wiring, 5).
 
-- **F3 (PR #TBD):** the webhook credential. Added `webhook_secret_ref` to the bootstrap `[github_app]` config
+- **F3 (PR #629):** the webhook credential. Added `webhook_secret_ref` to the bootstrap `[github_app]` config
   (`GithubAppCfg`, `crates/agent-runtime/src/config.rs`) — **optional**, `env:`/`file:` only (a `ghapp:` mint or an
   inline raw secret is rejected; the error never echoes the value, reusing `ApiKeyRef::parse`), so the
   `app_id` + `private_key_ref` (F2) + webhook `secret_ref` triple is now complete. Front-loaded the one
@@ -117,7 +117,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   tamper-fails-closed), and the `RefreshingInstalls` decorator (bind/unbind scoped to caller tenant,
   rejected-write-no-bind).
 
-- **F5a (PR #TBD):** the install-time user-OAuth **ownership-verification primitive** — the proof F4b
+- **F5a (PR #632):** the install-time user-OAuth **ownership-verification primitive** — the proof F4b
   deferred, the thing that makes a tenant-self-asserted install row trustworthy. **Design correction
   recorded here:** the design-of-record ([`README.md`](README.md)) assumed the ownership cross-check
   could compare an installation against "the tenant's **OAuth-linked GitHub account**," implying
@@ -146,6 +146,26 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   were previously only compiled, never executed. Tables: A (`administers`/`user_installation_ids`,
   `tiny_http`-mocked, four-class + `adversarial_` traversal/over-len/malformed-echo/secret-not-in-error/
   huge-body/pagination-cap), B (`GithubAppCfg::validate` OAuth creds).
+
+- **F5b (PR #634):** serve-mounts the F4a install registry live — pure transport wiring, mirroring the
+  `ForgeRegistryService` serve path. New seam `--serve-github-install-registry`
+  (`agent.v1.GithubInstallRegistryService`, also hosted by `--serve-all`) on endpoint constant
+  `GITHUB_INSTALL_REGISTRY` (port 50090 / metrics 9640 / `github_install_registry.sock`, `nix/constants.nix`);
+  `[github_install_registry] store = "" | "file" | "postgres"` (+ `file`, default `.agent/github_installs.json`)
+  and `[grpc.github_install_registry] listen`; `Agent::github_install_registry()`; builder
+  `resolve_github_install_registry` → `install_store_for` (a `PerTenant` wrap under `[tenancy] per_tenant`,
+  else the shared `local` view). Reuses the existing `forge-registry-store` / `forge-registry-postgres`
+  features and the `forge_registry` RBAC resource — no new feature, RBAC resource, or proto change (F4a already
+  compiled the proto and classified the service). **Security invariant held:** the served registry is the
+  PLAIN store — never the F4b `RefreshingInstalls` decorator — and nothing feeds `GHAPP_STORE_BINDINGS` or
+  touches `ghapp_allowed`/`ghapp_installation_allowed`, so a tenant-self-asserted `put` grants no minting
+  authority; the gate stays bootstrap-only until F5c proves ownership. `config/multi-tenant.toml` (and its
+  hermetic `config-roundtrip` mirror) now opens the install registry on Postgres, so the postgres arm is under
+  the selection proof. Tables: the seam flag/name tables (+ `adversarial_` near-miss spellings), the builder
+  resolver over a real file backend (`corner_` default-off + shared view, `positive_` persists across reopen,
+  `adversarial_` cross-tenant list/get/delete through the served registry, `adversarial_` unknown/case/space/
+  traversal store strings, `boundary_` postgres-without-feature), and a `serve-smoke` wire block
+  (Put→Get + `adversarial_` traversal `installation_id` refused).
 
 ## Links
 

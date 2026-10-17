@@ -232,6 +232,21 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists cards onto the shared config store (the [config_store]
 # block supplies the DSN + pool); needs the `transport-registry-postgres` feature (opt-in).
 
+# [github_install_registry] — per-tenant GitHub-App install rows (forge-auth F4/F5b).
+# Each row is `{installation_id, selected_repos[], installed_at}`: a decimal
+# installation id plus the `owner__name` repo slugs that install selected (ids, never
+# a secret). The owning tenant is the store's tenant dimension, not a field. A row is
+# TENANT-SELF-ASSERTED (shape-validated, never ownership-validated), so opening this
+# store NEVER authorizes a `ghapp:` mint — that gate stays on the operator
+# `[github_app] installations` allowlist until the install callback proves ownership.
+# Empty `store` (the default) ⇒ no registry. Edit rows via the
+# GithubInstallRegistryService seam (`agent --serve-github-install-registry`).
+# [github_install_registry]
+# store = "file"                        # "" (off) | "file" | "postgres"
+# file  = ".agent/github_installs.json"   # `file` backend only; tilde-expanded
+# store = "postgres" persists rows onto the shared config store (the [config_store]
+# block supplies the DSN + pool); needs the `forge-registry-postgres` feature (opt-in).
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. Backends (config-selected like every seam):
@@ -1182,6 +1197,14 @@ job         = "agent-seddon"
 # Needs a [transport_registry] store to advertise anything.
 # [grpc.transport_registry]
 # listen = "127.0.0.1:50089"                          # --serve-transport-registry binds this
+#
+# The GitHub-App install-row seam (forge-auth F5b): tenant-scoped CRUD over the
+# per-tenant installation rows. Hosted by `--serve-github-install-registry` /
+# `--serve-all`, or by a running agent when `listen` is set. Default port 50090.
+# Operator facing — keep it loopback / a unix socket. Needs a
+# [github_install_registry] store to advertise anything.
+# [grpc.github_install_registry]
+# listen = "127.0.0.1:50090"                          # --serve-github-install-registry binds this
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

@@ -311,6 +311,20 @@
       metrics_port = 9639;
     };
 
+    # GitHub-App install registry (forge-auth F4/F5b): the
+    # `GithubInstallRegistryService` seam — tenant-scoped CRUD over the per-tenant
+    # GitHub-App installation rows (`installation_id` + `selected_repos`). Rows are
+    # TENANT-SELF-ASSERTED (shape-validated, never ownership-validated), so serving
+    # this seam does NOT authorize minting: the `ghapp:` mint gate stays on the
+    # operator `[github_app] installations` allowlist until the install callback
+    # (F5c) proves ownership. Rows carry ids, never secrets. (`agent
+    # --serve-github-install-registry`.)
+    github_install_registry = {
+      port = 50090;
+      socket = "/tmp/agent-seddon/github_install_registry.sock";
+      metrics_port = 9640;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

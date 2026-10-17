@@ -1700,6 +1700,14 @@ pub async fn build_agent_with_mode(
         Some(r) => agent.with_transport_registry(r),
         None => agent,
     };
+    // The GitHub-App install-row store (forge-auth F5b), held for
+    // `--serve-github-install-registry`. CRUD only — the `ghapp:` mint gate never
+    // reads it (rows are tenant-self-asserted until the F5c callback proves ownership).
+    #[cfg(feature = "forge-registry-store")]
+    let agent = match resolve_github_install_registry(&cfg, &metrics)? {
+        Some(r) => agent.with_github_install_registry(r),
+        None => agent,
+    };
     // The fleet's persisted review-history reader (review-fleet C16), over the same
     // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
     // enabled — with no store there's nothing to read back, and the FSM reviews without
@@ -3817,6 +3825,68 @@ pub(crate) fn resolve_transport_registry(
     Ok(store)
 }
 
+/// Build the `GithubInstallRegistry` view over a shared-store `backend`: a per-tenant
+/// [`PerTenant`] wrap when `per_tenant` is set (config C40/E1), else one shared
+/// `local` view. Mirrors [`forge_store_for`]; both store arms feed it.
+///
+/// Deliberately the PLAIN store — never the `RefreshingInstalls` decorator. A row
+/// here is tenant-self-asserted (shape-validated, never ownership-validated), so
+/// binding a `put` into the `ghapp:` mint snapshot would let a tenant self-grant
+/// minting for an installation it does not own (forge-auth F4b). The gate stays on
+/// the operator bootstrap allowlist until the F5c callback proves ownership.
+#[cfg(feature = "forge-registry-store")]
+fn install_store_for(
+    backend: Arc<dyn agent_config_store::Backend>,
+    per_tenant: bool,
+) -> Arc<dyn agent_core::GithubInstallRegistry> {
+    if per_tenant {
+        let b = backend.clone();
+        Arc::new(crate::tenant::PerTenant::new(move |t| {
+            agent_forge::StoreInstalls::with_tenant(b.clone(), t)
+                .map(|s| Arc::new(s) as Arc<dyn agent_core::GithubInstallRegistry>)
+                .unwrap_or_else(|_| Arc::new(agent_forge::StoreInstalls::new(b.clone())))
+        })) as Arc<dyn agent_core::GithubInstallRegistry>
+    } else {
+        Arc::new(agent_forge::StoreInstalls::new(backend))
+    }
+}
+
+/// Resolve the `[github_install_registry] store` (forge-auth F5b): a `StoreInstalls`
+/// over the selected backend, held for `--serve-github-install-registry`. `""` ⇒ no
+/// store. Tenant-scoped per verified identity when `[tenancy] per_tenant` (config
+/// C40/E1). Opening it never authorizes a mint (see [`install_store_for`]).
+#[cfg(feature = "forge-registry-store")]
+pub(crate) fn resolve_github_install_registry(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<Arc<dyn agent_core::GithubInstallRegistry>>> {
+    let store: Option<Arc<dyn agent_core::GithubInstallRegistry>> =
+        match cfg.github_install_registry.store.as_str() {
+            "" => None,
+            "file" => {
+                let backend: Arc<dyn agent_config_store::Backend> = crate::metered::config_store(
+                    Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                        &cfg.github_install_registry.file,
+                    ))),
+                    metrics.clone(),
+                    "file",
+                );
+                Some(install_store_for(backend, cfg.tenancy.per_tenant))
+            }
+            #[cfg(feature = "forge-registry-postgres")]
+            "postgres" => {
+                let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
+                Some(install_store_for(backend, cfg.tenancy.per_tenant))
+            }
+            #[cfg(not(feature = "forge-registry-postgres"))]
+            "postgres" => anyhow::bail!(
+                "[github_install_registry] store = \"postgres\" requires building with the `forge-registry-postgres` feature"
+            ),
+            other => anyhow::bail!("unknown [github_install_registry] store `{other}`"),
+        };
+    Ok(store)
+}
+
 /// Validate a loaded cognition-graph document, failing closed with a message that
 /// names the first few typed issues. Every store backend must clear this before
 /// the executor sees the document (the executor indexes `doc.nodes[&id]` and
@@ -5701,5 +5771,148 @@ mod synth_secret_tests {
             }
             (got, want) => panic!("got {got:?}, want {want:?}"),
         }
+    }
+}
+
+/// `[github_install_registry] store` resolution (forge-auth F5b): the store
+/// `--serve-github-install-registry` hosts. Drives the PRODUCTION
+/// `resolve_github_install_registry` → `install_store_for` path over a real file
+/// backend, so the served registry — not a test-local twin — is what's proven.
+#[cfg(all(test, feature = "forge-registry-store"))]
+mod github_install_registry_seam_tests {
+    use super::*;
+    use agent_core::{scope, GithubInstall, SessionKey};
+
+    fn install(id: &str) -> GithubInstall {
+        GithubInstall {
+            installation_id: id.into(),
+            selected_repos: vec!["octo__hello".into()],
+            installed_at: 1_700_000_000,
+        }
+    }
+
+    fn file_cfg(dir: &std::path::Path, per_tenant: bool) -> Config {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.github_install_registry.store = "file".into();
+        cfg.github_install_registry.file = dir
+            .join("github_installs.json")
+            .to_string_lossy()
+            .into_owned();
+        cfg.tenancy.per_tenant = per_tenant;
+        cfg
+    }
+
+    fn resolve(cfg: &Config) -> Arc<dyn agent_core::GithubInstallRegistry> {
+        resolve_github_install_registry(cfg, &Metrics::new())
+            .expect("resolves")
+            .expect("a `file` store opens a registry")
+    }
+
+    // corner: the default config opens no store, so the seam stays unmounted.
+    #[test]
+    fn corner_default_store_is_none() {
+        let cfg = crate::config::Config::minimal_for_test();
+        assert!(cfg.github_install_registry.store.is_empty());
+        assert!(resolve_github_install_registry(&cfg, &Metrics::new())
+            .unwrap()
+            .is_none());
+    }
+
+    // positive: a `file` store is a real persisted `StoreInstalls` — a row written
+    // through one resolve is read back through a FRESH resolve over the same file.
+    #[tokio::test]
+    async fn positive_file_store_round_trips_across_reopen() {
+        let dir = agent_testkit::tempdir();
+        let cfg = file_cfg(&dir, false);
+        resolve(&cfg).put(install("12345")).await.unwrap();
+        let got = resolve(&cfg).get("12345").await.unwrap();
+        assert_eq!(got.installation_id, "12345");
+        assert_eq!(got.selected_repos, vec!["octo__hello".to_string()]);
+    }
+
+    // corner: `per_tenant` off is the Tier-0 single shared `local` view — rows
+    // written under different identities land in ONE view (no isolation claimed).
+    #[tokio::test]
+    async fn corner_shared_view_when_per_tenant_off() {
+        let dir = agent_testkit::tempdir();
+        let reg = resolve(&file_cfg(&dir, false));
+        scope(SessionKey::parse("acme", "s1").unwrap(), async {
+            reg.put(install("111")).await.unwrap();
+        })
+        .await;
+        let seen = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+            reg.list().await.unwrap()
+        })
+        .await;
+        assert_eq!(seen.len(), 1, "per_tenant off ⇒ one shared view");
+    }
+
+    // adversarial: with `per_tenant` on, the SERVED registry isolates tenants — a
+    // hostile caller cannot list, get, or delete another tenant's install row even
+    // naming its exact id, and the owner's row survives the attempted delete.
+    #[tokio::test]
+    async fn adversarial_cross_tenant_install_is_invisible() {
+        let dir = agent_testkit::tempdir();
+        let reg = resolve(&file_cfg(&dir, true));
+        scope(SessionKey::parse("acme", "s1").unwrap(), async {
+            reg.put(install("12345")).await.unwrap();
+        })
+        .await;
+        scope(SessionKey::parse("globex", "s1").unwrap(), async {
+            assert!(
+                reg.list().await.unwrap().is_empty(),
+                "list leaks acme's row"
+            );
+            let err = reg
+                .get("12345")
+                .await
+                .expect_err("get must miss")
+                .to_string();
+            assert!(err.contains("not found"), "got: {err}");
+            assert!(
+                !reg.delete("12345").await.unwrap(),
+                "delete must be a no-op"
+            );
+        })
+        .await;
+        let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+            reg.list().await.unwrap()
+        })
+        .await;
+        assert_eq!(acme.len(), 1, "acme's row must survive globex's delete");
+    }
+
+    // negative/adversarial: an unrecognised backend string fails closed at build
+    // rather than silently serving nothing (exact match — no case/space folding).
+    #[rstest::rstest]
+    #[case::negative_unknown_backend("sqlite")]
+    #[case::adversarial_uppercased("FILE")]
+    #[case::adversarial_padded(" file")]
+    #[case::adversarial_traversal("../file")]
+    fn adversarial_unknown_store_bails(#[case] store: &str) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.github_install_registry.store = store.into();
+        let err = match resolve_github_install_registry(&cfg, &Metrics::new()) {
+            Ok(_) => panic!("store `{store}` must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("unknown [github_install_registry] store"),
+            "got: {err}"
+        );
+    }
+
+    // boundary: `postgres` is a known backend but needs its feature; without it the
+    // build fails closed naming the feature, never falling back to another store.
+    #[cfg(not(feature = "forge-registry-postgres"))]
+    #[test]
+    fn boundary_postgres_without_feature_bails() {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.github_install_registry.store = "postgres".into();
+        let err = match resolve_github_install_registry(&cfg, &Metrics::new()) {
+            Ok(_) => panic!("postgres without the feature must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("forge-registry-postgres"), "got: {err}");
     }
 }

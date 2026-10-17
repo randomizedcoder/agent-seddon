@@ -238,6 +238,11 @@ pub struct Agent {
     /// D2): the messaging cards the fleet's trigger watch + progress feed build their
     /// clients from. Not consumed by the loop; hosted over gRPC for runtime CRUD.
     transport_registry: Option<Arc<dyn agent_core::TransportRegistry>>,
+    /// The per-tenant GitHub-App install-row store, held for
+    /// `--serve-github-install-registry` (forge-auth F5b). Hosted over gRPC for runtime
+    /// CRUD only — NOT consulted by the `ghapp:` mint gate, since a row is
+    /// tenant-self-asserted (ownership is unproven until the F5c install callback).
+    github_install_registry: Option<Arc<dyn agent_core::GithubInstallRegistry>>,
     /// The fleet's persisted review-history reader (review-fleet C16), held for
     /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
     /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
@@ -1015,6 +1020,7 @@ impl Agent {
             role_registry: None,
             forge_registry: None,
             transport_registry: None,
+            github_install_registry: None,
             fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -1421,6 +1427,18 @@ impl Agent {
         self
     }
 
+    /// Attach the GitHub-App install-row store (forge-auth F5b), so it can be hosted
+    /// over gRPC (`--serve-github-install-registry`). CRUD only: the `ghapp:` mint gate
+    /// never reads it (rows are tenant-self-asserted until the F5c callback proves
+    /// ownership), so attaching it grants no minting authority.
+    pub fn with_github_install_registry(
+        mut self,
+        r: Arc<dyn agent_core::GithubInstallRegistry>,
+    ) -> Self {
+        self.github_install_registry = Some(r);
+        self
+    }
+
     /// Attach the fleet's persisted review-history reader (review-fleet C16), consulted by
     /// the fleet orchestrator for head-oid dedup + cross-round carry-forward.
     pub fn with_fleet_history(mut self, h: Arc<dyn agent_core::FleetHistory>) -> Self {
@@ -1734,6 +1752,12 @@ impl Agent {
     /// (`--serve-transport-registry`).
     pub fn transport_registry(&self) -> Option<Arc<dyn agent_core::TransportRegistry>> {
         self.transport_registry.clone()
+    }
+
+    /// The GitHub-App install-row store, if `[github_install_registry] store` is
+    /// configured (`--serve-github-install-registry`).
+    pub fn github_install_registry(&self) -> Option<Arc<dyn agent_core::GithubInstallRegistry>> {
+        self.github_install_registry.clone()
     }
 
     /// The review-fleet C18 progress feed (config C37): a [`agent_core::FleetProgress`]
