@@ -163,6 +163,15 @@ the same relationship `ProviderRegistryService` (cards) has with the `LlmProvide
 seam. `token_ref` is an `env:`/`file:` reference, never a raw secret, and never
 echoed on rejection.
 
+A sibling control-plane seam, `agent.v1.GithubInstallRegistryService`
+(`--serve-github-install-registry`, port 50090, `[github_install_registry] store`),
+CRUDs the per-tenant **GitHub-App install rows** (`installation_id` +
+`selected_repos`) of the [forge-auth](../design/forge-auth/README.md) track. It reuses
+the `forge_registry` RBAC resource and is tenant-scoped like the forge cards. A row is
+**tenant-self-asserted** — shape-validated, never ownership-validated — so serving it
+grants **no** `ghapp:` minting authority: the mint gate stays on the operator
+`[github_app] installations` allowlist until the install callback proves ownership.
+
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the
 default build), each via the C36 recipe below:
 - **gitea** (`agent-forge/src/gitea.rs`, `forge-gitea`) — a GitHub-shaped `/api/v1`

@@ -118,6 +118,13 @@ store = "postgres"
 [transport_registry]
 store = "postgres"
 
+# GitHub-App install rows (forge-auth F4/F5b): per-tenant installation registry on
+# Postgres (`--serve-github-install-registry`). CRUD only — a row is tenant-self-
+# asserted, so it never authorizes a `ghapp:` mint (that stays on the operator
+# `[github_app] installations` allowlist until ownership is proven).
+[github_install_registry]
+store = "postgres"
+
 # Campaigns (docs/design/campaigns, CP-04): the `agent campaign …` task tree on
 # Postgres. Opened lazily (no dial until the first verb) over the same
 # `[config_store] dsn_ref`; the schema is applied on the first verb under

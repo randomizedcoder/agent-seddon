@@ -130,6 +130,13 @@ pkgs.writeShellApplication {
     store = "file"
     file  = "$work/.agent/transports.json"
 
+    # A file-backed GitHub-App install-row store, so --serve-all advertises the
+    # GithubInstallRegistry control plane (forge-auth F5b) and the Put→Get roundtrip
+    # below can exercise it over the wire. CRUD only — a row never authorizes a mint.
+    [github_install_registry]
+    store = "file"
+    file  = "$work/.agent/github_installs.json"
+
     # A file-backed durable scheduler (config C2c), so --serve-all advertises the
     # Scheduler control plane over the persistent StoreScheduler and the
     # Schedule->List roundtrip below can exercise it over the wire. 'enabled' wires the
@@ -297,6 +304,40 @@ pkgs.writeShellApplication {
           echo "CONTRACT[$transport]: TransportRegistryService/Get did not return the persisted card" >&2
           [ "$rc" -lt 2 ] && rc=2
         fi
+      fi
+
+      # ---- GitHub-App install control plane: Put→Get roundtrip (forge-auth F5b) ----
+      # Put an install row (decimal installation_id + owner__name repo slugs), then
+      # read it back via Get. Proves the GithubInstallRegistryService seam is truly on
+      # the wire and the row round-trips through the shared store. A row carries ids,
+      # never a secret, and serving it grants no `ghapp:` minting authority.
+      local install_json='{"installation_id":"12345","selected_repos":["octo__hello"],"installed_at":1700000000}'
+      if ! grpcurl -d "$install_json" "''${dial[@]}" \
+          agent.v1.GithubInstallRegistryService.Put >/dev/null 2>"$work/install_put.$transport.err"; then
+        echo "CONTRACT[$transport]: GithubInstallRegistryService/Put round-trip failed" >&2
+        cat "$work/install_put.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local install_got
+        install_got="$(grpcurl -d '{"installation_id":"12345"}' "''${dial[@]}" \
+          agent.v1.GithubInstallRegistryService.Get 2>"$work/install_get.$transport.err" || true)"
+        if ! echo "$install_got" | grep -q 'octo__hello'; then
+          echo "CONTRACT[$transport]: GithubInstallRegistryService/Get did not return the persisted row" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
+      fi
+      # Adversarial: a traversal installation_id is attacker-controlled input — the
+      # served seam must REFUSE it (never persist a path-shaped storage key), and List
+      # must not surface it.
+      if grpcurl -d '{"installation_id":"../12345","selected_repos":[]}' "''${dial[@]}" \
+          agent.v1.GithubInstallRegistryService.Put >/dev/null 2>&1; then
+        echo "CONTRACT[$transport]: GithubInstallRegistryService/Put ACCEPTED a traversal installation_id" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      fi
+      if grpcurl -d '{}' "''${dial[@]}" \
+          agent.v1.GithubInstallRegistryService.List 2>/dev/null | grep -qF '../'; then
+        echo "CONTRACT[$transport]: GithubInstallRegistryService/List surfaced a traversal id" >&2
+        [ "$rc" -lt 2 ] && rc=2
       fi
 
       # ---- Durable scheduler control plane: Schedule→List roundtrip (config C2c) --

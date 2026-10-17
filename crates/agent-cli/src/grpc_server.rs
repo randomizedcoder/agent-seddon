@@ -61,6 +61,7 @@ pub enum Seam {
     Role,
     ForgeRegistry,
     TransportRegistry,
+    GithubInstallRegistry,
     Config,
     SessionStream,
 }
@@ -103,6 +104,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Role,
     Seam::ForgeRegistry,
     Seam::TransportRegistry,
+    Seam::GithubInstallRegistry,
     Seam::Config,
     Seam::SessionStream,
 ];
@@ -375,6 +377,13 @@ const SEAMS: &[SeamInfo] = &[
         endpoint: constants::TRANSPORT_REGISTRY,
     },
     SeamInfo {
+        seam: Seam::GithubInstallRegistry,
+        flag: "--serve-github-install-registry",
+        name: "github-install-registry",
+        service: "agent.v1.GithubInstallRegistryService",
+        endpoint: constants::GITHUB_INSTALL_REGISTRY,
+    },
+    SeamInfo {
         seam: Seam::Config,
         flag: "--serve-config",
         name: "config",
@@ -472,6 +481,7 @@ impl Seam {
             Seam::Role => &cfg.grpc.role.listen,
             Seam::ForgeRegistry => &cfg.grpc.forge_registry.listen,
             Seam::TransportRegistry => &cfg.grpc.transport_registry.listen,
+            Seam::GithubInstallRegistry => &cfg.grpc.github_install_registry.listen,
             Seam::Config => &cfg.grpc.config.listen,
             Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
@@ -751,6 +761,16 @@ fn add_seam_service(
         Seam::TransportRegistry => match agent.transport_registry() {
             Some(r) => (
                 router.add_service(srv::TransportRegistrySvc::new(r).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        // forge-auth F5b: CRUD only. The rows are tenant-self-asserted, so this mount
+        // never feeds the `ghapp:` mint gate — that stays on the operator bootstrap
+        // allowlist until the install callback (F5c) proves ownership.
+        Seam::GithubInstallRegistry => match agent.github_install_registry() {
+            Some(r) => (
+                router.add_service(srv::GithubInstallRegistrySvc::new(r).into_server()),
                 true,
             ),
             None => (router, false),
@@ -1783,10 +1803,19 @@ mod tests {
     #[case::positive_forge("--serve-forge", Some(Seam::Forge))]
     #[case::positive_lsp("--serve-lsp", Some(Seam::Lsp))]
     #[case::positive_episodic("--serve-episodic", Some(Seam::Episodic))]
+    #[case::positive_github_install_registry(
+        "--serve-github-install-registry",
+        Some(Seam::GithubInstallRegistry)
+    )]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
+    #[case::boundary_github_install_registry_prefix("--serve-github-install", None)]
     #[case::adversarial_empty("", None)]
     #[case::adversarial_prefix_only("--serve-", None)]
+    #[case::adversarial_github_install_registry_underscored(
+        "--serve-github_install_registry",
+        None
+    )]
     fn from_flag_cases(#[case] flag: &str, #[case] want: Option<Seam>) {
         assert_eq!(Seam::from_flag(flag), want);
     }
@@ -1798,8 +1827,16 @@ mod tests {
     #[case::positive_pty("pty", Some(Seam::Pty))]
     #[case::positive_forge("forge", Some(Seam::Forge))]
     #[case::positive_provider("provider", Some(Seam::Provider))]
+    #[case::positive_github_install_registry(
+        "github-install-registry",
+        Some(Seam::GithubInstallRegistry)
+    )]
     #[case::negative_unknown("nope", None)]
     #[case::negative_flag_not_name("--serve-sandbox", None)]
+    #[case::corner_forge_registry_is_not_install_registry(
+        "forge-registry",
+        Some(Seam::ForgeRegistry)
+    )]
     #[case::adversarial_empty("", None)]
     #[case::adversarial_whitespace(" sandbox", None)]
     #[case::adversarial_uppercase("Sandbox", None)]
