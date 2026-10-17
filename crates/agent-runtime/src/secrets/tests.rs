@@ -221,9 +221,12 @@ fn adversarial_resolve_ghapp_bad_id_rejected_at_parse() {
 /// an installation the operator bound to it; everything else fails closed. Under
 /// single-operator the operator owns all config, so any id is allowed. The adversarial rows
 /// are the IDOR itself: a tenant naming another tenant's install id, and a substring probe.
+///
+/// Only the **operator-vouched** bootstrap allowlist is a source — the tenant-self-asserted
+/// store snapshot is deliberately NOT consulted (forge-auth F5, behind an ownership proof).
 #[cfg(feature = "forge-ghapp")]
 #[rstest]
-// tenant, requested id, per_tenant, expected-allowed, description
+// tenant, requested id, per_tenant, expected-allowed
 #[case::positive_bound_id_allowed("acme", "123", true, true)]
 #[case::positive_single_operator_any_id("acme", "999", false, true)]
 #[case::positive_single_operator_no_bindings_any_id("ghost", "777", false, true)]
@@ -241,32 +244,74 @@ fn ghapp_allowed_cases(
 ) {
     // acme is bound to 123 + the 20-digit cap id; beta is bound to 456 (the cross-tenant
     // target). A tenant must not reach another tenant's id.
-    let mut bindings = GithubAppBindings::new();
-    bindings.insert(
-        "acme".to_string(),
-        ["123", "99999999999999999999"]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-    );
-    bindings.insert(
-        "beta".to_string(),
-        ["456"].into_iter().map(str::to_string).collect(),
-    );
+    let allowlist = bindings(&[
+        ("acme", &["123", "99999999999999999999"]),
+        ("beta", &["456"]),
+    ]);
     assert_eq!(
-        ghapp_allowed(per_tenant, Some(&bindings), tenant, id),
+        ghapp_allowed(per_tenant, Some(&allowlist), tenant, id),
         allowed,
         "tenant={tenant} id={id} per_tenant={per_tenant}"
     );
 }
 
+/// Build a `GithubAppBindings` from `(tenant, &[id])` pairs.
+#[cfg(feature = "forge-ghapp")]
+fn bindings(rows: &[(&str, &[&str])]) -> GithubAppBindings {
+    rows.iter()
+        .map(|(t, ids)| (t.to_string(), ids.iter().map(ToString::to_string).collect()))
+        .collect()
+}
+
 /// `per_tenant` with **no** bindings installed at all (the fail-closed default): every
-/// tenant mints nothing, so even a plausible id is denied — the IDOR guard holds before
-/// the operator has declared a single binding.
+/// tenant mints nothing, so even a plausible id is denied — the IDOR guard holds before the
+/// operator has declared a single binding.
 #[cfg(feature = "forge-ghapp")]
 #[test]
 fn boundary_ghapp_allowed_no_bindings_denies_under_per_tenant() {
     assert!(!ghapp_allowed(true, None, "acme", "123"));
+    // A present-but-empty allowlist is still a deny (no tenant key).
+    assert!(!ghapp_allowed(
+        true,
+        Some(&GithubAppBindings::new()),
+        "acme",
+        "123"
+    ));
     // …and the same empty state is fully permissive under single-operator.
     assert!(ghapp_allowed(false, None, "acme", "123"));
+}
+
+/// The copy-on-write store-snapshot edits (`with_binding`/`without_binding`) — the F5
+/// building block the `RefreshingInstalls` decorator drives — tested as pure transforms by
+/// inspecting the resulting map directly (the mint gate does not read this snapshot yet, so
+/// the edits are asserted against the map, not through `ghapp_allowed`). Add is idempotent;
+/// remove drops the id and garbage-collects an emptied tenant (a `get(tenant)` miss, not an
+/// empty-set hit — the fail-closed shape F5's reader will rely on), never disturbing another
+/// tenant or id.
+#[cfg(feature = "forge-ghapp")]
+#[test]
+fn ghapp_store_binding_cow_edits() {
+    let has =
+        |m: &GithubAppBindings, t: &str, id: &str| m.get(t).is_some_and(|ids| ids.contains(id));
+    // Add into an empty snapshot creates the tenant entry.
+    let m = with_binding(None, "acme", "123");
+    assert!(has(&m, "acme", "123"));
+    // Add a second id for the same tenant keeps the first.
+    let m = with_binding(Some(&m), "acme", "456");
+    assert!(has(&m, "acme", "123"));
+    assert!(has(&m, "acme", "456"));
+    // Add is idempotent (re-adding changes nothing observable).
+    assert_eq!(with_binding(Some(&m), "acme", "123"), m);
+    // Remove one id leaves the other and never touches a different tenant.
+    let m = with_binding(Some(&m), "beta", "789");
+    let m = without_binding(Some(&m), "acme", "123");
+    assert!(!has(&m, "acme", "123"));
+    assert!(has(&m, "acme", "456"));
+    assert!(has(&m, "beta", "789"));
+    // Removing a tenant's last id drops the tenant entirely (no phantom empty set).
+    let m = without_binding(Some(&m), "acme", "456");
+    assert!(!m.contains_key("acme"), "emptied tenant must be removed");
+    assert!(has(&m, "beta", "789"));
+    // Removing an absent id is a harmless no-op.
+    assert_eq!(without_binding(Some(&m), "acme", "999"), m);
 }

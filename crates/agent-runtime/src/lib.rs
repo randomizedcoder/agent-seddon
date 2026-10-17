@@ -22,6 +22,9 @@ mod fleet_review;
 #[cfg(feature = "git")]
 mod git;
 pub mod hooks;
+/// The GitHub-App mint-gate ↔ install-store refresh decorator (forge-auth F4b).
+#[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
+pub mod install_gate;
 #[cfg(feature = "auth")]
 pub mod login;
 mod metered;

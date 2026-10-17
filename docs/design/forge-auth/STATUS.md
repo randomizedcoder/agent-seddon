@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F3 + F4a built; F2b + F4b + F5–F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F2b + F5–F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -21,7 +21,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2 | Installation-token minter | App JWT → installation token, `agent-retry`, ~55 m cache; wire into the forge-credential resolver (forge **API**). Clone-URL `x-access-token` injection split to **F2b**. | ✅ |
 | F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
-| F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: rewire the mint IDOR gate to consult the store (pending). | 🟡 |
+| F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
 | F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → roster-row write with a `ghapp:` ref | ⬜ |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
@@ -71,7 +71,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   13 cases incl. `adversarial_` wrong-secret / tampered-body / malformed-header / CRLF), B (5 new
   `GithubAppCfg::validate` cases for `webhook_secret_ref`).
 
-- **F4a (PR #TBD):** the per-tenant GitHub-App **install store** data layer — the per-tenant successor to
+- **F4a (PR #630):** the per-tenant GitHub-App **install store** data layer — the per-tenant successor to
   the operator-global `[github_app] installations` bootstrap allowlist. New core card + registry seam
   `GithubInstall { installation_id, selected_repos[], installed_at }` + `GithubInstallRegistry`
   (`crates/agent-core/src/github_install.rs`); the owning tenant is **not** a card field — it is the store's
@@ -91,6 +91,31 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   built and unit-tested; mounting (config + CLI) lands with the increment that serves it live (F5). Tables:
   A (`GithubInstall::validate`, four-class + `adversarial_`), B (`StoreInstalls` CRUD + cross-tenant isolation),
   C (gRPC server identity scoping), plus a `PerTenant` real-store isolation test.
+
+- **F4b (PR #631):** lands the plumbing to let the mint IDOR gate consult the F4a install store **without yet
+  wiring it into the gate** — the store→gate union is held back as unsound. The original F4b unioned the store
+  into `secrets::ghapp_allowed` (a tenant could mint an installation authorized by *either* the operator
+  `[github_app] installations` bootstrap allowlist *or* a row it owns in the store). A security review (HIGH,
+  IDOR) showed that premise is unsound: unlike the operator-vouched bootstrap allowlist, a store row is
+  **tenant-self-asserted** — any tenant with `write:forge_registry` can `put` an install row naming *any*
+  `installation_id` (shape-validated by `valid_installation_id`, never ownership-validated) and thereby
+  self-grant cross-tenant minting authority for an installation it does not own. A store row may authorize
+  minting only once its ownership is **proven** (the GitHub-App installation callback cross-checked via the App
+  JWT against the tenant's OAuth-linked account) — which is **F5**. So the gate (`ghapp_installation_allowed`,
+  called by `registry::mint_or_resolve_tenant_token` + `check_session_forge`, keyed on `row.user`) **stays
+  bootstrap-only** (identical to F2/F4a — zero regression, no new IDOR). What F4b *does* land, as F5 building
+  blocks, documented wired-but-unread: the sync-readable `secrets::GHAPP_STORE_BINDINGS` snapshot + its
+  wholesale/`ghapp_store_bind`/`ghapp_store_unbind` setters (copy-on-write single-id edits); the store enumerator
+  `agent_forge::github_install_bindings` (walks `Backend::tenants`, decodes each row through the validating path
+  so a corrupt row fails closed); and the `RefreshingInstalls` decorator (`crates/agent-runtime/src/install_gate.rs`,
+  binds a persisted `put` / unbinds a `delete` for `current_tenant()`). F5 adds **only** the verified read path
+  (bind from the ownership-verified callback, then union the snapshot into `ghapp_allowed`), not the plumbing.
+  New hermetic gate check `forge-ghapp` **executes** the gate decision + the decorator (the default `test` check
+  builds `forge-ghapp` off, so the authorization decision was previously only compiled). Tables: the
+  `ghapp_allowed` bootstrap matrix (bound/unbound/single-operator + `adversarial_` cross-tenant + substring
+  probe), the copy-on-write snapshot edits, `github_install_bindings` rebuild (+ `adversarial_`
+  tamper-fails-closed), and the `RefreshingInstalls` decorator (bind/unbind scoped to caller tenant,
+  rejected-write-no-bind).
 
 ## Links
 
