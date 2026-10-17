@@ -99,10 +99,31 @@ pub type GithubAppBindings = std::collections::BTreeMap<String, std::collections
 /// installed by the builder alongside the minter. The App private key is a single
 /// operator-global secret, so minting is a **cross-tenant authority**: without this
 /// binding a tenant could name `ghapp:<another tenant's install id>` and mint a token into
-/// that tenant's repos (an IDOR). Enforced only under `per_tenant` (forge-auth F2; the
-/// per-tenant install store F4 supersedes it). `None` ⇒ nothing bound.
+/// that tenant's repos (an IDOR). Enforced only under `per_tenant` (forge-auth F2). This is
+/// the **sole** source the mint gate consults ([`ghapp_allowed`]): it is operator-vouched,
+/// so a tenant cannot self-declare it. `None` ⇒ nothing bound (fail closed under
+/// `per_tenant`). The per-tenant install store is **not** a second source here — see
+/// [`GHAPP_STORE_BINDINGS`] for why that union is deferred to forge-auth F5.
 #[cfg(feature = "forge-ghapp")]
 static GHAPP_BINDINGS: RwLock<Option<Arc<GithubAppBindings>>> = RwLock::new(None);
+
+/// A sync-readable snapshot of the per-tenant install store, maintained as a **building
+/// block** for forge-auth F5 — **deliberately NOT consulted by the mint gate yet.**
+///
+/// F4b originally unioned this into [`ghapp_allowed`], but that is an **IDOR**: unlike the
+/// operator-vouched [`GHAPP_BINDINGS`], a store row is **tenant-self-asserted** (any tenant
+/// with `write:forge_registry` can `put` an install row naming *any* `installation_id`,
+/// which is only shape-validated, never ownership-validated). Treating such a row as mint
+/// authority lets a tenant self-grant minting for an installation it does not own — exactly
+/// the cross-tenant minting [`GHAPP_BINDINGS`] exists to prevent. A store row may authorize
+/// minting **only once its ownership is proven** (the GitHub-App installation callback
+/// cross-checked via the App JWT against the tenant's OAuth-linked account), which lands in
+/// **F5**. Until then the gate reads [`GHAPP_BINDINGS`] alone, and this snapshot — with
+/// [`install_github_app_store_bindings`], [`ghapp_store_bind`]/[`ghapp_store_unbind`] and the
+/// `install_gate::RefreshingInstalls` decorator — stays wired-but-unread, so F5 adds only the
+/// verified read path, not the plumbing. `None` ⇒ no snapshot installed.
+#[cfg(feature = "forge-ghapp")]
+static GHAPP_STORE_BINDINGS: RwLock<Option<Arc<GithubAppBindings>>> = RwLock::new(None);
 
 /// Install the tenant→installation-id bindings (the builder does, from `[github_app]`).
 #[cfg(feature = "forge-ghapp")]
@@ -112,12 +133,77 @@ pub fn install_github_app_bindings(bindings: GithubAppBindings) {
         .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(bindings));
 }
 
+/// Replace the store-sourced binding snapshot wholesale — an F5 building block (see
+/// [`GHAPP_STORE_BINDINGS`]; the gate does not read this snapshot yet). F5's builder will
+/// call this at startup with the full tenant→ids map rebuilt from the install store (via
+/// `agent_forge::github_install_bindings`), once store rows are ownership-verified.
+#[cfg(feature = "forge-ghapp")]
+pub fn install_github_app_store_bindings(bindings: GithubAppBindings) {
+    *GHAPP_STORE_BINDINGS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(bindings));
+}
+
+/// Add one `(tenant, id)` to the store snapshot, copy-on-write so a reader sees a stable
+/// `Arc` without holding the write lock — an F5 building block (the gate does not read the
+/// snapshot yet; see [`GHAPP_STORE_BINDINGS`]). Driven by the `RefreshingInstalls` decorator
+/// after a `put` persists; made live only on F5's verified path.
+#[cfg(feature = "forge-ghapp")]
+pub fn ghapp_store_bind(tenant: &str, id: &str) {
+    let mut guard = GHAPP_STORE_BINDINGS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    *guard = Some(Arc::new(with_binding(guard.as_deref(), tenant, id)));
+}
+
+/// Remove one `(tenant, id)` from the store snapshot, copy-on-write — the inverse of
+/// [`ghapp_store_bind`] and likewise an F5 building block (the gate does not read the
+/// snapshot yet). Driven by the `RefreshingInstalls` decorator after a `delete` persists.
+#[cfg(feature = "forge-ghapp")]
+pub fn ghapp_store_unbind(tenant: &str, id: &str) {
+    let mut guard = GHAPP_STORE_BINDINGS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    *guard = Some(Arc::new(without_binding(guard.as_deref(), tenant, id)));
+}
+
+/// `base` with `(tenant, id)` added — a pure copy-on-write transform so the single-id store
+/// edits are tested without the global snapshot. Adding an id already present is a no-op.
+#[cfg(feature = "forge-ghapp")]
+fn with_binding(base: Option<&GithubAppBindings>, tenant: &str, id: &str) -> GithubAppBindings {
+    let mut next = base.cloned().unwrap_or_default();
+    next.entry(tenant.to_string())
+        .or_default()
+        .insert(id.to_string());
+    next
+}
+
+/// `base` with `(tenant, id)` removed — the pure inverse of [`with_binding`]. A tenant whose
+/// last id is removed is dropped entirely, so an empty tenant set never lingers as a
+/// phantom (and a `get(tenant)` miss, not an empty-set hit, is the fail-closed shape).
+#[cfg(feature = "forge-ghapp")]
+fn without_binding(base: Option<&GithubAppBindings>, tenant: &str, id: &str) -> GithubAppBindings {
+    let mut next = base.cloned().unwrap_or_default();
+    if let Some(ids) = next.get_mut(tenant) {
+        ids.remove(id);
+        if ids.is_empty() {
+            next.remove(tenant);
+        }
+    }
+    next
+}
+
 /// The authorization decision, pure over its inputs so it is tested directly (the
 /// `is_some_and` global-reader wrapper below is a thin shim). Under single-operator
 /// (`per_tenant` off) the operator owns all config, so any id is allowed — mirroring how
-/// `file:`/`env:` refs resolve unconfined there. Under `per_tenant`, only an id the
-/// operator bound to this tenant is allowed; anything else fails closed. This closes the
-/// cross-tenant-minting IDOR in the window before the per-tenant install store (F4).
+/// `file:`/`env:` refs resolve unconfined there. Under `per_tenant`, only an id the operator
+/// bound to this tenant is allowed; anything else fails closed. This closes the
+/// cross-tenant-minting IDOR: the binding is **operator-vouched** ([`GHAPP_BINDINGS`]), so a
+/// tenant reaches only installations the operator bound to *its own* tenant key.
+///
+/// The per-tenant install store is **not** a source here. A store row is tenant-self-asserted
+/// (see [`GHAPP_STORE_BINDINGS`]), so unioning it would reopen the very IDOR this guards;
+/// consulting the store is deferred to forge-auth F5, behind an ownership proof.
 #[cfg(feature = "forge-ghapp")]
 fn ghapp_allowed(
     per_tenant: bool,
@@ -134,7 +220,8 @@ fn ghapp_allowed(
 /// May `tenant` mint installation `id` under the installed policy + bindings? The real
 /// runtime gate (`registry::mint_or_resolve_tenant_token` and `check_session_forge` call
 /// exactly this), delegating to the pure [`ghapp_allowed`] so the decision under test is
-/// the decision that runs.
+/// the decision that runs. Consults only the operator-vouched bootstrap allowlist
+/// ([`GHAPP_BINDINGS`]); the tenant-self-asserted store snapshot is not read (forge-auth F5).
 #[cfg(feature = "forge-ghapp")]
 pub fn ghapp_installation_allowed(tenant: &str, id: &str) -> bool {
     let bindings = GHAPP_BINDINGS

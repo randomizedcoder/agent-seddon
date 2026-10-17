@@ -61,4 +61,4 @@ pub use store::{StoreForges, DEFAULT_TENANT};
 // `StoreInstalls` shares the same `local` default-tenant convention as `StoreForges`
 // (re-exported above as `DEFAULT_TENANT`), so only the store type is re-exported here.
 #[cfg(feature = "forge-store")]
-pub use github_install_store::StoreInstalls;
+pub use github_install_store::{github_install_bindings, StoreInstalls};

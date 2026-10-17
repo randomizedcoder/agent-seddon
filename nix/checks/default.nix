@@ -126,6 +126,11 @@ in
   # in-memory config store (feature `forge-store`, off by default). The config-
   # architecture C36 forge-card twin of registry-store. docs/design/config/09-increments.md.
   forge-registry-store = craneCheck ./forge-registry-store.nix { inherit cargoArtifacts; };
+  # Executes the GitHub-App mint IDOR gate (`ghapp_allowed` bootstrap ∪ store union) + the
+  # install-store refresh decorator, behind the non-default `forge-ghapp` feature (forge-auth
+  # F2 + F4b). The default `test` check builds forge-ghapp off, so this runs the cross-tenant
+  # minting authorization decision in the gate. docs/design/forge-auth/STATUS.md.
+  forge-ghapp = craneCheck ./forge-ghapp.nix { inherit cargoArtifacts; };
   # Executes the Gitea `Forge` backend + the gitea arm of the forge-kind builder
   # (feature `forge-gitea`, off by default so the standard github+gitlab build is
   # unchanged). The config-architecture D1b new-host check. docs/design/config/04-forge-registry.md.

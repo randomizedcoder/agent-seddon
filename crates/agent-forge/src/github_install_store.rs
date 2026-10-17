@@ -8,6 +8,7 @@
 //! `safe_segment`/`valid_installation_id`-gated before it becomes a storage key, and
 //! a stored blob is re-validated on load (fail-closed on an out-of-band tamper).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use agent_config_store::{Backend, Write, DEFAULT_MAX_CARDS_PER_TENANT};
@@ -60,6 +61,36 @@ impl StoreInstalls {
         card.validate()?;
         Ok(card)
     }
+}
+
+/// Every stored installation, as a `tenant → {installation_id}` map across all tenants — an
+/// F5 building block (landed in forge-auth F4b). The mint IDOR gate is synchronous and
+/// cross-tenant, but the store is async and per-tenant, so F5's builder will call this once
+/// at startup to seed the gate's sync-readable snapshot
+/// (`secrets::install_github_app_store_bindings`) from the store, once store rows are
+/// ownership-verified (F4b keeps the gate bootstrap-only; see `install_gate` for why).
+///
+/// Enumerates `(collection, tenant)` via [`Backend::tenants`] and decodes every row through
+/// the same validating path a `get` uses — a blob that fails to decode or validate (an
+/// out-of-band tamper) fails the whole rebuild closed, so a corrupt row can never silently
+/// widen the gate. The id a valid row contributes is exactly its (already validated)
+/// `installation_id`, so the gate's snapshot and a `get` can never disagree about it.
+pub async fn github_install_bindings(
+    backend: &Arc<dyn Backend>,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for tenant in backend.tenants(INSTALLS).await? {
+        let mut ids = BTreeSet::new();
+        for blob in backend.list(INSTALLS, &tenant).await? {
+            ids.insert(StoreInstalls::decode(&blob)?.installation_id);
+        }
+        // A tenant that lists no (valid) rows contributes no entry — the fail-closed shape
+        // the gate expects (a `get(tenant)` miss, never an empty-set hit).
+        if !ids.is_empty() {
+            out.insert(tenant, ids);
+        }
+    }
+    Ok(out)
 }
 
 #[async_trait]
@@ -237,6 +268,57 @@ mod tests {
         let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
         assert!(StoreInstalls::with_tenant(b.clone(), "../etc").is_err());
         assert!(StoreInstalls::with_tenant(b, "acme").is_ok());
+    }
+
+    // desc: github_install_bindings rebuilds the tenant→ids map across all tenants (the
+    // forge-auth F4b startup seed of the mint gate's sync snapshot) — each tenant's ids,
+    // disjoint, and a tenant with no rows contributes no entry (the fail-closed shape).
+    #[tokio::test]
+    async fn positive_bindings_rebuild_across_tenants() {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        let acme = StoreInstalls::with_tenant(b.clone(), "acme").expect("tenant");
+        let beta = StoreInstalls::with_tenant(b.clone(), "beta").expect("tenant");
+        acme.put(install("123", &["a__b"])).await.expect("put");
+        acme.put(install("456", &[])).await.expect("put");
+        beta.put(install("789", &["c__d"])).await.expect("put");
+        let map = github_install_bindings(&b).await.expect("rebuild");
+        assert_eq!(
+            map.get("acme").expect("acme"),
+            &["123", "456"]
+                .into_iter()
+                .map(ToString::to_string)
+                .collect()
+        );
+        assert_eq!(
+            map.get("beta").expect("beta"),
+            &["789"].into_iter().map(ToString::to_string).collect()
+        );
+        // A deleted-empty tenant leaves no phantom entry.
+        beta.delete("789").await.expect("delete");
+        let map = github_install_bindings(&b).await.expect("rebuild");
+        assert!(!map.contains_key("beta"), "emptied tenant must not appear");
+        assert!(map.contains_key("acme"));
+    }
+
+    // adversarial: a tampered (undecodable) stored blob fails the whole rebuild closed,
+    // so a corrupt row can never silently seed the mint gate.
+    #[tokio::test]
+    async fn adversarial_bindings_rebuild_fails_closed_on_tamper() {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        b.apply(&[
+            Write::EnsureTenant {
+                tenant: "acme".into(),
+            },
+            Write::Put {
+                collection: INSTALLS,
+                tenant: "acme".into(),
+                id: "123".into(),
+                blob: b"not a valid prost GithubInstall".to_vec(),
+            },
+        ])
+        .await
+        .expect("seed tamper");
+        assert!(github_install_bindings(&b).await.is_err());
     }
 
     // adversarial: two tenants over the same backend never see each other's installs.
