@@ -31,6 +31,12 @@ pub mod ghapp;
 #[cfg(feature = "forge-ghapp")]
 pub mod webhook;
 
+/// GitHub App install-time user-OAuth ownership verification (forge-auth F5). Behind
+/// `forge-ghapp` alongside the minter; the install-callback consumer lands in a later
+/// F5 slice.
+#[cfg(feature = "forge-ghapp")]
+pub mod ghapp_oauth;
+
 /// The persisted forge-card registry (config C36 / D1). Behind `forge-store` so the
 /// default host-impl build stays free of the config-store dependency.
 #[cfg(feature = "forge-store")]

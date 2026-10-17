@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F2b + F5–F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F2b + the rest of F5 + F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -22,7 +22,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
-| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → roster-row write with a `ghapp:` ref | ⬜ |
+| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService`. **F5c**: install-callback endpoint + verified snapshot feed + gate union. **F5d**: portal UI. | 🟡 |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
@@ -116,6 +116,36 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   probe), the copy-on-write snapshot edits, `github_install_bindings` rebuild (+ `adversarial_`
   tamper-fails-closed), and the `RefreshingInstalls` decorator (bind/unbind scoped to caller tenant,
   rejected-write-no-bind).
+
+- **F5a (PR #TBD):** the install-time user-OAuth **ownership-verification primitive** — the proof F4b
+  deferred, the thing that makes a tenant-self-asserted install row trustworthy. **Design correction
+  recorded here:** the design-of-record ([`README.md`](README.md)) assumed the ownership cross-check
+  could compare an installation against "the tenant's **OAuth-linked GitHub account**," implying
+  account login already supplies a GitHub identity. It does not — account login is generic multi-issuer
+  OIDC (`google`/`entra`/`generic`, `crates/agent-grpc/src/server/auth/issuer.rs`), and neither the
+  tenant JWT/`VerifiedIdentity` nor any store records a GitHub login/id. So ownership is instead proven
+  **inline per install** via the canonical pattern: the GitHub App enables "Request user authorization
+  during installation," the install callback returns a one-time `code`, and
+  `agent_forge::ghapp_oauth::UserInstallationAccess` (behind `forge-ghapp`) exchanges it for a
+  user-to-server token and walks `GET /user/installations` (page-capped) to learn which installations
+  that user can **reach**. **Security note (review-driven):** `/user/installations` reports installations
+  the user has `:read`/`:write`/`:admin` on — *access*, **not ownership** — so this primitive is a
+  *necessary input* to the ownership decision, **not the whole of it**; the F5c consumer MUST add the
+  admin/ownership gate (require the install was just created in this flow — creating one needs org
+  owner/admin — and/or cross-check the App-JWT `GET /app/installations/{id}` account + the user's admin
+  role) before binding an installation to a tenant, or a mere read-only org member could bind another
+  tenant's installation (cross-tenant IDOR). No persistent GitHub-account linkage to maintain. Mirrors the F2 minter's
+  discipline exactly (`agent-retry` 429/5xx + rate-limited-403, `MAX_BODY_BYTES` bound, status-only
+  errors that never echo the `code`/client-secret/user-token, `agent_core::valid_installation_id` on
+  every id). New operator OAuth-client credentials `client_id` + `client_secret_ref` on `[github_app]`
+  (`GithubAppCfg`, env:/file: only, paired, never inline/`ghapp:`, value never echoed). **No consumer**
+  — the install-callback endpoint that calls it, the verified `GHAPP_STORE_BINDINGS` feed, and the gate
+  union are later F5 slices (front-loaded like F3's `verify_webhook_signature`). The `forge-ghapp` gate
+  check was extended to **run** the agent-forge `forge-ghapp` surface (minter + `ghapp_oauth` + webhook)
+  across both crates — `forge-store` does not enable `forge-ghapp`, so these authorization boundaries
+  were previously only compiled, never executed. Tables: A (`administers`/`user_installation_ids`,
+  `tiny_http`-mocked, four-class + `adversarial_` traversal/over-len/malformed-echo/secret-not-in-error/
+  huge-body/pagination-cap), B (`GithubAppCfg::validate` OAuth creds).
 
 ## Links
 
