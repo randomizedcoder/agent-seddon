@@ -3939,6 +3939,19 @@ pub struct GithubAppCfg {
     /// by F6, exactly as `private_key_ref` is (`builder.rs`).
     #[serde(default)]
     pub webhook_secret_ref: String,
+    /// OAuth **client id** for install-time user authorization (forge-auth F5). Set it
+    /// together with [`client_secret_ref`](Self::client_secret_ref) to let the portal
+    /// onboarding flow prove a tenant owns an installation (exchange the install
+    /// callback `code` for a user token and check `GET /user/installations`). Empty ⇒
+    /// onboarding OAuth is unconfigured and the callback fails closed. The client id is
+    /// public, so — unlike the secret below — it is not a `*_ref`.
+    #[serde(default)]
+    pub client_id: String,
+    /// Reference to the OAuth **client secret**: `env:NAME` or `file:/path` — never an
+    /// inline secret and never a `ghapp:` ref (it is read, not minted). Paired with
+    /// [`client_id`](Self::client_id); resolved on the host at use time.
+    #[serde(default)]
+    pub client_secret_ref: String,
     /// Token-endpoint HTTP timeout (seconds) and retry budget.
     #[serde(default = "default_github_app_timeout_secs")]
     pub timeout_secs: u64,
@@ -3999,6 +4012,41 @@ impl GithubAppCfg {
                     return Err("[github_app] webhook_secret_ref is required (env: or file:)".into())
                 }
                 Err(e) => return Err(format!("[github_app] webhook_secret_ref: {e}")),
+            }
+        }
+        // OAuth client for install-time user authorization (forge-auth F5). Optional:
+        // absent ⇒ onboarding OAuth is unconfigured and the install callback fails
+        // closed. When either is present, both must be, and `client_secret_ref` is a key
+        // to READ (env:/file:), never an inline secret or a `ghapp:` mint — the value is
+        // never echoed on error.
+        let has_client_id = !self.client_id.trim().is_empty();
+        let has_client_secret = !self.client_secret_ref.trim().is_empty();
+        if has_client_id || has_client_secret {
+            if !has_client_id {
+                return Err(
+                    "[github_app] client_id is required when client_secret_ref is set".into(),
+                );
+            }
+            if !has_client_secret {
+                return Err(
+                    "[github_app] client_secret_ref is required (env: or file:) when client_id is set"
+                        .into(),
+                );
+            }
+            match agent_core::ApiKeyRef::parse(&self.client_secret_ref) {
+                Ok(agent_core::ApiKeyRef::Env(_)) | Ok(agent_core::ApiKeyRef::File(_)) => {}
+                Ok(agent_core::ApiKeyRef::GitHubApp(_)) => {
+                    return Err(
+                        "[github_app] client_secret_ref is a key to read (env:/file:), not a `ghapp:` mint"
+                            .into(),
+                    )
+                }
+                Ok(agent_core::ApiKeyRef::None) => {
+                    return Err(
+                        "[github_app] client_secret_ref is required (env: or file:)".into(),
+                    )
+                }
+                Err(e) => return Err(format!("[github_app] client_secret_ref: {e}")),
             }
         }
         for (tenant, ids) in &self.installations {
@@ -5072,6 +5120,39 @@ mod tests {
     #[case::adversarial_webhook_secret_inline(
         "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nwebhook_secret_ref = \"s3cr3t-raw\"",
         Err("webhook_secret_ref")
+    )]
+    // --- forge-auth F5: install-time user-OAuth client credentials ---
+    #[case::positive_oauth_client_env_secret(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"env:GH_OAUTH_SECRET\"",
+        Ok(())
+    )]
+    #[case::positive_oauth_client_file_secret(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"file:/run/secrets/gh\"",
+        Ok(())
+    )]
+    #[case::positive_oauth_unconfigured(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"",
+        Ok(())
+    )]
+    #[case::negative_oauth_secret_is_ghapp(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"ghapp:1\"",
+        Err("client_secret_ref")
+    )]
+    #[case::negative_oauth_secret_inline_raw(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"s3cr3t-value\"",
+        Err("client_secret_ref")
+    )]
+    #[case::corner_oauth_client_id_without_secret(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"",
+        Err("client_secret_ref")
+    )]
+    #[case::corner_oauth_secret_without_client_id(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_secret_ref = \"env:GH_OAUTH_SECRET\"",
+        Err("client_id")
+    )]
+    #[case::adversarial_oauth_secret_crlf_inline(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"a\\r\\nb\"",
+        Err("client_secret_ref")
     )]
     fn github_app_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
         let cfg: GithubAppCfg = toml::from_str(toml_src).expect("parses");
