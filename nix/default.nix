@@ -31,6 +31,10 @@ let
   # crane, bound to our pinned Rust toolchain.
   craneLib = (crane.mkLib pkgs).overrideToolchain versions.rustToolchain;
 
+  # Experimental cargo(libnix) backend. Kept entirely opt-in; the default package,
+  # checks and dev shell remain on Crane + the normal rust-overlay toolchain.
+  libnixCargo = import ./libnix-cargo.nix { inherit pkgs lib; };
+
   # Source filter: crane's default keeps only cargo-relevant files (Cargo.toml,
   # Cargo.lock, *.rs), which would drop `crates/agent-proto/proto/**.proto` — the
   # inputs `tonic-build` needs — and the non-.rs files under `agent-search`'s
@@ -610,6 +614,60 @@ let
     ];
   };
 
+  # Opt-in cargo(libnix) developer shell. It uses the Rust 1.87.0 toolchain that
+  # matches the current libnix Cargo release and disables sccache so measurements
+  # reflect libnix/Nix-store reuse rather than the local compiler cache.
+  libnix-devshell = import ./devshell.nix {
+    inherit pkgs lib versions;
+    rustToolchain = libnixCargo.rustToolchain;
+    extraLeadingPackages = [
+      libnixCargo.cargo
+      libnixCargo.nix-prefetch
+    ];
+    extraPackages = [
+      go-ast
+      go-graph
+      versions.scip-go
+      versions.ast-grep
+    ];
+    enableSccache = false;
+    shellHookPrefix = ''
+      export PATH="${libnixCargo.cargo}/bin:$PATH"
+      export CARGO_BACKEND=nix
+      export PROTOC="${versions.protobuf}/bin/protoc"
+    '';
+  };
+
+  # Smoke runner for the first libnix probes documented in
+  # docs/design/libnix/EVALUATION.md. This runs in the caller's checkout.
+  libnix-smoke = pkgs.writeShellApplication {
+    name = "libnix-smoke";
+    runtimeInputs = [
+      libnixCargo.cargo
+      libnixCargo.rustToolchain
+      libnixCargo.nix-prefetch
+      versions.protobuf
+      pkgs.nix
+    ];
+    text = ''
+      export PATH="${libnixCargo.cargo}/bin:$PATH"
+      export CARGO_BACKEND=nix
+      export PROTOC="${versions.protobuf}/bin/protoc"
+      unset RUSTC_WRAPPER
+
+      echo "cargo: $(cargo --version)"
+      echo "rustc: $(rustc --version)"
+      echo "CARGO_BACKEND=$CARGO_BACKEND"
+      echo "PROTOC=$PROTOC"
+
+      # libnix v4 does not implement `cargo check`; `cargo build` exercises the
+      # same build-script/protoc path while producing linkable artifacts.
+      cargo build -p agent-proto
+      cargo test -p agent-core
+      cargo build -p agent-runtime --no-default-features
+    '';
+  };
+
   # ClickHouse container apps (up / down / client).
   clickhouse = import ./clickhouse { inherit pkgs lib versions; };
 
@@ -800,6 +858,7 @@ in
   packages = {
     inherit
       agent
+      libnix-smoke
       go-ast
       go-graph
       review-toolbox
@@ -807,6 +866,7 @@ in
       ;
     # The k8s agent image (streamLayeredImage stream script). k8s track K2.
     agent-image = k8sImages.images.agent;
+    cargo-libnix = libnixCargo.cargo;
     inherit (versions)
       promptfoo
       swebench
@@ -819,7 +879,10 @@ in
     default = agent;
   };
 
-  devShells.default = devshell;
+  devShells = {
+    default = devshell;
+    libnix = libnix-devshell;
+  };
 
   inherit checks;
 
@@ -831,6 +894,7 @@ in
     mkApps { } {
       inherit
         agent
+        libnix-smoke
         bench
         coverage
         clean
