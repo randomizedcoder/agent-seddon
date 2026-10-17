@@ -5,382 +5,323 @@
 </p>
 
 A coding agent in Rust, built so you can see what it is doing and change how it
-does it.
+does it. It edits code, runs tools, manages sessions, reviews pull requests, and
+turns objectives into tasks that workers execute in separate worktrees.
 
-## What this is
+Replaceable components sit behind named Rust traits, called **seams**. Configuration
+selects their implementations; many can also run as gRPC services. Metrics, traces,
+and stored history help explain which component acted and what happened. The same
+architecture supports a local CLI, unattended review fleets, and a management portal.
 
-`agent-seddon` edits files, runs shells, searches code, drives git across
-branches, talks to language servers, and holds interactive terminals. That part is
-not unusual — the harnesses it was measured against do most of it too.
-
-What is unusual is the shape. **Every capability is a named component behind a
-trait** — a *seam* — and each seam is swappable by a config string, separately
-instrumented, individually benchmarked, and can be moved into its own process
-behind a gRPC service. The thesis is that an agent should be **legible**: when it
-does something, you should be able to say which component did it, read the metric
-it emitted and the span it opened, and replace that component without forking the
-project.
-
-It is a single-author experimental project. There are over 2,200 tests and a
-hermetic `nix flake check` gate — but **no CI**: the gate runs locally, by hand, so
-take the claims below as things you can verify yourself rather than things a badge
-asserts.
-
-## What's different
-
-The six things below are all in service of that one thesis.
-
-- **It was specified against its peers before it was built.** 30 per-feature specs
-  in [`docs/parity/`](docs/parity/README.md), each written by reading the
-  corresponding implementation *and its test suite* in three mature harnesses, then
-  laying out a test plan to match them. The specs are in the repo, including the
-  parts where the peers are still ahead.
-- **Every capability is a seam.** 31 traits in
-  [`agent-core`](crates/agent-core/src/lib.rs), concrete impls in sibling crates
-  behind cargo features, selected by config. Adding a backend is never a fork.
-- **Seams can become services.** 26 of the 31 have a gRPC service with a
-  buf-governed wire contract and server reflection, so a running seam can be
-  introspected and called with plain JSON. The point is *structure and
-  introspectability*, not speed — for a same-host seam a gRPC hop is slower than a
-  direct call. See the honest scope [below](#running-seams-as-services).
-- **The agent's own cognition is a seam too.** It detects its **task mode** every
-  turn (implement / debug / review / …) and switches when the work changes;
-  compaction reshapes the context through the destination mode's lens on a switch;
-  and a per-step pass files what happened into per-dimension memory. The mode switch
-  is the pivot joining the three — the same legibility, turned inward. See
-  [`docs/design/adaptive-cognition/`](docs/design/adaptive-cognition/README.md).
-- **Observability on all of it.** 114 Prometheus metric families, a Grafana
-  dashboard provisioned in-tree, OpenTelemetry spans that follow a call across a
-  process boundary, and the run history queryable in ClickHouse.
-- **Rust, for two specific reasons.** A single binary with no runtime or virtualenv
-  to install; and no GC or JIT between the code and the numbers, which is what
-  makes the instruction-count benchmarks below stable enough to gate on.
-
-## Compared to the harnesses it was measured against
-
-The peers are [pi](https://github.com/earendil-works/pi) (TypeScript, disciplined
-minimalism), [hermes-agent](https://github.com/NousResearch/hermes-agent) (Python,
-batteries-included), and [opencode](https://github.com/anomalyco/opencode)
-(TypeScript, a polished fundamentals-first daily driver).
-
-> **Peer columns are a snapshot** taken from read-only clones in July 2026. These
-> are active projects and will have moved on. Every cell traces to a source path
-> in [`docs/features-comparison.md`](docs/features-comparison.md).
-
-For an orientation map of the local peer clones — what each is, where its prompts
-live, and how to reach the same source reproducibly through nixpkgs — see
-[`docs/reference/peer-harnesses.md`](docs/reference/peer-harnesses.md).
-
-**Fundamentals — all four have these.** The last column is the interesting one.
-
-| Capability | pi | hermes | opencode | What agent-seddon does with it |
-|---|:--:|:--:|:--:|---|
-| Loop, streaming, parallel tools | Yes | Yes | Yes | Same shape; every stage emits a metric and a span |
-| `bash`, read / write | Yes | Yes | Yes | Through a `Sandbox` seam, behind a `Policy` gate |
-| Surgical `edit` | Yes | Yes | Yes | Unique-match guard; paths canonicalised to block symlink escape |
-| Unified-diff `apply_patch` | — | Yes | Yes | Fuzzy-match chain with an explicit failure ladder |
-| grep / find / ls | Yes | Yes | Yes | gitignore-aware |
-| MCP client | by design, no | Yes | Yes | Plus an MCP *server* (`--serve-mcp`) |
-| Subagents | — | Yes | Yes | Depth-bounded, isolated context, returns a summary |
-| Skills | Yes | Yes | Yes | User-invoked (`/skill:<name>`); authoring is injection-scanned |
-| Sessions and resume | Yes | Yes | Yes | Content-addressed checkpoints — branch, undo, fork |
-| Approval gate | trust model | Yes | Yes | A `Policy` seam: swappable, and dialable over gRPC |
-| Context compaction | Yes | Yes | Yes | Truncating *and* summarizing |
-
-**Where it differs.** Each row is backed by a spec citing the peers' source paths.
-The `Status` column bounds the claim.
-
-| Capability | agent-seddon | Peers | Status |
-|---|---|---|---|
-| Seams as gRPC services | 26 `--serve-<seam>` + an all-in-one gateway, TCP or unix socket, reflection-introspectable | None ship this | Works and tested; **no container deployment** |
-| Load-balanced LLM/GPU pool | Health-checked pool across many local model targets — least-loaded / weighted / round-robin selection, per-target concurrency cap + fail-soft backpressure, latency-graded routing; `--serve-llm-pool` | None | Shipped |
-| Adaptive cognition | Detects its own task mode every turn and switches; mode-aware context compaction; per-step dimensional memory | None | Shipped |
-| Tool-call verification | A model-graded gate inspects each tool call (allow / revise / deny) before it runs, every verdict recorded to ClickHouse | None | Shipped |
-| Per-seam metrics | Every served seam exposes its own `/metrics`; ports generated from `nix/constants.nix` | None | Shipped, Grafana provisioned |
-| Queryable run history | ClickHouse `agent_events` / `agent_logs` / `agent_usage` | pi has an adapter interface | Shipped; best-effort, drops rather than blocks |
-| Traces across seams | OTLP span tree, W3C propagation into another process | None | Shipped |
-| Agent inspects its own metrics | A `metrics` tool, in-process, no stack required | None | Shipped |
-| Perf + leak as a build gate | iai-callgrind instruction ceilings, dhat budgets | None | Shipped; runs locally, **no CI** |
-| Full-text indexed code search | tantivy index, hybrid RRF fusion | ripgrep or none | Shipped |
-| Multi-branch git as tools | 9 `git_*`, one object DB + disposable worktrees, revision-addressed | all shell out to `git` | Shipped |
-| LSP | diagnostics **and** navigation **and** `rename` | hermes diagnostics; opencode navigation | Shipped |
-| Structured output | Validates **and repairs**, bounded | all three validate; none repair | Shipped |
-| Forge | GitHub **and** GitLab behind one seam | — | Shipped |
-| Reproducible execution | `nix` backend runs in a pinned flake closure | mutable images | **Reproducibility, not confinement** |
-
-No single peer does all of these, and several do individual rows better: pi's
-provider breadth (40+), hermes' ~94 tools, and opencode's UI surfaces are all well
-beyond this project.
+This is a single-author experimental project. Features below are implemented unless
+marked partial or experimental; availability still depends on build features,
+configuration, and external services. Tests and the Nix gate run locally; the project
+has no CI. Start with the [quickstart](#quickstart), browse the
+[features](#features), or use the [full documentation index](docs/README.md).
 
 ## Quickstart
 
-Toolchain, `protoc` and dev tools all come from the flake — nothing to install on
-the host.
-
-The shipped config targets a local [Ollama](https://ollama.com), so there is no
-account and no key to obtain:
+Install Nix with flakes enabled and run a local Ollama server. The flake supplies
+the Rust toolchain, `protoc`, and development tools. The small example configuration
+uses Ollama, so no hosted-model account is needed:
 
 ```sh
-ollama pull llama3.1:latest                   # a model that really calls tools
-nix develop                                   # dev shell
+ollama pull llama3.1:latest
+# Run `ollama serve` in another terminal if the server is not already running.
+nix develop
 cargo build
 cargo run -p agent-cli -- --config config/local-ollama.toml \
   "write a hello world program in C called hello.c"
-cargo run -p agent-cli -- --config config/local-ollama.toml   # no goal ⇒ REPL
+cargo run -p agent-cli -- --config config/local-ollama.toml   # no goal: REPL
 ```
 
-[`config/local-ollama.toml`](config/local-ollama.toml) is the short runnable file;
-[`config/agent.toml`](config/agent.toml) is the annotated reference that shows every
-seam. To use a hosted model instead, point `[provider] base_url`/`model` at it and
-supply a key inline, via an env var, or from a file.
+The model must actually support tool calling. The
+[Ollama example](config/local-ollama.toml) enables a small file/shell tool set and
+auto-approves ordinary calls while retaining the policy guard. The
+[annotated configuration](config/agent.toml) covers the broader system. Hosted
+providers can use inline, environment, or file-based credentials; see the
+[operating guide](docs/operating.md) for configuration, slash commands, and state
+layout, and [provider documentation](docs/components/providers.md) for backends.
 
-**The model must support tool calling** — the loop cannot do anything without it,
-and the symptom of a model that lacks it is an agent that replies in prose and
-never edits a file. Config, the REPL's slash commands and the runtime state layout
-are in [`docs/operating.md`](docs/operating.md).
+## Features
 
-## What it can do
+### Coding tools and integrations
 
-29 built-in tools: **files** (`read_file`, `write_file`, `edit`, `apply_patch`),
-**shell** (`bash`, plus `pty` for interactive sessions held across turns),
-**search** (`grep`, `find`, `ls`, indexed `search`, `index_ls`), **git** (9
-`git_*`), **web** (`web_fetch`, `web_search`), **code intelligence** (`lsp`), and
-**platform** (`forge`, `schedule`, `todo_write`, `session_export`, `skill_write`,
-`delegate`, `metrics`) — plus every tool exposed by any MCP server you configure.
+**Files, commands, and git.** Read and write files, make guarded edits, apply
+patches, and run shell commands through the configured execution backend.
+[Interactive PTYs](docs/components/pty.md) persist across turns;
+[git tools](docs/components/git.md) support branches, revision-addressed reads,
+and disposable worktrees sharing an object database.
+[Tool reference](docs/components/tools.md).
 
-Providers are OpenAI-compatible and Anthropic-native, both streaming, with model
-routing and failover, prompt-cache breakpoint placement, and token/cost accounting.
-Several local model targets (a heavy GLM, a medium MI50, a small card) can be grouped
-into a **health-checked, load-balanced pool** that routes around a target that is
-offline *or* busy and prefers a fast one over a slow one. The concrete dev/eval
-endpoints the harnesses dial (Kimi generator, GLM judge, MI50) — addresses, model
-names, and key handling — are written down in
-[`docs/llm-endpoints.md`](docs/llm-endpoints.md). Memory is a layered
-episodic log plus semantic recall. Multimodal content, lifecycle hooks, and a content
-scanner that feeds the `Policy` gate are all seams too.
+**Web and prompt references.** [Fetch pages](docs/components/web-fetch.md),
+[search the web](docs/components/web-search.md), and expand
+[`@file`, `@dir`, `@symbol`, and `@url` references](docs/components/reference.md)
+into bounded context. Reference expansion routes through the search and web
+components and screens imported content.
 
-Two larger capabilities compose these seams. **Adaptive cognition** spends cheap local
-LLMs on the agent's own meta-cognition — per-turn task-mode detection with a switch
-decision, mode-aware compaction that reshapes context on a switch, and per-step
-dimensional memory ([design](docs/design/adaptive-cognition/README.md)). The
-**code-review flow** detects a review task, then fans out mostly-deterministic
-collectors (file set, diff, static analysis, call graph, git state) into a *grounded*
-fact bundle a model can't hallucinate over
-([design](docs/design/code-review/README.md)). A **tool-call verifier** seam can gate
-each call before it runs.
+**MCP, skills, and delegation.** Configure MCP servers to add tools; the agent
+also serves a single goal-running tool over stdio with `--serve-mcp`
+([MCP](docs/components/mcp.md)). Invoke reusable skills with `/skill:<name>`,
+optionally enable guarded [skill authoring](docs/components/skill-authoring.md),
+or enable [subagents](docs/components/runtime.md) with isolated context and
+bounded delegation depth.
 
-Two more capabilities take the agent past a single interactive session. The
-**review-fleet** (`agent --serve-fleet`) is a long-running server that hosts many
-unattended review sessions: it watches Slack and polls a forge for non-draft pull
-requests, checks each one out in an isolated per-session workspace with scoped
-credentials, runs the grounded code-review flow above, and persists a draft review it
-can then approve and post — with a portal tab to see, edit, and approve drafts. It has
-been run end-to-end against a real GitHub PR
-([design](docs/design/review-fleet/README.md),
-[implementation](docs/design/review-fleet/IMPLEMENTATION.md),
-[status](docs/design/review-fleet/STATUS.md)). And the whole agent is **multi-tenant**:
-per-org process isolation (a bwrap `Sandbox` with read-only checkout, seccomp, and an
-egress allow-list), row-level data scoping in ClickHouse, and per-tenant config,
-model-router, and scheduler state — so one deployment can keep many tenants' work from
-touching. A coverage audit (`nix run .#mt-audit`) reconciles that tenancy against a
-manifest so it can't silently regress
-([design](docs/design/multi-tenancy/README.md),
-[status](docs/design/multi-tenancy/STATUS.md)).
+### Code intelligence
 
-## Understanding what it's doing
+**Search and language servers.** Gitignore-aware file search complements a
+Tantivy full-text index and semantic search with hybrid result fusion
+([search](docs/components/search.md)). [LSP integration](docs/components/lsp.md)
+adds diagnostics, navigation, and rename; structural search matches AST patterns
+across supported languages.
 
-This is what the project is actually for.
+**Structural code graphs.** The Go engine answers symbol, implementation,
+caller/callee, call-chain, and dependency queries. Optional SCIP support adds
+cross-language symbols and references where an indexer is configured; its supported
+queries differ from the Go engine.
+[Component guide](docs/components/ast.md) ·
+[code-graph design](docs/design/code-graph/README.md).
 
-**Metrics.** 114 Prometheus families covering every seam — provider latency and
-tokens, per-tool duration and outcome, context size and compactions, policy
-decisions, scanner findings, pool load and health, search and memory timings. The
-agent serves its own
-`/metrics`, and a `metrics` tool lets the model inspect its own performance
-mid-run. A Grafana dashboard and the Prometheus scrape config are generated from
-the same source of truth as the ports (`nix/constants.nix`), so they cannot drift:
+### Models, routing, and output
 
-```sh
-nix run .#prometheus-up          # scraper, UI :9090
-nix run .#grafana-up             # dashboards, UI :3000
-```
+**Providers and output.** OpenAI-compatible and Anthropic-native providers support
+streaming and tool calls. Typed [multimodal messages](docs/components/multimodal.md)
+carry images and documents through supported providers, while
+[structured output](docs/components/structured-output.md) validates responses and
+can attempt bounded repairs.
 
-**Traces.** OpenTelemetry spans with W3C context propagation, so one trace follows
-a call *across* a gRPC seam into another process — see the two-process demo in
-[`docs/tracing.md`](docs/tracing.md).
+**Routing and capacity.** Route requests by task mode, role, capabilities, context
+window, and policy. The live upstream registry supports health/load-aware selection,
+failover, circuit breakers, spillover, optional hard concurrency limits, cost
+ceilings, and rolling spend budgets. A separate health-checked GPU/LLM pool offers
+least-loaded, weighted, and round-robin selection.
+[Router](docs/components/router.md) · [pool](docs/components/pool.md) ·
+[routing design](docs/design/model-router/README.md).
 
-**History.** A separate native-protocol writer streams the transaction history,
-logs and token usage into ClickHouse (`agent_events`, `agent_logs`, `agent_usage`).
-It runs on a bounded channel and **drops rows rather than blocking the loop**: if
-ClickHouse is down the agent is unaffected, and `.agent/episodic.jsonl` remains the
-durable record.
+**Caching and accounting.** [Prompt-cache placement](docs/components/prompt-cache.md)
+keeps stable context reusable; [token and cost accounting](docs/components/tokenizer.md)
+tracks usage. Shared [retry/backoff handling](docs/components/retry.md) bounds
+transient-failure retries and server-provided delays.
 
-Full three-signal overview: [`docs/observability.md`](docs/observability.md).
+### Memory and cognition
 
-**Portal.** A small Flutter, gRPC-only app pulls this legibility into one place: it
-launches the observability UIs, sees and edits every prompt per mode, shows a live
-agent view (loop narration + a mode/context/pool/latency status bar), edits the
-model-router fleet **live**, and edits the whole `config/agent.toml` through a
-schema-driven **Settings** form (a `ConfigService` seam writes the file — comments
-preserved — to apply on the next restart). It is itself just another gRPC client of
-the `--serve-all` gateway. Design: [`docs/design/portal/`](docs/design/portal/README.md).
+**Memory and task modes.** An append-only episodic log and curated semantic facts
+support [recall and distillation](docs/components/memory.md). The agent detects its
+task mode, switches as work changes, and can reshape context through the destination
+mode's lens. Optional [dimensional memory](docs/components/dimensions.md) files
+per-step summaries by topic for later recall.
+[Adaptive-cognition design](docs/design/adaptive-cognition/README.md).
 
-## Running seams as services
+**Compaction and digests.** Choose sliding-window, summarizing, or mode-aware
+[context strategies](docs/components/context.md). A
+[background distiller](docs/components/digest.md) stores summaries and key facts;
+[instant compaction](docs/components/instant-compaction.md) assembles context from
+that ledger instead of generating a fresh summary on the critical path.
 
-26 seams have a gRPC service. Selecting one is a config change, not a code change —
-the loop cannot tell a remote seam from a local one:
+**Consensus and cognition graphs.** A generator/critic
+[consensus provider](docs/components/consensus.md) can revise a response through
+bounded feedback. Textproto [cognition graphs](docs/components/graph.md) connect
+these engines and add parallel branches with all/any/quorum joins and comparison
+or synthesis. Consensus checking requires non-streamed responses; critic errors
+can fail open, so it is a quality mechanism with documented limits.
+[Design and evaluation](docs/design/cognition-graph/README.md).
 
-```toml
-[agent]
-policy = "grpc"                            # the approval gate now runs elsewhere
-[grpc.policy]
-endpoint = "http://policy-host:50055"
-```
+### Prompts and sessions
 
-```sh
-agent --serve-policy                       # host one seam
-agent --serve-all                          # host every enabled seam in one process
-```
+**Editable prompts and personalities.** Manage system prompts, context fragments,
+mode lenses, and named personalities through a shared service and the portal.
+Situational fragment selection currently uses mode tags. Personality changes apply
+to the next assembled session; other edits follow their documented reload rules.
+[Prompt guide](docs/components/prompt.md) ·
+[prompt-library design](docs/design/prompts/README.md).
 
-Every server carries gRPC reflection — introspect and call a live seam with plain
-JSON, no `.proto` files — and the standard `grpc.health.v1` health service. The
-wire contract is governed by `buf` (lint + breaking-change checks) in the gate.
+**Checkpoints, export, and recall.** [Session checkpoints](docs/components/session.md)
+support resume, branching, undo, and forks of conversation state.
+[Exports](docs/components/session-export.md) produce redacted Markdown, HTML, or
+JSON. Cross-session recall is implemented, including a tenant-scoped ClickHouse
+backend over redacted history
+([data scoping](docs/design/multi-tenancy/02-data-scoping-and-rls.md)).
 
-**What is not shipped: container images, orchestration manifests, or any multi-host
-deployment.** Everything runs over loopback or a unix socket today. The seams, the
-transports, the health checks and the tests are real — a round-trip suite covers
-every seam on both TCP and UDS, and
-[`grpc_e2e.rs`](crates/agent-runtime/tests/grpc_e2e.rs) runs the actual agent loop
-with four seams remote at once — but the deployment layer does not exist yet.
+**Concurrent sessions.** Shared backends and separate session state support
+concurrent users, identity propagation, scoped memory, capacity admission, and
+lifecycle management. A [live event feed](docs/components/agent-session.md) exposes
+tokens, tool activity, mode switches, and status. Remaining session-isolation and
+lifecycle work is tracked in the
+[multi-session status](docs/design/multi-session/STATUS.md).
 
-Three seams are deliberately *not* distributed;
-[`docs/grpc.md`](docs/grpc.md#three-seams-are-deliberately-not-distributed) explains
-why. `--serve-sandbox`, `--serve-pty` and `--serve-forge` expose arbitrary code
-execution or authenticated writes — read the warning there before exposing them.
+### Automation and code review
 
-### REST + OpenAPI
+**Tasks and scheduling.** [Task tracking](docs/components/tasks.md) records plans
+and progress. The [scheduler](docs/components/scheduler.md) supports scheduled
+work, including a durable store and a driver that fires jobs under each tenant's
+identity.
 
-**gRPC is the primary interface, and the one to use.** A REST/JSON surface is being
-added for low-traffic external callers who want plain HTTP — not as a second
-implementation, but as a thin translation: each RPC carries a `google.api.http`
-annotation, and Envoy's `grpc_json_transcoder` maps REST/JSON onto the *same* gRPC
-handlers, so REST bypasses none of the gRPC auth. A generated **OpenAPI** document
-publishes the contract. Because it's pure translation, the whole surface is
-reachable — the only calls that can't transcode are client/bidi-streaming RPCs, and
-this API has none.
+**Campaigns.** `agent campaign …` plans hierarchical objectives in Postgres,
+applies approval gates, and dispatches workers into separate worktrees. Workers
+can implement tasks and open draft PRs; a poller observes merges and rolls progress
+up the task tree. Repository-knowledge integration, a campaign gRPC service, and
+webhook-driven follow-ups remain pending.
+[Usage](docs/components/campaigns.md) ·
+[design and status](docs/design/campaigns/README.md).
 
-This is **in progress**: the annotations and their survival through codegen are
-proven in the tree (`crates/agent-proto/tests/http_annotations.rs`); the full
-annotation sweep, the published OpenAPI doc, and the live transcoder listener are
-landing increment by increment. Design of record and status:
-[`docs/design/rest-openapi/`](docs/design/rest-openapi/README.md).
+**Grounded code review.** Parallel collectors assemble diffs, repository state,
+static-analysis findings, code structure, and summaries before model review.
+The analysis toolbox provisions tools through Nix and condenses findings into a
+bounded brief.
+[Review design](docs/design/code-review/README.md) ·
+[grounding](docs/design/fleet-grounding/README.md) ·
+[analysis depth](docs/design/review-analysis-depth/README.md).
 
-## How it's kept honest
+**Unattended review fleets.** `agent --serve-fleet` watches configured repositories
+through forge polling and Slack triggers, checks out PRs in isolated session
+workspaces, and runs reviews through the task router. It persists drafts, tracks
+feedback, and supports human approval before posting, including through the portal.
+[Fleet guide](docs/components/review-fleet.md) ·
+[fleet design](docs/design/review-fleet/README.md).
 
-- **Table-driven tests.** Over 2,200 tests, 1,514 of them `#[rstest]` cases,
-  classified by prefix: `positive_`, `negative_`, `corner_`, `boundary_`. For
-  anything reading untrusted input, `adversarial_` cases are **mandatory** and must
-  assert the rejection — there are nearly 300 of them.
-- **The binary is tested as a process, not just as a library.** The loop is
-  covered in-process — including an end-to-end scenario where the agent scaffolds a
-  Go program and the code-review flow's risk gate decides whether to commit it — and
-  separately the shipped `agent` binary is spawned as a subprocess against a scripted
-  OpenAI-compatible server, so argv parsing, the stdout contract, exit codes and the
-  real request/response serialization are covered too. Two pty tiers reach the
-  surfaces a pipe cannot: a Rust (`rexpect`) tier covers the REPL's line editor and
-  the policy guard's operator prompt (which hard-denies without reading when stdin is
-  not a terminal), and a **tcl/expect** harness drives the real REPL directly — its
-  model-free slice (`expect-smoke`) runs inside the gate.
-- **And against a real model.** `nix run .#e2e-live` runs the whole thing on an
-  actual LLM, has it write a C program, then compiles and runs it. Its companion
-  `nix run .#e2e-expect` goes further: a **tcl/expect** script holds a *multi-turn*
-  REPL conversation with a real model — write a file then edit it, fix a broken
-  build, pick tools to answer a question — and checks each result. Both split a
-  harness failure and a model-quality failure into different exit codes, because they
-  have different owners; both are opt-in and outside the gate — they need a network
-  the hermetic checks do not have.
-- **Instruction-count ceilings.** 22 iai-callgrind benchmarks measure deterministic
-  instruction counts under valgrind, each with a hard ceiling. A regression fails
-  the build like a lint, and raising a ceiling shows up in the diff.
-- **Leak budgets.** 18 dhat tests assert hot paths free what they allocate.
-- **Multi-tenancy coverage is audited, not assumed.** `nix run .#mt-audit` parses the
-  source and reconciles every served gRPC service and every `agent_*` metric family
-  against a checked-in manifest — governance-by-committed-artifact, the same shape as
-  the generated-constant and buf baselines. A new service whose handler never scopes to
-  the caller's tenant, a `PerTenant`-wrapped seam served without scoping, an
-  unclassified metric family, or a removed span/log mechanism fails the gate. The same
-  entrypoint backs the human report and the gate, so they cannot disagree. See
-  [`docs/components/mt-audit.md`](docs/components/mt-audit.md).
-- **One gate.** `nix flake check` runs every check (70-odd): clippy (`-D warnings`),
-  rustfmt, tests, coverage, `cargo-audit`/`cargo-deny`, nix-fmt, generated-constant
-  drift, buf lint and wire-compatibility, the OpenAPI drift check, the multi-tenancy
-  coverage audit, the bench and leak suites, the auth and portal end-to-end tests,
-  and the review-analysis suites.
+**Forge and messaging integrations.** GitHub and GitLab share the
+[forge interface](docs/components/forge.md); Gitea and Bitbucket Cloud are optional
+build features. Registry cards select hosts and credentials. A
+[message-transport registry](docs/design/config/05-message-transport.md) supports
+Slack and Matrix implementations with inbound/outbound operations.
 
-The security model assumes the model is prompt-injectable: every tool argument and
-every provider-supplied value is treated as attacker-controlled. The rules are in
-[`CLAUDE.md`](CLAUDE.md).
+### Security, tenancy, and configuration
 
-## Extending it
+**Tool controls.** [Policy](docs/components/policy.md) controls approvals and
+execution. [Scanning](docs/components/scanner.md) screens imported content;
+an optional [tool-call verifier](docs/components/verifier.md) evaluates correctness
+in shadow or enforce mode. Verification is off by default and fails open on
+verification errors; policy decisions remain authoritative.
 
-Implement the trait, gate it behind a cargo feature, register a factory, select it
-by config string. In-tree that is one line in `register_builtins`; out-of-tree,
-build your own binary against the public `Registry` + `build_agent_with` API and
-never touch this repo — see [`docs/extending.md`](docs/extending.md) and the
-runnable `cargo run -p agent-cli --example custom_provider`. Tools can also arrive
-with no Rust at all, from any MCP server named in config.
+**Execution isolation.** The [sandbox interface](docs/components/sandbox.md)
+provides local execution, reproducible Nix environments, and optional Linux
+bubblewrap isolation. Bubblewrap can enforce namespaces, read-only checkout
+with disposable writes, and seccomp. Separate controls provide resource limits
+and an optional allow-list proxy for the agent's HTTP egress. The default local
+backend is unconfined; Nix reproducibility alone does not provide confinement.
 
-## Status and limitations
+**Identity and access.** Implemented security support includes OIDC login, agent
+JWTs, sessions, RBAC roles and bindings, CLI/browser/desktop sign-in, TLS/mTLS,
+credential reload, and authentication auditing. Tenant identity comes from the
+authenticated principal on secured services.
+[Security design](docs/design/security-hardening/README.md) ·
+[implementation status](docs/design/security-hardening/STATUS.md).
 
-Experimental, single-author, no CI. Known gaps, stated plainly:
+**Tenant-scoped state and configuration.** Tenant-aware stores, search partitions,
+ClickHouse row policies, and scoped configuration support multi-org operation when
+configured. Bootstrap TOML works alongside dynamic registries backed by file,
+SQLite, or Postgres storage and atomic multi-card transactions. The
+[configuration editor](docs/components/config.md) preserves TOML comments and
+reports restart requirements.
+[Configuration design](docs/design/config/README.md) ·
+[tenancy boundaries and remaining work](docs/design/multi-tenancy/STATUS.md).
 
-- **No deployment story for the distributed seams** — see above.
-- **The `nix` sandbox backend is reproducibility, not confinement.** It reports
-  `network_off: false` in its own capabilities. Real isolation is unbuilt.
-- **The bundled embedder is feature hashing**, not a learned model — deterministic
-  and dependency-free, but real embedding backends are a seam away and not shipped.
-- **The bundled tokenizer is a heuristic** and does not tokenize per-model; hermes
-  is genuinely ahead here. Real BPE backends are deferred.
-- Cross-session export recall, model-invocable skills, fuzzy hunk matching in
-  `apply_patch`, and a secret-path write deny-list are open follow-ups — the live
-  list is at the foot of [`docs/parity/README.md`](docs/parity/README.md).
+### APIs, portal, and deployment
 
-## Docs
+**Services and REST.** Supported seams run individually with `--serve-<seam>` or
+in the `--serve-all` gateway over TCP or Unix sockets, with reflection, health checks,
+and configuration-selected remote clients. gRPC remains the primary API. Envoy also
+translates REST/JSON to the same authenticated handlers, with a generated OpenAPI
+contract and drift gate.
+[gRPC guide](docs/grpc.md) · [REST/OpenAPI design](docs/design/rest-openapi/README.md).
 
-[**`docs/README.md`**](docs/README.md) indexes everything: design and architecture,
-per-component docs, the operating guides, and the 30 parity specs.
-[**`DESIGN.md`**](DESIGN.md) is the architecture reference (the loop, the seams, the
-gRPC layer); the [**`docs/design/`**](docs/design/) directories hold the per-track
-design docs and their status trackers.
+**Management portal.** The Flutter portal provides sign-in, live agent activity,
+prompt/personality management, cognition-graph editing, router administration,
+configuration forms, review drafts, and access management. It also launches the
+observability UIs. Registry changes and bootstrap configuration edits have different
+apply/restart behavior, shown by their respective surfaces.
+[Portal design](docs/design/portal/README.md) ·
+[operating runbook](docs/portal-obs-mcp-runbook.md).
 
-### Design tracks
+**Diagnostics and deployment.** `agent doctor` and the fleet `Preflight` RPC probe
+configured dependencies and authentication setup
+([diagnostics](docs/design/doctor/README.md)). Native deployment is supported;
+Nix-built images, manifest rendering, ArgoCD deployment, certificate reload, and
+SPIFFE identity have also been implemented and exercised on the single-node k3s
+target. Cluster edge/portal, sandbox sidecar, observability cut-over, and full
+HA Kubernetes validation remain pending.
+[Native topology](docs/deployment-l2.md) ·
+[Kubernetes design](docs/design/k8s/README.md) ·
+[deployment status](docs/design/k8s/STATUS.md).
 
-Each track's directory holds its design of record plus a `STATUS.md` tracking what's
-built vs. designed. (Two deferred idea-notes are single files rather than directories.)
+### Observability
 
-| Track | What it designs |
-|---|---|
-| [adaptive-cognition](docs/design/adaptive-cognition/README.md) | Local-LLM meta-cognition: runtime mode detection, mode-aware compaction, and dimensional per-file memory. |
-| [code-graph](docs/design/code-graph/README.md) | Type-aware, whole-repo structural code intelligence exposed as an `AstBackend` seam. |
-| [code-review](docs/design/code-review/README.md) | The end-to-end code-review flow — signals, synthesis, and a reason-tagged risk gate. |
-| [cognition-graph](docs/design/cognition-graph/README.md) | Cross-checked responses, as-you-go distillation, and instant compaction via a graph-structured document. |
-| [config](docs/design/config/README.md) | Unified two-tier (TOML + protobuf) configuration with auth, RBAC, and per-tenant multi-forge stores. |
-| [doctor](docs/design/doctor/README.md) | Operational self-diagnosis: an `agent doctor` CLI and fleet `Preflight` RPC over a reusable `Probe` seam. |
-| [fleet-grounding](docs/design/fleet-grounding/README.md) | Fast, well-grounded PR reviews via repo indexing and worktree-rooted grounding. |
-| [gpu-pool](docs/design/gpu-pool/README.md) | Health-checked, capacity-aware load balancing across many GPU/LLM targets. |
-| [loadtest](docs/design/loadtest/README.md) | Overload/backpressure conformance (`RESOURCE_EXHAUSTED` + pushback) and a seam load/stress harness. |
-| [model-router](docs/design/model-router/README.md) | Task-aware routing and an upstream registry over a fleet of 10–50 LLM upstreams. |
-| [multi-session](docs/design/multi-session/README.md) | Multi-session / multi-user isolation across every seam (identity, tenancy, lifecycle). |
-| [multi-tenancy](docs/design/multi-tenancy/README.md) | Making the whole agent multi-org across process-isolation, data-scoping, and config/state planes. |
-| [observability](docs/design/observability/README.md) | A repo-wide OTEL audit adding tenant + repo dimensions across every metric family and span. |
-| [portal](docs/design/portal/README.md) | A Flutter/gRPC-only portal: prompt CRUD, live agent view, config/router admin, and an obs launcher. |
-| [portal-gui-testing](docs/design/portal-gui-testing/README.md) | A portal GUI test-automation framework: hermetic widget tests plus live Layer-B e2e proven via observability. |
-| [prompts](docs/design/prompts/README.md) | Situational, tag-based prompt selection with swappable storage and named personalities. |
-| [rest-openapi](docs/design/rest-openapi/README.md) | A REST/JSON + OpenAPI surface over the gRPC API via Envoy `grpc_json_transcoder` — REST as thin translation; gRPC stays primary. |
-| [review-analysis-depth](docs/design/review-analysis-depth/README.md) | Deeper review static analysis: nix-provisioned tool suites, run in parallel and condensed before the LLM. |
-| [review-fleet](docs/design/review-fleet/README.md) | A long-running server hosting N unattended review sessions (watch → checkout → review → approve → post). |
-| [review-parallelism](docs/design/review-parallelism/README.md) | Chunked map-reduce review to cut single-PR review latency (lever 3). |
-| [tokenization-cache](docs/design/tokenization-cache.md) | Idea-note (deferred): memoize token *counts* via a `Tokenizer`-seam decorator. |
-| [tool-call-verification](docs/design/tool-call-verification.md) | A measured, multi-model gate that verifies tool-call correctness before execution. |
+Prometheus metrics, Grafana dashboards, and OpenTelemetry spans expose provider,
+tool, policy, routing, session, and fleet behavior. Trace context crosses service
+boundaries; tenant/repository attribution follows the documented label and span
+rules. A built-in `metrics` tool lets the agent inspect its own counters, and the
+[metrics proxy](docs/components/metrics-proxy.md) serves portal queries.
+[Metrics](docs/metrics.md) · [tracing](docs/tracing.md) ·
+[dimensionality design](docs/design/observability/README.md).
+
+ClickHouse stores events, logs, usage, and workflow history. The general telemetry
+writer uses a bounded channel and drops rows rather than blocking the loop; the
+local episodic log remains the durable session record. Specialized stores such as
+the digest ledger have their own persistence guarantees.
+[Observability overview](docs/observability.md).
+
+## Quality and evaluation
+
+The local `nix flake check` gate covers formatting, linting, tests, dependency
+checks, generated artifacts, protocol compatibility, documentation links,
+performance ceilings, and allocation budgets. Tests exercise libraries, the CLI
+as a process, service transports, authentication, and portal behavior.
+[Testing](docs/components/testing.md) ·
+[benchmarks and leak budgets](docs/components/benchmarking.md) ·
+[portal testing](docs/design/portal-gui-testing/README.md).
+
+The [multi-tenancy audit](docs/components/mt-audit.md) checks service and
+observability coverage against a manifest. The
+[load harness](docs/design/loadtest/README.md) exercises overload and backpressure.
+[Evaluation tools](docs/eval-all.md) support model-based quality/security runs and
+external benchmark harnesses; the [graph arena](docs/graph-arena.md) compares
+cognition configurations. These measurements have task, model, and environment
+limits; individual reports record the conditions.
+
+The opt-in [libnix Cargo experiment](docs/design/libnix/README.md) adds a development
+shell and smoke runner alongside the existing Crane build. Its
+[evaluation](docs/design/libnix/EVALUATION.md) records current limitations and
+unequal toolchain/cache conditions; it has not replaced the default build.
+
+The [peer comparison](docs/features-comparison.md) and
+[parity specifications](docs/parity/README.md) explain the project's original
+reference points and remaining gaps. Peer claims are dated snapshots of the
+sources inspected, rather than a current ranking.
+
+## Limitations and ongoing work
+
+The bundled [embedder](docs/components/embedder.md) uses feature hashing, and the
+bundled tokenizer uses heuristic counts. Model and language support varies by
+backend. MCP currently exposes tools; the deeper resources/prompts/OAuth work is
+tracked separately. Conversation checkpoints do not imply file-edit rollback.
+
+[Repository knowledge](docs/design/repo-knowledge/README.md) has implemented graph
+storage foundations, including the Postgres backend. Its extraction/indexing
+pipeline, agent-facing tools, cited inventory, and briefing integrations remain
+planned ([status](docs/design/repo-knowledge/STATUS.md)). This is separate from the
+available Go/SCIP code intelligence above.
+
+[GitHub App authorization](docs/design/forge-auth/README.md) has optional API token
+minting and tenant-scoped installation-registry CRUD. The mint gate still uses an
+operator allowlist; ownership-verified onboarding, clone credential injection,
+and the webhook receiver remain pending
+([status](docs/design/forge-auth/STATUS.md)).
+
+The [docs index](docs/README.md) links the full design catalog, including partial
+tracks, experiments, and deferred ideas. Consult component documentation and
+implementation logs alongside older design prose when deciding what to enable.
+
+## Documentation and contributing
+
+[Documentation index](docs/README.md) · [architecture](DESIGN.md) ·
+[operating guide](docs/operating.md) · [contributor conventions](CLAUDE.md).
+
+To add an implementation, implement its trait, register a factory, and select it
+by configuration. The public registry also supports custom binaries and MCP
+provides an extension path without Rust. Typed
+[lifecycle hooks](docs/components/hooks.md) observe turns, tools, and compaction;
+pre-tool hooks can veto an already-authorized call.
+[Extension guide](docs/extending.md).
 
 ## License
 
