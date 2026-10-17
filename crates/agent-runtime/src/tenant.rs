@@ -344,6 +344,31 @@ impl agent_core::ForgeRegistry for PerTenant<dyn agent_core::ForgeRegistry> {
     }
 }
 
+/// The per-tenant GitHub-App install registry, routed per tenant (forge-auth F4).
+/// Each tenant's installs live under its own `(collection, tenant, id)` rows in the
+/// shared config store (mirroring the forge-card registry above), so a tenant's
+/// install CRUD addresses only its own GitHub-App installations — the per-tenant
+/// successor to the operator-global `[github_app] installations` bootstrap allowlist.
+#[cfg(feature = "forge-registry-store")]
+#[async_trait::async_trait]
+impl agent_core::GithubInstallRegistry for PerTenant<dyn agent_core::GithubInstallRegistry> {
+    async fn list(&self) -> agent_core::Result<Vec<agent_core::GithubInstall>> {
+        self.route().list().await
+    }
+    async fn get(&self, id: &str) -> agent_core::Result<agent_core::GithubInstall> {
+        self.route().get(id).await
+    }
+    async fn put(
+        &self,
+        install: agent_core::GithubInstall,
+    ) -> agent_core::Result<agent_core::GithubInstall> {
+        self.route().put(install).await
+    }
+    async fn delete(&self, id: &str) -> agent_core::Result<bool> {
+        self.route().delete(id).await
+    }
+}
+
 /// The message-transport card registry, routed per tenant (config C37 / D2,
 /// consolidated per-tenant in E1/C40). A tenant's transport cards (Slack/…) are
 /// keyed by its verified tenant in the shared config store, so a tenant's
@@ -1168,6 +1193,68 @@ mod tests {
             let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
             let reg = per_tenant_forge(backend);
             reg.put(card("gh")).await.unwrap();
+            assert_eq!(reg.list().await.unwrap().len(), 1);
+        }
+    }
+
+    // The GitHub-App install registry, routed per tenant over the REAL
+    // `StoreInstalls` on one shared in-memory backend (forge-auth F4). Proves an
+    // install `Put` under one verified tenant is invisible to another — the
+    // per-tenant successor to the operator-global `installations` allowlist,
+    // provable in the hermetic gate. Feature-gated like `real_forge`.
+    #[cfg(feature = "forge-registry-store")]
+    mod real_installs {
+        use crate::tenant::PerTenant;
+        use agent_config_store::{Backend, MemoryBackend};
+        use agent_core::{scope, GithubInstall, GithubInstallRegistry, SessionKey};
+        use std::sync::Arc;
+
+        fn install(id: &str) -> GithubInstall {
+            GithubInstall {
+                installation_id: id.into(),
+                selected_repos: vec!["octo__hello".into()],
+                installed_at: 1_700_000_000,
+            }
+        }
+
+        fn per_tenant_installs(backend: Arc<dyn Backend>) -> PerTenant<dyn GithubInstallRegistry> {
+            PerTenant::new(move |t| {
+                agent_forge::StoreInstalls::with_tenant(backend.clone(), t)
+                    .map(|s| Arc::new(s) as Arc<dyn GithubInstallRegistry>)
+                    .unwrap_or_else(|_| Arc::new(agent_forge::StoreInstalls::new(backend.clone())))
+            })
+        }
+
+        // desc: an install written under tenant `acme` is invisible to `globex` →
+        // expect acme sees exactly its install, globex sees none.
+        #[tokio::test]
+        async fn positive_two_tenants_isolated_installs() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let reg = per_tenant_installs(backend);
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                reg.put(install("12345")).await.unwrap();
+            })
+            .await;
+            let globex = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                reg.list().await.unwrap()
+            })
+            .await;
+            let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                reg.list().await.unwrap()
+            })
+            .await;
+            assert!(globex.is_empty(), "globex must not see acme's install");
+            assert_eq!(acme.len(), 1);
+            assert_eq!(acme[0].installation_id, "12345");
+        }
+
+        // adversarial: with no ambient identity the wrap routes to `local` (fail
+        // closed, never an escape) → an unscoped `Put` is the `local` tenant's.
+        #[tokio::test]
+        async fn adversarial_no_identity_defaults_local() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let reg = per_tenant_installs(backend);
+            reg.put(install("12345")).await.unwrap();
             assert_eq!(reg.list().await.unwrap().len(), 1);
         }
     }

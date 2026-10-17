@@ -46,6 +46,7 @@ pub fn class_of(service: &str) -> Option<IdentityClass> {
         | "DigestService"
         | "DimensionService"
         | "ForgeRegistryService"
+        | "GithubInstallRegistryService"
         | "GraphService"
         | "Memory"
         | "PromptService"

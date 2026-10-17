@@ -993,6 +993,9 @@ pub use requester::*;
 mod forge_card;
 pub use forge_card::*;
 
+mod github_install;
+pub use github_install::*;
+
 // Campaigns: the `CampaignStore` seam, its value types and the pure rules
 // (`allowed()`, `rollup()`, the path grammar, the policy). A namespaced module, not a
 // glob re-export: the names (`Task`, `Policy`, `TaskState`) would collide with the
@@ -2917,10 +2920,12 @@ impl<'a> ApiKeyRef<'a> {
                 return Err("api_key_ref `ghapp:` installation id too long".into());
             }
             // Decimal ASCII only — stricter than `safe_segment`, and exactly the
-            // GitHub installation-id shape. `is_ascii_digit` (NOT `is_numeric`)
-            // rejects Unicode digit look-alikes, traversal, separators, a leading
-            // `-`, CRLF and percent-escapes before the id can become a URL segment.
-            // The error never echoes the id: it may be an attacker log-injection payload.
+            // GitHub installation-id shape (see [`valid_installation_id`], the shared
+            // predicate the install store also uses so a stored id is always a
+            // mintable one). `is_ascii_digit` (NOT `is_numeric`) rejects Unicode digit
+            // look-alikes, traversal, separators, a leading `-`, CRLF and
+            // percent-escapes before the id can become a URL segment. The error never
+            // echoes the id: it may be an attacker log-injection payload.
             if !id.bytes().all(|b| b.is_ascii_digit()) {
                 return Err("api_key_ref `ghapp:` installation id must be decimal digits".into());
             }
@@ -2932,6 +2937,19 @@ impl<'a> ApiKeyRef<'a> {
                 .into(),
         )
     }
+}
+
+/// True iff `id` is a well-formed GitHub App installation id: non-empty, decimal
+/// ASCII only, and `<= MAX_INSTALLATION_ID_LEN`. This is the single source of truth
+/// for the id shape — the `ghapp:<id>` ref parser ([`ApiKeyRef::parse`]) and the
+/// per-tenant install store ([`GithubInstall::validate`]) both decide validity by
+/// this rule, so an id can never be storable yet unmintable (or the reverse).
+///
+/// `is_ascii_digit` (NOT `is_numeric`) rejects Unicode digit look-alikes, traversal,
+/// separators, a leading `-`, CRLF and percent-escapes before the id can become a
+/// URL or storage-key segment.
+pub fn valid_installation_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_INSTALLATION_ID_LEN && id.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Cap on a `dsn_ref` string (config C41 / A2). A reference, not the DSN, so it

@@ -1,0 +1,80 @@
+// The per-tenant GitHub-App install registry (forge-auth F4,
+// docs/design/forge-auth/README.md): the installations a tenant owns, as a CRUD
+// control plane so the portal onboarding flow (F5) writes an install row per repo
+// selection at runtime — WITHOUT a restart — and the webhook receiver (F6) reads
+// them. Mirrors `ForgeRegistryService`/`ProviderRegistryService` (one process holds
+// the store while any number of clients drive it).
+//
+// This is the *config-card registry* for GitHub App installs; it carries only the
+// non-secret install state (`installation_id`, selected repos, when). The App server
+// credentials stay in bootstrap TOML, and a token is NEVER persisted — it is minted
+// on demand from the `installation_id` (`ghapp:<id>` ref, the `InstallationTokenMinter`).
+//
+// Security contract:
+//   - `installation_id` is untrusted (it becomes a storage-key and, downstream, a
+//     URL segment): the server validates it as DECIMAL digits, `<= 20` long
+//     (`agent_core::valid_installation_id`), the same rule the `ghapp:` ref parser
+//     uses, so a stored id is always a mintable one.
+//   - each `selected_repos` entry is a flat `owner__name` slug and MUST pass
+//     `safe_segment` (it becomes a path/ref segment in the clone/checkout path).
+//   - the owning tenant is NOT a field — it is the ambient `(tenant, session)`
+//     identity the server scopes every RPC by; a card is only read/written inside a
+//     tenant scope.
+//   - mutations are gated by the RBAC enforcement core (C1): a caller needs a role
+//     granting `(write|delete, forge_registry)` (the forge-domain resource).
+syntax = "proto3";
+
+package agent.v1;
+
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/): the
+// `(google.api.http)` options let Envoy's `grpc_json_transcoder` expose the service
+// as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
+// One GitHub App installation a tenant owns. Mirrors `agent_core::GithubInstall`.
+message GithubInstall {
+  // Decimal GitHub installation id (server-validated; the card id).
+  string installation_id = 1;
+  // The repositories this install selected, each a flat `owner__name` slug
+  // (a single `safe_segment`). Capped on ingest.
+  repeated string selected_repos = 2;
+  // When the install was recorded, Unix seconds.
+  uint64 installed_at = 3;
+}
+
+message GithubInstallListRequest {}
+
+message GithubInstallList {
+  repeated GithubInstall installs = 1;
+}
+
+message GithubInstallRef {
+  string installation_id = 1;
+}
+
+message GithubInstallDeleteReply {
+  bool deleted = 1; // false when the id was absent (not an error)
+}
+
+// The GitHub-App install control plane (mirrors ForgeRegistryService). Mutations are
+// gated by the RBAC enforcement core (C1) on `(write|delete, forge_registry)`.
+service GithubInstallRegistryService {
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  // upsert → POST with `body: "*"`. Paths live under /v1/github-installs/.
+  rpc List(GithubInstallListRequest) returns (GithubInstallList) {
+    option (google.api.http) = {get: "/v1/github-installs"};
+  }
+  rpc Get(GithubInstallRef) returns (GithubInstall) {
+    option (google.api.http) = {get: "/v1/github-installs/{installation_id}"};
+  }
+  rpc Put(GithubInstall) returns (GithubInstall) {
+    // upsert = create + update
+    option (google.api.http) = {
+      post: "/v1/github-installs"
+      body: "*"
+    };
+  }
+  rpc Delete(GithubInstallRef) returns (GithubInstallDeleteReply) {
+    option (google.api.http) = {delete: "/v1/github-installs/{installation_id}"};
+  }
+}

@@ -49,6 +49,9 @@
       "name": "ForgeRegistryService"
     },
     {
+      "name": "GithubInstallRegistryService"
+    },
+    {
       "name": "GraphService"
     },
     {
@@ -2505,6 +2508,118 @@
         ],
         "tags": [
           "ForgeRegistryService"
+        ]
+      }
+    },
+    "/v1/github-installs": {
+      "get": {
+        "summary": "REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,\nupsert → POST with `body: \"*\"`. Paths live under /v1/github-installs/.",
+        "operationId": "GithubInstallRegistryService_List",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.GithubInstallList"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "tags": [
+          "GithubInstallRegistryService"
+        ]
+      },
+      "post": {
+        "operationId": "GithubInstallRegistryService_Put",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.GithubInstall"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "description": "One GitHub App installation a tenant owns. Mirrors `agent_core::GithubInstall`.",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.GithubInstall"
+            }
+          }
+        ],
+        "tags": [
+          "GithubInstallRegistryService"
+        ]
+      }
+    },
+    "/v1/github-installs/{installationId}": {
+      "get": {
+        "operationId": "GithubInstallRegistryService_Get",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.GithubInstall"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "installationId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "GithubInstallRegistryService"
+        ]
+      },
+      "delete": {
+        "operationId": "GithubInstallRegistryService_Delete",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.GithubInstallDeleteReply"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "installationId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "GithubInstallRegistryService"
         ]
       }
     },
@@ -7390,6 +7505,49 @@
         },
         "truncated": {
           "type": "boolean"
+        }
+      }
+    },
+    "agent.v1.GithubInstall": {
+      "type": "object",
+      "properties": {
+        "installationId": {
+          "type": "string",
+          "description": "Decimal GitHub installation id (server-validated; the card id)."
+        },
+        "selectedRepos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The repositories this install selected, each a flat `owner__name` slug\n(a single `safe_segment`). Capped on ingest."
+        },
+        "installedAt": {
+          "type": "string",
+          "format": "uint64",
+          "description": "When the install was recorded, Unix seconds."
+        }
+      },
+      "description": "One GitHub App installation a tenant owns. Mirrors `agent_core::GithubInstall`."
+    },
+    "agent.v1.GithubInstallDeleteReply": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean",
+          "title": "false when the id was absent (not an error)"
+        }
+      }
+    },
+    "agent.v1.GithubInstallList": {
+      "type": "object",
+      "properties": {
+        "installs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/agent.v1.GithubInstall"
+          }
         }
       }
     },
