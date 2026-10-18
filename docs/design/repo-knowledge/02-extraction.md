@@ -19,7 +19,7 @@ pub trait Extractor: Send + Sync {
 
 pub struct ExtractBudget {
     pub max_files: usize,        // 50_000
-    pub max_file_bytes: u64,     // 2 MiB
+    pub max_file_bytes: usize,   // 2 MiB (as-built core contract)
     pub max_nodes: usize,        // 250_000
     pub max_edges: usize,        // 2_000_000
     pub deadline: Instant,
@@ -218,3 +218,18 @@ Go/SCIP child processes use the sandbox timeout/termination path.
 E1 in [the matrix](08-test-matrix.md) covers parser results, malformed input, exact caps,
 confinement, deterministic hashes and cancellation. [The Nix runbook](10-integration-and-evaluation.md)
 specifies feature-scoped execution, fixture inclusion, instruction ceilings and leak checks.
+
+## As-built (RK-03, local implementation)
+
+The opt-in `extract-rust` feature now provides the three `Extractor` implementations and
+`extract::extract(root, budget) -> (RepoGraph, ExtractReport)`. `extract::ExtractionWorker`
+adds one-slot async admission, cancellation and late-result discard. Publication/report storage
+remain RK-06. Validation and deviations are tracked in [PROGRESS](PROGRESS.md#2026-10-18--rk-03-extraction).
+
+The shared walk creates source-byte file evidence, honours confined local `.gitignore` rules
+without implicit global/parent ignore reads, and never follows escaping symlinks. Rust parsing
+uses a scoped thread to release proc-macro2 span tables. Matching impl blocks coalesce; generic
+specializations use a header-hash key suffix. Repeated named rstest labels share a node while
+the parent retains the row count; anonymous constants produce no symbol. Binary/test target
+module prefixes keep separate Rust namespaces distinct. Unsupported macro expansion and resolved
+calls/references are reported explicitly; name-based test links remain heuristic.

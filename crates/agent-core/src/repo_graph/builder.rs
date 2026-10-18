@@ -282,6 +282,24 @@ impl Default for GraphBuilder {
 }
 
 impl GraphBuilder {
+    /// Current insertion counts, before dangling endpoints are resolved by `finish`.
+    pub fn report(&self) -> BuildReport {
+        BuildReport {
+            nodes: self.nodes.len(),
+            edges: self.edges.len(),
+            dropped_nodes: self.dropped_nodes,
+            dropped_edges: self.dropped_edges,
+            suffixed: self.suffixed,
+            truncated: self.truncated,
+        }
+    }
+
+    /// Tighten insertion limits before an extractor runs; never raises existing caps.
+    pub fn constrain_caps(&mut self, caps: BuilderCaps) {
+        self.caps.max_nodes = self.caps.max_nodes.min(caps.max_nodes);
+        self.caps.max_edges = self.caps.max_edges.min(caps.max_edges);
+    }
+
     /// A new builder with the given caps.
     pub fn new(caps: BuilderCaps) -> Self {
         Self {

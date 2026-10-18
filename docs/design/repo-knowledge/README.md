@@ -204,8 +204,9 @@ is RK-08/RK-09. Go/SCIP do not block those consumers. Migration order is 0002/RK
 
 ## Extension: monitored repositories and durable lessons (2026-10-17)
 
-**Design only.** RK-01/02 are implemented; the indexer, extraction and review consumers remain
-pending. The review fleet already polls PRs, persists drafts and tracks feedback; enabling that
+**Extension remains planned.** RK-01/02 are merged; RK-03 extraction exists locally with
+validation tracked in [STATUS](STATUS.md). The indexer and review consumers remain pending.
+The review fleet already polls PRs, persists drafts and tracks feedback; enabling that
 fleet does not yet populate this graph. Complete RK-03 → RK-06 → RK-07/08 → RK-09 first.
 The end-to-end publication and refresh contract is in [05 — Consumption](05-consumption.md).
 

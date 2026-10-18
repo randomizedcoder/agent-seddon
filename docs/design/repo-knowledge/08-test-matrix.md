@@ -140,6 +140,10 @@ race cases. R3 conformance is reused, not rewritten. Nix names and exact invocat
 
 ### E1 — deterministic extractors
 
+RK-03 now has local executable cases in `agent-repo-graph/tests/extraction.rs` and
+`extract/worker.rs`; acceptance evidence is in [PROGRESS](PROGRESS.md#2026-10-18--rk-03-extraction).
+RK-06 still owns publication assertions for late/canceled extraction.
+
 | Case ID | Class | Description/setup | Action | Expected outcome | Harness/gate | Increment |
 |---|---|---|---|---|---|---|
 | `positive_rust_cargo_docs` | Positive | Two-crate fixture, seam/impl, feature, linked docs, five test classes | Extract and compare expected nodes/edges | Correct qualified keys, cfg gates, doc links and test classes; heuristic tests labelled | H / repo-graph-rust | RK-03 |
@@ -149,6 +153,17 @@ race cases. R3 conformance is reused, not rewritten. Nix names and exact invocat
 | `corner_empty_and_unresolved` | Corner | Empty repo; separately unresolved external imports and macro-generated items | Extract | Empty graph valid; unresolved coverage explicit; no inferred zero-callers claim | H / repo-graph-rust | RK-03 |
 | `adversarial_escape_and_docs` | Adversarial | Escaping symlink, hostile path/doc instruction | Walk and extract | Outside file never read; instruction excluded; bounded diagnostic without hostile content | H / repo-graph-rust | RK-03 |
 | `boundary_deadline_late_worker` | Boundary | Parser double held beyond deadline | Cancel, release worker, request another job | No late publication; worker slot held until completion; no accumulating workers | H / repo-graph-rust | RK-03/06 |
+| `corner_canceled_worker_holds_admission` | Corner | Caller canceled while parser is blocked | Abort caller, request another job, then release parser | Cancellation signaled; admission retained until parser exits | H / repo-graph-rust | RK-03 |
+| `positive_multiple_impl_blocks_and_specializations` | Positive | Repeated impl blocks and distinct generic self types | Extract, then edit second block | Blocks coalesce; specializations/methods remain distinct; body hash changes | H / repo-graph-rust | RK-03 |
+| `corner_repeated_case_labels` | Corner | Two rstest rows share a named label | Extract | One named-case node; parent retains both rows | H / repo-graph-rust | RK-03 |
+| `corner_anonymous_constants_and_file_cfg` | Corner | Multiple `_` constants in a feature-gated file | Extract | No anonymous symbol collision; file gate reaches function | H / repo-graph-rust | RK-03 |
+| `positive_imported_trait_and_renamed_type` | Positive | Trait imported locally; self type renamed | Extract | Implements/impl-for edges reach workspace definitions | H / repo-graph-rust | RK-03 |
+| `positive_confined_gitignore` | Positive | Local ignore rules hide directory and source | Extract | Ignored paths absent; no global rules consulted | H / repo-graph-rust | RK-03 |
+| `adversarial_symlink_ignore_rules` | Adversarial | Root ignore file symlinks outside with `*` rule | Extract | Outside rules not read; source survives; report incomplete | H / repo-graph-rust | RK-03 |
+| `boundary_individual_extractor_caps` | Boundary | Zero-edge builder cap followed by another extractor | Compose extractors | Cap failures reported; later extractor cannot relax cap | H / repo-graph-rust | RK-03 |
+| `positive_comment_and_signature_hashes` | Positive | Doc-only edit followed by signature edit | Re-extract | Docs preserve symbol hashes but change file hash; signature changes signature hash | H / repo-graph-rust | RK-03 |
+| `positive_nested_docs_preserve_symbol_hashes` | Positive | Edit field docs and function inner docs | Re-extract | Neither signature nor body hash changes for documentation edits | H / repo-graph-rust | RK-03 |
+| `boundary_exact_graph_caps` | Boundary | Set caps to insertion counts, then one below | Re-extract | Exact cap preserves graph; each excess is explicitly truncated | H / repo-graph-rust | RK-03 |
 
 ### I1 — indexer publication and recovery
 

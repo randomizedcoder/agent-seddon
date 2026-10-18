@@ -10,9 +10,12 @@ license.workspace = true
 # in-memory double in `agent-testkit` and the Postgres tier here share one source of truth. This
 # crate re-exports the seam and, increment by increment, adds what only a consumer needs:
 # `PgRepoGraph` (feature `repo-graph-postgres`, RK-02), the extractors (RK-03) and the indexer
-# (RK-06). Until then it is a doc-only skeleton so every commit in the workspace builds.
+# (RK-06). The default feature set remains a thin, DB-free core re-export.
 
 [features]
+# Rust/Cargo/Markdown parsers and bounded worker admission; no repository execution.
+extract-rust = ["dep:ignore", "dep:globset", "dep:syn", "dep:quote", "dep:proc-macro2", "dep:toml", "dep:sha2", "dep:serde_json", "dep:tokio"]
+dhat-heap = ["dep:dhat"]
 # Postgres tier — `PgRepoGraph`, the durable store behind migration 0001 (RK-02). Off by
 # default so a normal build stays DB-free; not hermetic (needs a live server), its conformance
 # tests are `#[ignore]`-gated (run under `nix run .#pg-integration`). Deliberately NO
@@ -24,6 +27,15 @@ license.workspace = true
 repo-graph-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]
 
 [dependencies]
+ignore = { workspace = true, optional = true }
+globset = { workspace = true, optional = true }
+syn = { workspace = true, optional = true }
+quote = { workspace = true, optional = true }
+proc-macro2 = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
 agent-core.workspace = true
 async-trait = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
@@ -33,6 +45,16 @@ sqlx = { workspace = true, optional = true }
 agent-testkit.workspace = true
 rstest.workspace = true
 tokio.workspace = true
+iai-callgrind.workspace = true
+
+[[bench]]
+name = "extract"
+harness = false
+required-features = ["extract-rust"]
+
+[[example]]
+name = "extract"
+required-features = ["extract-rust"]
 
 [lints]
 workspace = true

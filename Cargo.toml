@@ -122,6 +122,10 @@ async-stream = "0.3"
 rustyline = "14"
 # gitignore-aware file walking + regex for the search tools
 ignore = "0.4"
+globset = "0.4"
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
 regex = "1"
 # table-driven test cases (dev-only)
 rstest = "0.23"

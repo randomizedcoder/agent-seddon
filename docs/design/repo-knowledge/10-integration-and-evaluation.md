@@ -3,7 +3,9 @@
 **Design/runbook; future commands below are explicitly marked.** Only RK-01/02 graph storage
 exists today. This document extends [increments](06-increments.md), the
 [test matrix](08-test-matrix.md), and [decisions/lessons](09-decisions-and-lessons.md).
-No Rust, Nix or SQL changes are implemented by this documentation update.
+RK-03 extraction and its feature-scoped/bench/leak wiring now exist locally; see
+[STATUS](STATUS.md) for validation. Indexing and consumers remain proposed, and this increment
+does not change SQL or runtime defaults.
 
 ## Build and feature wiring
 
@@ -13,8 +15,8 @@ family, or top-level change is required** for this design. Register checks in
 current package/app assembly lives (there is no `nix/apps.nix`). Use pinned tools and shared
 Crane `commonArgs`/`cargoArtifacts` as the existing graph check does.
 
-Existing feature `agent-repo-graph/repo-graph-postgres` remains opt-in. Proposed
-`agent-repo-graph/extract-rust` enables syn/Cargo/docs extraction;
+Existing feature `agent-repo-graph/repo-graph-postgres` remains opt-in. RK-03's local
+`agent-repo-graph/extract-rust` enables syn/Cargo/docs extraction; proposed
 `agent-runtime/repo-graph` forwards extraction and graph Postgres support;
 `agent-cli/repo-graph` forwards that runtime feature. The existing planned `tool-repo-graph`
 feature must forward the same graph dependency through the tools/runtime/CLI crates.

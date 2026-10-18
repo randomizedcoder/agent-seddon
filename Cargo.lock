@@ -519,10 +519,19 @@ dependencies = [
  "agent-core",
  "agent-testkit",
  "async-trait",
+ "dhat",
+ "globset",
+ "iai-callgrind",
+ "ignore",
+ "proc-macro2",
+ "quote",
  "rstest",
  "serde_json",
+ "sha2",
  "sqlx",
+ "syn 2.0.119",
  "tokio",
+ "toml",
 ]
 
 [[package]]

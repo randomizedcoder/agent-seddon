@@ -1,8 +1,9 @@
 # Repository knowledge — implementation plan
 
 Execution plan for the [design of record](README.md), including the decisions/lessons extension
-merged in PR #636. Baseline inspected: `ed0ab95d` (2026-10-17). Only RK-00–02 are implemented.
-Everything described below for RK-03–21 is planned work, including named checks and commands.
+merged in PR #636. Original baseline: `ed0ab95d` (2026-10-17). RK-00–02 are merged;
+RK-03 now has local implementation on `d648c894`, with acceptance in STATUS/PROGRESS.
+RK-04–21 remain planned, including their proposed checks and commands.
 
 [Status tracker](STATUS.md) · [Increment map](06-increments.md) · [Test matrix](08-test-matrix.md) ·
 [Progress journal](PROGRESS.md) · [Integration and evaluation runbook](10-integration-and-evaluation.md)
@@ -91,6 +92,9 @@ These results are historical, not a fresh validation of this documentation chang
 ### RK-03
 
 **Rust, Cargo and docs extraction.** Depends on RK-01.
+
+Local implementation is present on `d648c894`; see [status](STATUS.md) and the
+[as-built decisions/evidence](PROGRESS.md#2026-10-18--rk-03-extraction). Acceptance is not a merge.
 
 1. Implement the three extractors in `agent-repo-graph` behind `extract-rust`, using the existing
    core contract, builder and [extraction rules](02-extraction.md). Parse repository inputs
