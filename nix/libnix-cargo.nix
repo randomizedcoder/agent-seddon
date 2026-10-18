@@ -29,13 +29,14 @@ let
     ];
   };
 
-  cargo = (import (buildsystem + "/derivations/default.nix") {
-    inherit pkgs;
-    project_root = cargoSrc;
-    external_crate_dependencies = import (buildsystem + "/Cargo.dependencies.nix") { inherit pkgs; };
-    rustc = rustToolchain;
-    cargo = rustToolchain;
-  }).cargo-0_88_0-bin-8cad88ffd54a16db;
+  cargo =
+    (import (buildsystem + "/derivations/default.nix") {
+      inherit pkgs;
+      project_root = cargoSrc;
+      external_crate_dependencies = import (buildsystem + "/Cargo.dependencies.nix") { inherit pkgs; };
+      rustc = rustToolchain;
+      cargo = rustToolchain;
+    }).cargo-0_88_0-bin-8cad88ffd54a16db;
 in
 {
   inherit
