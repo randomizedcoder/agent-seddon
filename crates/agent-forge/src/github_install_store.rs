@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use agent_config_store::{Backend, Write, DEFAULT_MAX_CARDS_PER_TENANT};
+use agent_config_store::{is_conflict, Backend, Write, DEFAULT_MAX_CARDS_PER_TENANT};
 use agent_core::{safe_segment, Error, GithubInstall, GithubInstallRegistry, Result};
 use agent_proto::pb;
 use async_trait::async_trait;
@@ -69,6 +69,14 @@ impl StoreInstalls {
 /// `INSTALLS`, whose rows are tenant-self-asserted, so no open CRUD call can ever reach
 /// this one. Only the onboarding `CompleteInstall` path writes here, after the proof.
 pub const INSTALLS_VERIFIED: &str = "github_installs_verified";
+/// The global one-tenant-per-installation claims: one row per installation id (under the
+/// fixed [`CLAIMS_SCOPE`], not a tenant's), whose blob is the owning tenant. Written by
+/// compare-and-swap in the **same atomic batch** as the verified row, so across every
+/// process sharing the backend exactly one tenant can ever claim an installation.
+pub const INSTALL_CLAIMS: &str = "github_install_claims";
+/// The fixed storage scope the claims live under. Collection-scoped, so a tenant that
+/// happens to share the name owns nothing in [`INSTALL_CLAIMS`] by it.
+const CLAIMS_SCOPE: &str = "_global";
 /// Longest verified principal `subject` we persist (an OIDC `sub` is opaque but short).
 pub const MAX_SUBJECT_LEN: usize = 256;
 
@@ -176,17 +184,24 @@ impl VerifiedInstalls {
         })
     }
 
-    /// Persist a verified binding (upsert). Validated before the write; a new row is
-    /// refused once the tenant holds [`DEFAULT_MAX_CARDS_PER_TENANT`].
-    pub async fn put(&self, row: &VerifiedInstall) -> Result<()> {
+    /// Claim the installation for this tenant and persist the verified row, atomically.
+    /// `Ok(true)` = this tenant holds it (a re-claim of its own install is an upsert);
+    /// `Ok(false)` = another tenant holds the claim, and nothing was written. The claim row
+    /// and the verified row land in one batch under a compare-and-swap on the claim, so two
+    /// tenants racing the same installation — even on different replicas — cannot both
+    /// win. Validated before the write; a new row is refused once the tenant holds
+    /// [`DEFAULT_MAX_CARDS_PER_TENANT`].
+    pub async fn claim(&self, row: &VerifiedInstall) -> Result<bool> {
         row.validate()?;
         let id = row.installation_id.clone();
-        let is_new = self
-            .backend
-            .get(INSTALLS_VERIFIED, &self.tenant, &id)
-            .await?
-            .is_none();
-        if is_new
+        let current = self.backend.get(INSTALL_CLAIMS, CLAIMS_SCOPE, &id).await?;
+        if current
+            .as_deref()
+            .is_some_and(|owner| owner != self.tenant.as_bytes())
+        {
+            return Ok(false);
+        }
+        if current.is_none()
             && self.backend.count(INSTALLS_VERIFIED, &self.tenant).await?
                 >= DEFAULT_MAX_CARDS_PER_TENANT
         {
@@ -194,20 +209,36 @@ impl VerifiedInstalls {
                 "verified installs is full ({DEFAULT_MAX_CARDS_PER_TENANT} per tenant)"
             )));
         }
-        self.backend
-            .apply(&[
-                Write::EnsureTenant {
-                    tenant: self.tenant.clone(),
-                },
-                Write::Put {
-                    collection: INSTALLS_VERIFIED,
-                    tenant: self.tenant.clone(),
-                    id,
-                    blob: row.encode(),
-                },
-            ])
-            .await?;
-        Ok(())
+        let batch = [
+            Write::EnsureTenant {
+                tenant: CLAIMS_SCOPE.to_string(),
+            },
+            Write::CompareAndSwap {
+                collection: INSTALL_CLAIMS,
+                tenant: CLAIMS_SCOPE.to_string(),
+                id: id.clone(),
+                expected: current,
+                blob: self.tenant.as_bytes().to_vec(),
+            },
+            Write::EnsureTenant {
+                tenant: self.tenant.clone(),
+            },
+            Write::Put {
+                collection: INSTALLS_VERIFIED,
+                tenant: self.tenant.clone(),
+                id: id.clone(),
+                blob: row.encode(),
+            },
+        ];
+        match self.backend.apply(&batch).await {
+            Ok(()) => Ok(true),
+            // Lost a race: classify by who holds it now. Another tenant ⇒ refused; this
+            // tenant (a concurrent re-onboard of its own install) ⇒ already in place.
+            Err(e) if is_conflict(&e) => Ok(verified_owner(&self.backend, &id)
+                .await?
+                .is_some_and(|owner| owner == self.tenant)),
+            Err(e) => Err(e),
+        }
     }
 
     /// This tenant's verified rows (each re-validated on load).
@@ -221,58 +252,69 @@ impl VerifiedInstalls {
     }
 }
 
-/// Every **verified** binding, as a `tenant → {installation_id}` map across all tenants —
-/// the startup seed of the mint gate's verified snapshot
-/// (`secrets::install_github_app_store_bindings`). The gate is synchronous and
-/// cross-tenant, but the store is async and per-tenant, so the builder calls this once.
+/// The verified bindings rebuilt at startup ([`verified_install_bindings`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VerifiedBindings {
+    /// `tenant → {installation_id}`: each verified row whose claim names that tenant.
+    pub bindings: BTreeMap<String, BTreeSet<String>>,
+    /// `(tenant, installation_id)` verified rows left out because the claim does not
+    /// name that tenant (absent, another tenant's, or malformed) — only an out-of-band
+    /// write produces one. Reported so the caller can log it; excluded, so it binds nothing.
+    pub unclaimed: Vec<(String, String)>,
+}
+
+/// Every **verified** binding across all tenants — the startup seed of the mint gate's
+/// verified snapshot (`secrets::install_github_app_store_bindings`). The gate is
+/// synchronous and cross-tenant, but the store is async and per-tenant, so the builder
+/// calls this once.
 ///
 /// Reads [`INSTALLS_VERIFIED`] **only** — never the tenant-self-asserted CRUD
 /// [`INSTALLS`] collection (seeding from that would be the F4b cross-tenant minting IDOR).
-/// Every row is decoded through the validating path; a blob that fails (an out-of-band
-/// tamper) fails the whole rebuild closed, so a corrupt row can never silently widen the
-/// gate. A tenant with no rows contributes no entry (a `get(tenant)` miss, never an
-/// empty-set hit — the fail-closed shape the gate expects).
-pub async fn verified_install_bindings(
-    backend: &Arc<dyn Backend>,
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    // Every id seen so far → its tenant. One installation belongs to at most one tenant, so
-    // an id under two tenants (a tamper, or two replicas racing a claim) fails the whole
-    // rebuild closed rather than binding it to both.
-    let mut owner: BTreeMap<String, String> = BTreeMap::new();
+/// A row binds only when the [`INSTALL_CLAIMS`] row for its installation names the same
+/// tenant, so one installation can never bind two tenants; a row that disagrees with its
+/// claim is contained to that one id (left out, reported in `unclaimed`) rather than
+/// failing every tenant's startup. A blob that fails to decode (an out-of-band tamper)
+/// still fails the whole rebuild closed. A tenant with no bound rows contributes no entry
+/// (a `get(tenant)` miss, never an empty-set hit — the fail-closed shape the gate expects).
+pub async fn verified_install_bindings(backend: &Arc<dyn Backend>) -> Result<VerifiedBindings> {
+    let mut out = VerifiedBindings::default();
     for tenant in backend.tenants(INSTALLS_VERIFIED).await? {
         let mut ids = BTreeSet::new();
         for blob in backend.list(INSTALLS_VERIFIED, &tenant).await? {
             let id = VerifiedInstall::decode(&blob)?.installation_id;
-            if let Some(first) = owner.insert(id.clone(), tenant.clone()) {
-                if first != tenant {
-                    return Err(Error::Config(format!(
-                        "installation {id} is verified under more than one tenant"
-                    )));
-                }
+            if verified_owner(backend, &id).await?.as_deref() == Some(tenant.as_str()) {
+                ids.insert(id);
+            } else {
+                out.unclaimed.push((tenant.clone(), id));
             }
-            ids.insert(id);
         }
         if !ids.is_empty() {
-            out.insert(tenant, ids);
+            out.bindings.insert(tenant, ids);
         }
     }
     Ok(out)
 }
 
-/// The tenant `installation_id` is already verified-bound to, if any (one tenant per
-/// installation). A scan of [`verified_install_bindings`]; fails closed on a tamper.
-/// Callers in one process serialize the check-then-write (the runtime's onboarding holds a
-/// process-wide claim lock); two replicas racing the same install are not serialized, but
-/// the resulting double row fails [`verified_install_bindings`] closed (documented limit).
+/// The tenant holding the claim on `installation_id`, if any — the one-tenant-per-
+/// installation record [`VerifiedInstalls::claim`] writes. A claim blob that is not a
+/// valid tenant segment (an out-of-band tamper) is an error, never "unclaimed".
 pub async fn verified_owner(
     backend: &Arc<dyn Backend>,
     installation_id: &str,
 ) -> Result<Option<String>> {
-    Ok(verified_install_bindings(backend)
+    if !agent_core::valid_installation_id(installation_id) {
+        return Err(Error::Config("invalid installation id".into()));
+    }
+    match backend
+        .get(INSTALL_CLAIMS, CLAIMS_SCOPE, installation_id)
         .await?
-        .into_iter()
-        .find_map(|(t, ids)| ids.contains(installation_id).then_some(t)))
+    {
+        None => Ok(None),
+        Some(blob) => match String::from_utf8(blob) {
+            Ok(owner) if safe_segment(&owner) => Ok(Some(owner)),
+            _ => Err(Error::Config("stored install claim: malformed".into())),
+        },
+    }
 }
 
 #[async_trait]
@@ -489,12 +531,13 @@ mod tests {
         let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
         let acme = VerifiedInstalls::with_tenant(b.clone(), "acme").expect("tenant");
         let beta = VerifiedInstalls::with_tenant(b.clone(), "beta").expect("tenant");
-        acme.put(&verified("123")).await.expect("put");
-        acme.put(&verified("456")).await.expect("put");
-        beta.put(&verified("789")).await.expect("put");
-        let map = verified_install_bindings(&b).await.expect("rebuild");
-        assert_eq!(map.get("acme"), Some(&ids(&["123", "456"])));
-        assert_eq!(map.get("beta"), Some(&ids(&["789"])));
+        assert!(acme.claim(&verified("123")).await.expect("claim"));
+        assert!(acme.claim(&verified("456")).await.expect("claim"));
+        assert!(beta.claim(&verified("789")).await.expect("claim"));
+        let seed = verified_install_bindings(&b).await.expect("rebuild");
+        assert_eq!(seed.bindings.get("acme"), Some(&ids(&["123", "456"])));
+        assert_eq!(seed.bindings.get("beta"), Some(&ids(&["789"])));
+        assert!(seed.unclaimed.is_empty());
         assert_eq!(acme.list().await.expect("list").len(), 2);
         assert_eq!(
             verified_owner(&b, "789").await.expect("scan").as_deref(),
@@ -513,10 +556,10 @@ mod tests {
             .put(install("123", &["a__b"]))
             .await
             .expect("crud put");
-        assert!(verified_install_bindings(&b)
-            .await
-            .expect("rebuild")
-            .is_empty());
+        assert_eq!(
+            verified_install_bindings(&b).await.expect("rebuild"),
+            VerifiedBindings::default()
+        );
         assert_eq!(verified_owner(&b, "123").await.expect("scan"), None);
     }
 
@@ -545,30 +588,121 @@ mod tests {
         .await
         .expect("seed tamper");
         assert!(verified_install_bindings(&b).await.is_err());
-        assert!(verified_owner(&b, "123").await.is_err());
     }
 
-    // adversarial: one installation verified under two tenants (a tamper, or a cross-replica
-    // claim race) binds to neither — the rebuild and the owner scan both fail closed. The
-    // same id under one tenant twice is just an idempotent re-onboard.
+    // One tenant per installation, enforced by the atomic claim: once acme holds 123, beta's
+    // claim is refused and writes nothing; acme re-claiming its own install is an upsert.
     #[rstest]
-    #[case::adversarial_two_tenants_one_install("beta", false)]
-    #[case::corner_same_tenant_reverified("acme", true)]
+    #[case::adversarial_second_tenant_refused("beta", false)]
+    #[case::corner_same_tenant_reclaim("acme", true)]
     #[tokio::test]
-    async fn adversarial_install_under_two_tenants_fails_closed(
-        #[case] second: &str,
-        #[case] ok: bool,
-    ) {
+    async fn claim_is_one_tenant_per_install(#[case] second: &str, #[case] wins: bool) {
         let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
-        for tenant in ["acme", second] {
-            VerifiedInstalls::with_tenant(b.clone(), tenant)
-                .expect("tenant")
-                .put(&verified("123"))
-                .await
-                .expect("put");
+        let acme = VerifiedInstalls::with_tenant(b.clone(), "acme").expect("tenant");
+        assert!(acme.claim(&verified("123")).await.expect("claim"));
+        let other = VerifiedInstalls::with_tenant(b.clone(), second).expect("tenant");
+        assert_eq!(other.claim(&verified("123")).await.expect("claim"), wins);
+        assert_eq!(
+            other.list().await.expect("list").len(),
+            usize::from(wins),
+            "a refused claim writes nothing"
+        );
+        assert_eq!(
+            verified_owner(&b, "123").await.expect("owner").as_deref(),
+            Some("acme")
+        );
+        let seed = verified_install_bindings(&b).await.expect("rebuild");
+        assert_eq!(seed.bindings.len(), 1);
+        assert!(seed.unclaimed.is_empty());
+    }
+
+    // adversarial: many concurrent claims on one installation from different tenants — the
+    // compare-and-swap lets exactly one win (the cross-process guarantee, here across tasks).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adversarial_concurrent_claims_one_winner() {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let store = VerifiedInstalls::with_tenant(b.clone(), &format!("t{i}")).unwrap();
+                tokio::spawn(async move { store.claim(&verified("123")).await.expect("claim") })
+            })
+            .collect();
+        let mut wins = 0;
+        for t in tasks {
+            wins += usize::from(t.await.unwrap());
         }
-        assert_eq!(verified_install_bindings(&b).await.is_ok(), ok);
-        assert_eq!(verified_owner(&b, "123").await.is_ok(), ok);
+        assert_eq!(wins, 1);
+        let seed = verified_install_bindings(&b).await.expect("rebuild");
+        assert_eq!(seed.bindings.values().map(BTreeSet::len).sum::<usize>(), 1);
+    }
+
+    // adversarial: a verified row whose claim does not name its tenant (an out-of-band
+    // write — the claim absent, or held by another tenant) is contained to that one id: it
+    // binds nothing and is reported, while every other tenant's bindings still seed.
+    #[rstest]
+    #[case::adversarial_row_without_claim(None)]
+    #[case::adversarial_row_under_other_tenants_claim(Some("acme"))]
+    #[tokio::test]
+    async fn adversarial_unclaimed_row_is_contained(#[case] claim_owner: Option<&str>) {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        let beta = VerifiedInstalls::with_tenant(b.clone(), "beta").expect("tenant");
+        assert!(beta.claim(&verified("789")).await.expect("claim"));
+        let mut writes = vec![
+            Write::EnsureTenant {
+                tenant: "mallory".into(),
+            },
+            Write::Put {
+                collection: INSTALLS_VERIFIED,
+                tenant: "mallory".into(),
+                id: "123".into(),
+                blob: verified("123").encode(),
+            },
+        ];
+        if let Some(owner) = claim_owner {
+            writes.push(Write::Put {
+                collection: INSTALL_CLAIMS,
+                tenant: CLAIMS_SCOPE.into(),
+                id: "123".into(),
+                blob: owner.as_bytes().to_vec(),
+            });
+        }
+        b.apply(&writes).await.expect("out-of-band write");
+        let seed = verified_install_bindings(&b)
+            .await
+            .expect("rebuild still succeeds");
+        assert_eq!(seed.bindings.get("beta"), Some(&ids(&["789"])));
+        assert_eq!(seed.bindings.get("mallory"), None);
+        assert_eq!(
+            seed.unclaimed,
+            vec![("mallory".to_string(), "123".to_string())]
+        );
+    }
+
+    // adversarial: a malformed claim blob is an error, never read as "unclaimed" (which
+    // would let a new tenant take the install).
+    #[rstest]
+    #[case::adversarial_traversal_owner(b"../etc".to_vec())]
+    #[case::adversarial_non_utf8_owner(vec![0xff, 0xfe])]
+    #[case::adversarial_crlf_owner(b"ac\r\nme".to_vec())]
+    #[tokio::test]
+    async fn adversarial_malformed_claim_fails_closed(#[case] blob: Vec<u8>) {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        b.apply(&[
+            Write::EnsureTenant {
+                tenant: CLAIMS_SCOPE.into(),
+            },
+            Write::Put {
+                collection: INSTALL_CLAIMS,
+                tenant: CLAIMS_SCOPE.into(),
+                id: "123".into(),
+                blob,
+            },
+        ])
+        .await
+        .expect("seed tamper");
+        assert!(verified_owner(&b, "123").await.is_err());
+        let acme = VerifiedInstalls::with_tenant(b, "acme").expect("tenant");
+        assert!(acme.claim(&verified("123")).await.is_ok_and(|won| !won));
     }
 
     // negative: an invalid verified row is never written.
@@ -576,7 +710,7 @@ mod tests {
     async fn negative_invalid_verified_row_not_written() {
         let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
         let acme = VerifiedInstalls::with_tenant(b.clone(), "acme").expect("tenant");
-        assert!(acme.put(&verified("12a")).await.is_err());
+        assert!(acme.claim(&verified("12a")).await.is_err());
         assert!(acme.list().await.expect("list").is_empty());
         assert!(VerifiedInstalls::with_tenant(b, "../etc").is_err());
     }

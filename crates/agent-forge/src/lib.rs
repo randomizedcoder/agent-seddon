@@ -73,6 +73,6 @@ pub use store::{StoreForges, DEFAULT_TENANT};
 // (re-exported above as `DEFAULT_TENANT`), so only the store type is re-exported here.
 #[cfg(feature = "forge-store")]
 pub use github_install_store::{
-    verified_install_bindings, verified_owner, StoreInstalls, VerifiedInstall, VerifiedInstalls,
-    INSTALLS_VERIFIED, MAX_SUBJECT_LEN,
+    verified_install_bindings, verified_owner, StoreInstalls, VerifiedBindings, VerifiedInstall,
+    VerifiedInstalls, INSTALLS_VERIFIED, INSTALL_CLAIMS, MAX_SUBJECT_LEN,
 };

@@ -190,22 +190,23 @@ and a **verified principal** (no principal ⇒ `UNAUTHENTICATED`, in every auth 
    `GET /user/memberships/orgs/{login}`). Mere access or membership is never enough, and
    the callback's `installation_id` is never evidence by itself.
 4. If another tenant already holds the installation — a verified binding, or an operator
-   `[github_app] installations` assignment — the call is `ALREADY_EXISTS` (checked under a
-   process-wide claim lock held through the bind, so concurrent claims bind one tenant);
-   otherwise the binding is written to a separate `github_installs_verified` collection
+   `[github_app] installations` assignment — the call is `ALREADY_EXISTS`. The onboarded
+   case is an atomic claim: a global `github_install_claims` row per installation, written
+   by compare-and-swap in one batch with the verified row, so concurrent claims — on any
+   replica — bind exactly one tenant. Otherwise the binding is written to a separate `github_installs_verified` collection
    (no CRUD RPC reaches it), bound into the mint gate, and the display row is upserted.
 
 The mint gate is the operator `[github_app] installations` allowlist **OR** the verified
-bindings (rebuilt from `github_installs_verified` at startup; a tampered row fails startup
-closed). A refused `state` and a failed proof both answer one opaque `PERMISSION_DENIED`.
+bindings (rebuilt from `github_installs_verified` at startup; an undecodable row fails
+startup closed). A refused `state` and a failed proof both answer one opaque `PERMISSION_DENIED`.
 
 Prerequisites: `[github_app] slug` + `client_id` + `client_secret_ref` (and a
 `[github_install_registry] store`); on the App, **"Request user authorization (OAuth)
 during installation"** on, the Setup URL pointing at the portal page, and the
 **Organization → Members: read** permission (without it the membership read is refused
 and the proof fails closed). Limits: a binding made on one replica reaches another only
-at its restart (a miss fails closed); the claim is not atomic across replicas, but an
-installation verified under two tenants fails the startup rebuild closed (binding neither);
+at its restart (a miss fails closed); a verified row its claim does not name (only an
+out-of-band write makes one) is left out of the gate and logged, without failing startup;
 uninstall/revoke arrives with F6 webhooks.
 
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the

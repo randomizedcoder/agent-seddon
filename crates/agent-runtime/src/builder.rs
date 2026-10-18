@@ -3923,7 +3923,15 @@ async fn wire_github_install_onboarding(
     let seed = agent_forge::verified_install_bindings(backend)
         .await
         .map_err(|e| anyhow::anyhow!("rebuilding the verified github-app installs: {e}"))?;
-    crate::secrets::install_github_app_store_bindings(seed);
+    for (tenant, id) in &seed.unclaimed {
+        // An out-of-band row its claim disagrees with: left out of the gate (binds nothing).
+        tracing::warn!(
+            tenant,
+            installation_id = id,
+            "verified github-app install has no matching claim; not bound"
+        );
+    }
+    crate::secrets::install_github_app_store_bindings(seed.bindings);
     if !ga.onboarding_enabled() {
         return Ok(agent);
     }
