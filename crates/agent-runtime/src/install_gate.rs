@@ -27,13 +27,14 @@
 use std::sync::Arc;
 
 use agent_config_store::Backend;
+use agent_core::pending::PendingTable;
 use agent_core::{
     safe_segment, valid_installation_id, BeginInstall, GithubInstall, GithubInstallOnboarding,
     GithubInstallRegistry, OnboardRefusal, Result,
 };
 use agent_forge::ghapp::{AccountKind, Clock, InstallationTokenMinter};
 use agent_forge::ghapp_oauth::{UserInstallationAccess, MAX_CODE_BYTES};
-use agent_forge::ghapp_onboard::{install_url, PendingStates};
+use agent_forge::ghapp_onboard::{install_url, MAX_PENDING, STATE_TTL_SECS};
 use agent_forge::{StoreInstalls, VerifiedInstall, VerifiedInstalls, MAX_SUBJECT_LEN};
 use async_trait::async_trait;
 
@@ -112,7 +113,7 @@ type ElsewhereFn = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 /// The [`GithubInstallOnboarding`] backend (see the module docs).
 pub struct InstallOnboarding {
-    pending: PendingStates<Caller>,
+    pending: PendingTable<Caller>,
     prover: Arc<dyn ProveAdmin>,
     backend: Arc<dyn Backend>,
     /// The GitHub web host (`https://github.com`, or a GHES host) the install URL is on.
@@ -172,7 +173,7 @@ impl InstallOnboarding {
             ));
         }
         Ok(Self {
-            pending: PendingStates::new(clock.clone()),
+            pending: PendingTable::new(STATE_TTL_SECS, MAX_PENDING),
             prover,
             backend,
             web_base,
@@ -222,10 +223,13 @@ impl GithubInstallOnboarding for InstallOnboarding {
         }
         let (state, expires_at) = self
             .pending
-            .insert(Caller {
-                tenant: tenant.to_string(),
-                subject: subject.to_string(),
-            })
+            .insert(
+                self.clock.now_secs(),
+                Caller {
+                    tenant: tenant.to_string(),
+                    subject: subject.to_string(),
+                },
+            )
             .map_err(|_| OnboardRefusal::Busy)?;
         let install_url =
             install_url(&self.web_base, &self.slug, &state).ok_or(OnboardRefusal::NotConfigured)?;
@@ -247,7 +251,7 @@ impl GithubInstallOnboarding for InstallOnboarding {
         // Spend the state first, whatever follows: a state is good for one attempt.
         let began = self
             .pending
-            .take(state)
+            .take(self.clock.now_secs(), state)
             .ok_or(OnboardRefusal::UnknownState)?;
         if !match_binding(&began, tenant, subject) {
             tracing::warn!("install onboarding: state presented by a different caller");

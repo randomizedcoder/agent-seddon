@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use agent_core::pending::{random_token, PendingFull, PendingTable};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
 
 use super::issuer::{check_fetch_url, ResolvedIssuer};
@@ -32,8 +32,6 @@ pub const STATE_TTL_SECS: u64 = 600;
 pub const MAX_PENDING: usize = 1024;
 /// Largest authorization code `Exchange` will send on. Real ones are short.
 pub const MAX_CODE_BYTES: usize = 4096;
-/// Longest `state` worth looking up; the agent's own are 43 characters.
-const MAX_STATE_BYTES: usize = 128;
 /// Every request to an issuer (discovery, the token endpoint) is bounded by this.
 const IDP_TIMEOUT: Duration = Duration::from_secs(10);
 const SCOPE: &str = "openid email profile";
@@ -152,61 +150,41 @@ struct Pending {
     redirect_uri: String,
     challenge: String,
     nonce: String,
-    expires_at: u64,
 }
 
-/// The single-use `state` table.
+/// The single-use `state` table: [`agent_core::pending::PendingTable`] on this
+/// listener's clock, its misses reported as sign-in refusals.
 pub struct PendingLogins {
-    entries: Mutex<HashMap<String, Pending>>,
+    table: PendingTable<Pending>,
     clock: Arc<dyn Clock>,
 }
 
 impl PendingLogins {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            table: PendingTable::new(STATE_TTL_SECS, MAX_PENDING),
             clock,
         }
     }
 
     /// Remember a sign-in under a fresh random `state`; lapsed entries go first.
-    fn insert(&self, mut p: Pending) -> Result<(String, u64), CodeRefusal> {
-        let now = self.clock.now_secs();
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.retain(|_, e| now <= e.expires_at);
-        if entries.len() >= MAX_PENDING {
-            return Err(CodeRefusal::Busy);
-        }
-        let state = random_token(32).ok_or(CodeRefusal::Busy)?;
-        p.expires_at = now.saturating_add(STATE_TTL_SECS);
-        let expires_at = p.expires_at;
-        entries.insert(state.clone(), p);
-        Ok((state, expires_at))
+    fn insert(&self, p: Pending) -> Result<(String, u64), CodeRefusal> {
+        self.table
+            .insert(self.clock.now_secs(), p)
+            .map_err(|PendingFull::Busy| CodeRefusal::Busy)
     }
 
     /// Take the sign-in `state` names. It is gone afterwards whatever the caller
     /// does next, so a `state` is spent by its first use, right or wrong.
     fn take(&self, state: &str) -> Result<Pending, CodeRefusal> {
-        if state.is_empty() || state.len() > MAX_STATE_BYTES {
-            return Err(CodeRefusal::UnknownState);
-        }
-        let now = self.clock.now_secs();
-        let taken = self
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(state);
-        taken
-            .filter(|p| now <= p.expires_at)
+        self.table
+            .take(self.clock.now_secs(), state)
             .ok_or(CodeRefusal::UnknownState)
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.table.len()
     }
 }
 
@@ -291,7 +269,6 @@ impl CodeFlow {
             redirect_uri: redirect_uri.to_string(),
             challenge: challenge.to_string(),
             nonce: nonce.clone(),
-            expires_at: 0,
         })?;
         let authorize_url = authorize_url(
             &endpoints.authorization,
@@ -546,13 +523,6 @@ fn token_claim(token: &str, claim: &str) -> Option<String> {
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
     claims.get(claim)?.as_str().map(str::to_string)
-}
-
-/// `bytes` of system randomness, base64url.
-fn random_token(bytes: usize) -> Option<String> {
-    let mut buf = vec![0u8; bytes];
-    SystemRandom::new().fill(&mut buf).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(buf))
 }
 
 #[cfg(test)]
