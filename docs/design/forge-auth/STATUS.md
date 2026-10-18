@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d + F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d1 lands the portal Forges tab (Connect GitHub round trip + one-click `ghapp:` forge cards); F5d2 + F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -22,7 +22,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2b | Clone credential injection | authenticate the git clone/fetch with the resolved/minted token via a host-scoped `http.extraHeader` injected through `env_set` (token never in argv, `.git/config`, or an error string) ⇒ enables **private-repo clone**; GitHub, benefits `env:`/`file:` PAT rows too | ✅ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
-| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union (built). **F5d**: portal UI. | 🟡 |
+| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union (built). **F5d1**: portal Forges tab — Connect GitHub round trip + one-click `ghapp:` forge cards (built). **F5d2**: FleetSession create/edit on a forge card (`forge_id`). | 🟡 |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
@@ -257,6 +257,31 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   full refuses then sweeps, zero cap, TTL saturation, distinct states, `adversarial_` empty/oversized/CRLF/NUL
   lookups spend nothing, 16-thread race on one state redeems once, token lengths); sign-in and onboarding suites
   unchanged and green.
+
+- **F5d1 (PR #TBD):** the portal side of onboarding — a **Forges** tab (`portal/lib/src/pages/forges_page.dart`,
+  nav item gated on `read:forge_registry`) over two new committed Dart stub sets (`forge_registry`,
+  `github_install_registry`; only those files regenerated) on the existing gateway channel — no Rust/proto change.
+  **The load-bearing fix:** GitHub's return carries `code` + `state` like an IdP sign-in return, so
+  `AuthState.start()` would have spent the sign-in entry on it and signed the user out. A pure
+  `parseInstallCallback` (`portal/lib/src/auth/install_callback.dart`) recognises an install return by
+  `installation_id` / `setup_action`; `start()` stashes it (sessionStorage, so it survives a sign-in round trip),
+  strips the query in every auth mode, and leaves the sign-in entry alone. The Forges tab relays it in
+  `CompleteInstall` only when its `state` equals the single-use `{state, expires_at}` this tab stored at
+  `BeginInstall` and has not lapsed — a forged, replayed, expired or malformed return never sends its `code`
+  (fail-closed shape checks: decimal ≤ 20-digit id, known `setup_action`, printable bounded `state`/`code`; the
+  stash is re-parsed on read). `setup_action=request` explains that an org owner must approve and sends nothing.
+  The install URL off the wire is followed only if `https` (or loopback `http`). Refusals map to fixed text
+  (opaque `PERMISSION_DENIED`, `ALREADY_EXISTS` = another tenant, not-configured) and never echo the code, state
+  or server message. **Create forge card** puts `{kind: github, token_ref: ghapp:<id>, repo_encoding: owner_name}`
+  under a shape-checked id (default `github-<id>`), disabled when a `ghapp:<id>` card exists; cards can be
+  toggled and deleted (confirm dialog). Docs correction: with "Request user authorization during installation"
+  on, GitHub returns to the App's **Callback URL** (the Setup URL is unavailable) — point it at the portal root.
+  Tables: `forges` spec (31 rows: load states, connect incl. `adversarial_` hostile install URLs, return incl.
+  `adversarial_` forged/absent/malformed state never relayed and code/state never displayed, `boundary_` expiry,
+  cards incl. `adversarial_` traversal ids, viewer without write caps), `install_callback_test` (54: recognition
+  vs sign-in/IdP-error returns, shape matrix, pending/stash single-use + tamper, `safeInstallUrl`,
+  `validForgeId`), and two `login` rows (an install return keeps the stored session and the sign-in entry and is
+  never exchanged).
 
 ## Links
 

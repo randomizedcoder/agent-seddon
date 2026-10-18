@@ -10,6 +10,7 @@ import 'src/config.dart';
 import 'src/pages/access_page.dart';
 import 'src/pages/agent_view_page.dart';
 import 'src/pages/fleet_page.dart';
+import 'src/pages/forges_page.dart';
 import 'src/pages/graph_page.dart';
 import 'src/pages/launcher_page.dart';
 import 'src/pages/prompts_page.dart';
@@ -50,10 +51,16 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
   );
   int _index = 0;
 
+  /// A GitHub App install return is waiting: open on the Forges tab, which
+  /// relays it. `start()` sets the return aside before its first await, so this
+  /// is known right after it is called.
+  bool _openForges = false;
+
   @override
   void initState() {
     super.initState();
     _auth.start();
+    _openForges = _auth.hasInstallCallback;
   }
 
   /// Nav-rail items in display order (index-aligned with the pages in [build]).
@@ -111,6 +118,13 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       needs: null,
     ),
     (
+      label: 'Forges',
+      icon: Icons.cloud_outlined,
+      selected: Icons.cloud,
+      color: Color(0xFF6F7FA8), // muted periwinkle
+      needs: 'read:forge_registry',
+    ),
+    (
       label: 'Access',
       icon: Icons.admin_panel_settings_outlined,
       selected: Icons.admin_panel_settings,
@@ -142,6 +156,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       AgentViewPage(clients: _clients, tenant: () => _auth.tenant),
       RouterPage(clients: _clients),
       FleetPage(clients: _clients),
+      ForgesPage(clients: _clients, platform: _auth.platform, now: _auth.nowSecs),
       AccessPage(clients: _clients),
       SettingsPage(clients: _clients),
     ];
@@ -170,6 +185,11 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
           for (var i = 0; i < _navItems.length; i++)
             if (_allowed(caps, _navItems[i].needs)) i,
         ];
+        if (_openForges) {
+          _openForges = false;
+          final at = shown.indexWhere((i) => _navItems[i].label == 'Forges');
+          if (at >= 0) _index = at;
+        }
         final index = _index.clamp(0, shown.length - 1);
         return Scaffold(
         body: Row(

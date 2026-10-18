@@ -400,6 +400,43 @@ void main() {
           expect(robot.log.fired(LoginRobot.exchange), isFalse);
           break;
 
+        case 'corner_install_return_keeps_sign_in':
+          final robot = await LoginRobot.create(tester,
+              uri: 'http://127.0.0.1:8092/?code=gh1&installation_id=42'
+                  '&setup_action=install&state=st-1');
+          robot.authFake.whoAmIResponse = principal();
+          robot.storePending('s1');
+          robot.platform.storage[AuthState.sessionKey] = jsonEncode({
+            'access_token': 'tok-s',
+            'expires_at': now + 600,
+            'refresh_handle': 'h-s',
+          });
+          await robot.load();
+          await robot.pumpUntilFound('login.account');
+          expect(robot.log.fired(LoginRobot.exchange), isFalse);
+          expect(robot.platform.storage.containsKey(AuthState.pendingKey), isTrue,
+              reason: 'the sign-in entry is not spent on an install return');
+          expect(robot.platform.currentUri.hasQuery, isFalse);
+          expect(robot.auth.hasInstallCallback, isTrue);
+          final cb = robot.auth.takeInstallCallback()!;
+          expect((cb.code, cb.state, cb.installationId), ('gh1', 'st-1', '42'));
+          expect(robot.auth.hasInstallCallback, isFalse);
+
+        case 'adversarial_install_return_never_exchanged':
+          final robot = await LoginRobot.create(tester,
+              uri: 'http://127.0.0.1:8092/?code=gh1&installation_id=42'
+                  '&setup_action=install&state=s1');
+          robot.authFake.issuersResponse = issuers(['google']);
+          // Even a matching sign-in entry must not turn it into an Exchange.
+          robot.storePending('s1');
+          await robot.load();
+          expect(robot.log.fired(LoginRobot.exchange), isFalse);
+          expect(robot.exists('login.issuer.google'), isTrue);
+          expect(robot.errorText, isNull);
+          expect(robot.shellShown, isFalse);
+          expect(robot.platform.currentUri.hasQuery, isFalse);
+          expect(robot.auth.hasInstallCallback, isTrue);
+
         default:
           fail('no test body for row ${row.label}');
       }

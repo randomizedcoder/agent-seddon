@@ -203,4 +203,22 @@ const loginSpec = PageSpec('login', [
     name: 'native_hostile_cli_output_refused',
     description: 'native: CLI output with a CR/LF in the token is refused before any call',
   ),
+  // ── a GitHub App install return (forge-auth F5d1) ────────────────────────
+  SpecRow(
+    elementId: 'login.account',
+    caseClass: CaseClass.corner,
+    name: 'install_return_keeps_sign_in',
+    description: "GitHub's ?code&state&installation_id return is set aside for "
+        'the Forges tab: the stored session resumes, the sign-in entry is not '
+        'spent, nothing is exchanged and the query is stripped',
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
+  SpecRow(
+    elementId: 'login.issuer',
+    caseClass: CaseClass.adversarial,
+    name: 'install_return_never_exchanged',
+    description: 'signed out, an install return is never traded at Exchange; '
+        'the sign-in page shows and the return waits',
+    expectedRpc: 'agent.v1.AuthService/Issuers',
+  ),
 ]);

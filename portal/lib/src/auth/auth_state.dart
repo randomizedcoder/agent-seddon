@@ -11,6 +11,7 @@ import '../gen/agent/v1/auth.pbgrpc.dart';
 import 'auth_platform.dart';
 import 'capabilities.dart';
 import 'cli_login.dart';
+import 'install_callback.dart';
 import 'pkce.dart';
 
 /// `--dart-define=PORTAL_AUTH=`: `auto` (default) signs in when the agent offers
@@ -134,6 +135,15 @@ class AuthState extends ChangeNotifier {
 
   static int _unixNow() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
+  /// Unix seconds on this state's clock (tests pin it).
+  int nowSecs() => _now();
+
+  /// Whether a GitHub App install return is waiting for the Forges tab.
+  bool get hasInstallCallback => platform.read(installCallbackKey) != null;
+
+  /// The waiting install return, if any; single use (see install_callback.dart).
+  InstallCallback? takeInstallCallback() => takeStashedInstallCallback(platform);
+
   /// The bearer the interceptor sends; `null` when signed out or sign-in is off.
   String? get token => session?.accessToken;
 
@@ -187,9 +197,19 @@ class AuthState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Decide where sign-in stands: finish a redirect, resume a stored session, or
-  /// list the issuers.
+  /// Decide where sign-in stands: set aside a GitHub App install return, finish
+  /// a sign-in redirect, resume a stored session, or list the issuers.
   Future<void> start() async {
+    // A GitHub App install return also carries `code` + `state`: set it aside
+    // for the Forges tab (it may need a sign-in first) and strip it from the
+    // address bar, in every mode, and leave the sign-in entry alone rather than
+    // spend it on a callback that isn't ours.
+    final q = platform.currentUri.queryParameters;
+    final install = parseInstallCallback(q);
+    if (install != null) {
+      stashInstallCallback(platform, install);
+      platform.replaceUri(Uri.parse(redirectUri));
+    }
     if (mode == AuthMode.off) {
       _set(AuthPhase.off);
       return;
@@ -203,8 +223,8 @@ class AuthState extends ChangeNotifier {
       if (phase == AuthPhase.signedOut) _set(AuthPhase.signedOut, error: why);
       return;
     }
-    final q = platform.currentUri.queryParameters;
-    if (q.containsKey('code') || q.containsKey('error') || q.containsKey('state')) {
+    if (install == null &&
+        (q.containsKey('code') || q.containsKey('error') || q.containsKey('state'))) {
       await _finish(q);
       return;
     }

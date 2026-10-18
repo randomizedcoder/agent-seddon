@@ -6,6 +6,8 @@ import 'package:grpc/grpc.dart';
 import '../testkit/fakes/agent_session_service.dart';
 import '../testkit/fakes/auth_service.dart';
 import '../testkit/fakes/config_service.dart';
+import '../testkit/fakes/forge_registry_service.dart';
+import '../testkit/fakes/github_install_registry_service.dart';
 import '../testkit/fakes/graph_service.dart';
 import '../testkit/fakes/llm_pool_service.dart';
 import '../testkit/fakes/metrics_proxy_service.dart';
@@ -49,6 +51,8 @@ void main() {
       FakeMetricsProxyService(log),
       FakeAuthService(log),
       FakeRoleService(log),
+      FakeForgeRegistryService(log),
+      FakeGithubInstallRegistryService(log),
     ])
       s.$name: s,
   };
