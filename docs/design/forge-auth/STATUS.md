@@ -209,7 +209,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   / malformed code ⇒ 0 requests, errors never echo code/secret/user token/JWT/key), `valid_github_login` (16),
   `installation_account` (body table + HTTP failures + `adversarial_` ids pre-flight).
 
-- **F5c2 (PR #TBD):** self-service onboarding — the increment that makes a tenant-onboarded install actually
+- **F5c2 (PR #640):** self-service onboarding — the increment that makes a tenant-onboarded install actually
   mint, closing the F4b gap. Two RPCs on `GithubInstallRegistryService` (additive proto; REST-annotated
   `POST /v1/github-installs:begin` / `:complete`, swagger regenerated; no buf-image bump), gated on
   `write:forge_registry` (`gate_of` + `test/mt-audit/authz.toml`) **and a verified principal in every auth mode**
