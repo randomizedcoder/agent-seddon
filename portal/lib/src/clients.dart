@@ -4,6 +4,8 @@ import 'config.dart';
 import 'gen/agent/v1/agent_session.pbgrpc.dart';
 import 'gen/agent/v1/auth.pbgrpc.dart';
 import 'gen/agent/v1/config.pbgrpc.dart';
+import 'gen/agent/v1/forge_registry.pbgrpc.dart';
+import 'gen/agent/v1/github_install_registry.pbgrpc.dart';
 import 'gen/agent/v1/graph.pbgrpc.dart';
 import 'gen/agent/v1/llm_pool.pbgrpc.dart';
 import 'gen/agent/v1/metrics_proxy.pbgrpc.dart';
@@ -57,6 +59,12 @@ class PortalClients {
       ProviderRegistryServiceClient(gatewayChannel, interceptors: interceptors);
   // The whole-config seam (schema-driven Settings; write-TOML, restart-to-apply).
   late final ConfigServiceClient config = ConfigServiceClient(gatewayChannel, interceptors: interceptors);
+  // The Forges tab (forge-auth F5d1): git-host cards, and the tenant's GitHub App
+  // installs with the BeginInstall/CompleteInstall onboarding round trip.
+  late final ForgeRegistryServiceClient forges =
+      ForgeRegistryServiceClient(gatewayChannel, interceptors: interceptors);
+  late final GithubInstallRegistryServiceClient githubInstalls =
+      GithubInstallRegistryServiceClient(gatewayChannel, interceptors: interceptors);
 
   late final AgentSessionServiceClient session =
       AgentSessionServiceClient(sessionsChannel, interceptors: interceptors);

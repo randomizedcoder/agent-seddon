@@ -173,14 +173,19 @@ grants **no** `ghapp:` minting authority.
 
 **Self-service onboarding** (forge-auth F5c2, `forge-ghapp`) is what grants it. The same
 service carries `BeginInstall` and `CompleteInstall` (REST `POST
-/v1/github-installs:begin` / `:complete`), relayed by the portal page that is the App's
-GitHub **Setup URL** — the agent opens no HTTP listener. Both need `write:forge_registry`
+/v1/github-installs:begin` / `:complete`), relayed by the portal's **Forges** tab
+(forge-auth F5d1) — the agent opens no HTTP listener. Both need `write:forge_registry`
 and a **verified principal** (no principal ⇒ `UNAUTHENTICATED`, in every auth mode):
 
 1. `BeginInstall` remembers the caller's verified `(tenant, subject)` under a random
    single-use `state` (15 min) and returns `https://github.com/apps/{slug}/installations/new?state=…`.
-2. GitHub sends the browser back to the Setup URL with `code`, `installation_id` and
-   `state`; the portal relays them in `CompleteInstall`.
+2. GitHub sends the browser back to the portal with `code`, `installation_id`,
+   `setup_action` and `state`. The portal's sign-in code recognises this as an install
+   return (by `installation_id` / `setup_action`, which an IdP never sends), strips it from
+   the address bar and sets it aside without spending any sign-in state. The Forges tab
+   then relays it in `CompleteInstall` **only** if its `state` is the one this browser tab
+   stored at `BeginInstall` and has not expired. A forged or replayed link never sends its
+   `code` anywhere, and `setup_action=request` (an org owner must approve) sends nothing.
 3. The server spends the `state`, requires the **same** caller, and runs
    `UserInstallationAccess::prove_admin` (`agent-forge/src/ghapp_oauth.rs`): it exchanges
    the one-time `code` once, requires the user can reach the installation
@@ -202,12 +207,24 @@ startup closed). A refused `state` and a failed proof both answer one opaque `PE
 
 Prerequisites: `[github_app] slug` + `client_id` + `client_secret_ref` (and a
 `[github_install_registry] store`); on the App, **"Request user authorization (OAuth)
-during installation"** on, the Setup URL pointing at the portal page, and the
+during installation"** on, the App's **Callback URL** pointing at the portal root (for
+example `http://127.0.0.1:8092/`: with that option on, GitHub returns to the Callback URL
+and the Setup URL field is unavailable; the portal's static server has no SPA fallback, so
+use the root), and the
 **Organization → Members: read** permission (without it the membership read is refused
 and the proof fails closed). Limits: a binding made on one replica reaches another only
 at its restart (a miss fails closed); a verified row its claim does not name (only an
 out-of-band write makes one) is left out of the gate and logged, without failing startup;
 uninstall/revoke arrives with F6 webhooks.
+
+**Portal (F5d1).** The **Forges** tab (`portal/lib/src/pages/forges_page.dart`, shown to
+`read:forge_registry`) lists the tenant's installs and forge cards. **Connect GitHub**
+(`write:forge_registry`) runs `BeginInstall` and follows the returned install URL only if it
+is `https` (or `http` to loopback). **Create forge card** on an install writes a `github`
+card with `token_ref = "ghapp:<installation id>"` and `repo_encoding = "owner_name"` (the
+card id defaults to `github-<id>` and is shape-checked before the `Put`). Cards can be
+enabled/disabled and deleted; other cards (env/file refs) stay operator/REST-managed.
+Pointing fleet sessions at a card (`forge_id`) is F5d2.
 
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the
 default build), each via the C36 recipe below:
