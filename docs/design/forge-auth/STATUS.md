@@ -246,7 +246,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   rebuild, `adversarial_` CRUD rows never seed, tamper fails closed), handler (verified principal not header,
   unauthenticated, viewer denied, unconfigured, refusal→code table), config slug + `web_base`.
 
-- **State-table dedupe (follow-up to F5c2):** browser sign-in (`agent-grpc` `code_flow::PendingLogins`) and
+- **State-table dedupe (PR #641, follow-up to F5c2):** browser sign-in (`agent-grpc` `code_flow::PendingLogins`) and
   install onboarding each carried a private copy of the single-use `state` table and its RNG helper. Both now use
   one `agent_core::pending::PendingTable<T>` + `random_token` (`agent-core` gains `ring` + `base64`, both already
   in-tree). The table takes `now` per call instead of holding a clock, so it needs neither crate's `Clock` trait;
