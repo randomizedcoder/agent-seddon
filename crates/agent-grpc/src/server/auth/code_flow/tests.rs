@@ -39,7 +39,6 @@ fn pending(issuer: &str) -> Pending {
         redirect_uri: PORTAL.into(),
         challenge: CHALLENGE.into(),
         nonce: "n1".into(),
-        expires_at: 0,
     }
 }
 

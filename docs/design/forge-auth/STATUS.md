@@ -214,10 +214,10 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   `POST /v1/github-installs:begin` / `:complete`, swagger regenerated; no buf-image bump), gated on
   `write:forge_registry` (`gate_of` + `test/mt-audit/authz.toml`) **and a verified principal in every auth mode**
   (no principal ⇒ `UNAUTHENTICATED`; the backend gets the principal's `(tenant, subject)`, never wire/header
-  values). `BeginInstall` stores the caller under a 32-byte random single-use `state` (new
-  `agent_forge::ghapp_onboard::PendingStates<T>`: 900 s TTL, 1024 cap that refuses rather than evicts,
-  spend-on-first-use — sign-in's semantics, redeclared because `agent-forge` cannot depend on `agent-grpc`, so
-  sign-in's own table is unchanged) and returns `{web}/apps/{slug}/installations/new?state=…`.
+  values). `BeginInstall` stores the caller under a 32-byte random single-use `state` (900 s TTL, 1024 cap that
+  refuses rather than evicts, spend-on-first-use — sign-in's semantics; shipped as a redeclared
+  `ghapp_onboard::PendingStates<T>`, since folded into the shared `agent_core::pending::PendingTable<T>`, see
+  below) and returns `{web}/apps/{slug}/installations/new?state=…`.
   `CompleteInstall{state, code, installation_id}` (`agent-runtime/src/install_gate.rs::InstallOnboarding`, the new
   `agent_core::GithubInstallOnboarding` seam) spends the state, requires the **same** `(tenant, subject)` (pure
   `match_binding`), shape-checks the callback, runs `prove_admin`, refuses an install another tenant already holds
@@ -238,13 +238,25 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   installation, compare-and-swapped in one batch with the verified row — and also refuses an id the operator
   allowlist assigns to another tenant (both from the post-push security reviews); a verified row its claim does
   not name is contained (left out of the gate and logged, startup continues); uninstall/revoke is F6 (GitHub's 404 on mint fails closed
-  meanwhile). Tables: `PendingStates` + `install_url` (incl. `adversarial_` malformed state spends nothing, slug
+  meanwhile). Tables: the state table + `install_url` (incl. `adversarial_` malformed state spends nothing, slug
   injection, state query-encoding), `match_binding`, onboarding over a fake prover + `MemoryBackend` (both account
   kinds; refusals write/bind nothing; `adversarial_` cross-tenant/subject state replay never reaches the forge and
   burns the state; second tenant ⇒ `Claimed` with the first binding intact; a CRUD row is not a claim; malformed
   callback pre-proof), gate union (9 incl. cross-tenant leakage both ways), verified store (validate matrix,
   rebuild, `adversarial_` CRUD rows never seed, tamper fails closed), handler (verified principal not header,
   unauthenticated, viewer denied, unconfigured, refusal→code table), config slug + `web_base`.
+
+- **State-table dedupe (follow-up to F5c2):** browser sign-in (`agent-grpc` `code_flow::PendingLogins`) and
+  install onboarding each carried a private copy of the single-use `state` table and its RNG helper. Both now use
+  one `agent_core::pending::PendingTable<T>` + `random_token` (`agent-core` gains `ring` + `base64`, both already
+  in-tree). The table takes `now` per call instead of holding a clock, so it needs neither crate's `Clock` trait;
+  each flow keeps its own TTL/cap (sign-in 600 s, onboarding 900 s; both 1024). `PendingLogins` is now a thin
+  wrapper that maps misses to `CodeRefusal`; `ghapp_onboard::PendingStates` is deleted (`install_gate` holds the
+  core table directly). One visible change: an onboarding `state` is now 43 base64url characters (was 64 hex),
+  the same as sign-in's. Tables in `agent-core` (round trip, single use, TTL edge, expired lookup still spends,
+  full refuses then sweeps, zero cap, TTL saturation, distinct states, `adversarial_` empty/oversized/CRLF/NUL
+  lookups spend nothing, 16-thread race on one state redeems once, token lengths); sign-in and onboarding suites
+  unchanged and green.
 
 ## Links
 

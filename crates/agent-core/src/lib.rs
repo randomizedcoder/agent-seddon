@@ -1007,6 +1007,10 @@ pub mod campaign;
 // graph / tracker seams). See docs/design/repo-knowledge/.
 pub mod repo_graph;
 
+// The single-use `state → T` table shared by browser sign-in and GitHub App install
+// onboarding. Namespaced: `STATE_BYTES` / `PendingFull` are flow-specific names.
+pub mod pending;
+
 mod message_transport;
 pub use message_transport::*;
 // ---------------------------------------------------------------------------
