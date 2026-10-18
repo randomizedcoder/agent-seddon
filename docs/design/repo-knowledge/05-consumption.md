@@ -13,7 +13,7 @@ A new `FactCollector` in `crates/agent-review/src/repo_knowledge.rs`, next to th
 Steps, all fail-soft (a missing store or a query error is a recorded non-`ok` run, never an abort,
 the same posture as `nearby.rs:7-10`):
 
-1. **Find a snapshot.** `snapshot_find(repo, base_sha)`. If none: walk first-parent ancestors of
+1. **Find a snapshot.** `snapshot_find(repo, base_sha)` where `base_sha` is the pinned PR merge-base. If none: walk first-parent ancestors of
    the base (≤ 50) for the nearest ready snapshot and record `snapshot_distance`. If none and
    `repo_knowledge_index_on_demand = "syn"`: build an inline syn-only snapshot with a 10 s
    deadline. Else `skipped`.
@@ -53,8 +53,8 @@ default flips.
 
 `FleetOrchestrator` gets an `Arc<dyn RepoGraphIndexHook>`. After `worktree_add`
 (`crates/agent-review-fleet/src/orchestrator.rs:614-629`), the hook indexes the PR's merge-base
-with the default branch **off the critical path**: a detached task, deduplicated by an in-flight
-set keyed `(tenant, slug, sha)`, with the extractor budget's deadline. The review that triggered
+with the default branch **off the critical path** using the bounded queue described below,
+deduplicated by `(tenant, slug, sha, extractor_version)`, with the extractor budget's deadline. The review that triggered
 it does not wait; the next review of that base finds the snapshot. On a poll tick where the
 default-branch head changed, the same hook indexes the new head.
 
@@ -126,3 +126,78 @@ The interactive loop reads `[repo_graph].repo`; the fleet passes `row.repo`
 `owner__repo` shape and passes `safe_segment`. The tenant comes from the principal
 (`current_tenant()`, `crates/agent-core/src/identity.rs:298`); a store view for another tenant
 cannot be constructed from a model-supplied value.
+
+## Snapshot publication and recovery (RK-06)
+
+**Proposed extension; the store is implemented, this lifecycle is not.** The as-built
+`Scope { repo, snapshot }` is used on a tenant-bound handle. Register repository identity before
+indexing; fleet enrollment must resolve `(tenant, forge identity, repo slug)` to that registration
+and reject a mismatched remote. A missing registration records an indexing skip and does not
+stop ordinary reviews. Resolve a full SHA and index a dedicated immutable checkout: do not
+switch the active review worktree to the base revision or index a dirty working tree as HEAD.
+
+`Indexer::index(repo, sha, extractor_set)` first reuses an exact ready identity, otherwise extracts
+and validates before publishing. Snapshot identity includes the existing sorted extractor version
+string plus a hash of normalized output-affecting configuration (including extraction count/byte
+budgets). Increasing a cap or changing options must not silently reuse an incomplete older result.
+Use this identity when choosing among snapshots at one SHA; never select an incompatible extractor
+configuration just because it was built most recently. Add
+`RepoGraphStore::snapshot_publish(begin, graph, report)` with an atomic memory/Postgres contract:
+return an existing ready snapshot of the same identity, or publish a complete snapshot in one
+transaction. Inside that transaction acquire an advisory transaction lock keyed by tenant/repo/
+SHA/extractor version, then create/write/finish using transaction-scoped SQL helpers. A second
+publisher waits and reuses the winner; hash collisions in lock keys only serialize unrelated
+work, never merge identities. Add `snapshot_report(scope)` for completeness metadata, and `snapshot_recover(repo, id, reason)`
+for the operator recovery path below. Ready snapshots are immutable. Keep the existing begin/write/finish
+verbs and tests for compatibility; the new indexer exclusively uses atomic publication.
+
+A failed/disconnected transaction rolls back every publication write. Failed extraction records
+an attempt diagnostic without publishing ready data. Legacy `building` rows are never taken over
+by age alone: publication returns Conflict and status reports manual recovery required. Once the
+operator has stopped the legacy writer, a scoped recovery operation marks that row failed; a
+subsequent index retry uses the existing failed-identity replacement behavior. This prevents a
+slow active writer being mistaken for an orphan. New indexer crashes cannot leave committed
+building rows because begin/write/finish commit together. Recovery is exposed as proposed
+`agent repo recover --repo <slug> --snapshot <id> --reason <text>` through operator authorization.
+
+Retain ten ready snapshots by default using the existing sweep, after successful publication.
+Do not delete a snapshot in the middle of a read: add `RepoGraphStore::read_view(scope)` returning a scoped `RepoGraphReadView`
+for multi-query brief assembly under one repeatable-read transaction (an immutable copied view
+in memory). The caller releases it after bounded assembly. A missing snapshot fails view
+creation; it is not retried under a different identity. Retention failure is observable but does not invalidate the published
+snapshot. The report records input/output counts, parse errors, truncation, extractor versions
+and elapsed time. Readiness does not imply full language coverage; consumers receive the report.
+
+## Fleet refresh and exact revision selection (RK-07–09)
+
+The fleet hook schedules the registered default-branch head at enrollment and when polling sees
+a new head; it also schedules the merge-base after a PR checkout. It uses its own immutable
+checkout and a bounded queue (default 16, deduplicated by tenant/repo/SHA/extractor version).
+One active extraction per indexer; a full queue records a skip and the next poll retries.
+Repeated triggers share work; different tenants never share handles or fleet context caches.
+The cache key is `(tenant, row.id)` and the graph is selected separately by snapshot identity.
+Cancellation, deletion of a fleet row, and shutdown release worktree/queue resources; no late
+completion may publish under another tenant or change a completed review's evidence.
+
+The review pins base and head SHAs when admitted. Find an exact ready merge-base snapshot first;
+otherwise follow first-parent history up to 50 commits and explicitly label the selected SHA
+and distance. Never substitute latest/default-branch knowledge for a different ancestry.
+An ancestor snapshot can provide labelled historical context but cannot establish absence,
+current callers, or present test coverage. A partially parsed snapshot has the same limitation.
+When none exists, skip graph context and record why; ordinary collectors still run. The existing
+optional syn-only on-demand path remains off by default, obeys its 10-second budget and uses the
+same cancellation/publication rules. Graph errors do not become empty-success results.
+
+The 4 KiB graph brief retains citations after truncation by dropping whole entries. Read failures,
+staleness, incompleteness and unsupported relation kinds appear in collector status. The interactive
+`repo_graph` tool shares the same bounded store queries but reports unavailable/error distinctly
+from a successful query with no matches. Tool arguments cannot select tenant or arbitrary SQL.
+Keep `[review] repo_knowledge = false` until the evaluation gate is met.
+
+## Confirmed knowledge consumer (RK-21)
+
+[Decision/lesson retrieval](09-decisions-and-lessons.md#retrieval-and-evaluation-rk-21) adds a
+2 KiB sub-budget within existing brief totals. It checks freshness against the exact target
+revision; if only ancestor evidence is available, omit confirmed guidance as unverifiable for
+that target. Candidate, rejected, superseded, stale and unverifiable records never appear as
+current guidance. This separate consumer does not replace existing review approval or posting.

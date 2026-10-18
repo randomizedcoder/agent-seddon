@@ -28,6 +28,19 @@ Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments
 | RK-17 | Derived analyses: chokepoints, guard funnels / gaps, near-duplicates, orphans | SI-5 | ⬜ | — |
 | RK-18 | LLM extras: conventions, glossary, playbooks, pitfalls, L0 overview; layered briefs | SI-10 | ⬜ | — |
 
+## Design extension (2026-10-17)
+
+[Decisions and lessons](09-decisions-and-lessons.md) and
+[integration/evaluation](10-integration-and-evaluation.md) extend the existing track.
+This is documentation only: extraction, indexing, fleet integration and new knowledge consumers
+are still unimplemented. The existing RK-01/02 completion claims do not cover the extension.
+
+| # | Increment | State | PR |
+|---|---|---|---|
+| RK-19 | Evidence-backed decision/lesson store, migration 0004, lifecycle/conformance | ⬜ | — |
+| RK-20 | Operator confirmation workflow and optional review-to-candidate adapter | ⬜ | — |
+| RK-21 | Current confirmed knowledge in briefs and paired quality evaluation | ⬜ | — |
+
 ## As-built log
 
 - **2026-09-26 — RK-00 (#495).** Opened the track from

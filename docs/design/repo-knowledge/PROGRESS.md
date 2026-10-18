@@ -79,3 +79,20 @@ Next, runnable in parallel:
 
 Tracked in [`06-increments.md`](06-increments.md#open-questions-recorded-not-blocking); none
 blocks RK-01.
+
+## 2026-10-17 — Design extension for monitored repositories and lessons
+
+Documentation only; no runtime, schema or Nix change, and no new implementation increment marked
+complete. Extended RK-03/06–09 with deterministic extraction/report handling, atomic snapshot
+publication, bounded off-path refresh and explicit stale/missing context behavior. Clarified
+as-built tenant-bound `Scope` and fixture path selection for the existing Nix source filter.
+
+Added RK-19–21 for separately stored decisions/lessons, explicit human confirmation, evidence
+freshness and supersession. An `addressed` review finding is not a confirmed lesson. Model
+proposals never modify structural facts. Reserved additive migration 0004 after planned 0002/0003.
+
+Expanded the test matrix with descriptions, expected outcomes and gate/increment ownership;
+added a Nix wiring and integration runbook that distinguishes existing commands from future
+checks and makes successful skips insufficient for Postgres acceptance. Evaluation compares
+baseline, structural graph and confirmed-knowledge arms with indexing cost reported separately.
+No measurements of future behavior are claimed.
