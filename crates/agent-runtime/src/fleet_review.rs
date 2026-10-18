@@ -251,11 +251,16 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         // layout. A row references its forge either INLINE (`backend`/`base_url`) or by a
         // persisted card id (`forge_id`, config C36 / D1b); the card then supplies the
         // kind/base_url/credential (its `repo` slug still comes from the row).
-        let (backend, base_url, forge) = if row.forge_id.is_empty() {
+        let (backend, base_url, forge, token_ref) = if row.forge_id.is_empty() {
             let forge = build_session_forge_async(row).await.map_err(|e| {
                 Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
             })?;
-            (row.backend.clone(), row.base_url.clone(), forge)
+            (
+                row.backend.clone(),
+                row.base_url.clone(),
+                forge,
+                row.token_ref.clone(),
+            )
         } else {
             let reg = self.forge_registry.as_ref().ok_or_else(|| {
                 Error::Fleet(format!(
@@ -274,7 +279,12 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
                 .map_err(|e| {
                     Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
                 })?;
-            (card.kind.clone(), card.base_url.clone(), forge)
+            (
+                card.kind.clone(),
+                card.base_url.clone(),
+                forge,
+                card.token_ref.clone(),
+            )
         };
 
         let url = clone_url(&row.repo, &backend, &base_url)
@@ -284,6 +294,22 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
 
         let mut cli = agent_git::CliBackend::new(mirror.clone(), mirror.clone(), worktrees, url)
             .with_pr_ref_template(template);
+        // forge-auth F2b: authenticate the clone/fetch of a (possibly private) GitHub
+        // repo with the same credential the forge API uses. Re-resolve/-mint through the
+        // gated helper the forge build above already used — the minter caches (~55m) so a
+        // `ghapp:` token is free, and `env:`/`file:` is a cheap re-read; the ghapp IDOR
+        // gate (`ghapp_installation_allowed`) runs here too. An unresolvable credential
+        // already failed the forge build above, so a row that reached here resolves; an
+        // empty (public) token makes `with_github_token` a no-op. GitHub only — the
+        // `x-access-token` basic-auth form is GitHub's (GitLab/others are a follow-on).
+        if backend == "github" {
+            let tok = crate::registry::mint_or_resolve_tenant_token(&row.user, &token_ref)
+                .await
+                .map_err(|e| {
+                    Error::Fleet(format!("fleet row `{}`: clone credential: {e}", row.id))
+                })?;
+            cli = cli.with_github_token(&tok);
+        }
         if let Some(sandbox) = &self.sandbox {
             cli = cli.with_sandbox(sandbox.clone());
         }
@@ -760,6 +786,185 @@ mod tests {
         assert!(
             !tmp.as_path().parent().unwrap().join("repo").exists(),
             "{desc}: no dir created outside the fleet root"
+        );
+    }
+
+    // ---- forge-auth F2b: the clone-credential wiring -------------------------
+    // The security logic (base64 `x-access-token`, env not argv/config, injection-proof)
+    // is tested exhaustively in agent-git's `cli.rs`. Here we only prove the fleet wiring:
+    // `build` resolves the row's token and hands it to `CliBackend::with_github_token`,
+    // so the lazy clone/fetch carries (or, for public/non-GitHub rows, does not carry) the
+    // `http.extraHeader`. A recording sandbox captures the `ExecSpec`s the funnel builds.
+
+    /// Records every `git` `ExecSpec` and returns a canned oid (so `fetch_pr`'s
+    /// clone → fetch → rev-parse all succeed without a real git or network).
+    struct RecSandbox {
+        all: std::sync::Mutex<Vec<agent_core::ExecSpec>>,
+        out: agent_core::ExecOutput,
+    }
+    impl RecSandbox {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                all: std::sync::Mutex::new(Vec::new()),
+                out: agent_core::ExecOutput {
+                    stdout_bytes: b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n".to_vec(),
+                    ..Default::default()
+                },
+            })
+        }
+        fn specs(&self) -> Vec<agent_core::ExecSpec> {
+            self.all.lock().unwrap().clone()
+        }
+        /// Does any recorded call carry a GitHub `http.extraHeader` credential?
+        fn any_auth_header(&self) -> bool {
+            self.specs()
+                .iter()
+                .any(|s| s.env_set.iter().any(|(k, _)| k == "GIT_CONFIG_KEY_0"))
+        }
+    }
+    #[async_trait]
+    impl agent_core::Sandbox for RecSandbox {
+        async fn exec(&self, spec: &agent_core::ExecSpec) -> Result<agent_core::ExecOutput> {
+            self.all.lock().unwrap().push(spec.clone());
+            Ok(self.out.clone())
+        }
+        fn capabilities(&self) -> agent_core::SandboxCapabilities {
+            agent_core::SandboxCapabilities {
+                backend: "rec".into(),
+                available: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn factory_with_sandbox(
+        root: PathBuf,
+        sandbox: Arc<dyn agent_core::Sandbox>,
+    ) -> FleetReviewCtxFactory {
+        FleetReviewCtxFactory::new(
+            root,
+            ReviewCfg::default(),
+            String::new(),
+            Some(sandbox),
+            None,
+            None,
+            None,
+            4096,
+            None,
+            Metrics::new(),
+        )
+    }
+
+    /// A GitHub row with an `env:` token: `build` resolves it and the lazy clone/fetch
+    /// carries the credential as a host-scoped `http.extraHeader` — and the raw token
+    /// never appears in any `git` argv.
+    #[cfg(feature = "forge-github")]
+    #[tokio::test]
+    async fn positive_github_env_token_attaches_header() {
+        let tmp = agent_testkit::tempdir();
+        let rec = RecSandbox::new();
+        let f = factory_with_sandbox(tmp.as_path().to_path_buf(), rec.clone());
+        std::env::set_var("AGENT_SEDDON_F2B_ENV_TOKEN", "ghs_env_tok");
+        let r = row(
+            "rtl-fun",
+            "randomizedcoder",
+            "randomizedcoder__rtl-fun",
+            "github",
+            "env:AGENT_SEDDON_F2B_ENV_TOKEN",
+        );
+        let ctx = f.build(&r).await.expect("github row with env token builds");
+        // Drive the lazy clone + fetch so the credentialed git calls run through the seam.
+        let _ = ctx.repo.fetch_pr(1).await;
+
+        assert!(
+            rec.any_auth_header(),
+            "the resolved credential reaches the clone/fetch: {:?}",
+            rec.specs().iter().map(|s| &s.env_set).collect::<Vec<_>>()
+        );
+        // The key is host-scoped; the token itself is never a command-line argument.
+        let specs = rec.specs();
+        let key = specs
+            .iter()
+            .flat_map(|s| s.env_set.iter())
+            .find(|(k, _)| k == "GIT_CONFIG_KEY_0")
+            .map(|(_, v)| v.clone());
+        assert_eq!(key.as_deref(), Some("http.https://github.com/.extraHeader"));
+        assert!(
+            !specs
+                .iter()
+                .flat_map(|s| s.argv.iter())
+                .any(|a| a.contains("ghs_env_tok")),
+            "the raw token must never be in argv"
+        );
+    }
+
+    /// A public GitHub row (empty token) carries no credential — unchanged behaviour.
+    #[cfg(feature = "forge-github")]
+    #[tokio::test]
+    async fn positive_public_github_row_no_header() {
+        let tmp = agent_testkit::tempdir();
+        let rec = RecSandbox::new();
+        let f = factory_with_sandbox(tmp.as_path().to_path_buf(), rec.clone());
+        let r = row(
+            "rtl-fun",
+            "randomizedcoder",
+            "randomizedcoder__rtl-fun",
+            "github",
+            "", // public: no token
+        );
+        let ctx = f.build(&r).await.expect("public github row builds");
+        let _ = ctx.repo.fetch_pr(1).await;
+        assert!(
+            !rec.any_auth_header(),
+            "a public row attaches no credential"
+        );
+    }
+
+    /// A non-GitHub backend never gets the GitHub `x-access-token` header, even with a
+    /// token (F2b is GitHub-scoped; GitLab/others are a follow-on).
+    #[cfg(feature = "forge-gitlab")]
+    #[tokio::test]
+    async fn corner_non_github_backend_no_header() {
+        let tmp = agent_testkit::tempdir();
+        let rec = RecSandbox::new();
+        let f = factory_with_sandbox(tmp.as_path().to_path_buf(), rec.clone());
+        std::env::set_var("AGENT_SEDDON_F2B_GL_TOKEN", "glpat_tok");
+        let r = row(
+            "web",
+            "acme",
+            "acme__web",
+            "gitlab",
+            "env:AGENT_SEDDON_F2B_GL_TOKEN",
+        );
+        let ctx = f.build(&r).await.expect("gitlab row builds");
+        let _ = ctx.repo.fetch_pr(1).await;
+        assert!(
+            !rec.any_auth_header(),
+            "the GitHub-only credential path must not fire for gitlab"
+        );
+    }
+
+    /// A `ghapp:` row with no configured minter fails closed during the forge build,
+    /// before any clone is attempted (consistent with F2's fail-closed mint path).
+    #[tokio::test]
+    async fn negative_ghapp_without_minter_fails_before_clone() {
+        let tmp = agent_testkit::tempdir();
+        let rec = RecSandbox::new();
+        let f = factory_with_sandbox(tmp.as_path().to_path_buf(), rec.clone());
+        let r = row(
+            "rtl-fun",
+            "randomizedcoder",
+            "randomizedcoder__rtl-fun",
+            "github",
+            "ghapp:12345678", // no [github_app] minter installed in this test
+        );
+        assert!(
+            f.build(&r).await.is_err(),
+            "a ghapp credential with no minter fails closed"
+        );
+        assert!(
+            rec.specs().is_empty(),
+            "no git spawn before the credential resolves"
         );
     }
 }

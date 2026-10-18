@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F2b + F5c/F5d + F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c/F5d + F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -19,7 +19,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 |---|---|---|---|
 | F1 | `ghapp:` ref kind | `ApiKeyRef::GitHubApp` variant + parser + fail-closed validation (`agent-core`) | ✅ |
 | F2 | Installation-token minter | App JWT → installation token, `agent-retry`, ~55 m cache; wire into the forge-credential resolver (forge **API**). Clone-URL `x-access-token` injection split to **F2b**. | ✅ |
-| F2b | Clone-URL credential injection | splice the minted token into the git clone (`x-access-token` / `GIT_ASKPASS` / `http.extraHeader`) with argv + `.git/config` leak hardening ⇒ enables **private-repo clone** | ⬜ |
+| F2b | Clone credential injection | authenticate the git clone/fetch with the resolved/minted token via a host-scoped `http.extraHeader` injected through `env_set` (token never in argv, `.git/config`, or an error string) ⇒ enables **private-repo clone**; GitHub, benefits `env:`/`file:` PAT rows too | ✅ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
 | F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c**: install-callback endpoint + verified snapshot feed + gate union. **F5d**: portal UI. | 🟡 |
@@ -55,7 +55,23 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   process-global minter installed by the builder (mirrors `POLICY`). Clone-URL injection deferred to **F2b**,
   so the forge **API** uses ghapp tokens but **private-repo clone is not yet enabled**. Tables: A (minter,
   `tiny_http`-mocked, 26 cases incl. `adversarial_`), B (`GithubAppCfg::validate`, 12 + adversarial),
-  C (mint-aware resolver wiring, 5).
+  C (mint-aware resolver wiring, 5). Security-review follow-up (same PR): the App private key is one
+  operator-global secret, so minting is a cross-tenant authority — added a `[github_app] installations =
+  { <tenant> = ["<id>"] }` allowlist enforced under `per_tenant` by the pure, directly-tested
+  `secrets::ghapp_allowed` (an unbound/cross-tenant id fails closed; the IDOR guard F4's per-tenant install
+  store supersedes).
+
+- **F2b (PR #628):** authenticated private clone/fetch. `CliBackend::with_github_token` (`crates/agent-git/src/cli.rs`)
+  base64-encodes the token into an `Authorization: Basic` header under git's `x-access-token:<token>` basic-auth
+  convention and injects it as a **command-scoped** `http.<remote>.extraHeader` through git's
+  `GIT_CONFIG_COUNT`/`_KEY_0`/`_VALUE_0` env vars via the secret-safe `ExecSpec::env_set` — so the token never
+  enters `argv` (hence never the `args.join` error strings), never persists to the mirror's `.git/config`, and is
+  host-scoped to the remote. base64 makes the header value pure base64, so a token carrying CR/LF/NUL cannot inject
+  a header. `fleet_review.rs` resolves the row's credential through the same gated `mint_or_resolve_tenant_token`
+  the forge build uses (ghapp IDOR gate included; minter cache makes it free) and attaches it for **GitHub** rows
+  only — benefiting `env:`/`file:` PAT rows as well as `ghapp:`; an empty (public) token is a no-op, so public
+  clone is unchanged. Not behind `forge-ghapp` (a general `agent-git` capability). Tables: A (agent-git
+  `CliBackend` auth, RecordingSandbox, 11 incl. `adversarial_` CRLF/NUL/no-leak), B (fleet_review wiring, 4).
 
 - **F3 (PR #629):** the webhook credential. Added `webhook_secret_ref` to the bootstrap `[github_app]` config
   (`GithubAppCfg`, `crates/agent-runtime/src/config.rs`) — **optional**, `env:`/`file:` only (a `ghapp:` mint or an

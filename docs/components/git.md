@@ -125,6 +125,19 @@ older than the configured age. Worktrees and fetches prefer the mirror once it
 exists; reads always use the checkout. The whole flow is non-blocking — the loop
 starts immediately and the fetch runs off the request path.
 
+### Authenticated (private) clone/fetch
+
+For a private repo, `CliBackend::with_github_token(&secret)` carries a credential
+for the remote ops (forge-auth F2b). The token is base64-encoded into an
+`Authorization: Basic` header under git's `x-access-token:<token>` basic-auth
+convention and injected as a **command-scoped** `http.<remote>.extraHeader` through
+git's `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` env vars via the
+secret-safe [`ExecSpec::env_set`]. So the token never enters `argv` (and so never the
+`git …` error strings the backend builds on failure), is never persisted to the
+mirror's `.git/config`, and is scoped to the one remote. The clone URL stays bare. An
+empty token is a no-op (public clone, unchanged). The fleet wires this from the row's
+resolved/minted forge credential for GitHub rows (`agent-runtime/src/fleet_review.rs`).
+
 ## Tools
 
 All read tools are `parallel_safe` (immutable objects), so the loop dispatches a
