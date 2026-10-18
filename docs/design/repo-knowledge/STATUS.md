@@ -1,45 +1,96 @@
-# Repo knowledge — status
+# Repo knowledge — implementation status
 
-Legend: ✅ merged · 🟡 in progress · ⬜ not started · ❌ dropped
+[Implementation plan](IMPLEMENTATION.md) · [Design](README.md) ·
+[Increment map](06-increments.md) · [Test matrix](08-test-matrix.md) ·
+[Integration/evaluation](10-integration-and-evaluation.md) · [Journal](PROGRESS.md)
 
-Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments.md) · journal:
-[`PROGRESS.md`](PROGRESS.md) · tests: [`08-test-matrix.md`](08-test-matrix.md) · source:
-[self-improvement gap analysis](../../gap-analysis/self-improvement.md).
+## Current baseline and next work
 
-| # | Increment | Closes | State | PR |
-|---|---|---|---|---|
-| RK-00 | This track, the self-improvement gap analysis, index links | — | ✅ | #495 |
-| RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | ✅ | #582 |
-| RK-02 | `PgRepoGraph`, migration 0001, `with_tenant`, bulk write, read verbs, live suite | SI-1, SI-3 | ✅ | #585 |
-| RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace; determinism check; bench + leak | SI-2 | ⬜ | — |
-| RK-04 | Go mapping from the helper JSON + `_test.go` scan | SI-2 | ⬜ | — |
-| RK-05 | SCIP spike report + `extract-scip` extractor (resolved calls / references / tests) | SI-2 | ⬜ | — |
-| RK-06 | `Indexer`, `[repo_graph]` config, `agent repo add\|index\|status\|diff`, retention, metrics | SI-1, SI-3 | ⬜ | — |
-| RK-07 | Fleet index hook (merge-base, off-path), tenant view, `(tenant, row.id)` cache key | SI-8 | ⬜ | — |
-| RK-08 | `repo_graph` tool + `PgAst` engine + registry wiring + component doc | SI-4 | ⬜ | — |
-| RK-09 | `RepoKnowledgeCollector`, `ReviewFacts.repo_knowledge`, renderer, `ReviewCfg.repo_knowledge` (off) | SI-5 | ⬜ | — |
-| RK-10 | Inventory skeleton + migration 0002 + `agent repo inventory` | SI-6 | ⬜ | — |
-| RK-11 | Cited summaries + embeddings + `Similar` / `Feature` questions + `agent repo summarize` | SI-6 | ⬜ | — |
-| RK-12 | Implement / Design-mode brief hook + `agent repo brief --goal` | SI-7 | ⬜ | — |
-| RK-13 | `RepoGraphService` gRPC (`scoped`), mt-audit, constants, `--serve-repo-graph` | — | ⬜ | — |
-| RK-14 | Postgres RLS across Pg tiers (filed under multi-tenancy plane 02) | — | ⬜ | — |
-| RK-15 | Profile extractors + migration 0003 (`repo_facts`) + fixture extension | SI-9 | ⬜ | — |
-| RK-16 | History extractors: `repo_history`, `co_changes_with`, in-flight, change recipes | SI-10 | ⬜ | — |
-| RK-17 | Derived analyses: chokepoints, guard funnels / gaps, near-duplicates, orphans | SI-5 | ⬜ | — |
-| RK-18 | LLM extras: conventions, glossary, playbooks, pitfalls, L0 overview; layered briefs | SI-10 | ⬜ | — |
+Last reconciled **2026-10-17**, against `ed0ab95d` (includes design PR #636).
+**3 of 22 increments are merged: RK-00–02.** RK-00 is documentation; RK-01/02 are the
+implemented graph foundation. The 19 remaining increments include optional and externally
+owned work; this count is not an estimate of effort or feature readiness.
 
-## Design extension (2026-10-17)
+**Next: [RK-03 — extraction](IMPLEMENTATION.md#rk-03).** Its prerequisite is merged.
+RK-06 follows once extraction lands. Deliver structural review context before confirmed lessons;
+Go/SCIP do not block that path. Migration order is 0002/RK-10 → 0003/RK-15 → 0004/RK-19.
 
-[Decisions and lessons](09-decisions-and-lessons.md) and
-[integration/evaluation](10-integration-and-evaluation.md) extend the existing track.
-This is documentation only: extraction, indexing, fleet integration and new knowledge consumers
-are still unimplemented. The existing RK-01/02 completion claims do not cover the extension.
+The implementation plan and tracker are documentation only. They add no extractors, indexer,
+knowledge store, tests or Nix targets. Historical passing evidence below has not been rerun for
+this update. Graph and knowledge consumer features remain planned and disabled by default.
 
-| # | Increment | State | PR |
+## State and update rules
+
+| State | Meaning |
+|---|---|
+| Not started | No implementation is underway; listed prerequisites may still be pending |
+| In progress | Implementation has started; link the working PR and remaining acceptance work |
+| Blocked | Work cannot continue; name the concrete blocker, dependency and unblock action |
+| Implemented awaiting validation | Deliverables exist, but required checks/integration/evaluation evidence is incomplete |
+| Merged | Deliverables and required acceptance are evidenced and the PR has merged |
+| Deferred | Explicitly postponed; record the reason and reconsideration condition |
+
+Update a row when work starts, validation completes or a PR merges. Evidence must identify the
+revision, command/features, result, nonzero execution counts where relevant, and artifact link.
+Record pass, fail, skipped, unavailable or not run explicitly; skipped/unavailable never means
+pass. Keep detailed logs and deviations in PROGRESS, linked from the row. Do not promote a row
+solely because code compiled or a PR merged with validation outstanding.
+
+## Increment tracker
+
+Each ID links to its implementation steps and acceptance criteria. Prerequisites are delivery
+constraints, not claims that an unstarted row is actively blocked. The test matrix owns detailed
+case descriptions and expected outcomes; add missing scenario tables in the owning increment.
+
+| ID / plan | Deliverable | Prerequisites / blockers | State | Acceptance evidence / remaining work | PR / commit |
+|---|---|---|---|---|---|
+| [RK-00](IMPLEMENTATION.md#rk-00) | Design track | — | Merged | Existing design/index links | #495 |
+| [RK-01](IMPLEMENTATION.md#rk-01) | Core graph and memory store | RK-00 | Merged | R1/R2/R3; gate `a023635a` | #582 |
+| [RK-02](IMPLEMENTATION.md#rk-02) | Postgres graph store | RK-01 | Merged | P1/R3/R4; gate `0d61ff52`; live 57/57 | #585 |
+| [RK-03](IMPLEMENTATION.md#rk-03) | Rust/Cargo/docs extraction | RK-01 (met) | Not started | Pending: E1, determinism, bench/leak | — |
+| [RK-04](IMPLEMENTATION.md#rk-04) | Go extraction (additional) | RK-03 | Not started | Pending: Go mapping/helper fixture cases | — |
+| [RK-05](IMPLEMENTATION.md#rk-05) | SCIP spike and extraction (additional) | RK-03 | Not started | Pending: spike, resolved-edge/offline or integration evidence | — |
+| [RK-06](IMPLEMENTATION.md#rk-06) | Indexer, atomic publication and CLI | RK-02, RK-03 | Not started | Pending: I1, applicable I2, strict Pg runner | — |
+| [RK-07](IMPLEMENTATION.md#rk-07) | Fleet refresh and tenant cache | RK-06 | Not started | Pending: F1, fleet I2 | — |
+| [RK-08](IMPLEMENTATION.md#rk-08) | Graph tool and PgAst | RK-06 | Not started | Pending: R5, AST/config/feature composition | — |
+| [RK-09](IMPLEMENTATION.md#rk-09) | Review collector and A/B evaluation | RK-07, RK-08 | Not started | Pending: C1, full I2, Q1 A/B | — |
+| [RK-10](IMPLEMENTATION.md#rk-10) | Inventory skeleton; migration 0002 | RK-06 | Not started | Pending: inventory fixtures, store/migration cases | — |
+| [RK-11](IMPLEMENTATION.md#rk-11) | Cited summaries and embeddings | RK-10 | Not started | Pending: provider/citation/embedding/store cases | — |
+| [RK-12](IMPLEMENTATION.md#rk-12) | Implement/Design brief hook | RK-11 | Not started | Pending: session/CLI/brief composition | — |
+| [RK-13](IMPLEMENTATION.md#rk-13) | Remote graph service (optional) | RK-08 | Not started | Pending: scoped RPC, buf, mt-audit, constants | — |
+| [RK-14](IMPLEMENTATION.md#rk-14) | Cross-tier RLS (external, optional) | Multi-tenancy plane 02 | Not started | Pending: external RLS implementation and evidence | — |
+| [RK-15](IMPLEMENTATION.md#rk-15) | Repository profile; migration 0003 | RK-03, RK-10 (migration order) | Not started | Pending: profile fixtures, Facts conformance, Pg upgrade | — |
+| [RK-16](IMPLEMENTATION.md#rk-16) | History and recipes (additional) | RK-06, RK-15 | Not started | Pending: synthetic history, persistence/composition | — |
+| [RK-17](IMPLEMENTATION.md#rk-17) | Derived analyses (additional) | RK-09, RK-16; RK-05 for orphans | Not started | Pending: analysis/collector fixtures and coverage labels | — |
+| [RK-18](IMPLEMENTATION.md#rk-18) | LLM extras and layered briefs (additional) | RK-11, RK-16, RK-12 | Not started | Pending: cited extras, recipe validation, both briefs | — |
+| [RK-19](IMPLEMENTATION.md#rk-19) | Knowledge store; migration 0004 | RK-10, RK-15 | Not started | Pending: K1, applicable K2/K5, migration/races | — |
+| [RK-20](IMPLEMENTATION.md#rk-20) | Operator workflow and candidate adapter | RK-19, RK-09, RK-11 | Not started | Pending: K2/K3, live K5 lifecycle | — |
+| [RK-21](IMPLEMENTATION.md#rk-21) | Confirmed knowledge briefs and A/B/C evaluation | RK-20, RK-12 | Not started | Pending: K4, remaining K5, Q1 A/B/C | — |
+
+## Milestone acceptance
+
+- [x] **Foundation:** RK-00–02 merged with historical evidence in the as-built log below.
+- [ ] **Structural review context:** RK-03/06/07/08/09 merged; E1/I1/F1/R5/C1 and full I2
+  accepted; baseline/graph evaluation report linked.
+- [ ] **Inventory and session context:** RK-10/11/12/15 merged; migrations 0002/0003,
+  cited inventory and bounded session composition accepted.
+- [ ] **Confirmed decisions and lessons:** RK-19/20/21 merged; migration 0004, K1–K5 and
+  three-arm evaluation report accepted. Operator confirmation and evidence freshness enforced.
+- [ ] **Additional analysis:** RK-04/05/16/17/18 accepted, including SCIP-dependent orphan
+  analysis. Any deferred increment is explicitly recorded rather than silently counted complete.
+- [ ] **Optional remote service:** RK-13 accepted with protocol/tenancy governance evidence.
+- [ ] **Optional RLS:** RK-14 has linked acceptance from the multi-tenancy track.
+
+## Evaluation and rollout decisions
+
+Implementation delivery and the decision to change defaults are tracked separately. A completed
+report may show that quality thresholds failed; preserve that result and keep the feature opt-in.
+
+| Decision / report | State | Required evidence | Result / artifact |
 |---|---|---|---|
-| RK-19 | Evidence-backed decision/lesson store, migration 0004, lifecycle/conformance | ⬜ | — |
-| RK-20 | Operator confirmation workflow and optional review-to-candidate adapter | ⬜ | — |
-| RK-21 | Current confirmed knowledge in briefs and paired quality evaluation | ⬜ | — |
+| RK-09 baseline versus graph | Not run | Q1 paired A/B, held-out findings, cold index and warm review costs | — |
+| RK-21 baseline versus graph versus lessons | Not run | Q1 paired A/B/C with frozen confirmed knowledge | — |
+| Default enablement | Not proposed | All runbook correctness/quality/latency criteria; separate reviewed config PR | Features remain off |
 
 ## As-built log
 

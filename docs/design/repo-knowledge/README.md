@@ -3,7 +3,8 @@
 > **Status:** implementation under way, opened 2026-09-26 from the
 > [self-improvement gap analysis](../../gap-analysis/self-improvement.md). The track is landing
 > increment by increment: [`STATUS.md`](STATUS.md) is the tracker, [`06-increments.md`](06-increments.md)
-> the build sequence, [`PROGRESS.md`](PROGRESS.md) the working journal (why the as-built code
+> the increment map, [`IMPLEMENTATION.md`](IMPLEMENTATION.md) the execution plan,
+> [`PROGRESS.md`](PROGRESS.md) the working journal (why the as-built code
 > differs from these docs), and [`08-test-matrix.md`](08-test-matrix.md) the test tables. Every
 > design claim below carries a `path:line` against `main` `5ddcda7` so it can be re-verified.
 
@@ -168,20 +169,21 @@ tenants. Each item names its mitigation.
 
 ## Build order
 
-Five lanes; one PR per increment; `nix flake check` gates each.
+Use the [implementation plan](IMPLEMENTATION.md#delivery-sequence) for delivery order and
+acceptance, the [increment map](06-increments.md) for lane ownership, and [STATUS](STATUS.md)
+for progress. One PR per increment remains the default; `nix flake check` gates implementation.
 
-| Lane | Increments | Runs after |
-|---|---|---|
-| A store | RK-01 seam + model + memory double → RK-02 Postgres | RK-00 |
-| B extractors | RK-03 syn + cargo + docs → RK-04 Go → RK-15 profile → RK-05 SCIP | RK-01 |
-| C indexer + fleet | RK-06 indexer + CLI → RK-07 fleet hook → RK-16 history | RK-02, RK-03 |
-| D query + review | RK-08 tool + `PgAst` → RK-09 collector → RK-17 derived analyses | RK-06 |
-| E inventory | RK-10 skeleton → RK-11 summaries → RK-12 brief hook → RK-18 LLM extras | RK-06 |
+| Delivery path | Prerequisites and order |
+|---|---|
+| Structural context | RK-03 → RK-06 → RK-07/RK-08 → RK-09; RK-02 already merged |
+| Inventory and profile | RK-10 after RK-06; RK-11 → RK-12 after RK-10; RK-15 after RK-03 and RK-10 |
+| Confirmed knowledge | RK-19 after RK-10/RK-15; RK-20 after RK-19/RK-09/RK-11; RK-21 after RK-20/RK-12 |
+| Additional analyses | RK-04/RK-05 after RK-03; RK-16 after RK-06/RK-15; RK-17 after RK-09/RK-16 (RK-05 for orphans); RK-18 after RK-11/RK-16/RK-12 |
+| Optional infrastructure | RK-13 after RK-08; RK-14 owned by multi-tenancy plane 02 |
 
-First value for agent-seddon as tenant one: RK-03 + RK-06 (`agent repo index / status / diff`
-over the real workspace). First model-visible payoff: RK-08 (the loop asks the graph) and RK-09
-(the fleet sees touched nodes and similar-pattern hits). RK-05 is the largest quality jump
-(resolved calls, precise test coverage) but must not block RK-06 to RK-09.
+First value is RK-03 + RK-06 (`agent repo index / status / diff`). First model-visible payoff
+is RK-08/RK-09. Go/SCIP do not block those consumers. Migration order is 0002/RK-10 before
+0003/RK-15 before 0004/RK-19; sharing an extractor lane does not override that dependency.
 
 ## Risks
 

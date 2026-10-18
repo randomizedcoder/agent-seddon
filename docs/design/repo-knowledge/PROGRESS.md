@@ -9,6 +9,39 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
+**RK-00–02 are merged; RK-03 is next.** Current states and acceptance evidence live in
+[STATUS](STATUS.md); implementation steps and dependencies live in
+[IMPLEMENTATION](IMPLEMENTATION.md). RK-06 waits for RK-03, rather than running independently
+of its extractor prerequisite. No RK-03–21 implementation is claimed by the documentation work.
+
+## 2026-10-17 — implementation plan and tracker
+
+- Reconciled against `ed0ab95d`, including the design extension merged in #636.
+- Added the execution plan for RK-00–21 and expanded STATUS into the single implementation
+  tracker, with prerequisites, acceptance evidence, milestone checklists and rollout decisions.
+- Preserved RK-01/02 historical results below. The new plan/checklists are specifications, not
+  newly executed implementation tests or measured feature improvements.
+- Corrected stale lane guidance: Go/SCIP do not gate structural review delivery; migration
+  0002/RK-10 precedes 0003/RK-15 and 0004/RK-19. RK-18's completion includes RK-12's session
+  brief consumer. No runtime behavior or migration files changed.
+
+### Documentation validation
+
+On the uncommitted documentation change based on `ed0ab95d`:
+
+- `nix run .#doc-links -- --gate` — PASS; relative links resolve.
+- `nix run .#doc-orphans -- --gate` — PASS; first-party docs are reachable from README.
+- Markdown rendering/table/anchor validation — PASS; six changed/new Markdown files, 30 tables.
+- Plan/tracker audit — PASS; 22 unique RK sections and matching rows, completed foundation
+  preserved, all remaining increments not started; historical evidence retained.
+- `git diff --check` — PASS. No Rust, live Postgres or model evaluation suites run for this
+  documentation change. The implementation test cases remain specifications in the matrix.
+
+## Historical checkpoint — RK-02 closeout
+
+The following checkpoint is preserved as recorded. Its scheduling language is superseded by
+the current implementation plan: RK-06 needs RK-03.
+
 **RK-02 merged (#585, gate green on `0d61ff52`).** `PgRepoGraph` is durable (lane A):
 migration 0001, `with_tenant`, the `UNNEST` bulk write with the collision check, every read verb,
 diff / retention / shape; the `#[ignore]` live-Postgres suite reruns the R3 rows through

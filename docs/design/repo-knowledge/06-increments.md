@@ -1,5 +1,7 @@
 # 06 — Increments: RK-00 to RK-21
 
+[Implementation steps and acceptance](IMPLEMENTATION.md) · [Status tracker](STATUS.md)
+
 One PR per increment. Each is gated by `nix flake check` (clippy `-D warnings`, rustfmt, tests,
 cargo-audit, buf, bench, leak, mt-audit, constants-sync) plus whatever the row adds. Tests are
 table-driven `rstest` with the four case classes and `adversarial_` cases for every
@@ -16,7 +18,7 @@ untrusted input (repo content, model-supplied keys, tenant strings).
 | RK-04 | Go mapping from the helper JSON + `_test.go` scan; `nix/checks/repo-graph-go.nix` over the existing ast-go fixture | B | RK-03 | `repo-graph-go` |
 | RK-05 | SCIP spike report (as-built entry: time, RSS, index size, `enclosing_range`, join rate) + `extract-scip` extractor: resolved `calls` / `references` / `tests(via=scip)`, `res_key` join; check modelled on `ast-scip.nix` | B | RK-03 | `repo-graph-scip` when the fixture builds offline, else the `integration` app |
 | RK-06 | `Indexer`, `[repo_graph]` config, `agent repo add\|index\|status\|diff\|shape`, retention sweep, metrics `agent_repo_graph_index_seconds`, `_nodes`, `_edges`, `_truncated_total` | C | RK-02, RK-03 | `config-roundtrip`, `cli-help` |
-| RK-07 | Fleet hook (merge-base index off the critical path, in-flight dedup by `(tenant, slug, sha)`); `FleetReviewFactory` supplies the tenant view; cache key `(tenant, row.id)` | C | RK-06 | orchestrator tests with `MemRepoGraph` + a fake hook; a test that two tenants with the same `row.id` do not share a context |
+| RK-07 | Fleet hook (merge-base index off the critical path, in-flight dedup by `(tenant, repo, sha, extractor_version)`); `FleetReviewFactory` supplies the tenant view; cache key `(tenant, row.id)` | C | RK-06 | orchestrator tests with `MemRepoGraph` + a fake hook; a test that two tenants with the same `row.id` do not share a context |
 | RK-08 | `repo_graph` tool (feature `tool-repo-graph`) + `PgAst` (`[ast] backends = ["pg"]`) + registry lines in `register_builtins` (`crates/agent-runtime/src/registry.rs:469`) + `docs/components/repo-graph.md` | D | RK-06 | tool tests over the fixture; adversarial args (huge hops, unknown key, key with whitespace) |
 | RK-09 | `RepoKnowledgeCollector`, `FactFragment::RepoKnowledge`, `ReviewFacts.repo_knowledge`, `render_repo_knowledge`, `ReviewCfg.repo_knowledge` (off), ClickHouse status, `nix/checks/review-repo-knowledge.nix`, measure-gate note in STATUS | D | RK-07, RK-08 | `review-repo-knowledge` |
 | RK-10 | Inventory skeleton + migration 0002 + `agent repo inventory` | E | RK-06 | fixture assertions: one `seam`, one `tool`, one `cargo_feature` row with the expected evidence roles |
@@ -24,10 +26,10 @@ untrusted input (repo content, model-supplied keys, tenant strings).
 | RK-12 | Implement / Design-mode brief hook + `agent repo brief --goal` | E | RK-11 | session tests: injected once, bounded, absent when the store is off |
 | RK-13 | `RepoGraphService` gRPC (`scoped`) + mt-audit manifest row + `class_of` + constants + `--serve-repo-graph` | opt | RK-08 | `buf`, `mt-audit`, `constants-sync` |
 | RK-14 | Postgres RLS across all Pg tiers; filed under multi-tenancy plane 02, tracked there | opt | — | — |
-| RK-15 | Profile extractors ([`07-repo-profile.md`](07-repo-profile.md) rows marked RK-15) + migration 0003 (`repo_facts`, `repo_history`); fixture extended with a `.proto`, a migration, a clap bin, a `TODO`, an `#[ignore]`, a metric registration | B | RK-03 | `repo-graph-rust` assertions extended |
+| RK-15 | Profile extractors ([`07-repo-profile.md`](07-repo-profile.md) rows marked RK-15) + migration 0003 (`repo_facts`, `repo_history`); fixture extended with a `.proto`, a migration, a clap bin, a `TODO`, an `#[ignore]`, a metric registration | B | RK-03, RK-10 (migration 0002 before 0003) | `repo-graph-rust` assertions extended |
 | RK-16 | History extractors: `repo_history` (churn, recency, bus factor, slope; reusing the `churn.rs` math), `co_changes_with` edges (reusing `cochange.rs`), in-flight facts, change recipes; `Indexer` gets `RepoBackend` log access | C | RK-06, RK-15 | fixture repo with a synthetic git history built by `agent-testkit` |
 | RK-17 | Derived analyses over the stored graph: chokepoints, guard funnels and guard-gap detection, near-duplicate `similar_to` edges (winnowing), orphans; tool questions and review-brief lines for each | D | RK-09, RK-16 (RK-05 for orphans) | tool and collector tests over the fixture; `review-repo-knowledge` extended |
-| RK-18 | LLM extras: `conventions`, `glossary`, `playbook:*`, `pitfalls`, `overview_l0`; L0 / L1 / L2 layering in both briefs | E | RK-11, RK-16 | fake-provider tests: citations validated; a playbook naming a file outside its recipe is rejected |
+| RK-18 | LLM extras: `conventions`, `glossary`, `playbook:*`, `pitfalls`, `overview_l0`; L0 / L1 / L2 layering in both briefs | E | RK-11, RK-16, RK-12 (both brief consumers) | fake-provider tests: citations validated; a playbook naming a file outside its recipe is rejected |
 
 ## Extension increments (proposed, 2026-10-17)
 
@@ -50,18 +52,23 @@ wire extension must follow buf/mt-audit/constants governance rather than being i
 
 ## Lanes
 
-```
-A  RK-01 ──► RK-02 ─────────────────────────────┐
-B  RK-01 ──► RK-03 ──► RK-04 ──► RK-15 ──► RK-05 │
-C                      RK-02 + RK-03 ──► RK-06 ──► RK-07 ──► RK-16
-D                                        RK-06 ──► RK-08 ──► RK-09 ──► RK-17
-E                                        RK-06 ──► RK-10 ──► RK-11 ──► RK-12 ──► RK-18
-```
+Lanes identify implementation ownership, not extra prerequisites. The
+[implementation plan](IMPLEMENTATION.md#delivery-sequence) owns the recommended delivery order.
 
-Lane B runs in parallel with A after RK-01. RK-15 rides lane B right after RK-03 because it is
-the same extractor pass and cheap. RK-16 waits for the indexer to have git access. RK-17 and
-RK-18 are last. First value for agent-seddon as tenant one is RK-03 + RK-06; first model-visible
-payoff is RK-08 and RK-09; RK-05 is the largest quality jump and must not block RK-06 to RK-09.
+| Lane | Work | Dependency constraints |
+|---|---|---|
+| A store | RK-01 → RK-02 | Complete; extended by RK-06 publication/read APIs |
+| B extraction | RK-03; then RK-04, RK-05 and RK-15 | Go/SCIP independent after RK-03; RK-15 also waits for RK-10/migration 0002 |
+| C index/fleet/history | RK-06 → RK-07; RK-16 | RK-06 needs RK-02/RK-03; RK-16 needs RK-06/RK-15 |
+| D queries/review | RK-08 → RK-09 → RK-17 | RK-08 needs RK-06; RK-09 also needs RK-07; RK-17 also needs RK-16 and RK-05 for orphans |
+| E inventory/briefs | RK-10 → RK-11 → RK-12; RK-18 | RK-10 needs RK-06; RK-18 needs RK-11/RK-16/RK-12 |
+| Knowledge extension | RK-19 → RK-20 → RK-21 | RK-19 needs RK-10/RK-15; RK-20 also needs RK-09/RK-11; RK-21 also needs RK-12 |
+
+First value is RK-03 + RK-06; first model-visible payoff is RK-08/RK-09. Go and SCIP must not
+block that path. RK-15 can reuse the Rust extraction pass but must land after migration 0002;
+RK-19's migration 0004 follows RK-15's 0003. RK-18 requires both brief consumers before its
+layering is complete. These dependencies replace the former diagram's implied Go→profile→SCIP
+chain and its prematurely scheduled RK-15.
 
 ## Open questions (recorded, not blocking)
 
