@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c/F5d + F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof (no consumer); F5c2/F5d + F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -22,7 +22,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2b | Clone credential injection | authenticate the git clone/fetch with the resolved/minted token via a host-scoped `http.extraHeader` injected through `env_set` (token never in argv, `.git/config`, or an error string) ⇒ enables **private-repo clone**; GitHub, benefits `env:`/`file:` PAT rows too | ✅ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
-| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c**: install-callback endpoint + verified snapshot feed + gate union. **F5d**: portal UI. | 🟡 |
+| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built — no consumer). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union. **F5d**: portal UI. | 🟡 |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
@@ -182,6 +182,32 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   `adversarial_` cross-tenant list/get/delete through the served registry, `adversarial_` unknown/case/space/
   traversal store strings, `boundary_` postgres-without-feature), and a `serve-smoke` wire block
   (Put→Get + `adversarial_` traversal `installation_id` refused).
+
+- **F5c1 (PR #639):** the **admin-ownership proof** F5a deliberately stopped short of — still a primitive with
+  no consumer. Planning F5c split it in two (user-confirmed): F5c1 = this proof; F5c2 = the onboarding RPCs,
+  the verified store and the gate union. F5c2's transport was also settled (user-confirmed): **portal-relayed
+  gRPC**, the shape of the browser sign-in (`AuthService.Begin`/`Exchange`) — GitHub's Setup URL is a portal
+  page that calls `BeginInstall`/`CompleteInstall` with the tenant's bearer, so the agent gains no HTTP
+  listener. `UserInstallationAccess::prove_admin(minter, code, id)` (`crates/agent-forge/src/ghapp_oauth.rs`)
+  exchanges the one-time `code` **once** (new opaque `UserToken`: no `Debug`/`Clone`/accessor; `exchange` now
+  refuses an empty or > `MAX_CODE_BYTES` code pre-flight) and requires all three of: **access** (the id is in
+  `/user/installations`, F5a); **the account**, read with the App JWT by the new
+  `InstallationTokenMinter::installation_account` (`GET /app/installations/{id}`, `crates/agent-forge/src/ghapp.rs`
+  — GitHub's record, never the callback's `installation_id`/`setup_action` query params); and **admin of that
+  account** — a `User` account must be the user (`GET /user` id), an `Organization` must list the user as an
+  **active admin** (`GET /user/memberships/orgs/{login}`); any other type (`Enterprise`) is never proven. A
+  "fresh install" is deliberately not evidence (client-supplied). The rule is the pure `decide`; an
+  `OwnershipProof` (private fields) can only be built by `prove_admin`; `Ok(None)` = answered-not-admin, `Err` =
+  undecidable — both deny. Every forge-echoed field is re-validated: account/user ids as decimal ids, the org
+  login by the new strict `valid_github_login` (`[A-Za-z0-9-]`, 1–39, no leading/trailing `-`) **before** it
+  becomes the membership URL segment. The minter's `post` became a method-generic `send` (same retry/classify,
+  status-only errors). **App prerequisite:** *Organization → Members: read* (else the membership read is
+  refused ⇒ fails closed), documented in `docs/components/forge.md`. Gate unchanged (still bootstrap-only).
+  Tables (run by the `forge-ghapp` check): `decide` (12 incl. the F5a IDOR — read-only member with access ⇒ not
+  proven), `prove_admin` over a mock forge (11 outcomes, each asserting the code is exchanged exactly once;
+  no-access stops before the App lookup; `adversarial_` hostile echoed login ⇒ 0 membership requests, hostile id
+  / malformed code ⇒ 0 requests, errors never echo code/secret/user token/JWT/key), `valid_github_login` (16),
+  `installation_account` (body table + HTTP failures + `adversarial_` ids pre-flight).
 
 ## Links
 

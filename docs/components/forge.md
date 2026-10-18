@@ -172,6 +172,16 @@ the `forge_registry` RBAC resource and is tenant-scoped like the forge cards. A 
 grants **no** `ghapp:` minting authority: the mint gate stays on the operator
 `[github_app] installations` allowlist until the install callback proves ownership.
 
+The proof that callback will run is `UserInstallationAccess::prove_admin`
+(`agent-forge/src/ghapp_oauth.rs`, `forge-ghapp`). It exchanges the one-time install
+`code` once, then requires that the user can reach the installation
+(`/user/installations`), reads the installation's account with the App JWT
+(`GET /app/installations/{id}`), and requires the user to *be* that account (a `User`
+install) or an **active admin** of it (an `Organization` install, via
+`GET /user/memberships/orgs/{login}`). Mere access or membership is never enough. The
+App therefore needs the **Organization → Members: read** permission; without it the
+membership read is refused and the proof fails closed.
+
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the
 default build), each via the C36 recipe below:
 - **gitea** (`agent-forge/src/gitea.rs`, `forge-gitea`) — a GitHub-shaped `/api/v1`
