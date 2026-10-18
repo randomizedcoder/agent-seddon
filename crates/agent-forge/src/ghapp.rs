@@ -174,10 +174,42 @@ impl InstallationTokenMinter {
             .map_err(|_| Error::Repo("github app: signing the app jwt failed".into()))
     }
 
-    /// `POST {base}{path}` with the App JWT, through `agent-retry`. The classification
-    /// mirrors [`crate::http`] verbatim (429/5xx + rate-limited 403 retry; timeout/
-    /// connect retry; everything else fails fast). Only a status code reaches an error.
+    /// The **account** an installation belongs to, read with the App JWT from
+    /// `GET /app/installations/{id}` (forge-auth F5c). This is the server's own record,
+    /// so an ownership check keys on it rather than on anything the install callback
+    /// (attacker-reachable) claims. Every echoed field is re-validated — the account id
+    /// as a decimal id, the login by [`valid_github_login`] (it becomes a URL segment
+    /// downstream) — and a malformed or missing account fails closed.
+    pub async fn installation_account(&self, installation_id: &str) -> Result<InstallAccount> {
+        if !valid_installation_id(installation_id) {
+            return Err(Error::Repo("github app: invalid installation id".into()));
+        }
+        let jwt = self.app_jwt(self.clock.now_secs())?;
+        let path = format!("/app/installations/{installation_id}");
+        let body = self
+            .send(reqwest::Method::GET, &path, &jwt, "installation lookup")
+            .await?;
+        InstallAccount::from_installation(&body)
+            .ok_or_else(|| Error::Repo("github app: installation has no usable account".into()))
+    }
+
+    /// `POST {base}{path}` with the App JWT (the token endpoint).
     async fn post(&self, path: &str, jwt: &str) -> Result<serde_json::Value> {
+        self.send(reqwest::Method::POST, path, jwt, "token endpoint")
+            .await
+    }
+
+    /// `{method} {base}{path}` with the App JWT, through `agent-retry`. The
+    /// classification mirrors [`crate::http`] verbatim (429/5xx + rate-limited 403
+    /// retry; timeout/connect retry; everything else fails fast). Only a status code
+    /// and the fixed `what` label reach an error.
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        jwt: &str,
+        what: &str,
+    ) -> Result<serde_json::Value> {
         let url = format!(
             "{}/{}",
             self.base.trim_end_matches('/'),
@@ -185,10 +217,11 @@ impl InstallationTokenMinter {
         );
         let resp = agent_retry::run(&self.retry, || {
             let url = url.clone();
+            let method = method.clone();
             async move {
                 let req = self
                     .client
-                    .post(&url)
+                    .request(method, &url)
                     .header(reqwest::header::AUTHORIZATION, format!("Bearer {jwt}"))
                     .header(reqwest::header::ACCEPT, "application/vnd.github+json")
                     .header("X-GitHub-Api-Version", "2022-11-28");
@@ -211,7 +244,7 @@ impl InstallationTokenMinter {
                             return agent_retry::Attempt::Retry {
                                 // Status only — the body can echo the JWT.
                                 err: Error::Repo(format!(
-                                    "github app: token endpoint returned http {code}"
+                                    "github app: {what} returned http {code}"
                                 )),
                                 after,
                             };
@@ -219,11 +252,11 @@ impl InstallationTokenMinter {
                         agent_retry::Attempt::Done(r)
                     }
                     Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
-                        err: Error::Repo(format!("github app: token request failed: {e}")),
+                        err: Error::Repo(format!("github app: {what} request failed: {e}")),
                         after: None,
                     },
                     Err(e) => agent_retry::Attempt::Fail(Error::Repo(format!(
-                        "github app: token request failed: {e}"
+                        "github app: {what} request failed: {e}"
                     ))),
                 }
             }
@@ -234,18 +267,80 @@ impl InstallationTokenMinter {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| Error::Repo(format!("github app: reading token response: {e}")))?;
+            .map_err(|e| Error::Repo(format!("github app: reading {what} response: {e}")))?;
         if !status.is_success() {
             return Err(Error::Repo(format!(
-                "github app: token endpoint returned http {}",
+                "github app: {what} returned http {}",
                 status.as_u16()
             )));
         }
         // The body is remote-controlled: parse only a bounded prefix.
         let cut = bytes.len().min(MAX_BODY_BYTES);
         serde_json::from_slice(&bytes[..cut])
-            .map_err(|_| Error::Repo("github app: decoding token response failed".into()))
+            .map_err(|_| Error::Repo(format!("github app: decoding {what} response failed")))
     }
+}
+
+/// What kind of GitHub account an installation lives on. Anything GitHub may add later
+/// (e.g. `Enterprise`) is [`AccountKind::Other`], which no ownership check accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountKind {
+    User,
+    Organization,
+    Other,
+}
+
+/// The account an installation belongs to (`GET /app/installations/{id}` → `account`),
+/// every field already validated: `id` is decimal, `login` passes [`valid_github_login`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallAccount {
+    pub id: String,
+    pub login: String,
+    pub kind: AccountKind,
+}
+
+impl InstallAccount {
+    /// Read and validate `account` from an installation body; `None` (fail closed) when
+    /// it is missing or any field is malformed.
+    fn from_installation(body: &serde_json::Value) -> Option<Self> {
+        let account = body.get("account")?;
+        let id = account.get("id").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(str::to_string))
+        })?;
+        let login = account.get("login").and_then(serde_json::Value::as_str)?;
+        if !valid_installation_id(&id) || !valid_github_login(login) {
+            return None;
+        }
+        let kind = match account.get("type").and_then(serde_json::Value::as_str)? {
+            "User" => AccountKind::User,
+            "Organization" => AccountKind::Organization,
+            _ => AccountKind::Other,
+        };
+        Some(Self {
+            id,
+            login: login.to_string(),
+            kind,
+        })
+    }
+}
+
+/// Longest GitHub user/org login.
+pub const MAX_GITHUB_LOGIN_LEN: usize = 39;
+
+/// A GitHub user/org login: ASCII alphanumerics and `-`, 1–[`MAX_GITHUB_LOGIN_LEN`]
+/// long, not starting or ending with `-`. Stricter than `safe_segment`: a login the
+/// forge echoes back becomes a URL path segment (`/user/memberships/orgs/{login}`), so
+/// a traversal, separator, or control character must never get that far.
+pub fn valid_github_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= MAX_GITHUB_LOGIN_LEN
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && login
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// A GitHub installation id is decimal and length-capped (the F1 grammar). Stricter
@@ -524,5 +619,111 @@ mod tests {
             !err.contains("not-a-key"),
             "the key bytes are not echoed: {err}"
         );
+    }
+
+    // --- valid_github_login: the echoed-login URL-segment guard (F5c) ----------
+    #[rstest]
+    #[case::positive_plain_login("octocat", true)]
+    #[case::positive_hyphenated_org("my-org-2", true)]
+    #[case::positive_single_char("a", true)]
+    #[case::boundary_at_max_len("a".repeat(MAX_GITHUB_LOGIN_LEN), true)]
+    #[case::boundary_over_max_len("a".repeat(MAX_GITHUB_LOGIN_LEN + 1), false)]
+    #[case::negative_empty(String::new(), false)]
+    #[case::negative_leading_dash("-org", false)]
+    #[case::negative_trailing_dash("org-", false)]
+    #[case::corner_underscore("my_org", false)]
+    #[case::adversarial_traversal("../x", false)]
+    #[case::adversarial_separator("a/b", false)]
+    #[case::adversarial_query_injection("org?x=1", false)]
+    #[case::adversarial_crlf("org\r\nX-Evil: 1", false)]
+    #[case::adversarial_nul("org\0", false)]
+    #[case::adversarial_unicode("orgé", false)]
+    #[case::adversarial_percent_encoded("%2e%2e", false)]
+    fn github_login_shape(#[case] login: String, #[case] want: bool) {
+        assert_eq!(valid_github_login(&login), want, "{login:?}");
+    }
+
+    /// A `GET /app/installations/{id}` body whose `account` is `account`.
+    fn installation_body(account: &str) -> String {
+        format!(r#"{{"id":42,"account":{account},"app_id":123456}}"#)
+    }
+
+    // --- installation_account: App-JWT lookup of the install's owner (F5c) -----
+    #[rstest]
+    #[case::positive_organization(
+        r#"{"id":7,"login":"acme","type":"Organization"}"#,
+        Some(("7", "acme", AccountKind::Organization))
+    )]
+    #[case::positive_user(
+        r#"{"id":"9","login":"octocat","type":"User"}"#,
+        Some(("9", "octocat", AccountKind::User))
+    )]
+    #[case::corner_enterprise_is_other(
+        r#"{"id":5,"login":"bigco","type":"Enterprise"}"#,
+        Some(("5", "bigco", AccountKind::Other))
+    )]
+    #[case::negative_missing_type(r#"{"id":7,"login":"acme"}"#, None)]
+    #[case::negative_missing_id(r#"{"login":"acme","type":"Organization"}"#, None)]
+    #[case::negative_account_null("null", None)]
+    #[case::adversarial_login_traversal(r#"{"id":7,"login":"../x","type":"Organization"}"#, None)]
+    #[case::adversarial_login_separator(r#"{"id":7,"login":"a/b","type":"Organization"}"#, None)]
+    #[case::adversarial_account_id_non_digit(
+        r#"{"id":"7; drop","login":"acme","type":"Organization"}"#,
+        None
+    )]
+    #[tokio::test]
+    async fn installation_account_body(
+        #[case] account: &str,
+        #[case] want: Option<(&str, &str, AccountKind)>,
+    ) {
+        let (base, seen) = spawn_bodies(vec![(200, false, installation_body(account))]);
+        let m = minter(base, 0, at(1_000));
+        let got = m.installation_account("42").await;
+        match want {
+            Some((id, login, kind)) => {
+                let a = got.expect("well-formed account resolves");
+                assert_eq!(
+                    a,
+                    InstallAccount {
+                        id: id.to_string(),
+                        login: login.to_string(),
+                        kind,
+                    }
+                );
+            }
+            None => assert!(got.is_err(), "malformed account {account} fails closed"),
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(
+            seen.lock().unwrap()[0].starts_with("Bearer "),
+            "the lookup authenticates with the App JWT"
+        );
+    }
+
+    #[rstest]
+    #[case::negative_404_unknown_installation(404, 1)]
+    #[case::negative_401_bad_jwt(401, 1)]
+    #[case::negative_500_exhausts_retries(500, 4)]
+    #[tokio::test]
+    async fn installation_account_http_failure_fails_closed(
+        #[case] status: u16,
+        #[case] want_requests: usize,
+    ) {
+        let (base, seen) = spawn(vec![(status, false)]);
+        let m = minter(base, 3, at(1_000));
+        assert!(m.installation_account("42").await.is_err());
+        assert_eq!(seen.lock().unwrap().len(), want_requests);
+    }
+
+    #[rstest]
+    #[case::adversarial_traversal("1/../../x")]
+    #[case::adversarial_non_digit("abc")]
+    #[case::adversarial_empty("")]
+    #[tokio::test]
+    async fn adversarial_installation_account_id_rejected_before_http(#[case] id: &str) {
+        let (base, seen) = spawn(vec![(200, false)]);
+        let m = minter(base, 0, at(1_000));
+        assert!(m.installation_account(id).await.is_err());
+        assert_eq!(seen.lock().unwrap().len(), 0);
     }
 }
