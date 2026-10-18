@@ -258,7 +258,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   lookups spend nothing, 16-thread race on one state redeems once, token lengths); sign-in and onboarding suites
   unchanged and green.
 
-- **F5d1 (PR #TBD):** the portal side of onboarding — a **Forges** tab (`portal/lib/src/pages/forges_page.dart`,
+- **F5d1 (PR #643):** the portal side of onboarding — a **Forges** tab (`portal/lib/src/pages/forges_page.dart`,
   nav item gated on `read:forge_registry`) over two new committed Dart stub sets (`forge_registry`,
   `github_install_registry`; only those files regenerated) on the existing gateway channel — no Rust/proto change.
   **The load-bearing fix:** GitHub's return carries `code` + `state` like an IdP sign-in return, so
