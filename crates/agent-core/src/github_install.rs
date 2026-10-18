@@ -84,6 +84,94 @@ impl GithubInstall {
     }
 }
 
+/// Longest GitHub user/org login.
+pub const MAX_GITHUB_LOGIN_LEN: usize = 39;
+
+/// A GitHub user/org login: ASCII alphanumerics and `-`, 1–[`MAX_GITHUB_LOGIN_LEN`]
+/// long, not starting or ending with `-`. Stricter than [`safe_segment`]: a login the
+/// forge echoes back becomes a URL path segment (`/user/memberships/orgs/{login}`), so
+/// a traversal, separator, or control character must never get that far. GitHub App
+/// slugs (`/apps/{slug}`) share the shape, so the same rule screens `[github_app] slug`.
+pub fn valid_github_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= MAX_GITHUB_LOGIN_LEN
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && login
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// What `BeginInstall` hands the portal (forge-auth F5c2): the GitHub install URL to
+/// send the browser to, the single-use `state` it carries, and when that `state` lapses
+/// (Unix seconds).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeginInstall {
+    pub install_url: String,
+    pub state: String,
+    pub expires_at: u64,
+}
+
+/// Why an install-onboarding step was refused (forge-auth F5c2). The wire maps each to a
+/// status code; [`Self::reason`] is the bounded label logs record. `UnknownState` and
+/// `NotProven` deliberately share one opaque wire answer (a caller learns only "denied").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnboardRefusal {
+    /// `[github_app]` has no `slug`/OAuth client, or no install store is configured.
+    NotConfigured,
+    /// Too many onboardings in flight; try later.
+    Busy,
+    /// A malformed `code` or `installation_id` (rejected before any forge call).
+    Malformed,
+    /// The `state` was never issued, already spent, expired, or minted for another caller.
+    UnknownState,
+    /// The forge answered and the caller does not administer the installation's account.
+    NotProven,
+    /// The installation is already bound to another tenant.
+    Claimed,
+    /// The forge or the store could not be reached; the decision was not made.
+    Unavailable,
+}
+
+impl OnboardRefusal {
+    /// The bounded reason recorded in logs.
+    pub fn reason(self) -> &'static str {
+        match self {
+            OnboardRefusal::NotConfigured => "onboarding_off",
+            OnboardRefusal::Busy => "too_many_pending",
+            OnboardRefusal::Malformed => "malformed",
+            OnboardRefusal::UnknownState => "unknown_state",
+            OnboardRefusal::NotProven => "not_admin",
+            OnboardRefusal::Claimed => "claimed_by_other_tenant",
+            OnboardRefusal::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// The install-onboarding seam (forge-auth F5c2): the two halves of the portal-relayed
+/// GitHub App install handshake. `begin` remembers the verified caller under a fresh
+/// single-use `state`; `complete` spends it, requires the **same** caller, proves the
+/// caller administers the installation's account, and only then binds the installation
+/// to the tenant for minting. `tenant`/`subject` are the caller's **verified** principal
+/// (passed explicitly by the handler, never read from the wire or ambient scope);
+/// `state`/`code`/`installation_id` are browser-relayed and untrusted.
+#[async_trait]
+pub trait GithubInstallOnboarding: Send + Sync {
+    async fn begin(
+        &self,
+        tenant: &str,
+        subject: &str,
+    ) -> std::result::Result<BeginInstall, OnboardRefusal>;
+    async fn complete(
+        &self,
+        tenant: &str,
+        subject: &str,
+        state: &str,
+        code: &str,
+        installation_id: &str,
+    ) -> std::result::Result<GithubInstall, OnboardRefusal>;
+}
+
 /// The install-registry seam (forge-auth F4): CRUD over the persisted
 /// [`GithubInstall`]s. Mirrors [`ForgeRegistry`] — one process holds the store while
 /// any number of clients drive it; a `PerTenant<dyn GithubInstallRegistry>` routes
@@ -165,6 +253,40 @@ mod tests {
             .validate()
             .expect_err("traversal repo must be rejected");
         assert!(!err.to_string().contains("secretpayload"), "leaked: {err}");
+    }
+
+    #[rstest]
+    #[case::positive_org("acme", true)]
+    #[case::positive_inner_dash("my-org-1", true)]
+    #[case::boundary_single_char("a", true)]
+    #[case::boundary_at_max_len(&"a".repeat(MAX_GITHUB_LOGIN_LEN), true)]
+    #[case::boundary_over_max_len(&"a".repeat(MAX_GITHUB_LOGIN_LEN + 1), false)]
+    #[case::negative_empty("", false)]
+    #[case::corner_trailing_dash("acme-", false)]
+    #[case::adversarial_leading_dash("-acme", false)]
+    #[case::adversarial_traversal("../x", false)]
+    #[case::adversarial_separator("a/b", false)]
+    #[case::adversarial_crlf("acme\r\nX: y", false)]
+    #[case::adversarial_query("acme?role=admin", false)]
+    #[case::adversarial_unicode_lookalike("acmе", false)] // Cyrillic `е`
+    fn github_login_rule(#[case] login: &str, #[case] ok: bool) {
+        assert_eq!(valid_github_login(login), ok);
+    }
+
+    // Every refusal has a distinct, bounded log reason (no value is ever interpolated).
+    #[test]
+    fn onboard_refusal_reasons_are_distinct() {
+        let all = [
+            OnboardRefusal::NotConfigured,
+            OnboardRefusal::Busy,
+            OnboardRefusal::Malformed,
+            OnboardRefusal::UnknownState,
+            OnboardRefusal::NotProven,
+            OnboardRefusal::Claimed,
+            OnboardRefusal::Unavailable,
+        ];
+        let reasons: std::collections::BTreeSet<_> = all.iter().map(|r| r.reason()).collect();
+        assert_eq!(reasons.len(), all.len());
     }
 
     // The store's id rule and the `ghapp:` ref parser's id rule MUST agree, or an id

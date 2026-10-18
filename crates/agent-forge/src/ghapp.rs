@@ -326,22 +326,10 @@ impl InstallAccount {
     }
 }
 
-/// Longest GitHub user/org login.
-pub const MAX_GITHUB_LOGIN_LEN: usize = 39;
-
-/// A GitHub user/org login: ASCII alphanumerics and `-`, 1–[`MAX_GITHUB_LOGIN_LEN`]
-/// long, not starting or ending with `-`. Stricter than `safe_segment`: a login the
-/// forge echoes back becomes a URL path segment (`/user/memberships/orgs/{login}`), so
-/// a traversal, separator, or control character must never get that far.
-pub fn valid_github_login(login: &str) -> bool {
-    !login.is_empty()
-        && login.len() <= MAX_GITHUB_LOGIN_LEN
-        && !login.starts_with('-')
-        && !login.ends_with('-')
-        && login
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
+/// The login rule lives in `agent-core` (forge-auth F5c2) so the verified-install store
+/// can validate a stored account login without the `forge-ghapp` feature; re-exported
+/// here so every existing `ghapp::valid_github_login` path keeps resolving.
+pub use agent_core::{valid_github_login, MAX_GITHUB_LOGIN_LEN};
 
 /// A GitHub installation id is decimal and length-capped (the F1 grammar). Stricter
 /// than `safe_segment`: it is exactly the shape GitHub issues, so a hostile value

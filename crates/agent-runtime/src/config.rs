@@ -3991,6 +3991,14 @@ pub struct GithubAppCfg {
     /// [`client_id`](Self::client_id); resolved on the host at use time.
     #[serde(default)]
     pub client_secret_ref: String,
+    /// The App's URL **slug** (`https://github.com/apps/{slug}`), used to build the install
+    /// URL `BeginInstall` hands the portal (forge-auth F5c2). Self-service onboarding is on
+    /// only when this AND the OAuth client (`client_id` + `client_secret_ref`) are set;
+    /// otherwise `BeginInstall`/`CompleteInstall` answer `FAILED_PRECONDITION`. The App must
+    /// also enable "Request user authorization (OAuth) during installation" and grant
+    /// *Organization → Members: read* (the admin proof reads org membership).
+    #[serde(default)]
+    pub slug: String,
     /// Token-endpoint HTTP timeout (seconds) and retry budget.
     #[serde(default = "default_github_app_timeout_secs")]
     pub timeout_secs: u64,
@@ -4088,6 +4096,21 @@ impl GithubAppCfg {
                 Err(e) => return Err(format!("[github_app] client_secret_ref: {e}")),
             }
         }
+        // Optional onboarding slug (forge-auth F5c2): a URL path segment, so it must be a
+        // GitHub slug; the value is never echoed. It is useless without the OAuth client.
+        if !self.slug.is_empty() {
+            if !agent_core::valid_github_login(&self.slug) {
+                return Err(
+                    "[github_app] slug must be the App's URL slug ([A-Za-z0-9-], <= 39)".into(),
+                );
+            }
+            if !has_client_id {
+                return Err(
+                    "[github_app] slug enables onboarding, which needs client_id + client_secret_ref"
+                        .into(),
+                );
+            }
+        }
         for (tenant, ids) in &self.installations {
             if !agent_core::safe_segment(tenant) {
                 return Err("[github_app] installations has an invalid tenant key".into());
@@ -4114,6 +4137,22 @@ impl GithubAppCfg {
         } else {
             self.base_url.trim().to_string()
         }
+    }
+
+    /// The GitHub **web** host (user OAuth + the App install page): `https://github.com`
+    /// for the default API, else the API base with a GHES `/api/v3` suffix removed.
+    pub fn web_base(&self) -> String {
+        let api = self.base();
+        let api = api.trim_end_matches('/');
+        if api == "https://api.github.com" {
+            return "https://github.com".to_string();
+        }
+        api.strip_suffix("/api/v3").unwrap_or(api).to_string()
+    }
+
+    /// Is self-service install onboarding configured (`slug` + the OAuth client)?
+    pub fn onboarding_enabled(&self) -> bool {
+        !self.slug.is_empty() && !self.client_id.trim().is_empty()
     }
 }
 
@@ -5194,6 +5233,27 @@ mod tests {
         "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"a\\r\\nb\"",
         Err("client_secret_ref")
     )]
+    // forge-auth F5c2: the onboarding slug.
+    #[case::positive_slug_with_oauth_client(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"env:S\"\nslug = \"seddon-agent\"",
+        Ok(())
+    )]
+    #[case::negative_slug_without_oauth_client(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nslug = \"seddon-agent\"",
+        Err("client_id")
+    )]
+    #[case::boundary_slug_over_len(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"env:S\"\nslug = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        Err("slug")
+    )]
+    #[case::adversarial_slug_traversal(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"env:S\"\nslug = \"../../evil\"",
+        Err("slug")
+    )]
+    #[case::adversarial_slug_query_injection(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"env:S\"\nslug = \"app?state=x\"",
+        Err("slug")
+    )]
     fn github_app_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
         let cfg: GithubAppCfg = toml::from_str(toml_src).expect("parses");
         let got = cfg.validate();
@@ -5205,6 +5265,20 @@ mod tests {
                 assert!(err.len() < 200, "error echoes too much: {err:?}");
             }
         }
+    }
+
+    /// The web host the install page + user OAuth live on, derived from the API base.
+    #[rstest::rstest]
+    #[case::positive_default_github("", "https://github.com")]
+    #[case::positive_explicit_dotcom_api("https://api.github.com/", "https://github.com")]
+    #[case::positive_ghes_api_v3("https://ghe.example.com/api/v3", "https://ghe.example.com")]
+    #[case::corner_ghes_without_suffix("https://ghe.example.com", "https://ghe.example.com")]
+    fn github_app_web_base_cases(#[case] base_url: &str, #[case] want: &str) {
+        let cfg = GithubAppCfg {
+            base_url: base_url.into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.web_base(), want);
     }
 
     /// `deny_unknown_fields`: a stray or injected `[github_app]` key is refused at

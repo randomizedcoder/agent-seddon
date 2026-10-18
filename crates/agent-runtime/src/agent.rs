@@ -241,8 +241,12 @@ pub struct Agent {
     /// The per-tenant GitHub-App install-row store, held for
     /// `--serve-github-install-registry` (forge-auth F5b). Hosted over gRPC for runtime
     /// CRUD only — NOT consulted by the `ghapp:` mint gate, since a row is
-    /// tenant-self-asserted (ownership is unproven until the F5c install callback).
+    /// tenant-self-asserted.
     github_install_registry: Option<Arc<dyn agent_core::GithubInstallRegistry>>,
+    /// The ownership-verified install onboarding backend (forge-auth F5c2), served as
+    /// `BeginInstall`/`CompleteInstall` on the same registry service. `None` ⇒ onboarding
+    /// is not configured (`[github_app] slug` + OAuth client), and those RPCs refuse.
+    github_install_onboarding: Option<Arc<dyn agent_core::GithubInstallOnboarding>>,
     /// The fleet's persisted review-history reader (review-fleet C16), held for
     /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
     /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
@@ -1021,6 +1025,7 @@ impl Agent {
             forge_registry: None,
             transport_registry: None,
             github_install_registry: None,
+            github_install_onboarding: None,
             fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -1427,10 +1432,21 @@ impl Agent {
         self
     }
 
+    /// Attach the ownership-verified install onboarding backend (forge-auth F5c2), served
+    /// alongside the install registry. Its `complete` is the only path that binds an
+    /// installation into the `ghapp:` mint gate.
+    pub fn with_github_install_onboarding(
+        mut self,
+        o: Arc<dyn agent_core::GithubInstallOnboarding>,
+    ) -> Self {
+        self.github_install_onboarding = Some(o);
+        self
+    }
+
     /// Attach the GitHub-App install-row store (forge-auth F5b), so it can be hosted
     /// over gRPC (`--serve-github-install-registry`). CRUD only: the `ghapp:` mint gate
-    /// never reads it (rows are tenant-self-asserted until the F5c callback proves
-    /// ownership), so attaching it grants no minting authority.
+    /// never reads it (rows are tenant-self-asserted; only the onboarding path binds), so
+    /// attaching it grants no minting authority.
     pub fn with_github_install_registry(
         mut self,
         r: Arc<dyn agent_core::GithubInstallRegistry>,
@@ -1758,6 +1774,13 @@ impl Agent {
     /// configured (`--serve-github-install-registry`).
     pub fn github_install_registry(&self) -> Option<Arc<dyn agent_core::GithubInstallRegistry>> {
         self.github_install_registry.clone()
+    }
+
+    /// The install onboarding backend, if `[github_app]` enables it (forge-auth F5c2).
+    pub fn github_install_onboarding(
+        &self,
+    ) -> Option<Arc<dyn agent_core::GithubInstallOnboarding>> {
+        self.github_install_onboarding.clone()
     }
 
     /// The review-fleet C18 progress feed (config C37): a [`agent_core::FleetProgress`]

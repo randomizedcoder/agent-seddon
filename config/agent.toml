@@ -236,9 +236,10 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # Each row is `{installation_id, selected_repos[], installed_at}`: a decimal
 # installation id plus the `owner__name` repo slugs that install selected (ids, never
 # a secret). The owning tenant is the store's tenant dimension, not a field. A row is
-# TENANT-SELF-ASSERTED (shape-validated, never ownership-validated), so opening this
-# store NEVER authorizes a `ghapp:` mint — that gate stays on the operator
-# `[github_app] installations` allowlist until the install callback proves ownership.
+# TENANT-SELF-ASSERTED (shape-validated, never ownership-validated), so a CRUD `Put`
+# NEVER authorizes a `ghapp:` mint. Only the onboarding `CompleteInstall` RPC does,
+# after proving the caller administers the installation (forge-auth F5c2; needs
+# `[github_app] slug` + `client_id` + `client_secret_ref` and the `forge-ghapp` build).
 # Empty `store` (the default) ⇒ no registry. Edit rows via the
 # GithubInstallRegistryService seam (`agent --serve-github-install-registry`).
 # [github_install_registry]

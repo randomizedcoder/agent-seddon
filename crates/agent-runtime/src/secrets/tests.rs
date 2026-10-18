@@ -222,8 +222,8 @@ fn adversarial_resolve_ghapp_bad_id_rejected_at_parse() {
 /// single-operator the operator owns all config, so any id is allowed. The adversarial rows
 /// are the IDOR itself: a tenant naming another tenant's install id, and a substring probe.
 ///
-/// Only the **operator-vouched** bootstrap allowlist is a source — the tenant-self-asserted
-/// store snapshot is deliberately NOT consulted (forge-auth F5, behind an ownership proof).
+/// This table exercises the **bootstrap** source alone (no verified snapshot); the union
+/// with the ownership-verified snapshot is `ghapp_allowed_union_cases` below.
 #[cfg(feature = "forge-ghapp")]
 #[rstest]
 // tenant, requested id, per_tenant, expected-allowed
@@ -249,10 +249,36 @@ fn ghapp_allowed_cases(
         ("beta", &["456"]),
     ]);
     assert_eq!(
-        ghapp_allowed(per_tenant, Some(&allowlist), tenant, id),
+        ghapp_allowed(per_tenant, Some(&allowlist), None, tenant, id),
         allowed,
         "tenant={tenant} id={id} per_tenant={per_tenant}"
     );
+}
+
+/// The gate = operator bootstrap **OR** ownership-verified snapshot (forge-auth F5c2). acme is
+/// bootstrap-bound to 123 and verified-bound to 555; beta is verified-bound to 777. Each source
+/// is tenant-keyed, so a verified binding never leaks into another tenant's decision.
+#[cfg(feature = "forge-ghapp")]
+#[rstest]
+#[case::positive_bootstrap_only_hit("acme", "123", true)]
+#[case::positive_verified_only_hit("acme", "555", true)]
+#[case::positive_other_tenant_verified_hit("beta", "777", true)]
+#[case::negative_in_neither_source("acme", "999", false)]
+#[case::negative_unknown_tenant("ghost", "555", false)]
+#[case::corner_empty_id("acme", "", false)]
+#[case::adversarial_verified_id_of_other_tenant("acme", "777", false)] // beta's
+#[case::adversarial_bootstrap_id_of_other_tenant("beta", "123", false)] // acme's
+#[case::adversarial_verified_id_substring("acme", "55", false)]
+fn ghapp_allowed_union_cases(#[case] tenant: &str, #[case] id: &str, #[case] allowed: bool) {
+    let bootstrap = bindings(&[("acme", &["123"])]);
+    let verified = bindings(&[("acme", &["555"]), ("beta", &["777"])]);
+    assert_eq!(
+        ghapp_allowed(true, Some(&bootstrap), Some(&verified), tenant, id),
+        allowed,
+        "tenant={tenant} id={id}"
+    );
+    // Single-operator ignores both sources entirely.
+    assert!(ghapp_allowed(false, None, None, tenant, id));
 }
 
 /// Build a `GithubAppBindings` from `(tenant, &[id])` pairs.
@@ -269,25 +295,25 @@ fn bindings(rows: &[(&str, &[&str])]) -> GithubAppBindings {
 #[cfg(feature = "forge-ghapp")]
 #[test]
 fn boundary_ghapp_allowed_no_bindings_denies_under_per_tenant() {
-    assert!(!ghapp_allowed(true, None, "acme", "123"));
-    // A present-but-empty allowlist is still a deny (no tenant key).
+    assert!(!ghapp_allowed(true, None, None, "acme", "123"));
+    // Present-but-empty sources are still a deny (no tenant key).
+    let empty = GithubAppBindings::new();
     assert!(!ghapp_allowed(
         true,
-        Some(&GithubAppBindings::new()),
+        Some(&empty),
+        Some(&empty),
         "acme",
         "123"
     ));
     // …and the same empty state is fully permissive under single-operator.
-    assert!(ghapp_allowed(false, None, "acme", "123"));
+    assert!(ghapp_allowed(false, None, None, "acme", "123"));
 }
 
-/// The copy-on-write store-snapshot edits (`with_binding`/`without_binding`) — the F5
-/// building block the `RefreshingInstalls` decorator drives — tested as pure transforms by
-/// inspecting the resulting map directly (the mint gate does not read this snapshot yet, so
-/// the edits are asserted against the map, not through `ghapp_allowed`). Add is idempotent;
-/// remove drops the id and garbage-collects an emptied tenant (a `get(tenant)` miss, not an
-/// empty-set hit — the fail-closed shape F5's reader will rely on), never disturbing another
-/// tenant or id.
+/// The copy-on-write verified-snapshot edits (`with_binding`/`without_binding`) the
+/// onboarding bind (and the F6 revoke) drive, tested as pure transforms on the map. Add is
+/// idempotent; remove drops the id and garbage-collects an emptied tenant (a `get(tenant)`
+/// miss, not an empty-set hit — the fail-closed shape the gate relies on), never disturbing
+/// another tenant or id. The last step asserts the edits through `ghapp_allowed` itself.
 #[cfg(feature = "forge-ghapp")]
 #[test]
 fn ghapp_store_binding_cow_edits() {
@@ -314,4 +340,10 @@ fn ghapp_store_binding_cow_edits() {
     assert!(has(&m, "beta", "789"));
     // Removing an absent id is a harmless no-op.
     assert_eq!(without_binding(Some(&m), "acme", "999"), m);
+    // Through the gate: a bind opens exactly (tenant, id); an unbind closes it again.
+    let bound = with_binding(Some(&m), "acme", "42");
+    assert!(ghapp_allowed(true, None, Some(&bound), "acme", "42"));
+    assert!(!ghapp_allowed(true, None, Some(&bound), "beta", "42"));
+    let unbound = without_binding(Some(&bound), "acme", "42");
+    assert!(!ghapp_allowed(true, None, Some(&unbound), "acme", "42"));
 }

@@ -64,6 +64,8 @@
 "ForgeRegistryService.Get" = "read:forge_registry"
 "ForgeRegistryService.List" = "read:forge_registry"
 "ForgeRegistryService.Put" = "write:forge_registry"
+"GithubInstallRegistryService.BeginInstall" = "write:forge_registry"
+"GithubInstallRegistryService.CompleteInstall" = "write:forge_registry"
 "GithubInstallRegistryService.Delete" = "delete:forge_registry"
 "GithubInstallRegistryService.Get" = "read:forge_registry"
 "GithubInstallRegistryService.List" = "read:forge_registry"

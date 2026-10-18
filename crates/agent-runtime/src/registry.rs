@@ -2176,13 +2176,16 @@ mod tests {
 
         /// With `[github_app]` configured, a `ghapp:` reference is MINTED through the
         /// installed minter (forge-auth F2). This is the only test that installs the
-        /// process-global minter, so the "no minter" assertion below is race-free.
+        /// process-global minter; it holds `MINTER_TEST_LOCK` and uninstalls it at the end,
+        /// so other tests asserting "no minter" never observe it.
         #[cfg(feature = "forge-ghapp")]
         #[tokio::test]
         async fn ghapp_resolves_via_installed_minter() {
             use agent_forge::ghapp::{InstallationTokenMinter, SystemClock};
             use agent_testkit::oidc::RSA_PRIV_PEM;
             use std::sync::Arc;
+
+            let _serial = crate::secrets::MINTER_TEST_LOCK.lock().await;
 
             // negative_ghapp_without_minter_fails_closed: before install, fail closed.
             let before = mint_or_resolve_tenant_token("acme", "ghapp:12345678").await;
@@ -2211,6 +2214,7 @@ mod tests {
             // boundary_ghapp_id_at_cap_resolves: the 20-digit max id reaches HTTP + resolves.
             let big = format!("ghapp:{}", "9".repeat(agent_core::MAX_INSTALLATION_ID_LEN));
             assert!(mint_or_resolve_tenant_token("acme", &big).await.is_ok());
+            crate::secrets::uninstall_github_app();
         }
 
         /// A loopback endpoint that answers every POST with a `201` installation token.

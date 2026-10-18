@@ -2623,6 +2623,73 @@
         ]
       }
     },
+    "/v1/github-installs:begin": {
+      "post": {
+        "summary": "Self-service onboarding (forge-auth F5c2), gated on `(write, forge_registry)` and a\nverified principal. `CompleteInstall` is the ONLY path that authorizes `ghapp:`\nminting for a tenant-onboarded installation; `Put` never does.",
+        "operationId": "GithubInstallRegistryService_BeginInstall",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.BeginInstallReply"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "description": "Start onboarding an installation (forge-auth F5c2). Carries nothing: the tenant and\nsubject come from the caller's VERIFIED principal, never the wire.",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.BeginInstallRequest"
+            }
+          }
+        ],
+        "tags": [
+          "GithubInstallRegistryService"
+        ]
+      }
+    },
+    "/v1/github-installs:complete": {
+      "post": {
+        "operationId": "GithubInstallRegistryService_CompleteInstall",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.GithubInstall"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "description": "The query parameters GitHub appended to the App's Setup URL, relayed by the portal.\nAll three are browser-supplied and untrusted: `state` must be one this caller began,\nand `installation_id` is never taken as proof — the server re-reads the installation's\naccount with the App JWT and requires the `code`'s user to administer it.",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.CompleteInstallRequest"
+            }
+          }
+        ],
+        "tags": [
+          "GithubInstallRegistryService"
+        ]
+      }
+    },
     "/v1/graph": {
       "get": {
         "operationId": "GraphService_Get",
@@ -6127,6 +6194,28 @@
       },
       "description": "One auth session. Never carries a token or a refresh handle."
     },
+    "agent.v1.BeginInstallReply": {
+      "type": "object",
+      "properties": {
+        "installUrl": {
+          "type": "string",
+          "description": "`https://github.com/apps/{slug}/installations/new?state=…` — send the browser here."
+        },
+        "state": {
+          "type": "string",
+          "description": "Single-use, bound to the caller that began it; GitHub hands it back to the App's\nSetup URL."
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "uint64",
+          "description": "When `state` lapses, Unix seconds."
+        }
+      }
+    },
+    "agent.v1.BeginInstallRequest": {
+      "type": "object",
+      "description": "Start onboarding an installation (forge-auth F5c2). Carries nothing: the tenant and\nsubject come from the caller's VERIFIED principal, never the wire."
+    },
     "agent.v1.BeginRequest": {
       "type": "object",
       "properties": {
@@ -6468,6 +6557,22 @@
         }
       },
       "description": "How a compaction behaved, for the caller's accounting. `action` mirrors\n`agent_core::CompactAction`: \"budget\" | \"switch\" | \"fallback-generic\" |\n\"fallback-drop\". A compaction never errors on a dead summarizer — it returns a\nfallback result so the caller can see the degradation."
+    },
+    "agent.v1.CompleteInstallRequest": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "description": "The install-time user-authorization code (\"Request user authorization during\ninstallation\" must be on)."
+        },
+        "installationId": {
+          "type": "string"
+        }
+      },
+      "description": "The query parameters GitHub appended to the App's Setup URL, relayed by the portal.\nAll three are browser-supplied and untrusted: `state` must be one this caller began,\nand `installation_id` is never taken as proof — the server re-reads the installation's\naccount with the App JWT and requires the `code`'s user to administer it."
     },
     "agent.v1.CompletionChunk": {
       "type": "object",

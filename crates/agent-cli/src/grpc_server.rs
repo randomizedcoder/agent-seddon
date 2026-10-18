@@ -765,14 +765,18 @@ fn add_seam_service(
             ),
             None => (router, false),
         },
-        // forge-auth F5b: CRUD only. The rows are tenant-self-asserted, so this mount
-        // never feeds the `ghapp:` mint gate — that stays on the operator bootstrap
-        // allowlist until the install callback (F5c) proves ownership.
+        // forge-auth F5b/F5c2: the CRUD rows are tenant-self-asserted and never feed the
+        // `ghapp:` mint gate; only `CompleteInstall` (the onboarding backend, when
+        // `[github_app]` enables it) binds an installation, after proving ownership.
         Seam::GithubInstallRegistry => match agent.github_install_registry() {
-            Some(r) => (
-                router.add_service(srv::GithubInstallRegistrySvc::new(r).into_server()),
-                true,
-            ),
+            Some(r) => {
+                let svc = srv::GithubInstallRegistrySvc::new(r);
+                let svc = match agent.github_install_onboarding() {
+                    Some(o) => svc.with_onboarding(o),
+                    None => svc,
+                };
+                (router.add_service(svc.into_server()), true)
+            }
             None => (router, false),
         },
         Seam::Config => match agent.config_store() {
