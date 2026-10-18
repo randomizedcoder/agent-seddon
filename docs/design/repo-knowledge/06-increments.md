@@ -1,4 +1,4 @@
-# 06 — Increments: RK-00 to RK-18
+# 06 — Increments: RK-00 to RK-21
 
 One PR per increment. Each is gated by `nix flake check` (clippy `-D warnings`, rustfmt, tests,
 cargo-audit, buf, bench, leak, mt-audit, constants-sync) plus whatever the row adds. Tests are
@@ -9,10 +9,10 @@ untrusted input (repo content, model-supplied keys, tenant strings).
 |---|---|---|---|---|
 | RK-00 | This track, `docs/gap-analysis/self-improvement.md`, index and back-links | — | — | — |
 | RK-01 | `RepoGraphStore` seam + value types in `agent-core`; crate `agent-repo-graph`: model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` double in `agent-testkit` | A | RK-00 | unit tests: key round-trip, caps, confinement, `graph_hash` determinism, id-collision failure |
-| _as-built_ | **Deviation (D1):** the model, key grammar, validation and `GraphBuilder` live in **`agent_core::repo_graph`**, not in `agent-repo-graph`, because the `agent-testkit` conformance fixtures build graphs through the one builder and testkit cannot depend on the impl crate. `agent-repo-graph` is a skeleton re-exporting the seam; RK-02 (`PgRepoGraph`) and RK-03 (extractors) fill it. Tests: R1/R2 in `agent-core`, R3 conformance + mem-only rows in `agent-testkit` ([`08-test-matrix.md`](08-test-matrix.md), [`PROGRESS.md`](PROGRESS.md)). | | | |
+| _as-built_ | **Deviation (D1):** the model, key grammar, validation and `GraphBuilder` live in **`agent_core::repo_graph`**, not in `agent-repo-graph`, because the `agent-testkit` conformance fixtures build graphs through the one builder and testkit cannot depend on the impl crate. `agent-repo-graph` is a skeleton re-exporting the seam; RK-02 (`PgRepoGraph`) and RK-03 (extractors) fill it. Tests: R1/R2 in `agent-core`, R3 conformance + mem-only rows in `agent-testkit` ([`08-test-matrix.md`](08-test-matrix.md), [`PROGRESS.md`](PROGRESS.md)). | — | — | — |
 | RK-02 | `PgRepoGraph` (feature `postgres`), migration 0001, `with_tenant`, `UNNEST` bulk write with collision check, every read verb; `#[ignore = "requires a live Postgres (AGENT_REPO_GRAPH_TEST_DSN)"]` suite with `TRUNCATE`; `nix/pg-integration.nix` step | A | RK-01 | clippy all-features; pg suite in `nix run .#integration`; adversarial cross-tenant reads return nothing |
-| _as-built_ | The feature is named **`repo-graph-postgres`** (not `postgres`): `["dep:sqlx","dep:async-trait","dep:serde_json"]`, no `sqlx/macros`/`migrate`. **Deviation from the "adds to the gate" cell (E13′):** RK-02 also adds **`nix/checks/repo-graph.nix`** (feature-scoped, non-`--ignored`) so the **P1 in-gate units** run in `nix flake check` — the general `test` check builds default features and `pg-integration` runs only `--ignored`, so without it the P1 rows would run nowhere in the gate (the R3/R4 live rows still run only under `.#pg-integration`). Tiers **P1** + **R4** added to [`08-test-matrix.md`](08-test-matrix.md) (R4 was a parenthetical reservation for RK-03 extractors; RK-03's tables take fresh ids). | | | |
-| RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace `tests/fixture/ws` (a seam trait, an impl, a cargo feature, rstest cases of every class, a cfg-gated fn, a `mod` with `#[path]`); `nix/checks/repo-graph-rust.nix` (index twice ⇒ equal hash, pinned expected hash); iai bench with an Ir ceiling; dhat leak test | B | RK-01 | `repo-graph-rust`, `bench`, `leak` |
+| _as-built_ | The feature is named **`repo-graph-postgres`** (not `postgres`): `["dep:sqlx","dep:async-trait","dep:serde_json"]`, no `sqlx/macros`/`migrate`. **Deviation from the "adds to the gate" cell (E13′):** RK-02 also adds **`nix/checks/repo-graph.nix`** (feature-scoped, non-`--ignored`) so the **P1 in-gate units** run in `nix flake check` — the general `test` check builds default features and `pg-integration` runs only `--ignored`, so without it the P1 rows would run nowhere in the gate (the R3/R4 live rows still run only under `.#pg-integration`). Tiers **P1** + **R4** added to [`08-test-matrix.md`](08-test-matrix.md) (R4 was a parenthetical reservation for RK-03 extractors; RK-03's tables take fresh ids). | — | — | — |
+| RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace `tests/fixtures/ws` (a seam trait, an impl, a cargo feature, rstest cases of every class, a cfg-gated fn, a `mod` with `#[path]`); `nix/checks/repo-graph-rust.nix` (index twice ⇒ equal hash, pinned expected hash); iai bench with an Ir ceiling; dhat leak test | B | RK-01 | `repo-graph-rust`, `bench`, `leak` |
 | RK-04 | Go mapping from the helper JSON + `_test.go` scan; `nix/checks/repo-graph-go.nix` over the existing ast-go fixture | B | RK-03 | `repo-graph-go` |
 | RK-05 | SCIP spike report (as-built entry: time, RSS, index size, `enclosing_range`, join rate) + `extract-scip` extractor: resolved `calls` / `references` / `tests(via=scip)`, `res_key` join; check modelled on `ast-scip.nix` | B | RK-03 | `repo-graph-scip` when the fixture builds offline, else the `integration` app |
 | RK-06 | `Indexer`, `[repo_graph]` config, `agent repo add\|index\|status\|diff\|shape`, retention sweep, metrics `agent_repo_graph_index_seconds`, `_nodes`, `_edges`, `_truncated_total` | C | RK-02, RK-03 | `config-roundtrip`, `cli-help` |
@@ -28,6 +28,25 @@ untrusted input (repo content, model-supplied keys, tenant strings).
 | RK-16 | History extractors: `repo_history` (churn, recency, bus factor, slope; reusing the `churn.rs` math), `co_changes_with` edges (reusing `cochange.rs`), in-flight facts, change recipes; `Indexer` gets `RepoBackend` log access | C | RK-06, RK-15 | fixture repo with a synthetic git history built by `agent-testkit` |
 | RK-17 | Derived analyses over the stored graph: chokepoints, guard funnels and guard-gap detection, near-duplicate `similar_to` edges (winnowing), orphans; tool questions and review-brief lines for each | D | RK-09, RK-16 (RK-05 for orphans) | tool and collector tests over the fixture; `review-repo-knowledge` extended |
 | RK-18 | LLM extras: `conventions`, `glossary`, `playbook:*`, `pitfalls`, `overview_l0`; L0 / L1 / L2 layering in both briefs | E | RK-11, RK-16 | fake-provider tests: citations validated; a playbook naming a file outside its recipe is rejected |
+
+## Extension increments (proposed, 2026-10-17)
+
+Existing IDs and completed store work are preserved. RK-03 gains E1 extractor/report coverage;
+RK-06 gains atomic publication/recovery and I1/I2; RK-07 gains F1 refresh/cache tests; RK-08/09
+use R5/C1 for queries and review composition. These amend the existing increments, not duplicate
+implementations. Delivery begins with RK-03 → RK-06 → RK-07/08 → RK-09; Go/SCIP do not block it.
+
+| ID | Increment | Depends | Required checks and integration |
+|---|---|---|---|
+| RK-19 | Knowledge model/seam, Mem/Pg stores, migration 0004, evidence/lifecycle, K1/K5 | RK-10, RK-15 (migration ordering) | `repo-knowledge` hermetic check; shared store conformance plus live migration/race rows in `pg-integration` |
+| RK-20 | Explicit operator proposal/confirmation/rejection/supersession CLI; optional feedback-to-candidate adapter; K2/K3 | RK-19, RK-09, RK-11 | CLI/config/feature checks; scripted proposal tests; strict live lifecycle test |
+| RK-21 | Current confirmed knowledge in review and Implement/Design briefs; K4; paired three-arm evaluation | RK-20, RK-12 | `repo-knowledge` composition check; live runtime restart/retention; opt-in evaluation report |
+
+[09](09-decisions-and-lessons.md) owns the data/API/lifecycle contract.
+[10](10-integration-and-evaluation.md) owns Nix files, feature forwarding, exact test commands,
+artifacts and measurement thresholds. All feature flags remain disabled by default. No new
+remote protocol/service is introduced; RK-13 remains a separate optional increment. Any later
+wire extension must follow buf/mt-audit/constants governance rather than being implied here.
 
 ## Lanes
 

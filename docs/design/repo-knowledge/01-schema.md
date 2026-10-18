@@ -268,13 +268,13 @@ small and the model's mental model stays simple:
 | contains | crate → module → item; package → item; file → item | syn, cargo, go | structural |
 | defined_in | item → file | syn, go, proto, sql | one per node version |
 | imports | module → item or module | `use` / Go imports | `attrs.resolved = false` when the target is external or missing |
-| implements | impl → trait; Go type → interface; tonic impl → proto_service | syn, go-graph, proto | |
-| impl_for | impl → self type | syn | |
+| implements | impl → trait; Go type → interface; tonic impl → proto_service | syn, go-graph, proto | Only resolved in-snapshot targets produce edges |
+| impl_for | impl → self type | syn | Structural implementation target |
 | depends_on | crate → crate | Cargo.toml path / workspace deps | `attrs.dev`, `attrs.optional`, `attrs.features` |
-| gated_by | item → feature | `#[cfg(feature = …)]`, `all` / `any` flattened | |
-| tests | test → target | name heuristic (`attrs.via = "name"`), SCIP (`via = "scip"`) | |
-| documents | doc → crate, file, or item | markdown links and backtick paths | |
-| calls | fn → fn | go-graph CHA now; SCIP for Rust | |
+| gated_by | item → feature | `#[cfg(feature = …)]`, `all` / `any` flattened | See extraction rules for negated cfg |
+| tests | test → target | name heuristic (`attrs.via = "name"`), SCIP (`via = "scip"`) | Preserve provenance; a relationship does not prove executed coverage |
+| documents | doc → crate, file, or item | markdown links and backtick paths | Only existing repository targets |
+| calls | fn → fn | go-graph CHA now; SCIP for Rust | Language/indexer support must be reported |
 | references | item → item | SCIP | excluded from path queries (dense) |
 | co_changes_with | file ↔ file | git log (RK-16) | `weight` = confidence, `attrs.count` |
 | similar_to | fn ↔ fn | winnowing (RK-17) | `weight` = Jaccard |
@@ -284,7 +284,7 @@ Dangling edges (an endpoint not in the snapshot) are dropped at validation and c
 
 ## Size estimate for this workspace
 
-| | Nodes | Edges | Bytes per snapshot |
+| Extractor set | Nodes | Edges | Bytes per snapshot |
 |---|---|---|---|
 | syn + cargo + docs | ~17 k (≈ 19.5 k with rstest cases) | ~30 k | ≈ 10 MB |
 | + profile (RK-15) | + ~1.5 k | + ~3 k | + 1 MB |
@@ -332,3 +332,13 @@ transaction under a transaction-scoped advisory lock, recorded in a `_repo_graph
   versions and edges, but a shared body row outlives them, so retention **sweeps** `graph_nodes` rows
   that no surviving version references (`NOT EXISTS`) as an explicit step. Covered by
   `corner_retention_sweeps_orphan_bodies` ([`08-test-matrix.md`](08-test-matrix.md) R4).
+
+## Proposed additions after RK-02
+
+RK-06 adds atomic publication as a store operation without changing migration 0001; see
+[the indexer contract](05-consumption.md#snapshot-publication-and-recovery-rk-06).
+Migration 0002 remains the inventory, and 0003 remains profile/history. Reserve 0004 for
+[decision/lesson records, evidence, links and events](09-decisions-and-lessons.md#evidence-and-data-model-rk-19).
+Their foreign keys lead with tenant/repo and never cascade from a retained graph snapshot.
+Source hashes survive graph retention as audit metadata, not proof of current validity.
+Existing snapshot/graph APIs and their R1–R4 conformance remain compatible.

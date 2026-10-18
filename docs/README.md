@@ -176,7 +176,7 @@ logs rather than treating an entire design as an implemented feature.
 | [Fleet grounding](design/fleet-grounding/README.md) | Worktree-rooted review inputs, repository indexing, grounding telemetry, and collector skip/failure reporting. | As-built notes in design |
 | [Review analysis depth](design/review-analysis-depth/README.md) | Nix-provisioned Go/Rust analysis, parallel execution, deduplicated/risk-ranked digests, and overflow-gated model summarization. | [Status](design/review-analysis-depth/STATUS.md) |
 | [Review parallelism](design/review-parallelism/README.md) | Experimental latency investigation, including chunked map-reduce proposals. Cross-review concurrency exists; proposed single-review optimizations are not a shipped-feature commitment. | [Evidence and status](design/review-parallelism/STATUS.md) |
-| [Repository knowledge](design/repo-knowledge/README.md) | Graph model/store interface and Postgres storage are implemented (RK-01/02). Extractors, indexing CLI, agent tools, cited inventory, and briefing consumers remain pending. | [Status](design/repo-knowledge/STATUS.md) · [Progress](design/repo-knowledge/PROGRESS.md) |
+| [Repository knowledge](design/repo-knowledge/README.md) | Graph model/store interface and Postgres storage are implemented (RK-01/02). Extractors, indexing CLI, agent tools, cited inventory, and briefing consumers remain pending. The design now includes [confirmed decisions/lessons](design/repo-knowledge/09-decisions-and-lessons.md) and [Nix, integration and evaluation procedures](design/repo-knowledge/10-integration-and-evaluation.md). | [Status](design/repo-knowledge/STATUS.md) · [Progress](design/repo-knowledge/PROGRESS.md) |
 
 ### Configuration, security, and deployment
 

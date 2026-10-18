@@ -64,7 +64,7 @@ Item visitor with a module-path stack and a `cfg` stack:
 | `#[ignore]` / `#[ignore = "…"]` | on the test node | `attrs.ignored = true`, `attrs.ignore_reason` ≤ 160 B |
 | `ItemStruct`, `ItemEnum`, `ItemTrait`, `ItemType`, `ItemConst`, `ItemStatic`, `ItemMacro` (macro_rules) | matching kind | `attrs.fields` / `attrs.variants` counts; trait `attrs.async_trait` when the attribute is present |
 | `ItemImpl` | `impl` + `impl_for` edge to the self type + `implements` edge to the trait when present + one `method` node per fn | trait path normalised to the last two segments; unresolved trait path recorded as `attrs.trait_path` |
-| `ItemMod` inline | `module` + `contains` | |
+| `ItemMod` inline | `module` + `contains` | Visit with the enclosing module path |
 | `ItemMod` `mod x;` | resolved to `x.rs`, `x/mod.rs`, or `#[path = "…"]` (confined) | unresolved ⇒ `attrs.unresolved = true` |
 | `ItemUse` | `imports` edges | target resolved to a workspace key when the leading segment is a workspace crate or `crate` / `super` / `self`; else `attrs.resolved = false` with the external path |
 | `#[cfg(feature = "f")]`, `#[cfg(all(…))]`, `#[cfg(any(…))]` | `gated_by` edges, one per feature named | `not(…)` is recorded in `attrs.cfg` but produces no edge |
@@ -131,7 +131,7 @@ the join rate is at least 95 %; otherwise the as-built entry records what blocks
 
 ## Comparison
 
-| | A `rust-syn` + `cargo` | B `rust-analyzer scip` | C tree-sitter |
+| Property | A `rust-syn` + `cargo` | B `rust-analyzer scip` | C tree-sitter |
 |---|---|---|---|
 | Hermetic, no toolchain in sandbox | yes | no (needs a resolvable workspace) | yes |
 | Runtime on this workspace | ≤ 5 s | 2–6 min | ≤ 5 s |
@@ -161,13 +161,13 @@ symbols and edges, bounds on every string, closed kind sets. Applied at `GraphBu
 
 | Check | On failure |
 |---|---|
-| Node or edge cap | `truncated = true`; the snapshot is `ready` with `reason = "truncated"` unless `strict` is set, then `failed` |
+| Node or edge cap | `truncated = true`; publish ready but explicitly incomplete with the extraction report |
 | Key > 512 B, name > 256 B, attrs > 4 KiB, edge attrs > 1 KiB | node or edge dropped, counted |
 | Key contains whitespace or non-ASCII | dropped, counted |
 | Path not confined | dropped, counted, path never echoed |
 | Edge endpoint missing | edge dropped, `dropped_edges += 1` |
 | Kind not in the closed set | dropped, counted (programming error, also a unit test) |
-| `node_id` collision between distinct keys | snapshot `failed`, `reason = "id collision"` |
+| `node_id` collision between distinct keys | index attempt fails with reason `id collision`; atomic publication creates no ready snapshot |
 
 ## As-built (RK-01)
 
@@ -187,3 +187,34 @@ in `agent-repo-graph`. Confirmed behaviour, exercised by the R2 rows in
   `finish()`; a `#[doc(hidden)] with_id_fn` swaps the id function for the collision tests.
 - No extractor is implemented in RK-01 — the contract only. RK-03 adds `rust-syn` / `cargo` /
   `docs`.
+
+## Proposed implementation contract for RK-03
+
+Use `tests/fixtures/ws` under `agent-repo-graph` (plural `fixtures`, matching the existing Nix
+source filter). The fixture is local input; extraction never compiles repository code, runs
+build scripts, resolves dependencies over the network, or executes macros. Rust call resolution
+is unsupported until the optional SCIP increment; name-based test relationships are labelled
+heuristic and do not prove coverage. The comparison table above records design estimates, not
+measurements of an implemented extractor; benchmark actual fixtures and repositories in RK-03.
+
+Sort paths and outputs before applying deterministic count caps. A skipped/oversized/unparsed
+file must be represented in the extraction report so consumers cannot treat absence as proof.
+Use the existing report and budget types; persist report/completeness metadata with the snapshot
+via its existing extractor JSON metadata, using a versioned envelope and compatibility decoding
+for existing array-form metadata. Expose `snapshot_report` as unknown/incomplete for legacy rows
+without a report. Deploy dual-reading consumers before enabling envelope writers; old binaries
+cannot decode the new envelope, so disable new indexing before any rollback and retain upgraded
+readers for those snapshots. Introduce no independent schema migration for this envelope.
+The same report must be available through the memory store and Postgres read APIs in RK-06.
+File/document evidence hashes are SHA-256 of source bytes, separate from structural graph hashes.
+
+A Tokio timeout around `spawn_blocking` cannot stop an already running parser. Check cancellation
+between files, cap input before parsing, and keep at most one extraction worker per indexer.
+A timed-out worker retains its slot until it finishes; discard late output and do not enqueue
+unbounded blocking jobs. Deadline exhaustion fails the indexing attempt; file/count caps may
+produce a ready but explicitly incomplete snapshot. No timed-out extraction may publish later.
+Go/SCIP child processes use the sandbox timeout/termination path.
+
+E1 in [the matrix](08-test-matrix.md) covers parser results, malformed input, exact caps,
+confinement, deterministic hashes and cancellation. [The Nix runbook](10-integration-and-evaluation.md)
+specifies feature-scoped execution, fixture inclusion, instruction ceilings and leak checks.

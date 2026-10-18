@@ -44,8 +44,10 @@ for Rust has no parser-derived structure at all. The self-improvement gap analys
    `agent repo brief --goal`
 ```
 
-The graph is never written by a model. The model writes only `repo_summaries`, and every
-citation in a summary must name a node key that exists in the snapshot it was written against.
+The structural graph is never written by a model. In RK-11/18 the model writes only
+`repo_summaries`, with citations validated against the selected snapshot. The proposed RK-19–21
+extension adds separate decision/lesson candidates; only explicit human confirmation makes them
+eligible for guidance. These candidates never modify structural graph edges.
 
 ## Decisions
 
@@ -69,12 +71,12 @@ ranges on the source side and by a normalised path on the target side.
 Details in [`02-extraction.md`](02-extraction.md).
 
 **D4 — Tenancy is app-side, RLS-ready, RLS deferred.** Every table leads with `tenant` in its
-primary key and carries a foreign key to `tenants`; every read helper takes one
-`Scope { tenant, repo_id, snapshot_id }`; the Postgres impl exposes `with_tenant` and the runtime
-wraps it in `PerTenant` exactly like the other Pg tiers (`crates/agent-runtime/src/tenant.rs:71`).
+primary key and carries a foreign key to `tenants`; every read helper takes a
+`Scope { repo, snapshot }` on a tenant-bound handle (as built in RK-01/02); the Postgres impl
+exposes `with_tenant` and the planned runtime integration wraps it in `PerTenant` exactly like the other Pg tiers (`crates/agent-runtime/src/tenant.rs:71`).
 Row-level security is a cross-tier increment filed under multi-tenancy, not here.
 
-**D5 — No LLM in the graph.** Extractors are parsers and git. The model writes only
+**D5 — No LLM in the structural graph.** Extractors are parsers and git. Inventory models write
 `repo_summaries`; each summary's `citations[]` is validated against the snapshot fail-closed and
 the text passes the digest tier's `sanitize` + `scan_for_injection` template
 (`crates/agent-digest/src/lib.rs:51`, `crates/agent-core/src/security.rs:97`).
@@ -129,9 +131,9 @@ tenants. Each item names its mitigation.
 |---|---|
 | Hostile paths in a checkout (symlinks out of the root, `..`, huge names) | Every walked path passes `confine` (`crates/agent-core/src/security.rs:186`); `follow_links(false)`; key and name length caps |
 | Hostile identifiers and doc comments become prompt text | `attrs.doc` is capped at 512 B and dropped when `scan_for_injection` fires; keys are ASCII-validated; nothing from a comment is rendered raw |
-| Pathological files stall `syn` | Per-file byte cap (2 MiB), `spawn_blocking` with a deadline, node / edge caps, `truncated` flag |
+| Pathological files stall `syn` | Per-file byte cap (2 MiB), cooperative deadline, bounded worker admission and discarded late output, node / edge caps, `truncated` flag |
 | Recursive CTEs blow up | `SET LOCAL statement_timeout = '3s'`, hop caps (≤ 4 neighbours, ≤ 6 path), row `LIMIT`s, `references` excluded from path queries |
-| Cross-tenant reads | `Scope { tenant, repo_id, snapshot_id }` on every read helper; tenant-led PKs; adversarial tests that assert a wrong tenant sees nothing |
+| Cross-tenant reads | Tenant-bound handle plus `Scope { repo, snapshot }` on every read helper; tenant-led PKs; adversarial tests that assert a wrong tenant sees nothing |
 | Model-chosen slugs, keys, hops, limits | `safe_segment` on slugs and keys (`crates/agent-core/src/identity.rs:26`); hops and limits clamped; unknown keys are an empty result, not an error that echoes the key |
 | Summaries that cite nodes which do not exist | Citations validated against the snapshot; one retry listing the unknown keys; then the previous summary is kept and the failure recorded |
 | Row growth | Retention of N ready snapshots per repo (default 10); a body sweep deletes nodes unreferenced by any retained snapshot |
@@ -197,3 +199,22 @@ over the real workspace). First model-visible payoff: RK-08 (the loop asks the g
 | Comment and TODO scans are attacker text | bounded to 160 B, injection-screened, rendered as counts plus `file:line`, never as text in the brief |
 | Shingle index size for near-duplicates | ~9 k functions × a few winnowed shingles each; computed at index time, stored as edges only |
 | Recipe classifier drifts from a repo's conventions | Rule-based and per-repo configurable (`repos.profile.recipe_rules`), never learned |
+
+## Extension: monitored repositories and durable lessons (2026-10-17)
+
+**Design only.** RK-01/02 are implemented; the indexer, extraction and review consumers remain
+pending. The review fleet already polls PRs, persists drafts and tracks feedback; enabling that
+fleet does not yet populate this graph. Complete RK-03 → RK-06 → RK-07/08 → RK-09 first.
+The end-to-end publication and refresh contract is in [05 — Consumption](05-consumption.md).
+
+Then add human-confirmed decisions and lessons as RK-19–21, alongside the existing inventory:
+[09 — Decisions and lessons](09-decisions-and-lessons.md). Source-backed explanations complement
+parser-derived structure and conversational memory. Review `addressed` state and PR merge status
+are not confirmation. Candidate generation is optional; only confirmed, current evidence can
+enter a brief. No automatic graph writes by a model and no new database dependency.
+
+[10 — Integration and evaluation](10-integration-and-evaluation.md) owns Nix wiring, executable
+runbooks, required-versus-skipped Postgres acceptance, and paired review measurement. The
+[test matrix](08-test-matrix.md) maps the extensions to named case classes and increments.
+Existing non-goals remain: no commit/PR/author graph nodes or portal graph UI. Evidence references
+may identify a PR without turning this graph into a duplicate forge event store.

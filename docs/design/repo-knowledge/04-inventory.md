@@ -89,3 +89,13 @@ values already in the CHECK set:
 
 The `playbook` validator rejects any file path in the text that is not in the recipe's touch
 set, so a model cannot invent a file to edit.
+
+## Relationship to decisions and lessons
+
+RK-10/11/18 produce inventories and model-written explanations; those summaries are not
+human-confirmed decisions. [RK-19–21](09-decisions-and-lessons.md) adds a separate lifecycle and
+evidence store. Existing `pitfalls` summaries stay labelled model-written; promoting their text
+requires a new cited candidate and explicit confirmation, never a silent kind/state conversion.
+Both layers share graph keys and bounded retrieval, but lifecycle/freshness filtering happens
+before a confirmed lesson enters a brief. Reuse the summary provider and evidence sanitization
+where appropriate without coupling proposal failure to inventory publication.

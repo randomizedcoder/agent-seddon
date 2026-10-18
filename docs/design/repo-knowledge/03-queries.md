@@ -2,7 +2,8 @@
 
 Three consumers read the same tables: the `RepoGraphStore` seam (Rust callers), `PgAst` (the
 existing `AstBackend` verbs), and the `repo_graph` tool (the model). Every read takes one
-`Scope { tenant, repo_id, snapshot_id }`; there is no read helper without it.
+`Scope { repo, snapshot }` on a tenant-bound store handle (as built in RK-01);
+model arguments cannot supply tenant identity.
 
 ## `RepoGraphStore` seam (agent-core, RK-01)
 
@@ -18,8 +19,9 @@ exposes `with_tenant(&str) -> Self` and the runtime wraps it in `PerTenant`
 | Inventory | `features_put(repo_id, &[Feature])`, `features(repo_id, kind?)`, `summary_put(Summary)` (validates citations, fail-closed), `summaries(repo_id, kind, subject?)`, `embedding_put`, `embeddings(repo_id, subject_kind, model)` |
 | Facts | `facts_put(scope, &[Fact])`, `facts(scope, kind, limit)`, `history_put`, `history(scope, files)` |
 
-`MemRepoGraph` in `agent-testkit` implements the whole trait over `HashMap`s so every consumer
-is testable without Postgres.
+`MemRepoGraph` in `agent-testkit` implements the shipped Repos/Snapshots/Reads groups
+over in-memory state. Inventory and Facts are proposed additions in RK-10/15. New consumers
+must add matching memory conformance before Postgres integration.
 
 ## `PgAst: AstBackend` (RK-08)
 
@@ -246,3 +248,20 @@ type-checks and lints the tier under `clippy --all-features` with no database. A
   than a full-outer-join in SQL, to guarantee byte-for-byte parity with the `mem` tier the R3 rows
   pin. A corrupt stored row (an unknown `kind` / `lang`, an unparseable JSON `attrs`) is a `Backend`
   fault, never a panic — the store is treated as untrusted on read.
+
+## Proposed indexing and review API additions (RK-06–09)
+
+[The consumption contract](05-consumption.md#snapshot-publication-and-recovery-rk-06) specifies
+atomic `snapshot_publish`, `snapshot_report`, explicit operator-only `snapshot_recover`, and
+`read_view` for consistent multi-query briefs. Keep existing method behavior and conformance.
+Tool output is bounded to 16 KiB including JSON metadata; drop whole result records and set
+`truncated` rather than cutting citations or JSON. Unknown well-formed keys produce empty success;
+malformed tool arguments are rejected before the store, and unavailable stores return explicit
+errors. Existing store-level forgiving key semantics remain unchanged.
+
+Graph tool and `PgAst` calls pin a ready snapshot for the duration of a request. Latest-ready
+selection is only for an interactive request with no requested revision; fleet review always
+uses its pinned merge-base selection from [05](05-consumption.md). Responses carry the selected
+SHA and completeness metadata. Unsupported relationships are distinguished from empty matches.
+R5/C1 in [the matrix](08-test-matrix.md) cover these contracts. Decision/lesson interfaces are a
+separate [RK-19 seam](09-decisions-and-lessons.md#interfaces-and-operator-workflow-rk-20).
