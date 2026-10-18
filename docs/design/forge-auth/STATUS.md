@@ -183,7 +183,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   traversal store strings, `boundary_` postgres-without-feature), and a `serve-smoke` wire block
   (Put→Get + `adversarial_` traversal `installation_id` refused).
 
-- **F5c1 (PR #TBD):** the **admin-ownership proof** F5a deliberately stopped short of — still a primitive with
+- **F5c1 (PR #639):** the **admin-ownership proof** F5a deliberately stopped short of — still a primitive with
   no consumer. Planning F5c split it in two (user-confirmed): F5c1 = this proof; F5c2 = the onboarding RPCs,
   the verified store and the gate union. F5c2's transport was also settled (user-confirmed): **portal-relayed
   gRPC**, the shape of the browser sign-in (`AuthService.Begin`/`Exchange`) — GitHub's Setup URL is a portal
