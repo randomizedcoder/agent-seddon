@@ -9,15 +9,16 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-00–02 are merged; RK-03 is implemented locally, awaiting full-gate acceptance.** Current states and acceptance evidence live in
+**RK-00–02 are merged; RK-03 is published in draft PR #642, awaiting full-gate acceptance.** Current states and acceptance evidence live in
 [STATUS](STATUS.md); implementation steps and dependencies live in
 [IMPLEMENTATION](IMPLEMENTATION.md). RK-06 waits for RK-03, rather than running independently
 of its extractor prerequisite.
 
 ## 2026-10-18 — RK-03 extraction
 
-Implementation developed on `d648c894`, with a review handoff after this increment. Commit,
-push and PR publication were requested after that handoff, on branch `rk-03-extraction`.
+Implementation developed on `d648c894`, with a review handoff after this increment. Published
+as commit `db9d9948` on branch `rk-03-extraction` in draft
+[PR #642](https://github.com/randomizedcoder/agent-seddon/pull/642), as requested after that handoff.
 Delivers Rust/Cargo/docs extraction, E1 fixtures, feature-scoped Nix execution and bench/leak
 gates. RK-06 remains queued until RK-03 acceptance and merge.
 Historical RK-01/02 results below are not new evidence for this implementation.
@@ -91,9 +92,12 @@ fresh directories with opposite file-creation orders.
 
 The full-gate blocker is the existing
 `fleet_review::tests::negative_ghapp_without_minter_fails_before_clone` assertion at
-`crates/agent-runtime/src/fleet_review.rs:961`. It also fails on untouched HEAD; no runtime or
-forge implementation was changed by RK-03. Resolve that baseline failure and rerun the full gate
-before accepting/merging RK-03. RK-06 remains queued for that acceptance and merge.
+`crates/agent-runtime/src/fleet_review.rs:961`. It also fails on untouched `d648c894`; no runtime or
+forge implementation was changed by RK-03. At publication, upstream `d7a78084` (#640) adds
+synchronization to this test. `git merge-tree --write-tree HEAD origin/main` confirmed a clean
+merge with that revision; the combined tree has not been validated. Integrate the upstream fix
+and rerun the full gate before accepting/merging RK-03. RK-06 remains queued for that acceptance
+and merge.
 
 No live Postgres or model evaluation is required for RK-03; neither was run or claimed.
 Validation used uncommitted source snapshots before publication was requested. Feature defaults
