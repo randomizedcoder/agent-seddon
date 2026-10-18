@@ -1,0 +1,11 @@
+[package]
+name = "implementation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+seam.workspace = true
+external = "1"
+
+[dev-dependencies]
+seam = { path = "../seam", features = ["fast"] }

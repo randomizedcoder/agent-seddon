@@ -1,0 +1,8 @@
+[package]
+name = "seam"
+version.workspace = true
+edition.workspace = true
+
+[features]
+fast = []
+slow = []

@@ -6,18 +6,21 @@
 
 ## Current baseline and next work
 
-Last reconciled **2026-10-17**, against `ed0ab95d` (includes design PR #636).
+Last reconciled **2026-10-18**, local implementation on `d648c894` (includes plan PR #638).
 **3 of 22 increments are merged: RK-00–02.** RK-00 is documentation; RK-01/02 are the
 implemented graph foundation. The 19 remaining increments include optional and externally
 owned work; this count is not an estimate of effort or feature readiness.
 
-**Next: [RK-03 — extraction](IMPLEMENTATION.md#rk-03).** Its prerequisite is merged.
+**Active: [RK-03 — extraction](IMPLEMENTATION.md#rk-03).** Local implementation started
+2026-10-18 on `d648c894`; its prerequisite is merged. Publishing on branch
+[`rk-03-extraction`](https://github.com/randomizedcoder/agent-seddon/tree/rk-03-extraction)
+after the requested local handoff; full-gate acceptance remains outstanding.
 RK-06 follows once extraction lands. Deliver structural review context before confirmed lessons;
 Go/SCIP do not block that path. Migration order is 0002/RK-10 → 0003/RK-15 → 0004/RK-19.
 
-The implementation plan and tracker are documentation only. They add no extractors, indexer,
-knowledge store, tests or Nix targets. Historical passing evidence below has not been rerun for
-this update. Graph and knowledge consumer features remain planned and disabled by default.
+RK-03 extractors, fixtures and Nix wiring now exist locally behind `extract-rust`;
+acceptance is recorded in its journal entry. Indexing and graph/knowledge consumers remain
+planned and disabled by default. Historical RK-01/02 acceptance below is preserved separately.
 
 ## State and update rules
 
@@ -47,7 +50,7 @@ case descriptions and expected outcomes; add missing scenario tables in the owni
 | [RK-00](IMPLEMENTATION.md#rk-00) | Design track | — | Merged | Existing design/index links | #495 |
 | [RK-01](IMPLEMENTATION.md#rk-01) | Core graph and memory store | RK-00 | Merged | R1/R2/R3; gate `a023635a` | #582 |
 | [RK-02](IMPLEMENTATION.md#rk-02) | Postgres graph store | RK-01 | Merged | P1/R3/R4; gate `0d61ff52`; live 57/57 | #585 |
-| [RK-03](IMPLEMENTATION.md#rk-03) | Rust/Cargo/docs extraction | RK-01 (met) | Not started | Pending: E1, determinism, bench/leak | — |
+| [RK-03](IMPLEMENTATION.md#rk-03) | Rust/Cargo/docs extraction | RK-01 (met) | Implemented awaiting validation | E1 33/33, heap 1/1, Ir/lint, both graph Nix checks and 203 existing graph cases pass; full gate 75/76: baseline `forge-ghapp` failure reproduced on untouched HEAD. Resolve baseline and rerun before acceptance/merge; [journal](PROGRESS.md#2026-10-18--rk-03-extraction) | [Branch](https://github.com/randomizedcoder/agent-seddon/tree/rk-03-extraction), based on `d648c894` |
 | [RK-04](IMPLEMENTATION.md#rk-04) | Go extraction (additional) | RK-03 | Not started | Pending: Go mapping/helper fixture cases | — |
 | [RK-05](IMPLEMENTATION.md#rk-05) | SCIP spike and extraction (additional) | RK-03 | Not started | Pending: spike, resolved-edge/offline or integration evidence | — |
 | [RK-06](IMPLEMENTATION.md#rk-06) | Indexer, atomic publication and CLI | RK-02, RK-03 | Not started | Pending: I1, applicable I2, strict Pg runner | — |

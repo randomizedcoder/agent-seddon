@@ -9,10 +9,95 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-00–02 are merged; RK-03 is next.** Current states and acceptance evidence live in
+**RK-00–02 are merged; RK-03 is implemented locally, awaiting full-gate acceptance.** Current states and acceptance evidence live in
 [STATUS](STATUS.md); implementation steps and dependencies live in
 [IMPLEMENTATION](IMPLEMENTATION.md). RK-06 waits for RK-03, rather than running independently
-of its extractor prerequisite. No RK-03–21 implementation is claimed by the documentation work.
+of its extractor prerequisite.
+
+## 2026-10-18 — RK-03 extraction
+
+Implementation developed on `d648c894`, with a review handoff after this increment. Commit,
+push and PR publication were requested after that handoff, on branch `rk-03-extraction`.
+Delivers Rust/Cargo/docs extraction, E1 fixtures, feature-scoped Nix execution and bench/leak
+gates. RK-06 remains queued until RK-03 acceptance and merge.
+Historical RK-01/02 results below are not new evidence for this implementation.
+
+### Implementation decisions
+
+- `agent-repo-graph::extract` exposes `RustExtractor`, `CargoExtractor`, `DocsExtractor`,
+  combined `extract(root, budget)` and `ExtractionWorker`. The combined pipeline shares its
+  confined file inventory; individual extractors compose through the existing builder.
+  File/document hashes cover source bytes; Rust hashes cover normalized syntax without docs.
+- Added `GraphBuilder::constrain_caps` (never relaxes existing limits) and `report` (insertion
+  counters before endpoint resolution), so individual extractors report cap failures as well
+  as the combined pipeline. No store interface, migration, runtime or default feature change.
+- WalkBuilder's implicit ignore reads are disabled. Local `.gitignore` files are confined,
+  byte-capped and parsed through `GitignoreBuilder::add_line`; inherited host/global rules are
+  excluded. This prevents an escaping `.gitignore` symlink from bypassing the file-read boundary.
+  Directory/module depth is capped at 128 and ignore matcher count follows the file budget.
+- Rust parsing runs on a scoped thread: proc-macro2's span-location tables retain each parsed
+  source on the parsing thread. Ending that thread releases them without invalidating spans
+  owned by a caller. The async wrapper admits one blocking job, rejects busy requests, signals
+  cancellation between files and retains admission until timed-out/canceled work exits.
+- Matching impl blocks coalesce before emission. Generic specializations that share the
+  grammar's erased self-type key receive a deterministic header-hash suffix, propagated to
+  their methods. This extends cfg-only suffixing without changing the key grammar or builder's
+  duplicate checks. Repeated rstest case labels share one named-case node; parent `cases` counts
+  the input rows. Anonymous `_` constants have no addressable symbol node.
+- Library roots keep their canonical module keys; binary/integration-test roots use
+  `__bin_<target>` / `__test_<target>` modules to avoid collisions between Rust target namespaces.
+  Imports/impl endpoints resolve local aliases and re-exports with a bounded cycle check;
+  this is syntactic path resolution, not type checking or call resolution.
+- Nix registers `repo-graph-rust`, explicitly enables extraction in bench/leak, and keeps
+  fixture Markdown/TOML/source inputs under the existing `tests/fixtures/` source filter.
+  The callgrind bench explicitly collects the parser thread: default benchmark toggles only
+  collected the calling thread. Its initial measured full count was ~8.70M Ir; ceiling 12M.
+
+### Validation
+
+Base revision: `d648c8946729f75446865a4f7b970fc2a2659205`. Final gate source:
+`/tmp/rk03-final-source-hjx6jsl7`; full source fingerprint
+`2bb351a185569a0cbe563f29a779d4773a4dd7b45df4f661d9b6b0bbbf125136`.
+The manifest is `/tmp/rk03-final-source-manifest.json`. Its code/build/fixture fingerprint
+(`crates/`, `nix/`, root Cargo/flake files) is
+`844fb2b5d3a1c65694cc6678ef5f22ef15acea0512d819b8eb42e2d321489ee2`;
+subsequent edits to this evidence and STATUS do not change implementation inputs.
+
+Commands below ran through the pinned `nix develop -c` environment unless they are Nix gates.
+
+| Command / check | Result / execution | Artifact |
+|---|---|---|
+| `cargo test -p agent-repo-graph --features extract-rust --lib --test extraction` | PASS: 31 fixture cases + 2 worker cases, zero ignored | `/tmp/rk03-final-validation.log` |
+| `cargo test -p agent-repo-graph --features extract-rust,dhat-heap --test leak` | PASS: 1 heap/allocation case | `/tmp/rk03-final-validation.log` |
+| `cargo clippy -p agent-repo-graph --all-features --all-targets -- -D warnings` | PASS | `/tmp/rk03-final-validation.log` |
+| `cargo bench -p agent-repo-graph --features extract-rust --bench extract` | PASS: 1 benchmark, 8,893,782 Ir against 12,000,000 ceiling; parser thread explicitly collected | `/tmp/rk03-final-validation.log` |
+| Final-source Nix `repo-graph-rust` and `repo-graph` checks (`nix build`, `--no-link --no-write-lock-file --max-jobs 1`) | PASS: 33 extraction/worker cases; 34 DB-free Pg helper cases. The 57 ignored live Pg cases are not live acceptance. | `/tmp/rk03-final-graph-checks.log`, `/tmp/rk03-nix-84mdnxcb.log`, `/tmp/rk03-nix-59imf397.log` |
+| Final-source Nix `bench` / `leak` | PASS: extraction benchmark 8,618,514 Ir; heap case executed successfully | `/tmp/rk03-nix-bench.log`, `/tmp/rk03-nix-leak.log` |
+| `cargo test -p agent-core repo_graph`; `cargo test -p agent-testkit repo_graph` | PASS: 146 core + 57 memory/conformance cases, zero ignored | `/tmp/rk03-core-conformance.log` |
+| `cargo run -p agent-repo-graph --release --features extract-rust --example extract -- /tmp/rk03-final-source-hjx6jsl7` | PASS: 25,627 nodes, 66,345 edges, 1,669 files, zero parse errors/dropped edges; 4,684 ms while Nix checks were active | `/tmp/rk03-final-smoke.log` |
+| Initial `nix flake check path:/tmp/rk03-source-oi_t6nd5 --no-write-lock-file --keep-going --max-jobs 2` | FAIL: one reported failing check, `forge-ghapp`; extraction, bench/leak and remaining checks passed. This earlier snapshot had 25 fixture cases. | `/tmp/rk03-flake-check.log` |
+| Final `nix flake check path:/tmp/rk03-final-source-hjx6jsl7 --no-write-lock-file --keep-going --max-jobs 2` | FAIL (exit 1): 75/76 checks succeeded; only `forge-ghapp` failed with the same baseline assertion (58 passed / 1 failed in its runtime leg) | `/tmp/rk03-final-flake-check.log` |
+| Untouched baseline `nix build path:/tmp/rk03-baseline-a_a9re9i#checks.x86_64-linux.forge-ghapp --no-link --no-write-lock-file` | FAIL: same assertion as the initial full gate; 58 passed / 1 failed in the failing runtime leg | `/tmp/rk03-baseline-forge-ghapp.log` |
+| Built `doc-links --repo-root . --gate` and `--orphans --gate`, after evidence edits | PASS: links resolve and first-party docs remain reachable | `/tmp/rk03-doc-links.log`, `/tmp/rk03-doc-orphans.log` |
+| Markdown tables and tracker/plan audit | PASS: 7 changed Markdown files, 35 tables; 22 plan sections and matching tracker rows preserved | Local audit |
+| `git diff --check` | PASS | Local working tree |
+
+The frozen-source smoke graph hash is
+`5ea21c8fd95a57b34d294ff733b6f85575d9781931d58d81ba41d7e3360c924c`.
+Its report is explicitly incomplete (`skipped = 1`, `truncated = true`): `agent-seddon.png`
+exceeds the 2 MiB byte cap. No missing symbol/caller/coverage claim follows from that report.
+The separate fixture hash is pinned in `tests/fixtures/expected-hash.txt` and checked across
+fresh directories with opposite file-creation orders.
+
+The full-gate blocker is the existing
+`fleet_review::tests::negative_ghapp_without_minter_fails_before_clone` assertion at
+`crates/agent-runtime/src/fleet_review.rs:961`. It also fails on untouched HEAD; no runtime or
+forge implementation was changed by RK-03. Resolve that baseline failure and rerun the full gate
+before accepting/merging RK-03. RK-06 remains queued for that acceptance and merge.
+
+No live Postgres or model evaluation is required for RK-03; neither was run or claimed.
+Validation used uncommitted source snapshots before publication was requested. Feature defaults
+remain unchanged; publication does not promote RK-03 to accepted or merged.
 
 ## 2026-10-17 — implementation plan and tracker
 
