@@ -10,7 +10,9 @@
 //! 2. `prove_admin` shows the user behind the install-callback `code` **administers** the
 //!    installation's account, as GitHub's App-JWT record names it (forge-auth F5c1) — the
 //!    callback's `installation_id`/`setup_action` are never evidence on their own;
-//! 3. no **other** tenant already holds a verified binding for the installation.
+//! 3. no **other** tenant holds the installation — neither a verified binding nor an
+//!    operator bootstrap assignment — checked under a process-wide claim lock held through
+//!    the bind.
 //!
 //! It then persists the verified row (`agent_forge::INSTALLS_VERIFIED`, a collection no
 //! CRUD RPC reaches), binds the snapshot, and upserts the display row the portal lists.
@@ -20,8 +22,8 @@
 //! the snapshot, binding a raw `put` would be a cross-tenant minting IDOR.
 //!
 //! **Limits (documented):** a binding made on one replica reaches another only at its next
-//! restart (a miss there fails closed); the cross-tenant uniqueness scan is not atomic across
-//! replicas; uninstall/revoke arrives with F6 webhooks (meanwhile GitHub refuses the mint).
+//! restart (a miss there fails closed); the claim is not atomic across replicas, but an
+//! install verified under two tenants fails the verified rebuild closed; uninstall/revoke arrives with F6 webhooks (meanwhile GitHub refuses the mint).
 
 use std::sync::Arc;
 
@@ -105,6 +107,16 @@ impl ProveAdmin for GithubProver {
 /// snapshot; tests record instead of touching the global.
 type BindFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
+/// Is an id bound to a tenant other than the caller by the operator allowlist? Production
+/// reads the process gate; tests script it.
+type ElsewhereFn = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+/// Serializes the one-tenant-per-install check with the verified write and the bind,
+/// process-wide (not per instance), so two concurrent completes for the same install from
+/// different tenants cannot both pass the check. Across replicas the claim is not atomic;
+/// a resulting double row fails the verified rebuild closed instead.
+static CLAIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The [`GithubInstallOnboarding`] backend (see the module docs).
 pub struct InstallOnboarding {
     pending: PendingStates<Caller>,
@@ -115,6 +127,7 @@ pub struct InstallOnboarding {
     slug: String,
     clock: Arc<dyn Clock>,
     bind: BindFn,
+    bootstrap_elsewhere: ElsewhereFn,
     /// The served CRUD registry the display row goes through, so it lands where `List`
     /// reads (the shared `local` view under single-operator; the caller's tenant under
     /// `per_tenant`, routed by the handler's scoped identity). `None` ⇒ write the
@@ -146,6 +159,7 @@ impl InstallOnboarding {
             slug,
             clock,
             Arc::new(crate::secrets::ghapp_store_bind),
+            Arc::new(crate::secrets::ghapp_bootstrap_bound_elsewhere),
         )
     }
 
@@ -156,6 +170,7 @@ impl InstallOnboarding {
         slug: String,
         clock: Arc<dyn Clock>,
         bind: BindFn,
+        bootstrap_elsewhere: ElsewhereFn,
     ) -> Result<Self> {
         if install_url(&web_base, &slug, "probe").is_none() {
             return Err(agent_core::Error::Config(
@@ -171,6 +186,7 @@ impl InstallOnboarding {
             slug,
             clock,
             bind,
+            bootstrap_elsewhere,
             display: None,
         })
     }
@@ -257,7 +273,13 @@ impl GithubInstallOnboarding for InstallOnboarding {
             }
         };
         // One tenant per installation: a second tenant can never claim a bound install,
-        // even as a proven admin (e.g. one person holding accounts in two tenants).
+        // even as a proven admin (e.g. one person holding accounts in two tenants) — whether
+        // the operator assigned it or another tenant onboarded it. The claim lock holds from
+        // this check through the bind, so a concurrent complete can't slip between them.
+        let claim = CLAIM_LOCK.lock().await;
+        if (self.bootstrap_elsewhere)(tenant, installation_id) {
+            return Err(OnboardRefusal::Claimed);
+        }
         match agent_forge::verified_owner(&self.backend, installation_id).await {
             Ok(Some(owner)) if owner != tenant => return Err(OnboardRefusal::Claimed),
             Ok(_) => {}
@@ -284,6 +306,7 @@ impl GithubInstallOnboarding for InstallOnboarding {
         // Bind only after the verified row persisted, so the snapshot never holds an id
         // the boot seed would not rebuild.
         (self.bind)(tenant, installation_id);
+        drop(claim);
         tracing::info!(tenant, installation_id, "github app installation onboarded");
         match self.upsert_display(tenant, installation_id).await {
             Ok(install) => Ok(install),
@@ -356,6 +379,10 @@ mod tests {
     }
 
     fn rig_on(backend: Arc<dyn Backend>, prover: Arc<FakeProver>) -> Rig {
+        rig_with(backend, prover, Arc::new(|_, _| false))
+    }
+
+    fn rig_with(backend: Arc<dyn Backend>, prover: Arc<FakeProver>, elsewhere: ElsewhereFn) -> Rig {
         let binds: Binds = Arc::default();
         let b = binds.clone();
         let onboard = InstallOnboarding::with_bind(
@@ -365,6 +392,7 @@ mod tests {
             "seddon-agent".into(),
             Arc::new(FixedClock),
             Arc::new(move |t, id| b.lock().unwrap().push((t.to_string(), id.to_string()))),
+            elsewhere,
         )
         .expect("valid config");
         Rig {
@@ -625,6 +653,60 @@ mod tests {
         assert!(globex.binds.lock().unwrap().is_empty());
         assert!(verified_ids(&globex, "globex").await.is_empty());
         assert_eq!(verified_ids(&acme, "acme").await, vec!["42".to_string()]);
+    }
+
+    // An install the operator allowlist assigns to another tenant can't be self-served
+    // into this one, even by a proven admin: Claimed, nothing written, nothing bound.
+    #[tokio::test]
+    async fn adversarial_cannot_claim_install_bootstrap_bound_elsewhere() {
+        let bootstrap: crate::secrets::GithubAppBindings =
+            [("acme".to_string(), ["42".to_string()].into())].into();
+        let r = rig_with(
+            Arc::new(MemoryBackend::new()),
+            FakeProver::new(Some("Organization"), false),
+            Arc::new(move |t, id| crate::secrets::bound_elsewhere(Some(&bootstrap), t, id)),
+        );
+        let s = begin(&r, "globex", "bob").await;
+        let got = r.onboard.complete("globex", "bob", &s, "code", "42").await;
+        assert_eq!(got, Err(OnboardRefusal::Claimed));
+        assert!(r.binds.lock().unwrap().is_empty());
+        assert!(verified_ids(&r, "globex").await.is_empty());
+        // ...while the tenant the operator bound it to onboards it normally.
+        let s = begin(&r, "acme", "alice").await;
+        assert!(r
+            .onboard
+            .complete("acme", "alice", &s, "code", "42")
+            .await
+            .is_ok());
+    }
+
+    // Two tenants completing the same install concurrently: the claim lock serializes them,
+    // so exactly one wins and the other is Claimed (never both bound).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adversarial_concurrent_claims_bind_exactly_one_tenant() {
+        let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        let acme = rig_on(
+            backend.clone(),
+            FakeProver::new(Some("Organization"), false),
+        );
+        let globex = rig_on(backend, FakeProver::new(Some("Organization"), false));
+        let (sa, sg) = (
+            begin(&acme, "acme", "alice").await,
+            begin(&globex, "globex", "bob").await,
+        );
+        let (a, g) = tokio::join!(
+            acme.onboard.complete("acme", "alice", &sa, "code", "42"),
+            globex.onboard.complete("globex", "bob", &sg, "code", "42"),
+        );
+        assert_eq!(
+            usize::from(a.is_ok()) + usize::from(g.is_ok()),
+            1,
+            "exactly one tenant may win: {a:?} / {g:?}"
+        );
+        let loser = if a.is_ok() { g } else { a };
+        assert_eq!(loser, Err(OnboardRefusal::Claimed));
+        let bound = acme.binds.lock().unwrap().len() + globex.binds.lock().unwrap().len();
+        assert_eq!(bound, 1);
     }
 
     // The same tenant re-onboarding its own installation is idempotent, not Claimed.

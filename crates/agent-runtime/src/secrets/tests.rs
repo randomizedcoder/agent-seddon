@@ -281,6 +281,23 @@ fn ghapp_allowed_union_cases(#[case] tenant: &str, #[case] id: &str, #[case] all
     assert!(ghapp_allowed(false, None, None, tenant, id));
 }
 
+/// `bound_elsewhere`: the onboarding check that an operator-assigned install can't be
+/// self-served into a second tenant.
+#[cfg(feature = "forge-ghapp")]
+#[rstest]
+#[case::positive_bound_to_other_tenant("beta", "123", true)]
+#[case::negative_bound_to_same_tenant("acme", "123", false)]
+#[case::negative_unbound_id("beta", "999", false)]
+#[case::corner_shared_by_caller_and_other("acme", "456", true)]
+#[case::adversarial_id_substring("beta", "12", false)]
+#[case::adversarial_case_folded_tenant("ACME", "123", true)]
+fn bound_elsewhere_cases(#[case] tenant: &str, #[case] id: &str, #[case] want: bool) {
+    let bootstrap = bindings(&[("acme", &["123", "456"]), ("gamma", &["456"])]);
+    assert_eq!(bound_elsewhere(Some(&bootstrap), tenant, id), want);
+    // boundary: nothing installed binds nothing anywhere.
+    assert!(!bound_elsewhere(None, tenant, id));
+}
+
 /// Build a `GithubAppBindings` from `(tenant, &[id])` pairs.
 #[cfg(feature = "forge-ghapp")]
 fn bindings(rows: &[(&str, &[&str])]) -> GithubAppBindings {

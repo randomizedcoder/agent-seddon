@@ -189,7 +189,9 @@ and a **verified principal** (no principal ⇒ `UNAUTHENTICATED`, in every auth 
    install) or an **active admin** of it (an `Organization` install, via
    `GET /user/memberships/orgs/{login}`). Mere access or membership is never enough, and
    the callback's `installation_id` is never evidence by itself.
-4. If another tenant already holds the installation the call is `ALREADY_EXISTS`;
+4. If another tenant already holds the installation — a verified binding, or an operator
+   `[github_app] installations` assignment — the call is `ALREADY_EXISTS` (checked under a
+   process-wide claim lock held through the bind, so concurrent claims bind one tenant);
    otherwise the binding is written to a separate `github_installs_verified` collection
    (no CRUD RPC reaches it), bound into the mint gate, and the display row is upserted.
 
@@ -202,7 +204,9 @@ Prerequisites: `[github_app] slug` + `client_id` + `client_secret_ref` (and a
 during installation"** on, the Setup URL pointing at the portal page, and the
 **Organization → Members: read** permission (without it the membership read is refused
 and the proof fails closed). Limits: a binding made on one replica reaches another only
-at its restart (a miss fails closed); uninstall/revoke arrives with F6 webhooks.
+at its restart (a miss fails closed); the claim is not atomic across replicas, but an
+installation verified under two tenants fails the startup rebuild closed (binding neither);
+uninstall/revoke arrives with F6 webhooks.
 
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the
 default build), each via the C36 recipe below:

@@ -236,10 +236,22 @@ pub async fn verified_install_bindings(
     backend: &Arc<dyn Backend>,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Every id seen so far → its tenant. One installation belongs to at most one tenant, so
+    // an id under two tenants (a tamper, or two replicas racing a claim) fails the whole
+    // rebuild closed rather than binding it to both.
+    let mut owner: BTreeMap<String, String> = BTreeMap::new();
     for tenant in backend.tenants(INSTALLS_VERIFIED).await? {
         let mut ids = BTreeSet::new();
         for blob in backend.list(INSTALLS_VERIFIED, &tenant).await? {
-            ids.insert(VerifiedInstall::decode(&blob)?.installation_id);
+            let id = VerifiedInstall::decode(&blob)?.installation_id;
+            if let Some(first) = owner.insert(id.clone(), tenant.clone()) {
+                if first != tenant {
+                    return Err(Error::Config(format!(
+                        "installation {id} is verified under more than one tenant"
+                    )));
+                }
+            }
+            ids.insert(id);
         }
         if !ids.is_empty() {
             out.insert(tenant, ids);
@@ -250,8 +262,9 @@ pub async fn verified_install_bindings(
 
 /// The tenant `installation_id` is already verified-bound to, if any (one tenant per
 /// installation). A scan of [`verified_install_bindings`]; fails closed on a tamper.
-/// Single-process: two replicas completing the same install concurrently are not
-/// serialized against each other (documented limit; F6 webhooks reconcile).
+/// Callers in one process serialize the check-then-write (the runtime's onboarding holds a
+/// process-wide claim lock); two replicas racing the same install are not serialized, but
+/// the resulting double row fails [`verified_install_bindings`] closed (documented limit).
 pub async fn verified_owner(
     backend: &Arc<dyn Backend>,
     installation_id: &str,
@@ -533,6 +546,29 @@ mod tests {
         .expect("seed tamper");
         assert!(verified_install_bindings(&b).await.is_err());
         assert!(verified_owner(&b, "123").await.is_err());
+    }
+
+    // adversarial: one installation verified under two tenants (a tamper, or a cross-replica
+    // claim race) binds to neither — the rebuild and the owner scan both fail closed. The
+    // same id under one tenant twice is just an idempotent re-onboard.
+    #[rstest]
+    #[case::adversarial_two_tenants_one_install("beta", false)]
+    #[case::corner_same_tenant_reverified("acme", true)]
+    #[tokio::test]
+    async fn adversarial_install_under_two_tenants_fails_closed(
+        #[case] second: &str,
+        #[case] ok: bool,
+    ) {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        for tenant in ["acme", second] {
+            VerifiedInstalls::with_tenant(b.clone(), tenant)
+                .expect("tenant")
+                .put(&verified("123"))
+                .await
+                .expect("put");
+        }
+        assert_eq!(verified_install_bindings(&b).await.is_ok(), ok);
+        assert_eq!(verified_owner(&b, "123").await.is_ok(), ok);
     }
 
     // negative: an invalid verified row is never written.

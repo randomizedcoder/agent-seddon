@@ -226,6 +226,29 @@ fn ghapp_allowed(
     hit(bootstrap) || hit(verified)
 }
 
+/// Does `bindings` bind `id` to some tenant other than `tenant`? Pure, so the onboarding
+/// one-tenant-per-install check against the operator allowlist is tested directly.
+#[cfg(feature = "forge-ghapp")]
+pub(crate) fn bound_elsewhere(
+    bindings: Option<&GithubAppBindings>,
+    tenant: &str,
+    id: &str,
+) -> bool {
+    bindings.is_some_and(|m| m.iter().any(|(t, ids)| t != tenant && ids.contains(id)))
+}
+
+/// Is installation `id` bound to a tenant other than `tenant` by the operator bootstrap
+/// allowlist ([`GHAPP_BINDINGS`])? Onboarding refuses such a claim, so a tenant can never
+/// self-serve its way into sharing an install the operator assigned elsewhere.
+#[cfg(feature = "forge-ghapp")]
+pub fn ghapp_bootstrap_bound_elsewhere(tenant: &str, id: &str) -> bool {
+    let bootstrap = GHAPP_BINDINGS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    bound_elsewhere(bootstrap.as_deref(), tenant, id)
+}
+
 /// May `tenant` mint installation `id` under the installed policy + bindings? The real
 /// runtime gate (`registry::mint_or_resolve_tenant_token` and `check_session_forge` call
 /// exactly this), delegating to the pure [`ghapp_allowed`] so the decision under test is

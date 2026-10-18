@@ -234,7 +234,9 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   client) + derived `web_base()` (GHES strips `/api/v3`); onboarding is on only with slug + client + an install
   store. Also fixes a pre-existing test race (the one minter-installing test vs F2b's "no minter" test, now
   serialized and cleaned up). **Limits:** another replica sees a new binding only after restart (a miss fails
-  closed); the uniqueness scan is single-process; uninstall/revoke is F6 (GitHub's 404 on mint fails closed
+  closed); the one-tenant-per-install claim is serialized in-process by a claim lock (and also refuses an id the
+  operator allowlist assigns to another tenant — both from the post-push security review), not across replicas,
+  where an id verified under two tenants fails the rebuild closed; uninstall/revoke is F6 (GitHub's 404 on mint fails closed
   meanwhile). Tables: `PendingStates` + `install_url` (incl. `adversarial_` malformed state spends nothing, slug
   injection, state query-encoding), `match_binding`, onboarding over a fake prover + `MemoryBackend` (both account
   kinds; refusals write/bind nothing; `adversarial_` cross-tenant/subject state replay never reaches the forge and
