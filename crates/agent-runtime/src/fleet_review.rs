@@ -948,6 +948,9 @@ mod tests {
     /// before any clone is attempted (consistent with F2's fail-closed mint path).
     #[tokio::test]
     async fn negative_ghapp_without_minter_fails_before_clone() {
+        // Serialized against the one test that installs the process minter.
+        #[cfg(feature = "forge-ghapp")]
+        let _serial = crate::secrets::MINTER_TEST_LOCK.lock().await;
         let tmp = agent_testkit::tempdir();
         let rec = RecSandbox::new();
         let f = factory_with_sandbox(tmp.as_path().to_path_buf(), rec.clone());

@@ -37,6 +37,11 @@ pub mod webhook;
 #[cfg(feature = "forge-ghapp")]
 pub mod ghapp_oauth;
 
+/// The single-use `state` table + install URL for GitHub App install onboarding
+/// (forge-auth F5c2). Behind `forge-ghapp` (its `state` comes from `ring`'s RNG).
+#[cfg(feature = "forge-ghapp")]
+pub mod ghapp_onboard;
+
 /// The persisted forge-card registry (config C36 / D1). Behind `forge-store` so the
 /// default host-impl build stays free of the config-store dependency.
 #[cfg(feature = "forge-store")]
@@ -67,4 +72,7 @@ pub use store::{StoreForges, DEFAULT_TENANT};
 // `StoreInstalls` shares the same `local` default-tenant convention as `StoreForges`
 // (re-exported above as `DEFAULT_TENANT`), so only the store type is re-exported here.
 #[cfg(feature = "forge-store")]
-pub use github_install_store::{github_install_bindings, StoreInstalls};
+pub use github_install_store::{
+    verified_install_bindings, verified_owner, StoreInstalls, VerifiedBindings, VerifiedInstall,
+    VerifiedInstalls, INSTALLS_VERIFIED, INSTALL_CLAIMS, MAX_SUBJECT_LEN,
+};

@@ -132,7 +132,11 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         // GitHub-App installs are forge state (forge-auth F4): they reuse the
         // forge-registry resource rather than minting a new RBAC resource type.
         ("GithubInstallRegistryService", "List" | "Get") => Require(Read, ForgeRegistry),
-        ("GithubInstallRegistryService", "Put") => Require(Write, ForgeRegistry),
+        // BeginInstall/CompleteInstall (forge-auth F5c2) are writes that, after an
+        // ownership proof, bind an installation into the `ghapp:` mint gate.
+        ("GithubInstallRegistryService", "Put" | "BeginInstall" | "CompleteInstall") => {
+            Require(Write, ForgeRegistry)
+        }
         ("GithubInstallRegistryService", "Delete") => Require(Delete, ForgeRegistry),
         ("TransportRegistryService", "List" | "Get") => Require(Read, TransportRegistry),
         ("TransportRegistryService", "Put") => Require(Write, TransportRegistry),

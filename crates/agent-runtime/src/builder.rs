@@ -1701,13 +1701,20 @@ pub async fn build_agent_with_mode(
         None => agent,
     };
     // The GitHub-App install-row store (forge-auth F5b), held for
-    // `--serve-github-install-registry`. CRUD only — the `ghapp:` mint gate never
-    // reads it (rows are tenant-self-asserted until the F5c callback proves ownership).
+    // `--serve-github-install-registry`. Its CRUD rows never feed the `ghapp:` mint gate
+    // (tenant-self-asserted); the verified collection on the same backend does, and only
+    // the onboarding `CompleteInstall` writes it (forge-auth F5c2).
     #[cfg(feature = "forge-registry-store")]
-    let agent = match resolve_github_install_registry(&cfg, &metrics)? {
-        Some(r) => agent.with_github_install_registry(r),
+    let install_backend = resolve_github_install_backend(&cfg, &metrics)?;
+    #[cfg(feature = "forge-registry-store")]
+    let agent = match &install_backend {
+        Some(b) => {
+            agent.with_github_install_registry(install_store_for(b.clone(), cfg.tenancy.per_tenant))
+        }
         None => agent,
     };
+    #[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
+    let agent = wire_github_install_onboarding(&cfg, install_backend.as_ref(), agent).await?;
     // The fleet's persisted review-history reader (review-fleet C16), over the same
     // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
     // enabled — with no store there's nothing to read back, and the FSM reviews without
@@ -3829,11 +3836,11 @@ pub(crate) fn resolve_transport_registry(
 /// [`PerTenant`] wrap when `per_tenant` is set (config C40/E1), else one shared
 /// `local` view. Mirrors [`forge_store_for`]; both store arms feed it.
 ///
-/// Deliberately the PLAIN store — never the `RefreshingInstalls` decorator. A row
-/// here is tenant-self-asserted (shape-validated, never ownership-validated), so
-/// binding a `put` into the `ghapp:` mint snapshot would let a tenant self-grant
-/// minting for an installation it does not own (forge-auth F4b). The gate stays on
-/// the operator bootstrap allowlist until the F5c callback proves ownership.
+/// Deliberately the PLAIN store, never feeding the `ghapp:` mint gate. A row here is
+/// tenant-self-asserted (shape-validated, never ownership-validated), so binding a `put`
+/// into the mint snapshot would let a tenant self-grant minting for an installation it
+/// does not own (forge-auth F4b). Only the onboarding `CompleteInstall` path binds, after
+/// proving ownership (`install_gate`, F5c2).
 #[cfg(feature = "forge-registry-store")]
 fn install_store_for(
     backend: Arc<dyn agent_config_store::Backend>,
@@ -3855,36 +3862,108 @@ fn install_store_for(
 /// over the selected backend, held for `--serve-github-install-registry`. `""` ⇒ no
 /// store. Tenant-scoped per verified identity when `[tenancy] per_tenant` (config
 /// C40/E1). Opening it never authorizes a mint (see [`install_store_for`]).
-#[cfg(feature = "forge-registry-store")]
+#[cfg(all(test, feature = "forge-registry-store"))]
 pub(crate) fn resolve_github_install_registry(
     cfg: &Config,
     metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::GithubInstallRegistry>>> {
-    let store: Option<Arc<dyn agent_core::GithubInstallRegistry>> =
-        match cfg.github_install_registry.store.as_str() {
-            "" => None,
-            "file" => {
-                let backend: Arc<dyn agent_config_store::Backend> = crate::metered::config_store(
-                    Arc::new(agent_config_store::FileBackend::new(expand_tilde(
-                        &cfg.github_install_registry.file,
-                    ))),
-                    metrics.clone(),
-                    "file",
-                );
-                Some(install_store_for(backend, cfg.tenancy.per_tenant))
-            }
-            #[cfg(feature = "forge-registry-postgres")]
-            "postgres" => {
-                let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
-                Some(install_store_for(backend, cfg.tenancy.per_tenant))
-            }
-            #[cfg(not(feature = "forge-registry-postgres"))]
-            "postgres" => anyhow::bail!(
-                "[github_install_registry] store = \"postgres\" requires building with the `forge-registry-postgres` feature"
-            ),
-            other => anyhow::bail!("unknown [github_install_registry] store `{other}`"),
-        };
-    Ok(store)
+    Ok(resolve_github_install_backend(cfg, metrics)?
+        .map(|backend| install_store_for(backend, cfg.tenancy.per_tenant)))
+}
+
+/// The shared-store backend under `[github_install_registry] store` (`""` ⇒ none). Both
+/// the CRUD install store and the verified-install collection (forge-auth F5c2) live on
+/// it, in separate collections.
+#[cfg(feature = "forge-registry-store")]
+fn resolve_github_install_backend(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<Arc<dyn agent_config_store::Backend>>> {
+    Ok(match cfg.github_install_registry.store.as_str() {
+        "" => None,
+        "file" => Some(crate::metered::config_store(
+            Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                &cfg.github_install_registry.file,
+            ))),
+            metrics.clone(),
+            "file",
+        )),
+        #[cfg(feature = "forge-registry-postgres")]
+        "postgres" => Some(crate::store_backend::pg_backend(&cfg.config_store, metrics)?),
+        #[cfg(not(feature = "forge-registry-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[github_install_registry] store = \"postgres\" requires building with the `forge-registry-postgres` feature"
+        ),
+        other => anyhow::bail!("unknown [github_install_registry] store `{other}`"),
+    })
+}
+
+/// forge-auth F5c2: seed the mint gate's verified snapshot from the verified-install
+/// collection, and — when `[github_app]` enables onboarding (`slug` + OAuth client) —
+/// attach the [`crate::install_gate::InstallOnboarding`] backend over the same `backend`.
+/// A tampered verified row fails startup closed (it can never silently widen the gate).
+/// Runs after [`install_github_app_minter`], whose minter the admin proof reuses.
+#[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
+async fn wire_github_install_onboarding(
+    cfg: &Config,
+    backend: Option<&Arc<dyn agent_config_store::Backend>>,
+    agent: Agent,
+) -> anyhow::Result<Agent> {
+    let Some(ga) = &cfg.github_app else {
+        return Ok(agent);
+    };
+    let Some(backend) = backend else {
+        if ga.onboarding_enabled() {
+            tracing::warn!(
+                "[github_app] slug is set but no [github_install_registry] store: install onboarding is off"
+            );
+        }
+        return Ok(agent);
+    };
+    let seed = agent_forge::verified_install_bindings(backend)
+        .await
+        .map_err(|e| anyhow::anyhow!("rebuilding the verified github-app installs: {e}"))?;
+    for (tenant, id) in &seed.unclaimed {
+        // An out-of-band row its claim disagrees with: left out of the gate (binds nothing).
+        tracing::warn!(
+            tenant,
+            installation_id = id,
+            "verified github-app install has no matching claim; not bound"
+        );
+    }
+    crate::secrets::install_github_app_store_bindings(seed.bindings);
+    if !ga.onboarding_enabled() {
+        return Ok(agent);
+    }
+    let minter = crate::secrets::minter()
+        .ok_or_else(|| anyhow::anyhow!("[github_app] onboarding needs the app minter"))?;
+    let secret =
+        crate::secrets::resolve(crate::secrets::SecretScope::Operator, &ga.client_secret_ref)
+            .map_err(|e| anyhow::anyhow!("[github_app] client_secret_ref: {e}"))?;
+    let access = agent_forge::ghapp_oauth::UserInstallationAccess::new(
+        ga.client_id.trim().to_string(),
+        &secret,
+        ga.web_base(),
+        ga.base(),
+        ga.max_retries,
+        ga.timeout_secs,
+    )
+    .map_err(|e| anyhow::anyhow!("building the github-app oauth client: {e}"))?;
+    let onboarding = crate::install_gate::InstallOnboarding::new(
+        Arc::new(crate::install_gate::GithubProver::new(access, minter)),
+        backend.clone(),
+        ga.web_base(),
+        ga.slug.clone(),
+        Arc::new(agent_forge::ghapp::SystemClock),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The display row goes through the served CRUD registry, so it lands where `List`
+    // reads (shared `local` view, or the caller's tenant under `per_tenant`).
+    let onboarding = match agent.github_install_registry() {
+        Some(r) => onboarding.with_display(r),
+        None => onboarding,
+    };
+    Ok(agent.with_github_install_onboarding(Arc::new(onboarding)))
 }
 
 /// Validate a loaded cognition-graph document, failing closed with a message that

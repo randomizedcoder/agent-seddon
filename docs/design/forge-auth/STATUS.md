@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof (no consumer); F5c2/F5d + F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d + F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -22,7 +22,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2b | Clone credential injection | authenticate the git clone/fetch with the resolved/minted token via a host-scoped `http.extraHeader` injected through `env_set` (token never in argv, `.git/config`, or an error string) ⇒ enables **private-repo clone**; GitHub, benefits `env:`/`file:` PAT rows too | ✅ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
-| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built — no consumer). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union. **F5d**: portal UI. | 🟡 |
+| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union (built). **F5d**: portal UI. | 🟡 |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
@@ -208,6 +208,43 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   no-access stops before the App lookup; `adversarial_` hostile echoed login ⇒ 0 membership requests, hostile id
   / malformed code ⇒ 0 requests, errors never echo code/secret/user token/JWT/key), `valid_github_login` (16),
   `installation_account` (body table + HTTP failures + `adversarial_` ids pre-flight).
+
+- **F5c2 (PR #640):** self-service onboarding — the increment that makes a tenant-onboarded install actually
+  mint, closing the F4b gap. Two RPCs on `GithubInstallRegistryService` (additive proto; REST-annotated
+  `POST /v1/github-installs:begin` / `:complete`, swagger regenerated; no buf-image bump), gated on
+  `write:forge_registry` (`gate_of` + `test/mt-audit/authz.toml`) **and a verified principal in every auth mode**
+  (no principal ⇒ `UNAUTHENTICATED`; the backend gets the principal's `(tenant, subject)`, never wire/header
+  values). `BeginInstall` stores the caller under a 32-byte random single-use `state` (new
+  `agent_forge::ghapp_onboard::PendingStates<T>`: 900 s TTL, 1024 cap that refuses rather than evicts,
+  spend-on-first-use — sign-in's semantics, redeclared because `agent-forge` cannot depend on `agent-grpc`, so
+  sign-in's own table is unchanged) and returns `{web}/apps/{slug}/installations/new?state=…`.
+  `CompleteInstall{state, code, installation_id}` (`agent-runtime/src/install_gate.rs::InstallOnboarding`, the new
+  `agent_core::GithubInstallOnboarding` seam) spends the state, requires the **same** `(tenant, subject)` (pure
+  `match_binding`), shape-checks the callback, runs `prove_admin`, refuses an install another tenant already holds
+  (`AlreadyExists`; a scan of the verified collection), then writes the verified row, binds the gate snapshot, and
+  upserts the display CRUD row (keeping its repos — repo-list sync is F6). Refusals are a typed
+  `OnboardRefusal`; a bad state and a failed proof share one opaque `PERMISSION_DENIED`. The verified row lives in
+  a **separate** collection `github_installs_verified` (`agent_forge::VerifiedInstalls`, validated JSON record
+  `{installation_id, account_login, account_kind, subject, verified_at}`) that no CRUD RPC reaches; the boot seed
+  `verified_install_bindings` reads only it (replacing F4b's unread `github_install_bindings` over the CRUD
+  collection) and a tampered row fails startup closed. **Gate:** `ghapp_allowed(per_tenant, bootstrap, verified,
+  tenant, id)` = bootstrap-hit OR verified-hit, both tenant-keyed. The F4b `RefreshingInstalls` decorator
+  (bind-on-CRUD-`put`) is **deleted** — once the gate reads the snapshot it would be the IDOR. `valid_github_login`
+  moved to `agent-core` (re-exported from `ghapp`). Config: `[github_app] slug` (login-shaped; requires the OAuth
+  client) + derived `web_base()` (GHES strips `/api/v3`); onboarding is on only with slug + client + an install
+  store. Also fixes a pre-existing test race (the one minter-installing test vs F2b's "no minter" test, now
+  serialized and cleaned up). **Limits:** another replica sees a new binding only after restart (a miss fails
+  closed); the one-tenant-per-install claim is atomic across replicas — a global `github_install_claims` row per
+  installation, compare-and-swapped in one batch with the verified row — and also refuses an id the operator
+  allowlist assigns to another tenant (both from the post-push security reviews); a verified row its claim does
+  not name is contained (left out of the gate and logged, startup continues); uninstall/revoke is F6 (GitHub's 404 on mint fails closed
+  meanwhile). Tables: `PendingStates` + `install_url` (incl. `adversarial_` malformed state spends nothing, slug
+  injection, state query-encoding), `match_binding`, onboarding over a fake prover + `MemoryBackend` (both account
+  kinds; refusals write/bind nothing; `adversarial_` cross-tenant/subject state replay never reaches the forge and
+  burns the state; second tenant ⇒ `Claimed` with the first binding intact; a CRUD row is not a claim; malformed
+  callback pre-proof), gate union (9 incl. cross-tenant leakage both ways), verified store (validate matrix,
+  rebuild, `adversarial_` CRUD rows never seed, tamper fails closed), handler (verified principal not header,
+  unauthenticated, viewer denied, unconfigured, refusal→code table), config slug + `web_base`.
 
 ## Links
 

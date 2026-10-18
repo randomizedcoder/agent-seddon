@@ -168,19 +168,46 @@ A sibling control-plane seam, `agent.v1.GithubInstallRegistryService`
 CRUDs the per-tenant **GitHub-App install rows** (`installation_id` +
 `selected_repos`) of the [forge-auth](../design/forge-auth/README.md) track. It reuses
 the `forge_registry` RBAC resource and is tenant-scoped like the forge cards. A row is
-**tenant-self-asserted** — shape-validated, never ownership-validated — so serving it
-grants **no** `ghapp:` minting authority: the mint gate stays on the operator
-`[github_app] installations` allowlist until the install callback proves ownership.
+**tenant-self-asserted** — shape-validated, never ownership-validated — so a CRUD `Put`
+grants **no** `ghapp:` minting authority.
 
-The proof that callback will run is `UserInstallationAccess::prove_admin`
-(`agent-forge/src/ghapp_oauth.rs`, `forge-ghapp`). It exchanges the one-time install
-`code` once, then requires that the user can reach the installation
-(`/user/installations`), reads the installation's account with the App JWT
-(`GET /app/installations/{id}`), and requires the user to *be* that account (a `User`
-install) or an **active admin** of it (an `Organization` install, via
-`GET /user/memberships/orgs/{login}`). Mere access or membership is never enough. The
-App therefore needs the **Organization → Members: read** permission; without it the
-membership read is refused and the proof fails closed.
+**Self-service onboarding** (forge-auth F5c2, `forge-ghapp`) is what grants it. The same
+service carries `BeginInstall` and `CompleteInstall` (REST `POST
+/v1/github-installs:begin` / `:complete`), relayed by the portal page that is the App's
+GitHub **Setup URL** — the agent opens no HTTP listener. Both need `write:forge_registry`
+and a **verified principal** (no principal ⇒ `UNAUTHENTICATED`, in every auth mode):
+
+1. `BeginInstall` remembers the caller's verified `(tenant, subject)` under a random
+   single-use `state` (15 min) and returns `https://github.com/apps/{slug}/installations/new?state=…`.
+2. GitHub sends the browser back to the Setup URL with `code`, `installation_id` and
+   `state`; the portal relays them in `CompleteInstall`.
+3. The server spends the `state`, requires the **same** caller, and runs
+   `UserInstallationAccess::prove_admin` (`agent-forge/src/ghapp_oauth.rs`): it exchanges
+   the one-time `code` once, requires the user can reach the installation
+   (`/user/installations`), reads the installation's account with the App JWT
+   (`GET /app/installations/{id}`), and requires the user to *be* that account (a `User`
+   install) or an **active admin** of it (an `Organization` install, via
+   `GET /user/memberships/orgs/{login}`). Mere access or membership is never enough, and
+   the callback's `installation_id` is never evidence by itself.
+4. If another tenant already holds the installation — a verified binding, or an operator
+   `[github_app] installations` assignment — the call is `ALREADY_EXISTS`. The onboarded
+   case is an atomic claim: a global `github_install_claims` row per installation, written
+   by compare-and-swap in one batch with the verified row, so concurrent claims — on any
+   replica — bind exactly one tenant. Otherwise the binding is written to a separate `github_installs_verified` collection
+   (no CRUD RPC reaches it), bound into the mint gate, and the display row is upserted.
+
+The mint gate is the operator `[github_app] installations` allowlist **OR** the verified
+bindings (rebuilt from `github_installs_verified` at startup; an undecodable row fails
+startup closed). A refused `state` and a failed proof both answer one opaque `PERMISSION_DENIED`.
+
+Prerequisites: `[github_app] slug` + `client_id` + `client_secret_ref` (and a
+`[github_install_registry] store`); on the App, **"Request user authorization (OAuth)
+during installation"** on, the Setup URL pointing at the portal page, and the
+**Organization → Members: read** permission (without it the membership read is refused
+and the proof fails closed). Limits: a binding made on one replica reaches another only
+at its restart (a miss fails closed); a verified row its claim does not name (only an
+out-of-band write makes one) is left out of the gate and logged, without failing startup;
+uninstall/revoke arrives with F6 webhooks.
 
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the
 default build), each via the C36 recipe below:

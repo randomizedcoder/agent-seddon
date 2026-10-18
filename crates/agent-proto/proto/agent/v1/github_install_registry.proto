@@ -56,6 +56,32 @@ message GithubInstallDeleteReply {
   bool deleted = 1; // false when the id was absent (not an error)
 }
 
+// Start onboarding an installation (forge-auth F5c2). Carries nothing: the tenant and
+// subject come from the caller's VERIFIED principal, never the wire.
+message BeginInstallRequest {}
+
+message BeginInstallReply {
+  // `https://github.com/apps/{slug}/installations/new?state=…` — send the browser here.
+  string install_url = 1;
+  // Single-use, bound to the caller that began it; GitHub hands it back to the App's
+  // Setup URL.
+  string state = 2;
+  // When `state` lapses, Unix seconds.
+  uint64 expires_at = 3;
+}
+
+// The query parameters GitHub appended to the App's Setup URL, relayed by the portal.
+// All three are browser-supplied and untrusted: `state` must be one this caller began,
+// and `installation_id` is never taken as proof — the server re-reads the installation's
+// account with the App JWT and requires the `code`'s user to administer it.
+message CompleteInstallRequest {
+  string state = 1;
+  // The install-time user-authorization code ("Request user authorization during
+  // installation" must be on).
+  string code = 2;
+  string installation_id = 3;
+}
+
 // The GitHub-App install control plane (mirrors ForgeRegistryService). Mutations are
 // gated by the RBAC enforcement core (C1) on `(write|delete, forge_registry)`.
 service GithubInstallRegistryService {
@@ -76,5 +102,20 @@ service GithubInstallRegistryService {
   }
   rpc Delete(GithubInstallRef) returns (GithubInstallDeleteReply) {
     option (google.api.http) = {delete: "/v1/github-installs/{installation_id}"};
+  }
+  // Self-service onboarding (forge-auth F5c2), gated on `(write, forge_registry)` and a
+  // verified principal. `CompleteInstall` is the ONLY path that authorizes `ghapp:`
+  // minting for a tenant-onboarded installation; `Put` never does.
+  rpc BeginInstall(BeginInstallRequest) returns (BeginInstallReply) {
+    option (google.api.http) = {
+      post: "/v1/github-installs:begin"
+      body: "*"
+    };
+  }
+  rpc CompleteInstall(CompleteInstallRequest) returns (GithubInstall) {
+    option (google.api.http) = {
+      post: "/v1/github-installs:complete"
+      body: "*"
+    };
   }
 }

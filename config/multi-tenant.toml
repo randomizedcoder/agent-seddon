@@ -119,9 +119,9 @@ store = "postgres"
 store = "postgres"
 
 # GitHub-App install rows (forge-auth F4/F5b): per-tenant installation registry on
-# Postgres (`--serve-github-install-registry`). CRUD only — a row is tenant-self-
-# asserted, so it never authorizes a `ghapp:` mint (that stays on the operator
-# `[github_app] installations` allowlist until ownership is proven).
+# Postgres (`--serve-github-install-registry`). A CRUD row is tenant-self-asserted,
+# so it never authorizes a `ghapp:` mint; only the ownership-verified onboarding
+# `CompleteInstall` does (forge-auth F5c2, `[github_app] slug` + OAuth client).
 [github_install_registry]
 store = "postgres"
 

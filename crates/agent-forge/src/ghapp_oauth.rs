@@ -44,8 +44,9 @@
 //! without it the membership call is refused and the proof fails closed.
 //!
 //! An [`OwnershipProof`] can only be built here, so a consumer cannot fabricate one.
-//! This slice has **no consumer**: the onboarding RPC that calls it, persists the
-//! verified binding and unions it into the mint gate is forge-auth F5c2.
+//! Its consumer is the onboarding `CompleteInstall` RPC (forge-auth F5c2,
+//! `agent-runtime`'s `install_gate`), which persists the verified binding and binds it
+//! into the mint gate.
 //!
 //! Security discipline mirrors [`crate::ghapp`] and [`crate::http`] — the model is
 //! untrusted and a leaked secret or token goes straight to it:
