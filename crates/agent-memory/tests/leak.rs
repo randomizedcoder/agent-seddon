@@ -56,9 +56,17 @@ fn evt(text: &str) -> MemoryEvent {
     }
 }
 
-#[tokio::test]
-async fn summarize_step_does_not_leak() {
+/// Runs on [`agent_testkit::leak_runtime`]: `summarize_step` makes several
+/// `tokio::fs` calls per run, and on the default blocking pool a CPU-starved gate
+/// spawns extra workers mid-measurement, each leaving permanent thread bookkeeping
+/// that read as "growth" (a dhat dump of the failing runs showed only those).
+#[test]
+fn summarize_step_does_not_leak() {
     let _profiler = dhat::Profiler::builder().testing().build();
+    agent_testkit::leak_runtime().block_on(summarize_hot_path());
+}
+
+async fn summarize_hot_path() {
     let td = tempdir();
     let d = FileDimensions::new(td.as_path().join("dimensions")).with_provider(Arc::new(FixedDim));
     let events = vec![evt("do the work"), evt("more work")];
