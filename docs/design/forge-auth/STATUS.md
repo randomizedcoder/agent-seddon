@@ -283,7 +283,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   `validForgeId`), and two `login` rows (an install return keeps the stored session and the sign-in entry and is
   never exchanged).
 
-- **F5d2 (PR #TBD):** the last onboarding hop — the Fleet tab's **Sessions** strip creates, edits and deletes
+- **F5d2 (PR #644):** the last onboarding hop — the Fleet tab's **Sessions** strip creates, edits and deletes
   roster rows that reach their forge through a forge card (`forge_id`), so a GitHub App install goes Connect →
   card → reviewed repo without hand-editing config. Portal only, no Rust/proto change (the `forge_id` field and
   `Put`/`Delete` RPCs already existed). The cards come from the gateway's `ForgeRegistryService`, best-effort —
