@@ -224,7 +224,12 @@ is `https` (or `http` to loopback). **Create forge card** on an install writes a
 card with `token_ref = "ghapp:<installation id>"` and `repo_encoding = "owner_name"` (the
 card id defaults to `github-<id>` and is shape-checked before the `Put`). Cards can be
 enabled/disabled and deleted; other cards (env/file refs) stay operator/REST-managed.
-Pointing fleet sessions at a card (`forge_id`) is F5d2.
+On the **Fleet** tab (F5d2), **New session** in the Sessions strip (`write:fleet`) picks one of
+those cards, takes the repo as `owner/name` (`group/subgroup/name` for a `path` card) and puts a
+roster row with `forge_id` set — the card then supplies kind, base URL and token reference. Rows
+can be edited (unshown fields are kept; choosing a card clears the row's inline forge settings)
+and deleted (`delete:fleet`). Signed in, a new row's `user` (its tenant to the fleet — the
+tenant the `ghapp:` mint gate checks) is the signed-in tenant. New sessions start disabled.
 
 **D1b (complete):** two host impls landed behind opt-in cargo features (not in the
 default build), each via the C36 recipe below:

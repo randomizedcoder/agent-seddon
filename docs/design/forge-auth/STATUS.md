@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d1 lands the portal Forges tab (Connect GitHub round trip + one-click `ghapp:` forge cards); F5d2 + F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d1 lands the portal Forges tab (Connect GitHub round trip + one-click `ghapp:` forge cards); F5d2 lands fleet-session create/edit/delete on a forge card on the Fleet tab; F6 designed, not built.** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -22,7 +22,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F2b | Clone credential injection | authenticate the git clone/fetch with the resolved/minted token via a host-scoped `http.extraHeader` injected through `env_set` (token never in argv, `.git/config`, or an error string) ⇒ enables **private-repo clone**; GitHub, benefits `env:`/`file:` PAT rows too | ✅ |
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
-| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union (built). **F5d1**: portal Forges tab — Connect GitHub round trip + one-click `ghapp:` forge cards (built). **F5d2**: FleetSession create/edit on a forge card (`forge_id`). | 🟡 |
+| F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union (built). **F5d1**: portal Forges tab — Connect GitHub round trip + one-click `ghapp:` forge cards (built). **F5d2**: FleetSession create/edit/delete on a forge card (`forge_id`) on the Fleet tab (built). | 🟡 |
 | F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
@@ -282,6 +282,28 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   vs sign-in/IdP-error returns, shape matrix, pending/stash single-use + tamper, `safeInstallUrl`,
   `validForgeId`), and two `login` rows (an install return keeps the stored session and the sign-in entry and is
   never exchanged).
+
+- **F5d2 (PR #TBD):** the last onboarding hop — the Fleet tab's **Sessions** strip creates, edits and deletes
+  roster rows that reach their forge through a forge card (`forge_id`), so a GitHub App install goes Connect →
+  card → reviewed repo without hand-editing config. Portal only, no Rust/proto change (the `forge_id` field and
+  `Put`/`Delete` RPCs already existed). The cards come from the gateway's `ForgeRegistryService`, best-effort —
+  the Fleet tab still loads without `read:forge_registry`, but then a new session can't be created. The editor
+  (`portal/lib/src/pages/fleet_session_dialog.dart`) is a pure `buildSession` over a `FleetSession` deep copy:
+  an edit keeps every field it doesn't show (Slack channels, transport card, timestamps) and can't rename the id;
+  a new row's id must be free on the roster (`Put` is an upsert — it would silently overwrite); choosing a card
+  clears the inline `backend`/`base_url`/`token_ref` (the card supersedes them); a row with inline settings keeps
+  them unless a card is chosen; a row whose card is gone keeps that id. The repo is typed `owner/name` (or
+  `group/subgroup/name` for a `path` card) and encoded to the roster slug exactly as the agent decodes it
+  (`decode_owner_name` / `decode_path`); id/user/repo/card id are shape-checked like `safe_segment` (stricter: no
+  leading `.`, no `..`), the skill is ≤ 256 bytes with no control characters, the poll interval 30–86400 s or
+  blank. A row's `user` is its **tenant** to the fleet (workspace root, metrics, and the tenant the `ghapp:`
+  mint gate checks), so signed in, a new row's `user` is the signed-in tenant (the field is fixed); only with
+  sign-in off is it typed (default: the repo owner); an edit never changes it. New sessions start disabled.
+  As before, the `--serve-fleet` process admits and polls roster rows at boot, so a created/edited row is
+  polled after the next fleet restart (`ReviewNow` works at once). Controls follow `write:fleet` (new/edit) and `delete:fleet` (delete,
+  behind a confirm). Tables: 32 new `fleet` spec rows (incl. `adversarial_` hostile id/repo/skill, duplicate id
+  refused, tenant owns a new row / an edit can't move it, edit preserves unshown fields, inline↔card, cards unavailable, viewer/write-only caps) and
+  `fleet_session_test` (60: `repoSlug`, `validSessionSegment`, `buildSession` refusals and carry-over).
 
 ## Links
 

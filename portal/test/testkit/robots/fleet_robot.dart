@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../fake_gateway.dart';
+import '../fakes/forge_registry_service.dart';
 import '../fakes/review_fleet_service.dart';
 import '../recording.dart';
 import 'robot.dart';
 
 /// Robot for the Fleet page. Owns a [FakeGateway] (started on an ephemeral
-/// loopback port) with the [FakeReviewFleetService] registered as an extra seam,
+/// loopback port) with the [FakeReviewFleetService] registered as an extra seam
+/// (plus a [FakeForgeRegistryService] for the session editor's card picker),
 /// and the `PortalClients` the page dials; both are torn down — in `runAsync`,
 /// since socket close needs the real event loop — automatically. Script
 /// responses via `robot.fleet` before calling [load]; assert against `robot.log`.
@@ -28,10 +30,11 @@ import 'robot.dart';
 ///     disposed field — the dialog is closed with a single `pump(duration)` that
 ///     retires the route before the build phase (see [_closeDialog]).
 class FleetRobot extends Robot {
-  FleetRobot._(super.tester, this.gw, this.fleet, this.log);
+  FleetRobot._(super.tester, this.gw, this.fleet, this.forges, this.log);
 
   final FakeGateway gw;
   final FakeReviewFleetService fleet;
+  final FakeForgeRegistryService forges;
   final RecordingLog log;
   late final clients = gw.clients();
 
@@ -40,17 +43,21 @@ class FleetRobot extends Robot {
   static const _update = 'agent.v1.ReviewFleetService/UpdateReview';
   static const _reviewNow = 'agent.v1.ReviewFleetService/ReviewNow';
   static const _setEnabled = 'agent.v1.ReviewFleetService/SetEnabled';
+  static const put = 'agent.v1.ReviewFleetService/Put';
+  static const delete = 'agent.v1.ReviewFleetService/Delete';
 
   static Future<FleetRobot> create(WidgetTester tester) async {
     late FakeReviewFleetService fleet;
+    late FakeForgeRegistryService forges;
     late FakeGateway gw;
     await tester.runAsync(() async {
       gw = await FakeGateway.start((log) {
         fleet = FakeReviewFleetService(log);
-        return [fleet];
+        forges = FakeForgeRegistryService(log);
+        return [fleet, forges];
       });
     });
-    final robot = FleetRobot._(tester, gw, fleet, gw.log);
+    final robot = FleetRobot._(tester, gw, fleet, forges, gw.log);
     addTearDown(() => tester.runAsync(() async {
           await robot.clients.terminate();
           await gw.shutdown();
@@ -122,10 +129,12 @@ class FleetRobot extends Robot {
     await pumpUntil(() => isListLoaded || isError, reason: 'fleet list to settle');
   }
 
-  /// [load] with the signed-in user's [caps] in scope (security-hardening S13b).
-  Future<void> loadWith(Capabilities caps) async {
+  /// [load] with the signed-in user's [caps] in scope (security-hardening S13b),
+  /// optionally signed in as [tenant].
+  Future<void> loadWith(Capabilities caps, {String? tenant}) async {
     await pumpPage(CapabilityScope(
-        capabilities: caps, child: FleetPage(clients: clients)));
+        capabilities: caps,
+        child: FleetPage(clients: clients, tenant: () => tenant)));
     await pumpUntil(() => isListLoaded || isError, reason: 'fleet list to settle');
   }
 
@@ -216,6 +225,84 @@ class FleetRobot extends Robot {
     final before = log.countOf(_setEnabled);
     await tap('fleet.session.enable.$id',
         until: () => log.countOf(_setEnabled) > before);
+  }
+
+  // ── session editor (forge-auth F5d2) ───────────────────────────────────────
+  /// Open the session dialog from [key] (`fleet.session.new` or an edit button).
+  /// A fixed pump, not `pumpAndSettle`: the autofocused id field's cursor blinks.
+  Future<void> openSessionDialog(String key) async {
+    await tester.tap(byKey(key));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  bool get sessionDialogOpen => exists('fleet.session.dialog.save');
+
+  String? get sessionDialogError {
+    final f = byKey('fleet.session.dialog.error');
+    return f.evaluate().isEmpty ? null : (tester.widget(f) as Text).data;
+  }
+
+  /// Fill whichever fields are given (null leaves a field as it is).
+  Future<void> fillSession({
+    String? id,
+    String? repo,
+    String? user,
+    String? skill,
+    String? poll,
+  }) async {
+    if (id != null) await enterText('fleet.session.dialog.id', id);
+    if (repo != null) await enterText('fleet.session.dialog.repo', repo);
+    if (user != null) await enterText('fleet.session.dialog.user', user);
+    if (skill != null) await enterText('fleet.session.dialog.skill', skill);
+    if (poll != null) await enterText('fleet.session.dialog.poll', poll);
+  }
+
+  /// Choose the forge card whose menu label starts with [label].
+  Future<void> pickForge(String label) async {
+    await tester.tap(byKey('fleet.session.dialog.forge'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.textContaining(label, skipOffstage: false).last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> toggleSessionEnabled() async {
+    await tester.tap(byKey('fleet.session.dialog.enabled'));
+    await tester.pump();
+  }
+
+  /// Tap Save; with [expectPut], wait for the Put to land and the dialog to go.
+  Future<void> saveSession({bool expectPut = true}) async {
+    final before = log.countOf(put);
+    await tap('fleet.session.dialog.save',
+        until: expectPut ? () => log.countOf(put) > before : null);
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> cancelSession() async {
+    await tester.tap(byKey('fleet.session.dialog.cancel'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> openDelete(String id) async {
+    await tester.tap(byKey('fleet.session.delete.$id'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> confirmDelete() async {
+    final before = log.countOf(delete);
+    await tap('fleet.session.delete.confirm',
+        until: () => log.countOf(delete) > before);
+  }
+
+  Future<void> cancelDelete() async {
+    await tester.tap(byKey('fleet.session.delete.cancel'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
   }
 
   // ── detail pane ─────────────────────────────────────────────────────────────
