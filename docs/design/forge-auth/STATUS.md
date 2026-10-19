@@ -305,6 +305,18 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   refused, tenant owns a new row / an edit can't move it, edit preserves unshown fields, inline↔card, cards unavailable, viewer/write-only caps) and
   `fleet_session_test` (60: `repoSlug`, `validSessionSegment`, `buildSession` refusals and carry-over).
 
+- **Fleet `Put` binds the owner (follow-up to F5d2, PR #645):** F5d2 fixed a row's `user` to the signed-in tenant
+  in the portal, but the server stored whatever `user` it was sent — and `user` is the tenant the `ghapp:` mint
+  gate checks when the fleet mints the row's forge credential (`mint_or_resolve_tenant_token(&row.user, …)`). A
+  tenant-A caller writing `user = "B"` plus a forge card naming one of B's installations would therefore pass
+  B's gate: a cross-tenant IDOR. `ReviewFleetService.Put` now binds the row to the caller's tenant
+  (`request_tenant`: the verified principal's tenant, else the identity header) before the store sees it: an
+  empty `user` is filled, an equal one kept, anything else `PERMISSION_DENIED` with the store untouched (never
+  a silent re-owning). No tenant in scope (single-operator, no identity) ⇒ stored as sent, unchanged. Table:
+  `fleet_put_binds_owner_to_caller_tenant` (11: incl. `adversarial_` header claiming another tenant under a
+  verified principal, traversal `user`, `boundary_` case/prefix lookalikes). Still open: the fleet process reads
+  the roster only at boot, unscoped (F6).
+
 ## Links
 
 - Design: [`README.md`](README.md)
