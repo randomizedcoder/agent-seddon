@@ -72,6 +72,12 @@ extra fields:
 fails closed on structural problems (a non-path-safe id/user/repo, an unknown backend,
 an over-long field, or a malformed `token_ref`).
 
+`ReviewFleetService.Put` binds a row's `user` to the caller's tenant (verified principal,
+else the identity header): empty ⇒ filled, equal ⇒ kept, anything else ⇒
+`PERMISSION_DENIED`. `user` is the tenant the `ghapp:` mint gate checks for the row's
+forge credential, so a caller must not be able to store another tenant's name there.
+With no tenant in scope the row is stored as sent.
+
 ### `token_ref` is a reference, never a secret
 
 The forge token is stored and served as a kind-prefixed **reference** (`env:NAME` or

@@ -187,11 +187,13 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
     ) -> Result<Response<pb::FleetSession>, Status> {
         super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
         let key = super::identity_key(request.metadata());
+        let tenant = super::request_tenant(key.as_ref());
         let sp = span("fleet.put", request.metadata());
         let inner = self.inner.clone();
         let work = async move {
             // Wire → core clamps numbers; the store validates fail-closed.
-            let session = agent_core::FleetSession::from(request.into_inner());
+            let mut session = agent_core::FleetSession::from(request.into_inner());
+            bind_owner(&mut session, tenant.as_deref())?;
             let stored = inner
                 .put(session)
                 .await
@@ -452,6 +454,31 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
     }
 }
 
+/// Bind a written row's owner to the caller's tenant.
+///
+/// A row's `user` is its **tenant** to the fleet: the workspace root, the metrics
+/// label, and — load-bearing — the tenant the `ghapp:` mint gate checks when the row's
+/// forge credential is minted (`mint_or_resolve_tenant_token(&row.user, …)`). So a
+/// caller in tenant A that could store `user = "B"` (with a forge card naming one of
+/// B's installations) would pass B's mint gate: a cross-tenant IDOR. An empty `user` is
+/// filled with the caller's tenant; any other value must equal it, else
+/// `PERMISSION_DENIED` (never a silent re-owning). With no tenant in scope (a
+/// single-operator agent, no identity) the row is stored as sent.
+#[allow(clippy::result_large_err)]
+fn bind_owner(session: &mut agent_core::FleetSession, tenant: Option<&str>) -> Result<(), Status> {
+    let Some(tenant) = tenant else {
+        return Ok(());
+    };
+    if session.user.is_empty() {
+        session.user = tenant.to_string();
+    } else if session.user != tenant {
+        return Err(Status::permission_denied(
+            "a fleet session's user must be the caller's tenant",
+        ));
+    }
+    Ok(())
+}
+
 pub fn review_fleet_router(inner: Arc<dyn FleetRegistry>) -> Router {
     Server::builder().add_service(ReviewFleetSvc::new(inner).into_server())
 }
@@ -559,5 +586,71 @@ mod tests {
             store.seen.lock().unwrap().as_slice(),
             &[Some("acme".to_string())]
         );
+    }
+
+    fn admin(tenant: &str) -> agent_core::VerifiedPrincipal {
+        agent_core::VerifiedPrincipal {
+            tenant: tenant.into(),
+            subject: "alice".into(),
+            roles: vec![agent_core::ROLE_ORG_ADMIN.into()],
+        }
+    }
+
+    // A written row's `user` (its tenant to the fleet, incl. the `ghapp:` mint gate) is
+    // bound to the caller's tenant: empty ⇒ filled, equal ⇒ kept, anything else refused
+    // before the store is touched. `principal` is the verified tenant (wins over the
+    // self-asserted header); `stored` is `None` when the Put must be refused.
+    #[rstest]
+    #[case::positive_own_tenant_kept(None, Some("acme"), "acme", Some("acme"))]
+    #[case::positive_empty_user_takes_tenant(None, Some("acme"), "", Some("acme"))]
+    #[case::positive_verified_tenant_owns_row(Some("acme"), Some("acme"), "acme", Some("acme"))]
+    #[case::negative_other_tenant_refused(None, Some("acme"), "globex", None)]
+    #[case::corner_no_identity_stored_as_sent(None, None, "globex", Some("globex"))]
+    #[case::corner_hostile_header_names_no_tenant(None, Some("../x"), "globex", Some("globex"))]
+    #[case::boundary_case_differs_refused(None, Some("acme"), "ACME", None)]
+    #[case::boundary_prefix_refused(None, Some("acme"), "acme2", None)]
+    #[case::adversarial_header_cannot_claim_other_tenant(
+        Some("acme"),
+        Some("globex"),
+        "globex",
+        None
+    )]
+    #[case::adversarial_verified_tenant_fills_empty_not_header(
+        Some("acme"),
+        Some("globex"),
+        "",
+        Some("acme")
+    )]
+    #[case::adversarial_traversal_user_refused(None, Some("acme"), "../acme", None)]
+    #[tokio::test]
+    async fn fleet_put_binds_owner_to_caller_tenant(
+        #[case] principal: Option<&str>,
+        #[case] header: Option<&str>,
+        #[case] user: &str,
+        #[case] stored: Option<&str>,
+    ) {
+        let store = Arc::new(TenantProbeFleet::default());
+        let svc = ReviewFleetSvc::new(store.clone());
+        let row = pb::FleetSession {
+            id: "s1".into(),
+            user: user.into(),
+            ..Default::default()
+        };
+        let req = req_with(row, header, header.map(|_| "s1"));
+        let res = match principal {
+            Some(t) => agent_core::principal_scope(admin(t), svc.put(req)).await,
+            None => svc.put(req).await,
+        };
+        match stored {
+            Some(want) => assert_eq!(res.expect("put").into_inner().user, want),
+            None => {
+                let err = res.expect_err("refused");
+                assert_eq!(err.code(), tonic::Code::PermissionDenied);
+                assert!(
+                    store.seen.lock().unwrap().is_empty(),
+                    "a refused Put never reaches the store"
+                );
+            }
+        }
     }
 }
