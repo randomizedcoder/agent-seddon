@@ -155,7 +155,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       GraphPage(clients: _clients),
       AgentViewPage(clients: _clients, tenant: () => _auth.tenant),
       RouterPage(clients: _clients),
-      FleetPage(clients: _clients),
+      FleetPage(clients: _clients, tenant: () => _auth.tenant),
       ForgesPage(clients: _clients, platform: _auth.platform, now: _auth.nowSecs),
       AccessPage(clients: _clients),
       SettingsPage(clients: _clients),

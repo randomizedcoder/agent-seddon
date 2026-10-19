@@ -1,10 +1,13 @@
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:grpc/grpc.dart' show GrpcError;
 
 import '../auth/capabilities.dart';
 import '../clients.dart';
+import '../gen/agent/v1/forge_registry.pb.dart';
 import '../gen/agent/v1/review_fleet.pb.dart';
+import 'fleet_session_dialog.dart';
 
 /// The **Fleet** tab: view, trigger, and act on the review-fleet's PR review
 /// drafts (review-fleet C14), plus light roster control. Talks to the full
@@ -13,18 +16,28 @@ import '../gen/agent/v1/review_fleet.pb.dart';
 /// RPCs read (`ListReviews`/`GetReview`).
 ///
 /// Two panes: a left master list of review drafts (filterable by repo/status),
-/// with a collapsible **Sessions** strip above it (enable/disable + "Review
-/// now"); and a right detail pane that renders the selected draft's markdown
+/// with a collapsible **Sessions** strip above it (create/edit/delete,
+/// enable/disable, "Review now"); and a right detail pane that renders the selected draft's markdown
 /// body and offers **Approve & post** (the only outward-facing action, gated
 /// behind a confirm dialog). Editing the body is increment 4.
 ///
 /// Controls follow the signed-in user's permissions ([CapabilityScope],
 /// security-hardening S13b): Approve needs `approve:review`, editing a draft
-/// `write:review`, Review now `trigger:fleet`, enabling a session `write:fleet`.
+/// `write:review`, Review now `trigger:fleet`, creating/editing/enabling a
+/// session `write:fleet`, deleting one `delete:fleet`.
+///
+/// A session reaches its forge through a **forge card** (`forge_id`, forge-auth
+/// F5d2) — typically one the Forges tab made for a GitHub App install. The cards
+/// are listed from the gateway's `ForgeRegistryService`, best-effort: without
+/// them the strip still works, but a new session can't be created.
 /// Hidden controls are a courtesy; the agent refuses the call regardless.
 class FleetPage extends StatefulWidget {
   final PortalClients clients;
-  const FleetPage({super.key, required this.clients});
+
+  /// The signed-in tenant, which owns the sessions this tab creates (a row's
+  /// `user`); null when sign-in is off.
+  final String? Function()? tenant;
+  const FleetPage({super.key, required this.clients, this.tenant});
 
   @override
   State<FleetPage> createState() => _FleetPageState();
@@ -39,6 +52,9 @@ class _FleetPageState extends State<FleetPage> {
 
   List<ReviewSummary> _reviews = [];
   List<FleetSession> _sessions = [];
+  // Forge cards for the session editor; null when they could not be listed.
+  List<ForgeCard>? _cards;
+  String? _cardsError;
   ReviewSummary? _selected;
   bool _loading = true;
   String? _error;
@@ -73,12 +89,25 @@ class _FleetPageState extends State<FleetPage> {
           .list(FleetListRequest())
           .then((r) => r.sessions.toList())
           .catchError((_) => <FleetSession>[]);
+      // Forge cards come from the gateway, not the fleet process; also
+      // best-effort (a reviewer may not hold `read:forge_registry`).
+      String? cardsError;
+      final cardsF = widget.clients.forges
+          .list(ForgeListRequest())
+          .then<List<ForgeCard>?>((r) => r.forges.toList()..sort((a, b) => a.id.compareTo(b.id)))
+          .catchError((Object e) {
+        cardsError = e is GrpcError ? (e.message ?? e.codeName) : 'unreachable';
+        return null;
+      });
       final reviews = (await reviewsF).reviews.toList();
       final sessions = await sessionsF;
+      final cards = await cardsF;
       if (!mounted) return;
       setState(() {
         _reviews = reviews;
         _sessions = sessions;
+        _cards = cards;
+        _cardsError = cardsError;
         // Re-select by id so an action keeps the detail pane in place.
         final selId = _selected?.reviewId;
         _selected = selId == null
@@ -111,6 +140,60 @@ class _FleetPageState extends State<FleetPage> {
       await _reload();
     } catch (e) {
       _snack('Enable failed: $e');
+    }
+  }
+
+  /// Create (no [base]) or edit a session, then `Put` it.
+  Future<void> _editSession([FleetSession? base]) async {
+    final row = await showDialog<FleetSession>(
+      context: context,
+      builder: (ctx) => FleetSessionDialog(
+        base: base,
+        cards: _cards,
+        cardsError: _cardsError,
+        takenIds: {for (final s in _sessions) s.id},
+        tenant: widget.tenant?.call(),
+      ),
+    );
+    if (row == null) return;
+    try {
+      final saved = await widget.clients.fleet.put(row);
+      _snack('Session ${saved.id.isEmpty ? row.id : saved.id} saved.');
+      await _reload();
+    } on GrpcError catch (e) {
+      _snack('Save failed: ${e.message ?? e.codeName}');
+    }
+  }
+
+  Future<void> _deleteSession(FleetSession s) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete session "${s.id}"?'),
+        content: const Text('The fleet stops reviewing this repository. Its '
+            'review drafts stay listed.'),
+        actions: [
+          TextButton(
+            key: const Key('fleet.session.delete.cancel'),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('fleet.session.delete.confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final reply =
+          await widget.clients.fleet.delete(FleetSessionRef()..id = s.id);
+      _snack(reply.deleted ? '${s.id} deleted.' : '${s.id} was already gone.');
+      await _reload();
+    } on GrpcError catch (e) {
+      _snack('Delete failed: ${e.message ?? e.codeName}');
     }
   }
 
@@ -349,20 +432,34 @@ class _FleetPageState extends State<FleetPage> {
       title: Text('Sessions (${_sessions.length})',
           style: const TextStyle(fontWeight: FontWeight.bold)),
       childrenPadding: EdgeInsets.zero,
-      children: _sessions.isEmpty
-          ? [
-              const ListTile(
-                dense: true,
-                title: Text('No roster sessions.'),
-              )
-            ]
-          : _sessions
-              .map((s) => ListTile(
+      children: [
+        if (caps.can('write', 'fleet'))
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: TextButton.icon(
+                key: const Key('fleet.session.new'),
+                onPressed: () => _editSession(),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('New session'),
+              ),
+            ),
+          ),
+        if (_sessions.isEmpty)
+          const ListTile(
+            dense: true,
+            title: Text('No roster sessions.'),
+          ),
+        ..._sessions.map((s) => ListTile(
+                    key: Key('fleet.session.item.${s.id}'),
                     dense: true,
                     title: Text(s.id,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text(s.repo,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                        s.forgeId.isEmpty ? s.repo : '${s.repo} · ${s.forgeId}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -371,7 +468,24 @@ class _FleetPageState extends State<FleetPage> {
                             key: Key('fleet.session.reviewNow.${s.id}'),
                             icon: const Icon(Icons.play_circle_outline),
                             tooltip: 'Review now',
+                            visualDensity: VisualDensity.compact,
                             onPressed: () => _reviewNow(s),
+                          ),
+                        if (caps.can('write', 'fleet'))
+                          IconButton(
+                            key: Key('fleet.session.edit.${s.id}'),
+                            icon: const Icon(Icons.edit_outlined),
+                            tooltip: 'Edit',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _editSession(s),
+                          ),
+                        if (caps.can('delete', 'fleet'))
+                          IconButton(
+                            key: Key('fleet.session.delete.${s.id}'),
+                            icon: const Icon(Icons.delete_outline),
+                            tooltip: 'Delete',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _deleteSession(s),
                           ),
                         Switch(
                           key: Key('fleet.session.enable.${s.id}'),
@@ -382,8 +496,8 @@ class _FleetPageState extends State<FleetPage> {
                         ),
                       ],
                     ),
-                  ))
-              .toList(),
+                  )),
+      ],
     );
   }
 
