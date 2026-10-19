@@ -1244,42 +1244,28 @@ pub async fn serve_fleet(
         });
     }
 
-    // C5 fail-closed forge check: reconcile keeps a row disabled when its `token_ref`
-    // can't resolve or its backend forge can't be built. A row that references a
-    // persisted forge card by id (config C36 / D1b) is checked against a SNAPSHOT of
-    // the registry taken here — the `forge_check` closure is sync and cannot await a
-    // per-row registry fetch. A `forge_id` absent from the snapshot fails closed.
-    let forge_cards: std::collections::HashMap<String, agent_core::ForgeCard> =
-        match agent.forge_registry() {
-            Some(reg) => reg
-                .list()
-                .await
-                .map(|cards| cards.into_iter().map(|c| (c.id.clone(), c)).collect())
-                .unwrap_or_default(),
-            None => std::collections::HashMap::new(),
-        };
-    let forge_check = move |row: &agent_core::FleetSession| {
-        // `check_session_forge` admits a `ghapp:` row on a sync shape + minter-installed
-        // check (the token is minted lazily at first use — async, which this sync
-        // closure cannot do) and probes every other credential by building (forge-auth F2).
-        let card = if row.forge_id.is_empty() {
-            None
-        } else {
-            forge_cards.get(&row.forge_id)
-        };
-        agent_runtime::check_session_forge(row, card)
-    };
-    let report = agent_review_fleet::reconcile(
-        roster.as_ref(),
-        mgr.as_ref() as &dyn agent_core::FleetHost,
-        &forge_check,
-    )
-    .await;
+    // The live, tenant-aware roster driver (forge-auth F6): each pass reconciles every
+    // driven tenant's rows into owner sessions — with the C5 fail-closed forge check (a row
+    // whose credential can't resolve or whose forge can't be built stays disabled) — and
+    // diffs the forge-poll jobs. The first pass runs here; later ones every
+    // `FLEET_RESYNC_SECS`, so a roster edit lands without a restart.
+    let per_tenant = agent.fleet_tenants().is_some();
+    let sync = Arc::new(crate::fleet_sync::FleetSync::new(
+        roster.clone(),
+        mgr.clone() as Arc<dyn agent_core::FleetHost>,
+        agent.forge_registry(),
+        agent.fleet_tenants(),
+    ));
+    let report = sync.sync_once().await;
     tracing::info!(
-        admitted = report.admitted.len(),
-        skipped = report.skipped.len(),
+        tenants = report.tenants,
+        admitted = report.admitted,
+        skipped = report.skipped,
+        poll_jobs = report.jobs,
+        per_tenant,
         "fleet reconciled from roster"
     );
+    spawn_fleet_resync(sync.clone());
 
     // Orchestrator + bounded trigger queue. The queue's sink drives `ReviewNow`; a
     // background loop drains it through the FSM. Wired only when a repo backend exists
@@ -1287,7 +1273,7 @@ pub async fn serve_fleet(
     let triggers: Option<Arc<dyn agent_core::TriggerSink>> = match agent.repo() {
         Some(repo) => {
             let (queue, mut rx) =
-                agent_review_fleet::TriggerQueue::channel(FLEET_TRIGGER_QUEUE_CAP);
+                agent_review_fleet::TriggerQueue::channel_for(FLEET_TRIGGER_QUEUE_CAP, per_tenant);
             // C10/C13/C14: attach the review engine + drafter when wired, so the FSM
             // grounds each review in real facts (diff + mechanized checks) and, after the
             // review completes, renders a redacted `.md` + persists an `agent_review_drafts`
@@ -1328,22 +1314,25 @@ pub async fn serve_fleet(
             // `agent_fleet_*` families + emit the `fleet.review` spans.
             orch = orch.with_metrics(agent.metrics());
             let orch = Arc::new(orch);
+            // Each trigger is driven under its row's tenant (forge-auth F6), so a per-tenant
+            // roster resolves `session_id` there; the review task inherits that scope.
             tokio::spawn(async move {
                 while let Some(trigger) = rx.recv().await {
-                    if let Err(e) = orch.handle(trigger).await {
-                        tracing::warn!(error = %e, "fleet: review trigger failed");
+                    let tenant = trigger.tenant.clone();
+                    match crate::fleet_sync::in_tenant(&tenant, orch.handle(trigger)).await {
+                        Some(Ok(_)) | None => {}
+                        Some(Err(e)) => tracing::warn!(error = %e, "fleet: review trigger failed"),
                     }
                 }
             });
 
-            // C6 forge poll (inc 4a): one overlap-guarded `every {poll_secs}` job per
-            // enabled session emits triggers onto the same queue the orchestrator drains.
+            // C6 forge poll (inc 4a): the sync's overlap-guarded `every {poll_secs}` jobs —
+            // one per enabled row with a forge, per tenant — emit onto the queue the
+            // orchestrator drains.
             spawn_forge_poll(
-                roster.clone(),
+                sync.clone(),
                 queue.clone() as Arc<dyn agent_core::TriggerSink>,
-                agent.forge_registry(),
-            )
-            .await;
+            );
 
             // C7 Slack watch (inc 4b): one Socket-Mode connection fanned out from each
             // enabled row's `slack_trigger_channel`, emitting onto the same queue. Started
@@ -1355,12 +1344,24 @@ pub async fn serve_fleet(
             )
             .await;
 
+            // forge-auth F6: GitHub App webhooks — `pull_request` triggers in real time
+            // (the poll stays as backstop) and uninstall/suspend narrow the mint gate.
+            start_fleet_webhook(
+                &agent,
+                roster.clone(),
+                queue.clone() as Arc<dyn agent_core::TriggerSink>,
+                per_tenant,
+            )?;
+
             Some(queue as Arc<dyn agent_core::TriggerSink>)
         }
         None => {
             tracing::warn!(
                 "fleet: no repo backend ([git] unset); ReviewNow is UNIMPLEMENTED until one is configured"
             );
+            if !agent.fleet_webhook_listen().is_empty() {
+                tracing::warn!("fleet: [review_fleet.webhook] is set but there is no repo backend; no webhook receiver");
+            }
             None
         }
     };
@@ -1418,55 +1419,89 @@ pub async fn serve_fleet(
     Ok(())
 }
 
-/// Register + drive the C6 forge-poll jobs (inc 4a): one overlap-guarded
-/// `every {poll_secs}` job per enabled, forge-capable roster row, fired on a fixed
-/// [`FLEET_POLL_TICK_SECS`] tick through `agent-scheduler` (whose overlap guard means a
-/// slow poll never stacks a second copy). Each fire builds the row's session-scoped forge
-/// (C5) and emits a trigger for every open non-draft PR onto `sink`
-/// ([`agent_review_fleet::poll_session`], which bounds pages + triggers against a hostile
-/// forge response).
-///
-/// Jobs are registered from the roster snapshot at boot — matching the one-shot reconcile
-/// this process already does; a roster edit is picked up on the next restart (live re-sync
-/// of both reconcile and the poll jobs is a shared follow-up). The ticker is spawned only
-/// when at least one job registers, so an all-disabled roster stays quiet.
-async fn spawn_forge_poll(
+/// Start the GitHub App webhook receiver (forge-auth F6) when `[review_fleet.webhook]
+/// listen` is set. Fails startup closed when it can't be served safely: no
+/// `[github_app] webhook_secret_ref` (every delivery must be verifiable), an unbindable
+/// address, or a binary built without `forge-ghapp`.
+fn start_fleet_webhook(
+    agent: &Agent,
     roster: Arc<dyn agent_core::FleetRegistry>,
     sink: Arc<dyn agent_core::TriggerSink>,
-    forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
-) {
-    use agent_core::Scheduler;
-
-    let scheduler = Arc::new(agent_scheduler::LocalScheduler::new());
-    match roster.list().await {
-        Ok(rows) => {
-            let mut n = 0usize;
-            // A row has a forge either inline (`backend`) or by persisted card
-            // (`forge_id`, config C36 / D1b); poll whichever it uses.
-            for row in rows
-                .iter()
-                .filter(|r| r.enabled && (!r.backend.is_empty() || !r.forge_id.is_empty()))
-            {
-                let spec = format!("every {}s", row.poll_secs);
-                match scheduler.schedule(&spec, &row.id).await {
-                    Ok(_) => n += 1,
-                    Err(e) => tracing::warn!(
-                        session = %row.id, spec = %spec, error = %e,
-                        "fleet: could not register forge-poll job"
-                    ),
-                }
-            }
-            tracing::info!(jobs = n, "fleet: forge-poll jobs registered");
-            if n == 0 {
-                return; // nothing to poll — don't spawn an idle ticker
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "fleet: roster list failed; no forge-poll jobs");
-            return;
-        }
+    per_tenant: bool,
+) -> anyhow::Result<()> {
+    let listen = agent.fleet_webhook_listen();
+    if listen.is_empty() {
+        return Ok(());
     }
+    #[cfg(feature = "forge-ghapp")]
+    {
+        let secret = agent.github_webhook_secret().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "[review_fleet.webhook] listen needs [github_app] webhook_secret_ref (deliveries must be verifiable)"
+            )
+        })?;
+        let server = tiny_http::Server::http(listen)
+            .map_err(|e| anyhow::anyhow!("fleet webhook: could not bind {listen}: {e}"))?;
+        let target = Arc::new(crate::fleet_webhook::FleetWebhookTarget {
+            per_tenant,
+            lifecycle: agent.github_install_lifecycle(),
+            roster,
+            forge_registry: agent.forge_registry(),
+            sink,
+        });
+        crate::fleet_webhook::serve(server, secret, target, tokio::runtime::Handle::current());
+        tracing::info!(
+            listen,
+            path = crate::fleet_webhook::WEBHOOK_PATH,
+            "fleet webhook receiver ready"
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "forge-ghapp"))]
+    {
+        let _ = (roster, sink, per_tenant);
+        anyhow::bail!(
+            "[review_fleet.webhook] listen requires an agent built with the `forge-ghapp` feature"
+        )
+    }
+}
 
+/// Re-run the fleet sync every [`crate::fleet_sync::FLEET_RESYNC_SECS`] (forge-auth F6),
+/// so roster edits — a new row, a disabled one, a changed poll interval — are picked up
+/// live. The first pass already ran at boot.
+fn spawn_fleet_resync(sync: Arc<crate::fleet_sync::FleetSync>) {
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(crate::fleet_sync::FLEET_RESYNC_SECS);
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            tick.tick().await;
+            let r = sync.sync_once().await;
+            if r.jobs_added + r.jobs_cancelled + r.removed > 0 {
+                tracing::info!(
+                    added = r.jobs_added,
+                    cancelled = r.jobs_cancelled,
+                    removed = r.removed,
+                    jobs = r.jobs,
+                    "fleet: roster re-synced"
+                );
+            }
+        }
+    });
+}
+
+/// Drive the C6 forge-poll jobs (inc 4a) the [`crate::fleet_sync::FleetSync`] registers:
+/// fired on a fixed [`FLEET_POLL_TICK_SECS`] tick through `agent-scheduler` (whose overlap
+/// guard means a slow poll never stacks a second copy). Each fire runs under its row's
+/// tenant, builds the row's session-scoped forge (C5) and emits a trigger for every open
+/// non-draft PR onto `sink` ([`agent_review_fleet::poll_session`], which bounds pages +
+/// triggers against a hostile forge response).
+fn spawn_forge_poll(
+    sync: Arc<crate::fleet_sync::FleetSync>,
+    sink: Arc<dyn agent_core::TriggerSink>,
+) {
+    let scheduler = sync.scheduler();
+    let roster = sync.roster();
+    let forge_registry = sync.forge_registry();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(FLEET_POLL_TICK_SECS));
         loop {
@@ -1475,40 +1510,13 @@ async fn spawn_forge_poll(
             let sink = sink.clone();
             let forge_registry = forge_registry.clone();
             scheduler
-                .tick_with(move |session_id| {
-                    let roster = roster.clone();
-                    let sink = sink.clone();
-                    let forge_registry = forge_registry.clone();
-                    async move {
-                        let row = roster
-                            .get(&session_id)
-                            .await
-                            .map_err(|e| agent_core::Error::Scheduler(e.to_string()))?;
-                        // Inline (`backend`) or persisted-card (`forge_id`) forge —
-                        // `resolve_session_forge` dispatches (config C36 / D1b).
-                        match agent_runtime::resolve_session_forge(&row, forge_registry.as_ref())
-                            .await
-                            .map_err(|e| agent_core::Error::Scheduler(e.to_string()))?
-                        {
-                            Some(forge) => {
-                                let report = agent_review_fleet::poll_session(
-                                    forge.as_ref(),
-                                    &session_id,
-                                    sink.as_ref(),
-                                    agent_review_fleet::MAX_TRIGGERS_PER_TICK,
-                                )
-                                .await?;
-                                Ok(format!(
-                                    "polled {}: {} emitted / {} scanned{}",
-                                    session_id,
-                                    report.emitted,
-                                    report.scanned,
-                                    if report.capped { " (capped)" } else { "" }
-                                ))
-                            }
-                            None => Ok(format!("polled {session_id}: no forge configured")),
-                        }
-                    }
+                .tick_with(move |goal| {
+                    crate::fleet_sync::poll_job(
+                        goal,
+                        roster.clone(),
+                        forge_registry.clone(),
+                        sink.clone(),
+                    )
                 })
                 .await;
         }
@@ -1526,6 +1534,8 @@ async fn spawn_forge_poll(
 /// Emits onto the same `sink` the orchestrator drains, so a Slack-posted link and a
 /// polled PR are indistinguishable downstream. A row whose card is missing, disabled,
 /// or non-Slack contributes no trigger (fail-closed; a Matrix card is progress-only).
+/// Each driven tenant's rows are read under its scope (forge-auth F6). Built once at boot:
+/// unlike the poll jobs, a Slack subscription edit still needs a restart.
 async fn spawn_slack_watch(
     agent: Arc<Agent>,
     roster: Arc<dyn agent_core::FleetRegistry>,
@@ -1534,72 +1544,54 @@ async fn spawn_slack_watch(
     let legacy_ref = agent.fleet_slack_app_token_ref().trim().to_string();
     let registry = agent.transport_registry();
 
-    let rows = match roster.list().await {
-        Ok(rows) => rows,
+    // Per driven tenant (forge-auth F6): its rows and their transport cards are read under
+    // its scope, and its subscriptions stamp it on their triggers.
+    let tenants = match crate::fleet_sync::driven_tenants(agent.fleet_tenants().as_ref()).await {
+        Ok(t) => t,
         Err(e) => {
-            tracing::warn!(error = %e, "fleet: roster list failed; Slack watch disabled");
+            tracing::warn!(error = %e, "fleet: tenant discovery failed; Slack watch disabled");
             return;
         }
     };
 
-    // token_ref -> the watch fanning out every row that resolves to that token. A card
-    // is fetched at most once per id (a dangling/errored id ⇒ no trigger, warned once).
+    // token_ref -> the watch fanning out every row that resolves to that token.
     // Keyed by (owner, token_ref): a card's token belongs to the row's tenant and
-    // resolves confined to it (S17); the legacy `[review_fleet.slack]` ref is operator
+    // resolves confined to it (S17); the legacy `[review_fleet.slack] ref` is operator
     // config (owner `None`).
     let mut groups: std::collections::HashMap<(Option<String>, String), agent_slack::SlackWatch> =
         std::collections::HashMap::new();
-    let mut card_cache: std::collections::HashMap<String, Option<agent_core::TransportCard>> =
-        std::collections::HashMap::new();
 
-    for row in rows.iter().filter(|r| r.enabled) {
-        let card = if row.transport_id.is_empty() {
-            None
-        } else {
-            // Resolve (cached). `None` (absent id or a get error) ⇒ the binding returns
-            // None below and the row is skipped — a bad transport_id never triggers.
-            if !card_cache.contains_key(&row.transport_id) {
-                let resolved = match &registry {
-                    Some(reg) => match reg.get(&row.transport_id).await {
-                        Ok(c) => Some(c),
-                        Err(e) => {
-                            tracing::warn!(session = %row.id, transport_id = %row.transport_id, error = %e,
-                                "fleet: transport card did not resolve; row gets no Slack trigger");
-                            None
-                        }
-                    },
-                    None => {
-                        tracing::warn!(session = %row.id, transport_id = %row.transport_id,
-                            "fleet: a row set transport_id but no TransportRegistry is configured; no Slack trigger");
-                        None
-                    }
-                };
-                card_cache.insert(row.transport_id.clone(), resolved);
-            }
-            card_cache.get(&row.transport_id).and_then(Clone::clone)
-        };
-
-        let Some((token_ref, channels)) =
-            agent_slack::slack_trigger_binding(row, card.as_ref(), &legacy_ref)
+    for tenant in &tenants {
+        let Some(Some(rows)) =
+            crate::fleet_sync::in_tenant(tenant, slack_rows(roster.as_ref(), registry.as_ref()))
+                .await
         else {
-            continue; // no live Slack inbound for this row (non-slack/disabled/missing card).
+            continue;
         };
-        if token_ref.trim().is_empty() {
-            continue; // no token configured for this row's transport.
-        }
-        let expect = match agent_slack::ExpectRepo::new(&row.backend, &row.base_url, &row.repo) {
-            Some(e) => e,
-            None => {
-                tracing::warn!(session = %row.id,
-                    "fleet: slack watch skipped a row with an unrecognized backend/base_url");
-                continue;
+        for (row, card) in &rows {
+            let Some((token_ref, channels)) =
+                agent_slack::slack_trigger_binding(row, card.as_ref(), &legacy_ref)
+            else {
+                continue; // no live Slack inbound for this row (non-slack/disabled/missing card).
+            };
+            if token_ref.trim().is_empty() {
+                continue; // no token configured for this row's transport.
             }
-        };
-        let owner = (!row.transport_id.is_empty()).then(|| row.user.clone());
-        let watch = groups.entry((owner, token_ref)).or_default();
-        for channel in channels {
-            // `subscribe` ignores blank channels, so an empty inline channel is a no-op.
-            watch.subscribe(&channel, &row.id, expect.clone());
+            let expect = match agent_slack::ExpectRepo::new(&row.backend, &row.base_url, &row.repo)
+            {
+                Some(e) => e,
+                None => {
+                    tracing::warn!(session = %row.id,
+                        "fleet: slack watch skipped a row with an unrecognized backend/base_url");
+                    continue;
+                }
+            };
+            let owner = (!row.transport_id.is_empty()).then(|| row.user.clone());
+            let watch = groups.entry((owner, token_ref)).or_default();
+            for channel in channels {
+                // `subscribe` ignores blank channels, so an empty inline channel is a no-op.
+                watch.subscribe_in(tenant, &channel, &row.id, expect.clone());
+            }
         }
     }
 
@@ -1640,6 +1632,53 @@ async fn spawn_slack_watch(
     } else {
         tracing::info!(connections, "fleet: slack watch starting");
     }
+}
+
+/// The enabled rows of the roster in scope, each with its transport card (`None` for a
+/// row without a `transport_id`, or one whose card is absent / errored — that row gets no
+/// Slack trigger, fail closed). A card is fetched at most once per id. `None` when the
+/// roster list itself failed.
+async fn slack_rows(
+    roster: &dyn agent_core::FleetRegistry,
+    registry: Option<&Arc<dyn agent_core::TransportRegistry>>,
+) -> Option<Vec<(agent_core::FleetSession, Option<agent_core::TransportCard>)>> {
+    let rows = match roster.list().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "fleet: roster list failed; no Slack triggers for this tenant");
+            return None;
+        }
+    };
+    let mut card_cache: std::collections::HashMap<String, Option<agent_core::TransportCard>> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for row in rows.into_iter().filter(|r| r.enabled) {
+        let card = if row.transport_id.is_empty() {
+            None
+        } else {
+            if !card_cache.contains_key(&row.transport_id) {
+                let resolved = match registry {
+                    Some(reg) => match reg.get(&row.transport_id).await {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            tracing::warn!(session = %row.id, transport_id = %row.transport_id, error = %e,
+                                "fleet: transport card did not resolve; row gets no Slack trigger");
+                            None
+                        }
+                    },
+                    None => {
+                        tracing::warn!(session = %row.id, transport_id = %row.transport_id,
+                            "fleet: a row set transport_id but no TransportRegistry is configured; no Slack trigger");
+                        None
+                    }
+                };
+                card_cache.insert(row.transport_id.clone(), resolved);
+            }
+            card_cache.get(&row.transport_id).and_then(Clone::clone)
+        };
+        out.push((row, card));
+    }
+    Some(out)
 }
 
 /// Resolve the `--serve-sessions` endpoint: `--listen` override, else

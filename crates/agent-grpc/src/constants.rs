@@ -230,3 +230,7 @@ pub const GATEWAY: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/gateway.sock",
     metrics_port: 9700,
 };
+
+/// The `agent --serve-fleet` GitHub App webhook receiver's default port (forge-auth
+/// F6) — plain HTTP, not gRPC; `[review_fleet.webhook] listen` sets it.
+pub const FLEET_WEBHOOK_PORT: u16 = 50110;

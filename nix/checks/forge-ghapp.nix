@@ -8,8 +8,8 @@
 # decision — the security boundary a prompt-injectable tenant `token_ref` is checked
 # against — was previously only *compiled* (clippy `--all-features`), never *run*.
 #
-# This dedicated, feature-scoped check runs it in the gate. It spans BOTH crates that
-# live behind `forge-ghapp`, because `forge-store` does NOT enable `forge-ghapp`, so no
+# This dedicated, feature-scoped check runs it in the gate. It spans every crate with
+# code behind `forge-ghapp`, because `forge-store` does NOT enable `forge-ghapp`, so no
 # other check builds this surface with the feature on:
 #
 #   * agent-runtime — the pure `ghapp_allowed` mint decision (operator bootstrap allowlist
@@ -20,8 +20,13 @@
 #     install-time user-OAuth ownership verifier (F5a), both over a `tiny_http` loopback,
 #     plus the `webhook` HMAC verify (F3). Without this arm those authorization boundaries
 #     were only *compiled* (clippy `--all-features`), never *run*.
+#   * agent-runtime `install_lifecycle` (F6) — the webhook-driven narrowing of that gate
+#     (uninstall/suspend unbind + forget the cached token, unsuspend rebinds only a still-
+#     held claim, repo-list sync never touches the gate).
+#   * agent-cli `fleet_webhook` (F6) — the `POST /webhooks/github` receiver: HMAC verified
+#     before any parse, body cap, delivery replay set, over a real loopback socket.
 #
-# One hermetic/offline invocation, filtered to those modules across both packages
+# One hermetic/offline invocation, filtered to those modules across the three packages
 # (libtest treats several positional filters as OR). The agent-forge store arm
 # (`StoreInstalls` + `VerifiedInstalls` + `verified_install_bindings`, feature `forge-store`) runs under
 # forge-registry-store.nix.
@@ -35,6 +40,6 @@ craneLib.cargoTest (
   commonArgs
   // {
     inherit cargoArtifacts;
-    cargoTestExtraArgs = "-p agent-runtime -p agent-forge --features forge-ghapp -- secrets:: install_gate:: ghapp webhook";
+    cargoTestExtraArgs = "-p agent-runtime -p agent-forge -p agent-cli --features forge-ghapp -- secrets:: install_gate:: install_lifecycle:: ghapp webhook";
   }
 )

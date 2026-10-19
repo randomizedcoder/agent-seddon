@@ -96,6 +96,40 @@ class Rest:
     services: tuple[str, ...]  # fully-qualified service names to transcode
 
 
+@dataclass(frozen=True)
+class Webhook:
+    """The GitHub App webhook listener (forge-auth F6): plain HTTP/1.1 to the fleet's
+    receiver, one exact `POST <path>` route, a body cap, and NO jwt_authn — GitHub sends
+    no bearer; the receiver verifies each delivery's HMAC signature itself."""
+
+    name: str
+    port: int
+    cluster: str
+    upstream_port: int
+    path: str
+    max_body: int
+
+
+# The receiver's own MAX_WEBHOOK_BODY; GitHub caps payloads at 25 MiB, but the
+# events the fleet consumes are far smaller, so a spec asking for more is a bug.
+MAX_WEBHOOK_BODY = 1 << 20
+
+
+def validate_webhook(w: Webhook) -> Webhook:
+    """Fail closed on a spec that would widen the unauthenticated surface: the path
+    must be one exact absolute segment path (no wildcard, query or traversal) and the
+    body cap positive and within MAX_WEBHOOK_BODY."""
+    no_controls("the webhook path", w.path)
+    segs = w.path.split("/")
+    if (not w.path.startswith("/") or len(w.path) > 64 or w.path.endswith("/")
+            or any(s in ("", ".", "..") for s in segs[1:])
+            or any(not all(c.isalnum() or c in "-_" for c in s) for s in segs[1:])):
+        raise EnvoyError(f"webhook path {w.path!r} is not an exact /segment path")
+    if not 0 < w.max_body <= MAX_WEBHOOK_BODY:
+        raise EnvoyError(f"webhook max_body {w.max_body} is outside 1..={MAX_WEBHOOK_BODY}")
+    return w
+
+
 # The transcoder `services` list is derived from the descriptor (nix/rest-descriptor.nix);
 # a value far above the ~40-service surface means a malformed services file, so cap it.
 MAX_SERVICES = 512
@@ -134,6 +168,7 @@ class Spec:
     otel_port: int
     gateway_port: int
     rest: Rest | None = None
+    webhook: Webhook | None = None
 
     @staticmethod
     def load(raw: Mapping) -> "Spec":
@@ -150,7 +185,13 @@ class Spec:
                     int(r["upstream_port"]), str(r["descriptor"]),
                     load_services(str(r["services_file"])),
                 )
-            return Spec(listeners, int(raw["otel_port"]), int(raw["gateway_port"]), rest)
+            webhook = None
+            w = raw.get("webhook")
+            if w is not None:
+                webhook = validate_webhook(Webhook(
+                    str(w["name"]), int(w["port"]), str(w["cluster"]),
+                    int(w["upstream_port"]), str(w["path"]), int(w["max_body"])))
+            return Spec(listeners, int(raw["otel_port"]), int(raw["gateway_port"]), rest, webhook)
         except (KeyError, TypeError, ValueError) as e:
             raise EnvoyError(f"bad spec: {e}") from e
 
@@ -736,6 +777,71 @@ def rest_listener(rest: Rest, k: Knobs, descriptor_path: str, jwt: Jwt | None, t
     }
 
 
+def webhook_listener(w: Webhook, k: Knobs, tls: Tls | None) -> dict:
+    """The GitHub App webhook listener. Filter chain `buffer ▶ router`: no `grpc_web`
+    (plain HTTP), no CORS (no browser calls it), and **no jwt_authn** — the receiver's
+    HMAC check is the authentication, so nothing here may forward a path the receiver
+    does not verify. Hence ONE route, exact `path` + `:method POST`, and a catch-all
+    direct 404: the agent's other surfaces are never reachable through this listener.
+    `buffer` enforces the body cap at the edge (413), and the header/request timeouts
+    absorb slow clients the receiver's tiny_http would otherwise hold a thread for.
+    Binds the host knob (GitHub must reach it) and terminates the same downstream TLS;
+    the upstream hop is plain HTTP to the loopback receiver."""
+    hcm = {
+        "@type": any_type(
+            "envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"),
+        "stat_prefix": w.name,
+        "codec_type": "AUTO",
+        "request_headers_timeout": "5s",
+        "request_timeout": "15s",
+        "max_request_headers_kb": 32,
+        "access_log": access_log(k.otlp_authorization),
+        "tracing": tracing(k.otlp_authorization),
+        "route_config": {
+            "name": f"{w.name}_route",
+            "virtual_hosts": [{
+                "name": w.cluster,
+                "domains": ["*"],
+                "routes": [
+                    {"match": {"path": w.path, "headers": [
+                        {"name": ":method", "string_match": {"exact": "POST"}}]},
+                     # GitHub abandons a delivery after 10s; the receiver answers 202 at once.
+                     "route": {"cluster": w.cluster, "timeout": "10s"}},
+                    {"match": {"prefix": "/"}, "direct_response": {"status": 404}},
+                ],
+            }],
+        },
+        "http_filters": [
+            {"name": "envoy.filters.http.buffer", "typed_config": {
+                "@type": any_type("envoy.extensions.filters.http.buffer.v3.Buffer"),
+                "max_request_bytes": w.max_body}},
+            {"name": "envoy.filters.http.router",
+             "typed_config": {"@type": any_type("envoy.extensions.filters.http.router.v3.Router")}},
+        ],
+    }
+    chain: dict = {"filters": [{
+        "name": "envoy.filters.network.http_connection_manager", "typed_config": hcm}]}
+    if tls is not None:
+        chain["transport_socket"] = {
+            "name": "envoy.transport_sockets.tls",
+            "typed_config": {
+                "@type": any_type("envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext"),
+                "common_tls_context": {
+                    "alpn_protocols": ["h2", "http/1.1"],
+                    "tls_certificates": [{
+                        "certificate_chain": {"filename": tls.cert},
+                        "private_key": {"filename": tls.key},
+                    }],
+                },
+            },
+        }
+    return {
+        "name": w.name,
+        "address": {"socket_address": {"address": k.host, "port_value": w.port}},
+        "filter_chains": [chain],
+    }
+
+
 def jwks_cluster(url: str) -> dict:
     u = urlsplit(url)
     host = u.hostname or ""
@@ -765,6 +871,10 @@ def render(spec: Spec, k: Knobs, jwt: Jwt | None, paths: Mapping[str, str]) -> d
         # The transcoder fronts an existing cluster (agent_gateway); no new cluster.
         # `jwt` is the same provider the grpc-web listeners use — edge auth on REST too.
         listeners.append(rest_listener(spec.rest, k, p(spec.rest.descriptor), jwt, tls))
+    if spec.webhook is not None:
+        # Its own HTTP/1.1 cluster: tiny_http speaks no h2, and no upstream TLS.
+        clusters.append(cluster(spec.webhook.cluster, "127.0.0.1", spec.webhook.upstream_port, h2=False))
+        listeners.append(webhook_listener(spec.webhook, k, tls))
     return {"static_resources": {"listeners": listeners, "clusters": clusters}}
 
 
@@ -844,6 +954,10 @@ def cmd_up(args: argparse.Namespace, env: Mapping[str, str], runner: Runner) -> 
         r = spec.rest
         print(f"      {scheme}://127.0.0.1:{r.port}  -> 127.0.0.1:{r.upstream_port} "
               f"({r.cluster}, REST/JSON transcoder, {len(r.services)} services)")
+    if spec.webhook is not None:
+        w = spec.webhook
+        print(f"      {scheme}://{k.host}:{w.port}{w.path}  -> 127.0.0.1:{w.upstream_port} "
+              f"({w.cluster}, GitHub webhooks, HMAC-verified by the agent, no edge JWT)")
     print(f"      CORS origins: {', '.join(k.origins)}")
     argv = [rt, "run", "-d", "--name", args.name, "--network", "host",
             # the container user must read the 0600 config (and any TLS keys) we own

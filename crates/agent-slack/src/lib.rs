@@ -60,6 +60,8 @@ use agent_core::{FleetSession, FleetTrigger, TriggerSink};
 /// point at.
 #[derive(Debug, Clone)]
 pub struct Subscription {
+    /// The tenant owning the row (forge-auth F6); stamped on the trigger. Empty ⇒ unscoped.
+    pub tenant: String,
     pub session_id: String,
     pub expect: ExpectRepo,
 }
@@ -80,6 +82,18 @@ impl SlackWatch {
     /// Subscribe `session_id` to `channel`, accepting only PR links matching `expect`. A
     /// blank channel (a row with no trigger channel) is ignored.
     pub fn subscribe(&mut self, channel: &str, session_id: &str, expect: ExpectRepo) {
+        self.subscribe_in("", channel, session_id, expect);
+    }
+
+    /// [`Self::subscribe`] for `tenant`'s row: its triggers carry that tenant, so the
+    /// fleet resolves the row in the right per-tenant roster (forge-auth F6).
+    pub fn subscribe_in(
+        &mut self,
+        tenant: &str,
+        channel: &str,
+        session_id: &str,
+        expect: ExpectRepo,
+    ) {
         let channel = channel.trim();
         if channel.is_empty() {
             return;
@@ -88,6 +102,7 @@ impl SlackWatch {
             .entry(channel.to_string())
             .or_default()
             .push(Subscription {
+                tenant: tenant.to_string(),
                 session_id: session_id.to_string(),
                 expect,
             });
@@ -113,6 +128,7 @@ impl SlackWatch {
                     session_id: sub.session_id.clone(),
                     pr_number,
                     requested_by: Vec::new(),
+                    tenant: sub.tenant.clone(),
                 });
                 emitted += 1;
             }
@@ -270,6 +286,7 @@ mod tests {
                 session_id: "acme:web-pr".into(),
                 pr_number: 5,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             }],
             "the trigger carries the session id and PR number"
         );
@@ -327,11 +344,13 @@ mod tests {
             session_id: "s-web".into(),
             pr_number: 1,
             requested_by: Vec::new(),
+            tenant: String::new(),
         }));
         assert!(got.contains(&FleetTrigger {
             session_id: "s-api".into(),
             pr_number: 2,
             requested_by: Vec::new(),
+            tenant: String::new(),
         }));
     }
 
@@ -361,6 +380,7 @@ mod tests {
                 session_id: "acme:web-pr".into(),
                 pr_number: 12,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             }],
             "exactly the one watched-channel, matching-repo link triggered a review"
         );

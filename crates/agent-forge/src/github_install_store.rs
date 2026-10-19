@@ -241,6 +241,65 @@ impl VerifiedInstalls {
         }
     }
 
+    /// Release this tenant's claim on `installation_id` and delete its verified row,
+    /// atomically — the uninstall path (forge-auth F6). `Ok(true)` = this tenant held it and
+    /// both rows are gone; `Ok(false)` = the claim is absent or another tenant's, and
+    /// nothing was written (a tenant can never release someone else's installation). The
+    /// batch opens with a compare-and-swap that re-asserts the current claim, so a claim
+    /// that changed hands since the read rejects the whole batch.
+    pub async fn revoke(&self, installation_id: &str) -> Result<bool> {
+        if !agent_core::valid_installation_id(installation_id) {
+            return Err(Error::Config("invalid installation id".into()));
+        }
+        let id = installation_id.to_string();
+        let mine = self.tenant.as_bytes().to_vec();
+        let current = self.backend.get(INSTALL_CLAIMS, CLAIMS_SCOPE, &id).await?;
+        if current.as_deref() != Some(mine.as_slice()) {
+            return Ok(false);
+        }
+        let batch = [
+            Write::CompareAndSwap {
+                collection: INSTALL_CLAIMS,
+                tenant: CLAIMS_SCOPE.to_string(),
+                id: id.clone(),
+                expected: current,
+                blob: mine,
+            },
+            Write::Delete {
+                collection: INSTALL_CLAIMS,
+                tenant: CLAIMS_SCOPE.to_string(),
+                id: id.clone(),
+            },
+            Write::Delete {
+                collection: INSTALLS_VERIFIED,
+                tenant: self.tenant.clone(),
+                id,
+            },
+        ];
+        match self.backend.apply(&batch).await {
+            Ok(()) => Ok(true),
+            Err(e) if is_conflict(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether this tenant has a verified row for `installation_id` **and** holds its
+    /// claim — the condition under which a suspended installation may be re-bound.
+    pub async fn holds(&self, installation_id: &str) -> Result<bool> {
+        if verified_owner(&self.backend, installation_id)
+            .await?
+            .as_deref()
+            != Some(self.tenant.as_str())
+        {
+            return Ok(false);
+        }
+        Ok(self
+            .list()
+            .await?
+            .iter()
+            .any(|r| r.installation_id == installation_id))
+    }
+
     /// This tenant's verified rows (each re-validated on load).
     pub async fn list(&self) -> Result<Vec<VerifiedInstall>> {
         self.backend
@@ -614,6 +673,47 @@ mod tests {
         let seed = verified_install_bindings(&b).await.expect("rebuild");
         assert_eq!(seed.bindings.len(), 1);
         assert!(seed.unclaimed.is_empty());
+    }
+
+    // Revoke releases only the caller's own claim: acme revoking its install clears the
+    // claim + verified row (so the rebuild binds nothing and another tenant may onboard it);
+    // beta revoking acme's install, or anyone revoking an unclaimed one, writes nothing.
+    #[rstest]
+    #[case::positive_owner_revokes("acme", "123", true)]
+    #[case::negative_unclaimed_install("acme", "999", false)]
+    #[case::adversarial_other_tenant_cannot_release("beta", "123", false)]
+    #[tokio::test]
+    async fn revoke_releases_only_own_claim(
+        #[case] who: &str,
+        #[case] id: &str,
+        #[case] revoked: bool,
+    ) {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        let acme = VerifiedInstalls::with_tenant(b.clone(), "acme").expect("tenant");
+        assert!(acme.claim(&verified("123")).await.expect("claim"));
+        let caller = VerifiedInstalls::with_tenant(b.clone(), who).expect("tenant");
+        assert_eq!(caller.revoke(id).await.expect("revoke"), revoked);
+        let owner = verified_owner(&b, "123").await.expect("owner");
+        assert_eq!(owner.as_deref(), (!revoked).then_some("acme"));
+        assert_eq!(acme.holds("123").await.expect("holds"), !revoked);
+        assert_eq!(acme.list().await.expect("list").is_empty(), revoked);
+        if revoked {
+            let beta = VerifiedInstalls::with_tenant(b.clone(), "beta").expect("tenant");
+            assert!(
+                beta.claim(&verified("123")).await.expect("claim"),
+                "freed for a new owner"
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::adversarial_traversal_id("../123")]
+    #[case::negative_empty_id("")]
+    #[tokio::test]
+    async fn revoke_rejects_malformed_id(#[case] id: &str) {
+        let b: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+        let acme = VerifiedInstalls::with_tenant(b, "acme").expect("tenant");
+        assert!(acme.revoke(id).await.is_err());
     }
 
     // adversarial: many concurrent claims on one installation from different tenants — the

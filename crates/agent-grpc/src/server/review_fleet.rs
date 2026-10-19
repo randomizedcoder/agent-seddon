@@ -261,10 +261,13 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
             let req = request.into_inner();
             // `enqueue` is fire-and-forget into a bounded, coalescing queue — it never
             // blocks or rejects; the outcome says whether it queued or coalesced.
+            // The caller's tenant (in scope here): the roster row was written under it, so
+            // the fleet must resolve `session_id` there too (forge-auth F6).
             let outcome = triggers.enqueue(FleetTrigger {
                 session_id: req.session_id,
                 pr_number: req.pr_number,
                 requested_by: requester.into_iter().collect(),
+                tenant: agent_core::scoped_tenant().unwrap_or_default(),
             });
             Ok(Response::new(pb::ReviewNowReply {
                 accepted: matches!(outcome, TriggerOutcome::Accepted),
@@ -652,5 +655,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        got: Mutex<Vec<FleetTrigger>>,
+    }
+    impl TriggerSink for RecordingSink {
+        fn enqueue(&self, trigger: FleetTrigger) -> TriggerOutcome {
+            self.got.lock().unwrap().push(trigger);
+            TriggerOutcome::Accepted
+        }
+    }
+
+    // `ReviewNow` stamps the trigger with the caller's tenant (forge-auth F6) so the fleet
+    // drain resolves `session_id` in the roster the row was written under — never a tenant
+    // named in the request. The verified principal wins over the self-asserted header;
+    // a hostile or missing identity stamps "" (unscoped ⇒ the operator's own roster).
+    #[rstest]
+    #[case::positive_header_tenant_stamped(None, Some("acme"), Some("s1"), "acme")]
+    #[case::positive_verified_tenant_stamped(Some("acme"), Some("acme"), Some("s1"), "acme")]
+    #[case::negative_no_identity_is_unscoped(None, None, None, "")]
+    #[case::corner_user_without_session_is_unscoped(None, Some("acme"), None, "")]
+    #[case::boundary_max_len_tenant(None, Some(&*"a".repeat(128)), Some("s1"), &*"a".repeat(128))]
+    #[case::adversarial_header_cannot_name_other_tenant(
+        Some("acme"),
+        Some("globex"),
+        Some("s1"),
+        "acme"
+    )]
+    #[case::adversarial_traversal_header_is_unscoped(None, Some("../../x"), Some("s1"), "")]
+    #[tokio::test]
+    async fn review_now_stamps_caller_tenant(
+        #[case] principal: Option<&str>,
+        #[case] header: Option<&str>,
+        #[case] session: Option<&str>,
+        #[case] want: &str,
+    ) {
+        let sink = Arc::new(RecordingSink::default());
+        let svc =
+            ReviewFleetSvc::new(Arc::new(TenantProbeFleet::default())).with_triggers(sink.clone());
+        let req = req_with(
+            pb::ReviewNowRequest {
+                session_id: "row1".into(),
+                pr_number: 7,
+            },
+            header,
+            session,
+        );
+        let res = match principal {
+            Some(t) => agent_core::principal_scope(admin(t), svc.review_now(req)).await,
+            None => svc.review_now(req).await,
+        };
+        assert!(res.expect("review_now").into_inner().accepted);
+        let got = sink.got.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (
+                got[0].tenant.as_str(),
+                got[0].session_id.as_str(),
+                got[0].pr_number
+            ),
+            (want, "row1", 7)
+        );
     }
 }

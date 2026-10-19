@@ -26,6 +26,10 @@ pub mod hooks;
 /// into the `ghapp:` mint gate (forge-auth F5c2).
 #[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
 pub mod install_gate;
+/// GitHub App installation lifecycle from webhooks — uninstall/suspend narrow the mint
+/// gate, repo-list sync (forge-auth F6).
+#[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
+pub mod install_lifecycle;
 #[cfg(feature = "auth")]
 pub mod login;
 mod metered;
@@ -116,6 +120,10 @@ mod scheduler_driver;
 pub use agent::{
     Agent, BudgetExceeded, GrpcTlsSettings, OpenError, Session, SessionManager, Settings, Spend,
 };
+/// The constant-time `X-Hub-Signature-256` check the fleet webhook receiver runs on
+/// every delivery (forge-auth F3/F6).
+#[cfg(feature = "forge-ghapp")]
+pub use agent_forge::webhook::verify_webhook_signature;
 pub use agent_metrics::Metrics;
 pub use builder::{
     build_agent, build_agent_mode, build_agent_with, build_agent_with_mode, BuildMode,

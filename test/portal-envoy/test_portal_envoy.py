@@ -789,5 +789,117 @@ class RestTranscoder(unittest.TestCase):
         self.assertEqual(text.count('"sekrit"'), 2 * (len(SPEC.listeners) + 1))
 
 
+
+HOOK = E.Webhook("fleet_webhook", 8096, "agent_fleet_webhook", 50110, "/webhooks/github", 1 << 20)
+SPEC_HOOK = E.Spec(listeners=SPEC.listeners, otel_port=4317, gateway_port=50100, webhook=HOOK)
+
+
+def hook_listener_of(cfg: dict) -> dict:
+    return next(l for l in cfg["static_resources"]["listeners"] if l["name"] == "fleet_webhook")
+
+
+def hook_hcm(cfg: dict) -> dict:
+    return hook_listener_of(cfg)["filter_chains"][0]["filters"][0]["typed_config"]
+
+
+class SpecLoadWebhook(unittest.TestCase):
+    RAW = {"name": "fleet_webhook", "port": 8096, "cluster": "agent_fleet_webhook",
+           "upstream_port": 50110, "path": "/webhooks/github", "max_body": 1 << 20}
+
+    def load(self, **over) -> E.Spec:
+        return E.Spec.load({**SPEC_RAW, "webhook": {**self.RAW, **over}})
+
+    def test_positive_webhook_is_parsed(self):
+        self.assertEqual(self.load().webhook, HOOK)
+
+    def test_boundary_no_webhook_key_is_backward_compatible(self):
+        self.assertIsNone(E.Spec.load(SPEC_RAW).webhook)
+
+    def test_boundary_body_cap_limits(self):
+        self.assertEqual(self.load(max_body=1).webhook.max_body, 1)
+        self.assertEqual(self.load(max_body=E.MAX_WEBHOOK_BODY).webhook.max_body, E.MAX_WEBHOOK_BODY)
+        for bad in (0, -1, E.MAX_WEBHOOK_BODY + 1):
+            with self.subTest(bad), self.assertRaises(E.EnvoyError):
+                self.load(max_body=bad)
+
+    def test_negative_missing_field(self):
+        raw = {**SPEC_RAW, "webhook": {k: v for k, v in self.RAW.items() if k != "path"}}
+        with self.assertRaises(E.EnvoyError):
+            E.Spec.load(raw)
+
+    def test_adversarial_path_cannot_widen_the_unauthenticated_route(self):
+        # The webhook route skips edge JWT, so its path must be ONE exact path — never
+        # a prefix-ish "/", a traversal, a wildcard, a query or a control character.
+        for bad in ("/", "", "webhooks", "/webhooks/", "/webhooks/../agent.v1.X",
+                    "/webhooks/./github", "/webhooks//github", "/webhooks/*", "/webhooks/github?x=1",
+                    "/webhooks/git hub", "/webhooks/github\n", "/webhooks/\x00", "/" + "a" * 64):
+            with self.subTest(bad), self.assertRaises(E.EnvoyError):
+                self.load(path=bad.encode().decode("unicode_escape"))
+
+
+class WebhookListener(unittest.TestCase):
+    JWT = E.Jwt("https://agent.example", ("agent-seddon",), jwks_inline=E.validate_jwks(JWKS))
+
+    def render(self, env: dict, jwt: E.Jwt | None = None) -> dict:
+        return E.render(SPEC_HOOK, E.knobs_from_env(env, SPEC_HOOK), jwt, {})
+
+    def test_positive_only_post_on_the_exact_path_reaches_the_receiver(self):
+        routes = hook_hcm(self.render({}))["route_config"]["virtual_hosts"][0]["routes"]
+        self.assertEqual(len(routes), 2)
+        self.assertEqual(routes[0]["match"], {"path": "/webhooks/github", "headers": [
+            {"name": ":method", "string_match": {"exact": "POST"}}]})
+        self.assertEqual(routes[0]["route"]["cluster"], "agent_fleet_webhook")
+        self.assertEqual(routes[1], {"match": {"prefix": "/"}, "direct_response": {"status": 404}})
+
+    def test_adversarial_no_route_forwards_anything_but_the_webhook(self):
+        # Every forwarding route is the exact webhook path: the agent's gRPC/REST
+        # surfaces are never reachable through this JWT-less listener.
+        routes = hook_hcm(self.render({}))["route_config"]["virtual_hosts"][0]["routes"]
+        fwd = [r for r in routes if "route" in r]
+        self.assertEqual([r["match"].get("path") for r in fwd], ["/webhooks/github"])
+        self.assertFalse(any("prefix" in r["match"] or "safe_regex" in r["match"] for r in fwd))
+
+    def test_positive_no_edge_jwt_even_when_auth_is_on(self):
+        # GitHub sends no bearer; the receiver verifies the HMAC. The other listeners
+        # still get jwt_authn in the same render.
+        cfg = self.render({}, self.JWT)
+        names = [f["name"] for f in hook_hcm(cfg)["http_filters"]]
+        self.assertEqual(names, ["envoy.filters.http.buffer", "envoy.filters.http.router"])
+        self.assertIn("envoy.filters.http.jwt_authn", filter_names(cfg, 0))
+
+    def test_positive_body_cap_and_slow_client_timeouts(self):
+        h = hook_hcm(self.render({}))
+        self.assertEqual(h["http_filters"][0]["typed_config"]["max_request_bytes"], 1 << 20)
+        self.assertEqual(h["request_headers_timeout"], "5s")
+        self.assertEqual(h["request_timeout"], "15s")
+
+    def test_positive_h1_cluster_without_upstream_tls(self):
+        # tiny_http speaks HTTP/1.1 only; the receiver has no TLS, so even with upstream
+        # mTLS configured for the gRPC clusters the webhook hop stays plain loopback HTTP.
+        cfg = self.render({"PORTAL_UPSTREAM_CA": "/h/ca.crt"})
+        c = next(c for c in cfg["static_resources"]["clusters"] if c["name"] == "agent_fleet_webhook")
+        self.assertNotIn("typed_extension_protocol_options", c)
+        self.assertNotIn("transport_socket", c)
+        self.assertEqual(c["load_assignment"]["endpoints"][0]["lb_endpoints"][0]["endpoint"]
+                         ["address"]["socket_address"], {"address": "127.0.0.1", "port_value": 50110})
+
+    def test_corner_follows_the_host_knob_and_downstream_tls(self):
+        cfg = self.render({"PORTAL_GRPC_WEB_HOST": "0.0.0.0",
+                           "PORTAL_TLS_CERT": "/h/l.crt", "PORTAL_TLS_KEY": "/h/l.key"})
+        l = hook_listener_of(cfg)
+        self.assertEqual(l["address"]["socket_address"]["address"], "0.0.0.0")
+        self.assertIn("transport_socket", l["filter_chains"][0])
+
+    def test_corner_no_cors_on_the_webhook(self):
+        vh = hook_hcm(self.render({}))["route_config"]["virtual_hosts"][0]
+        self.assertNotIn("typed_per_filter_config", vh)
+
+    def test_boundary_spec_without_webhook_renders_no_listener_or_cluster(self):
+        cfg = E.render(SPEC, E.knobs_from_env({}, SPEC), None, {})
+        self.assertFalse([l for l in cfg["static_resources"]["listeners"] if l["name"] == "fleet_webhook"])
+        self.assertFalse([c for c in cfg["static_resources"]["clusters"]
+                          if c["name"] == "agent_fleet_webhook"])
+
+
 if __name__ == "__main__":
     unittest.main()

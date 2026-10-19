@@ -85,6 +85,10 @@ let
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}
+
+    /// The `agent --serve-fleet` GitHub App webhook receiver's default port (forge-auth
+    /// F6) — plain HTTP, not gRPC; `[review_fleet.webhook] listen` sets it.
+    pub const FLEET_WEBHOOK_PORT: u16 = ${toString c.fleetWebhookPort};
   '';
 
   rawFile = pkgs.writeText "agent-grpc-constants-raw.rs" raw;

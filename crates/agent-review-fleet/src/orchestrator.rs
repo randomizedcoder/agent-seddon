@@ -116,13 +116,28 @@ pub async fn reconcile(
     report
 }
 
+/// A trigger's identity for coalescing and the in-flight guard: `(tenant, session_id,
+/// pr_number)`. The tenant is part of it (forge-auth F6) — two tenants may hold rows with
+/// the same id, and one tenant's pending review must never swallow another's.
+type TriggerKey = (String, String, u64);
+
+fn trigger_key(t: &FleetTrigger) -> TriggerKey {
+    (t.tenant.clone(), t.session_id.clone(), t.pr_number)
+}
+
+/// The [`TriggerKey`] of an unscoped (single-operator) trigger — what the two-argument
+/// in-flight helpers address.
+fn unscoped_key(session_id: &str, pr_number: u64) -> TriggerKey {
+    (String::new(), session_id.to_string(), pr_number)
+}
+
 /// Shared state of a [`TriggerQueue`]/[`TriggerReceiver`] pair: the set of
-/// `(session_id, pr_number)` keys currently *pending* (queued but not yet popped), used
-/// to coalesce duplicates before they reach the orchestrator. Each key holds the merged
-/// requesters of every trigger folded into it (S19), handed to the popped trigger.
+/// [`TriggerKey`]s currently *pending* (queued but not yet popped), used to coalesce
+/// duplicates before they reach the orchestrator. Each key holds the merged requesters of
+/// every trigger folded into it (S19), handed to the popped trigger.
 #[derive(Default)]
 struct QueueShared {
-    pending: Mutex<HashMap<(String, u64), Vec<String>>>,
+    pending: Mutex<HashMap<TriggerKey, Vec<String>>>,
 }
 
 /// The producer half of the orchestrator's **bounded, coalescing** trigger queue,
@@ -132,6 +147,10 @@ struct QueueShared {
 pub struct TriggerQueue {
     tx: tokio::sync::mpsc::Sender<FleetTrigger>,
     shared: Arc<QueueShared>,
+    /// Whether triggers keep their tenant (a per-tenant fleet). `false` clears it on
+    /// intake, so a single-operator fleet coalesces a `ReviewNow` stamped with a caller's
+    /// identity header together with the poller's unscoped trigger for the same PR.
+    per_tenant: bool,
 }
 
 /// The consumer half: the serve loop pops triggers here and drives each through
@@ -146,14 +165,21 @@ pub struct TriggerReceiver {
 impl TriggerQueue {
     /// Build a bounded queue of `capacity` triggers, returning the sink half (to hand to
     /// trigger sources) and the receiver half (to drive in the serve loop). `capacity`
-    /// is clamped to at least 1.
+    /// is clamped to at least 1. Unscoped: every trigger's tenant is cleared on intake.
     pub fn channel(capacity: usize) -> (Arc<TriggerQueue>, TriggerReceiver) {
+        Self::channel_for(capacity, false)
+    }
+
+    /// [`Self::channel`] for a fleet that is (`per_tenant`) or isn't multi-tenant. A
+    /// per-tenant queue keeps each trigger's tenant, so the drain resolves it there.
+    pub fn channel_for(capacity: usize, per_tenant: bool) -> (Arc<TriggerQueue>, TriggerReceiver) {
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
         let shared = Arc::new(QueueShared::default());
         (
             Arc::new(TriggerQueue {
                 tx,
                 shared: shared.clone(),
+                per_tenant,
             }),
             TriggerReceiver { rx, shared },
         )
@@ -161,8 +187,11 @@ impl TriggerQueue {
 }
 
 impl TriggerSink for TriggerQueue {
-    fn enqueue(&self, trigger: FleetTrigger) -> TriggerOutcome {
-        let kt = (trigger.session_id.clone(), trigger.pr_number);
+    fn enqueue(&self, mut trigger: FleetTrigger) -> TriggerOutcome {
+        if !self.per_tenant {
+            trigger.tenant.clear();
+        }
+        let kt = trigger_key(&trigger);
         let mut pending = self.shared.pending.lock().expect("queue pending poisoned");
         if let Some(requesters) = pending.get_mut(&kt) {
             // Folded into the pending review, but its requester is kept (S19): a second
@@ -213,7 +242,7 @@ impl TriggerReceiver {
             .pending
             .lock()
             .expect("queue pending poisoned")
-            .remove(&(trigger.session_id.clone(), trigger.pr_number))
+            .remove(&trigger_key(&trigger))
             .unwrap_or_default();
         Some(trigger)
     }
@@ -360,7 +389,7 @@ pub struct FleetOrchestrator {
     /// Live review tasks, keyed by `(session_id, pr_number)`; membership is the in-flight
     /// guard (one review per PR). Cleared by [`Self::cancel`]/[`Self::join`] or dropping
     /// the orchestrator; precise head-oid dedup + supersede across rounds is inc 6b (C16).
-    in_flight: Mutex<HashMap<(String, u64), ReviewTask>>,
+    in_flight: Mutex<HashMap<TriggerKey, ReviewTask>>,
 }
 
 impl FleetOrchestrator {
@@ -484,12 +513,18 @@ impl FleetOrchestrator {
         )
     }
 
-    /// Whether a review for `(session_id, pr_number)` is currently in flight.
+    /// Whether an unscoped (single-operator) review for `(session_id, pr_number)` is
+    /// currently in flight; [`Self::is_in_flight_in`] names a tenant.
     pub fn is_in_flight(&self, session_id: &str, pr_number: u64) -> bool {
+        self.is_in_flight_in("", session_id, pr_number)
+    }
+
+    /// Whether `tenant`'s review for `(session_id, pr_number)` is currently in flight.
+    pub fn is_in_flight_in(&self, tenant: &str, session_id: &str, pr_number: u64) -> bool {
         self.in_flight
             .lock()
             .expect("in_flight poisoned")
-            .contains_key(&(session_id.to_string(), pr_number))
+            .contains_key(&(tenant.to_string(), session_id.to_string(), pr_number))
     }
 
     /// Drop completed review tasks from the in-flight guard; returns how many were
@@ -507,13 +542,13 @@ impl FleetOrchestrator {
         before - g.len()
     }
 
-    /// Cancel and clear an in-flight review (dropping its [`ReviewTask`] aborts the task,
+    /// Cancel and clear an unscoped in-flight review (dropping its [`ReviewTask`] aborts the task,
     /// cancelling the run). Returns whether one was present.
     pub fn cancel(&self, session_id: &str, pr_number: u64) -> bool {
         self.in_flight
             .lock()
             .expect("in_flight poisoned")
-            .remove(&(session_id.to_string(), pr_number))
+            .remove(&unscoped_key(session_id, pr_number))
             .is_some()
     }
 
@@ -525,7 +560,7 @@ impl FleetOrchestrator {
             .in_flight
             .lock()
             .expect("in_flight poisoned")
-            .remove(&(session_id.to_string(), pr_number));
+            .remove(&unscoped_key(session_id, pr_number));
         match task {
             Some(t) => {
                 t.join().await;
@@ -544,7 +579,7 @@ impl FleetOrchestrator {
     /// it). A duplicate `(session_id, pr_number)` returns [`Handled::Duplicate`] without
     /// touching the forge, the engine, or the session.
     pub async fn handle(&self, trigger: FleetTrigger) -> agent_core::Result<Handled> {
-        let kt = (trigger.session_id.clone(), trigger.pr_number);
+        let kt = trigger_key(&trigger);
         // Reap completed reviews first, so a finished (session, PR) neither blocks a
         // re-trigger (a new commit → re-review) nor leaks its JoinHandle — the prod
         // drain loop never cancels/joins, so this is the only reaper on that path.
@@ -1445,6 +1480,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -1502,6 +1538,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -1594,6 +1631,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -1655,6 +1693,7 @@ mod tests {
                 session_id: id.into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -1697,6 +1736,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 7,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         let first = o.handle(t()).await.expect("first ok");
         let second = o.handle(t()).await.expect("second ok");
@@ -1725,6 +1765,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         assert!(matches!(
             o.handle(t()).await.expect("first ok"),
@@ -1752,6 +1793,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         assert!(matches!(
             o.handle(t()).await.expect("first ok"),
@@ -1799,6 +1841,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -1822,6 +1865,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -1858,6 +1902,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok despite a stale worktree");
@@ -1883,6 +1928,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 7,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -1905,6 +1951,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -1935,6 +1982,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -1962,6 +2010,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok despite a base-refresh failure");
@@ -2006,6 +2055,7 @@ mod tests {
                 session_id: "ghost".into(),
                 pr_number: 1,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await;
         assert!(err.is_err(), "unknown row must be an error");
@@ -2031,6 +2081,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 9,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2064,6 +2115,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -2105,6 +2157,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 8,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok despite engine error");
@@ -2138,6 +2191,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 3,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         o.handle(t()).await.expect("first ok");
         let second = o.handle(t()).await.expect("second ok");
@@ -2164,6 +2218,7 @@ mod tests {
                 session_id: "ghost".into(),
                 pr_number: 1,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await;
         assert!(err.is_err(), "unknown row must be an error");
@@ -2204,6 +2259,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2237,6 +2293,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 7,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         o.handle(t()).await.expect("first ok");
         o.handle(t()).await.expect("second ok");
@@ -2263,6 +2320,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 5,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("web ok");
@@ -2270,6 +2328,7 @@ mod tests {
             session_id: "api".into(),
             pr_number: 5,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("api ok");
@@ -2302,6 +2361,7 @@ mod tests {
                 session_id: "../../etc/web".into(),
                 pr_number: 1,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await;
         assert!(got.is_err(), "an unmatched/hostile session is an error");
@@ -2333,6 +2393,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2365,6 +2426,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 9,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2400,6 +2462,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2444,6 +2507,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2497,6 +2561,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 9,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2527,6 +2592,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 5,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2549,6 +2615,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 6,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2570,6 +2637,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 4,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2606,6 +2674,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -2643,6 +2712,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -2677,6 +2747,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2711,6 +2782,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok");
@@ -2736,6 +2808,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle ok despite history error");
@@ -2844,6 +2917,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("web handle ok");
@@ -2851,6 +2925,7 @@ mod tests {
             session_id: "api".into(),
             pr_number: 97,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("api handle ok");
@@ -2898,6 +2973,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -2932,6 +3008,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             })
             .await
             .expect("handle is fail-soft, not an error");
@@ -2965,6 +3042,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 1,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("pr1 ok");
@@ -2973,6 +3051,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 2,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("pr2 ok");
@@ -3004,6 +3083,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -3023,9 +3103,57 @@ mod tests {
             session_id: "web".into(),
             pr_number: 3,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Accepted);
         assert_eq!(rx.recv().await, Some(t));
+    }
+
+    // forge-auth F6: the tenant is part of a trigger's identity on a per-tenant queue (two
+    // tenants' rows with the same id never coalesce), and is cleared on an unscoped one (a
+    // caller-stamped `ReviewNow` folds into the poller's trigger for the same PR).
+    #[rstest::rstest]
+    #[case::positive_same_tenant_coalesces(true, "acme", "acme", TriggerOutcome::Coalesced, "acme")]
+    #[case::adversarial_other_tenant_same_id_not_swallowed(
+        true,
+        "acme",
+        "globex",
+        TriggerOutcome::Accepted,
+        "acme"
+    )]
+    #[case::corner_unscoped_vs_tenant_distinct_when_per_tenant(
+        true,
+        "",
+        "acme",
+        TriggerOutcome::Accepted,
+        ""
+    )]
+    #[case::negative_unscoped_queue_clears_tenant(false, "acme", "", TriggerOutcome::Coalesced, "")]
+    #[case::boundary_unscoped_queue_two_headers_coalesce(
+        false,
+        "acme",
+        "globex",
+        TriggerOutcome::Coalesced,
+        ""
+    )]
+    #[tokio::test]
+    async fn queue_coalesces_per_tenant(
+        #[case] per_tenant: bool,
+        #[case] first: &str,
+        #[case] second: &str,
+        #[case] outcome: TriggerOutcome,
+        #[case] popped_tenant: &str,
+    ) {
+        let (q, mut rx) = TriggerQueue::channel_for(8, per_tenant);
+        let t = |tenant: &str| FleetTrigger {
+            tenant: tenant.into(),
+            session_id: "web".into(),
+            pr_number: 5,
+            requested_by: Vec::new(),
+        };
+        assert_eq!(q.enqueue(t(first)), TriggerOutcome::Accepted);
+        assert_eq!(q.enqueue(t(second)), outcome);
+        assert_eq!(rx.recv().await.expect("popped").tenant, popped_tenant);
     }
 
     #[tokio::test]
@@ -3037,6 +3165,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 5,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Accepted);
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Coalesced);
@@ -3052,11 +3181,13 @@ mod tests {
             session_id: "web".into(),
             pr_number: 1,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         let b = FleetTrigger {
             session_id: "web".into(),
             pr_number: 2,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         assert_eq!(q.enqueue(a.clone()), TriggerOutcome::Accepted);
         assert_eq!(
@@ -3076,6 +3207,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 4,
             requested_by: Vec::new(),
+            tenant: String::new(),
         };
         assert_eq!(q.enqueue(t.clone()), TriggerOutcome::Accepted);
         assert_eq!(rx.recv().await, Some(t.clone()));
@@ -3094,6 +3226,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: pr,
             requested_by: by.iter().map(ToString::to_string).collect(),
+            tenant: String::new(),
         }
     }
 
@@ -3164,6 +3297,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: vec!["acme/alice".into()],
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -3208,6 +3342,7 @@ mod tests {
                 session_id: "web".into(),
                 pr_number: 42,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             }),
             TriggerOutcome::Accepted
         );
@@ -3216,6 +3351,7 @@ mod tests {
                 session_id: "api".into(),
                 pr_number: 97,
                 requested_by: Vec::new(),
+                tenant: String::new(),
             }),
             TriggerOutcome::Accepted
         );
@@ -3276,6 +3412,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");
@@ -3320,6 +3457,7 @@ mod tests {
             session_id: "web".into(),
             pr_number: 42,
             requested_by: Vec::new(),
+            tenant: String::new(),
         })
         .await
         .expect("handle ok");

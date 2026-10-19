@@ -47,10 +47,13 @@ pub struct PollReport {
 }
 
 /// Poll one session's forge for open, non-draft PRs and emit a [`FleetTrigger`] for each
-/// onto `sink`. `max_triggers` is clamped to [`MAX_TRIGGERS_PER_TICK`]. See the module
-/// docs for the untrusted-response contract.
+/// onto `sink`. `max_triggers` is clamped to [`MAX_TRIGGERS_PER_TICK`]. `tenant` is the
+/// roster scope the row was read from (forge-auth F6; empty ⇒ unscoped) and is stamped on
+/// every trigger so the drain resolves the row in that tenant. See the module docs for the
+/// untrusted-response contract.
 pub async fn poll_session(
     forge: &dyn Forge,
+    tenant: &str,
     session_id: &str,
     sink: &dyn TriggerSink,
     max_triggers: usize,
@@ -79,6 +82,7 @@ pub async fn poll_session(
                 session_id: session_id.to_string(),
                 pr_number: pr.number,
                 requested_by: Vec::new(),
+                tenant: tenant.to_string(),
             });
             report.emitted += 1;
         }
@@ -310,7 +314,7 @@ mod tests {
     async fn poll_session_cases(#[case] case: Case) {
         let forge = FakeForge::new(case.pages, case.err_on);
         let sink = RecordingSink::default();
-        let got = poll_session(&forge, "sess", &sink, case.max_triggers).await;
+        let got = poll_session(&forge, "acme", "sess", &sink, case.max_triggers).await;
 
         match case.expect {
             Expect::Err => {
@@ -336,6 +340,11 @@ mod tests {
                     case.desc
                 );
                 let recorded = sink.got.lock().unwrap();
+                assert!(
+                    recorded.iter().all(|t| t.tenant == "acme"),
+                    "{}: every trigger carries the polled tenant",
+                    case.desc
+                );
                 let nums: Vec<u64> = recorded.iter().map(|t| t.pr_number).collect();
                 assert_eq!(nums, emitted, "{}: emitted PR numbers", case.desc);
                 assert!(

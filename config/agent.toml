@@ -185,6 +185,15 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists the roster onto the shared transactional config store
 # (config C41 / A3b) — the [config_store] block supplies the DSN and pool. Needs the
 # `fleet-postgres` feature (a live Postgres server, opt-in).
+#
+# GitHub App webhooks for `--serve-fleet` (forge-auth F6, `forge-ghapp` build): a
+# `pull_request` delivery triggers a review at once (the forge poll stays as backstop)
+# and uninstall/suspend narrow the `ghapp:` mint gate. Empty `listen` (the default) ⇒
+# off. Every delivery's HMAC is checked against `[github_app] webhook_secret_ref`, so a
+# `listen` without that secret fails startup. Bind loopback and expose it through the
+# portal Envoy `fleet_webhook` listener (:8096). See docs/components/forge.md.
+# [review_fleet.webhook]
+# listen = "127.0.0.1:50110"   # agent_grpc::constants::FLEET_WEBHOOK_PORT
 
 # [role] — operator-defined RBAC role cards (config C34 / C1b). Under `[auth] mode =
 # "oidc"` every RPC is gated (security-hardening S7) against the immutable built-in

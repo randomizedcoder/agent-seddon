@@ -14,8 +14,11 @@
 //!
 //! The table holds no clock: callers pass `now` (unix seconds) from their own, so
 //! tests pin time without a shared clock trait.
+//!
+//! [`SeenSet`] is its sibling for the opposite job: remembering **caller-supplied** keys
+//! (a webhook's delivery id, forge-auth F6) so a replay is recognised.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -90,6 +93,83 @@ impl<T> PendingTable<T> {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A TTL-bounded, size-capped set of caller-supplied keys: [`SeenSet::first_sight`]
+/// says whether a key is new, so a redelivered event is recognised and skipped. Unlike
+/// [`PendingTable`] a full set **evicts the oldest** key rather than refusing — refusing
+/// would drop a legitimate new delivery, whereas eviction only lets a very old replay
+/// through (which downstream coalescing still absorbs). Lapsed keys are swept on insert.
+/// Callers shape-check keys first; an empty or oversized key is never recorded.
+pub struct SeenSet {
+    inner: Mutex<SeenInner>,
+    ttl_secs: u64,
+    max: usize,
+}
+
+#[derive(Default)]
+struct SeenInner {
+    expires: HashMap<String, u64>,
+    /// Insertion order, oldest first, for eviction and the lapsed sweep.
+    order: VecDeque<String>,
+}
+
+/// Longest key a [`SeenSet`] records.
+pub const MAX_SEEN_KEY_BYTES: usize = 128;
+
+impl SeenSet {
+    /// A set remembering each key for `ttl_secs`, holding at most `max` (at least 1).
+    pub fn new(ttl_secs: u64, max: usize) -> Self {
+        Self {
+            inner: Mutex::new(SeenInner::default()),
+            ttl_secs,
+            max: max.max(1),
+        }
+    }
+
+    /// `true` the first time `key` is seen within its TTL (and records it); `false` for a
+    /// repeat — and for an empty or oversized key, which is never recorded.
+    pub fn first_sight(&self, now: u64, key: &str) -> bool {
+        if key.is_empty() || key.len() > MAX_SEEN_KEY_BYTES {
+            return false;
+        }
+        let mut g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let SeenInner { expires, order } = &mut *g;
+        while let Some(oldest) = order.front() {
+            if expires.get(oldest).is_some_and(|&at| now <= at) {
+                break;
+            }
+            let k = order.pop_front().expect("front exists");
+            expires.remove(&k);
+        }
+        if expires.get(key).is_some_and(|&at| now <= at) {
+            return false;
+        }
+        while expires.len() >= self.max {
+            match order.pop_front() {
+                Some(k) => {
+                    expires.remove(&k);
+                }
+                None => break,
+            }
+        }
+        expires.insert(key.to_string(), now.saturating_add(self.ttl_secs));
+        order.push_back(key.to_string());
+        true
+    }
+
+    /// Keys currently held (tests and metrics).
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .expires
             .len()
     }
 
@@ -240,6 +320,46 @@ mod tests {
             .map(|h| h.join().unwrap())
             .sum();
         assert_eq!(wins, 1);
+    }
+
+    // SeenSet: `(steps of (elapsed, key), cap) → first_sight results`.
+    #[rstest]
+    #[case::positive_new_then_repeat(&[(0, "d1"), (0, "d1")], 4, &[true, false])]
+    #[case::positive_distinct_keys(&[(0, "d1"), (0, "d2")], 4, &[true, true])]
+    #[case::boundary_last_second_still_seen(&[(0, "d1"), (60, "d1")], 4, &[true, false])]
+    #[case::boundary_lapsed_is_new_again(&[(0, "d1"), (61, "d1")], 4, &[true, true])]
+    #[case::corner_full_evicts_oldest(&[(0, "a"), (0, "b"), (0, "c"), (0, "a")], 2, &[true, true, true, true])]
+    #[case::corner_full_keeps_newest(&[(0, "a"), (0, "b"), (0, "c"), (0, "c")], 2, &[true, true, true, false])]
+    #[case::negative_empty_key_never_recorded(&[(0, ""), (0, "")], 4, &[false, false])]
+    fn seen_set_cases(#[case] steps: &[(u64, &str)], #[case] cap: usize, #[case] want: &[bool]) {
+        let s = SeenSet::new(60, cap);
+        let got: Vec<bool> = steps
+            .iter()
+            .map(|(dt, k)| s.first_sight(T0 + dt, k))
+            .collect();
+        assert_eq!(got, want);
+        assert!(s.len() <= cap);
+    }
+
+    #[test]
+    fn adversarial_seen_set_oversized_key_not_recorded() {
+        let s = SeenSet::new(60, 4);
+        let huge = "x".repeat(MAX_SEEN_KEY_BYTES + 1);
+        assert!(!s.first_sight(T0, &huge));
+        assert!(s.is_empty());
+        assert!(
+            s.first_sight(T0, &"x".repeat(MAX_SEEN_KEY_BYTES)),
+            "at the cap is fine"
+        );
+    }
+
+    #[test]
+    fn adversarial_seen_set_flood_stays_bounded() {
+        let s = SeenSet::new(3600, 100);
+        for i in 0..10_000 {
+            assert!(s.first_sight(T0, &format!("d{i}")));
+        }
+        assert_eq!(s.len(), 100);
     }
 
     #[rstest]

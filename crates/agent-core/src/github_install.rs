@@ -189,6 +189,36 @@ pub trait GithubInstallRegistry: Send + Sync {
     async fn delete(&self, installation_id: &str) -> Result<bool>;
 }
 
+/// What GitHub's installation webhooks may change (forge-auth F6), over the
+/// ownership-verified install state. Every method names the installation's **owning
+/// tenant** — the one [`Self::owner_of`] returned from the verified claim, never a value
+/// from the webhook payload — and only ever narrows the `ghapp:` mint gate, except
+/// [`Self::unsuspend`], which restores a binding that is still verified and nothing else.
+/// Nothing here can bind an installation a tenant did not prove it administers.
+#[async_trait]
+pub trait GithubInstallLifecycle: Send + Sync {
+    /// The tenant holding the verified claim on `installation_id`; `None` when unclaimed.
+    async fn owner_of(&self, installation_id: &str) -> Result<Option<String>>;
+    /// The installation was uninstalled: unbind it, release the claim, delete the verified
+    /// and display rows, and forget its cached token.
+    async fn revoke(&self, tenant: &str, installation_id: &str) -> Result<()>;
+    /// The installation was suspended: unbind it and forget its cached token; the
+    /// verified records stay, so an unsuspend can restore it.
+    async fn suspend(&self, tenant: &str, installation_id: &str) -> Result<()>;
+    /// The installation was unsuspended: rebind it only if `tenant` still holds its
+    /// verified claim.
+    async fn unsuspend(&self, tenant: &str, installation_id: &str) -> Result<()>;
+    /// Apply a repo-selection change (`owner__name` slugs) to `tenant`'s display row for
+    /// the installation, if it has one. Display data only — never the mint gate.
+    async fn sync_repos(
+        &self,
+        tenant: &str,
+        installation_id: &str,
+        added: &[String],
+        removed: &[String],
+    ) -> Result<()>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

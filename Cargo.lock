@@ -81,6 +81,7 @@ dependencies = [
  "async-trait",
  "reqwest",
  "rexpect",
+ "ring",
  "rstest",
  "rustyline",
  "serde_json",

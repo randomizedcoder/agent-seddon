@@ -101,6 +101,9 @@ max_per_user = 0                           # cap per owning org (0 = unbounded; 
 [review_fleet.slack]                       # Slack-watch trigger (C7, inc 4b); empty ⇒ no watch
 app_token_ref = ""                         # env:NAME / file:/path — xapp- app token (Socket Mode)
 bot_token_ref = ""                         # env:NAME / file:/path — xoxb- bot token (progress, inc 7)
+
+[review_fleet.webhook]                     # GitHub App webhooks (forge-auth F6); empty ⇒ off
+listen = ""                                # e.g. "127.0.0.1:50110"; needs [github_app] webhook_secret_ref
 ```
 
 Both Slack tokens are C5-style **references** (`env:`/`file:`), never raw secrets; the
@@ -287,7 +290,8 @@ unreadable `.md`) is a transport `Err`. `review_id` is untrusted wire input trea
 lookup key, never a path.
 
 **Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
-`every {poll_secs}` job per enabled, forge-capable roster row on `agent-scheduler` (whose
+`every {poll_secs}` job per enabled, forge-capable roster row (kept in step with the roster by the
+F6 re-sync below) on `agent-scheduler` (whose
 **overlap guard** means a poll that runs long never stacks a second copy) and fires due jobs
 on a fixed 30s driver tick. Each fire builds the row's session-scoped forge (C5) and calls
 [`poll_session`](../../crates/agent-review-fleet/src/poll.rs), which lists open PRs, filters
@@ -322,6 +326,75 @@ thin glue exercised only against a live Slack. `serve_fleet` resolves `[review_f
 app_token_ref` (C5, empty ⇒ no watch), builds the fan-out from the roster's
 `slack_trigger_channel`s, and runs one reconnecting connection (`serve_socket_mode`, backoff via
 `agent-retry`). Only `tokio-tungstenite` (rustls, no native-tls) enters the tree.
+
+### Tenancy, live re-sync and webhook triggers (forge-auth F6)
+
+**Tenant-aware drivers.** A roster row's `user` is its tenant: it picks the session key, the
+workspace path, the metrics labels and the tenant the `ghapp:` mint gate checks. Under
+`[tenancy] per_tenant` the roster is a `PerTenant` store that routes by the *ambient* tenant —
+and the fleet's background work (reconcile, poll, trigger drain) has no caller, so unscoped it
+would only ever see `local`. The drivers in
+[`fleet_sync.rs`](../../crates/agent-cli/src/fleet_sync.rs) instead discover the tenants holding
+rows ([`FleetTenants`](../../crates/agent-core/src/lib.rs), `Backend::tenants("fleet_sessions")`)
+and run each tenant's work under its own scope
+([`agent_core::in_tenant`](../../crates/agent-core/src/identity.rs)). A
+[`FleetTrigger`](../../crates/agent-core/src/lib.rs) carries a `tenant`, set by the producer —
+the row's tenant for poll/Slack/webhook, the caller's tenant for `ReviewNow` — and **never read
+from a payload**; the drain runs `orch.handle` inside that tenant. The queue coalesces and the
+orchestrator guards in-flight work per `(tenant, session, pr)`, so two tenants with the same row
+id never fold into one review; the per-row review factory caches by `(user, id)` plus a
+fingerprint of the row's forge fields, so an edited row rebuilds. Without `per_tenant`
+everything runs unscoped as before (tenant `""`).
+
+**Live re-sync.** The roster is no longer read once at boot. A `FleetSync` pass runs at boot and
+then every `FLEET_RESYNC_SECS` (60 s): per tenant it re-reads the rows, re-takes the forge-card
+snapshot, reconciles (admission is idempotent), drops the owner session of a row that was deleted
+or disabled, and diffs the forge-poll jobs (keyed `<tenant>/<id>`; added, removed, or re-scheduled
+when `poll_secs` changes; capped at `MAX_FLEET_POLL_JOBS`). It fails closed: a failed tenant
+discovery changes nothing that round, a failed read of one tenant leaves that tenant's jobs
+alone, and only a tenant that has really gone is torn down. A row created or edited from the
+portal is therefore picked up within a minute, without a restart. (The Slack watch still builds
+its channel fan-out once at boot, across every tenant.)
+
+**GitHub webhooks.** With `[review_fleet.webhook] listen` set, `--serve-fleet` also serves
+`POST /webhooks/github` (plain HTTP, [`fleet_webhook.rs`](../../crates/agent-cli/src/fleet_webhook.rs),
+build feature `forge-ghapp`). A `pull_request` delivery becomes a trigger in real time; the poll
+stays as the backstop for anything missed, and both paths dedup downstream (the queue's coalescing,
+then C16's head-oid `UpToDate` check). Each delivery is screened before anything is parsed:
+exact path (404), `POST` (405), body ≤ 1 MiB (413), `X-Hub-Signature-256` verified in constant
+time against `[github_app] webhook_secret_ref` (401 — unsigned and wrong look the same), event
+and `X-GitHub-Delivery` shape-checked (400), and a delivery id seen in the last hour is answered
+`200` without being re-run. Only then is the payload parsed
+([`webhook.rs`](../../crates/agent-review-fleet/src/webhook.rs), typed and capped: repo
+`owner/name` must be a valid GitHub login plus a `safe_segment` name, PR numbers in
+`1..=u32::MAX`, installation ids through `valid_installation_id`, repo lists ≤ 512 with one bad
+entry refusing the event). The receiver answers `202` at once and dispatches off the HTTP thread
+(at most 16 requests are read at a time; beyond that `503`, which GitHub redelivers).
+
+Routing never trusts the payload's account names. The installation id is mapped to its owning
+tenant through the **verified install claim** (forge-auth F5c2); an unclaimed installation is
+ignored. The PR then triggers every *enabled* row of that tenant whose `repo` is the event's
+`owner__name` — a row in another tenant with the same repo is never touched. Actions
+`opened`/`reopened`/`synchronize`/`ready_for_review` trigger; drafts don't. Without `per_tenant`
+the single roster owns every installation.
+
+`installation` and `installation_repositories` events drive the install lifecycle
+([`install_lifecycle.rs`](../../crates/agent-runtime/src/install_lifecycle.rs)), which can only
+**narrow** the mint gate: `deleted` unbinds the tenant, drops the minter's cached token, and
+deletes the verified row, its claim (a compare-and-swap that only releases a claim still naming
+that tenant) and the display row; `suspend` unbinds and drops the cached token; `unsuspend`
+rebinds only while the verified row *and* matching claim still exist; repository changes update
+the display row's `selected_repos` and never touch the gate. Single-operator (no install store)
+lifecycle events only drop cached tokens. See [forge.md](forge.md#github-app-webhooks-forge-auth-f6)
+for the App-side setup.
+
+Limits: delivery dedup is per process; an unbind reaches other replicas only at their restart (a
+stale binding there fails closed at GitHub, which refuses tokens for a deleted or suspended
+installation); suspension isn't persisted, so a restart rebinds a suspended install until
+GitHub's next refusal; `tiny_http` has no per-connection read timeout, so run the receiver on
+loopback behind the portal Envoy `fleet_webhook` listener (:8096), which caps the body, times out
+slow clients and forwards only `POST /webhooks/github` — with **no** edge JWT, since GitHub sends
+no bearer and the HMAC is the authentication.
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)
 

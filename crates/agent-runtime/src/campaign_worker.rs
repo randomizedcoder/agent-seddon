@@ -956,6 +956,7 @@ pub(crate) mod testing {
             fleet_max_total: 0,
             fleet_max_per_user: 0,
             fleet_slack_app_token_ref: String::new(),
+            fleet_webhook_listen: String::new(),
             grpc_auth: crate::agent::GrpcAuthSettings::default(),
             grpc_tls: crate::agent::GrpcTlsSettings::default(),
             per_tenant: false,

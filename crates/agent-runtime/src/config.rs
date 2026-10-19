@@ -193,6 +193,10 @@ pub struct ReviewFleetCfg {
     /// no Slack watch is started (the forge poll still runs).
     #[serde(default)]
     pub slack: FleetSlackCfg,
+    /// The GitHub webhook receiver (forge-auth F6). Empty `listen` ⇒ none (the forge poll
+    /// still runs).
+    #[serde(default)]
+    pub webhook: FleetWebhookCfg,
 }
 
 impl Default for ReviewFleetCfg {
@@ -205,8 +209,25 @@ impl Default for ReviewFleetCfg {
             max_total: 0,
             max_per_user: 0,
             slack: FleetSlackCfg::default(),
+            webhook: FleetWebhookCfg::default(),
         }
     }
+}
+
+/// `[review_fleet.webhook]` (forge-auth F6): where `--serve-fleet` accepts GitHub App
+/// webhook deliveries (`POST /webhooks/github`). Each delivery's `X-Hub-Signature-256`
+/// is verified against `[github_app] webhook_secret_ref`, so a `listen` without that
+/// secret is a startup error. Put it behind the edge (Envoy), not on a public interface.
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct FleetWebhookCfg {
+    /// `host:port` to listen on, e.g. `127.0.0.1:50110` (`constants::FLEET_WEBHOOK_PORT`).
+    /// Empty ⇒ off.
+    #[serde(default)]
+    pub listen: String,
 }
 
 /// Slack Socket-Mode credentials for the fleet's trigger watch (review-fleet C7). Both are

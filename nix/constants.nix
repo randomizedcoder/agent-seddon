@@ -351,4 +351,11 @@
       metrics_port = 9700;
     };
   };
+
+  # NOT a gRPC endpoint: the plain-HTTP GitHub App webhook receiver inside
+  # `agent --serve-fleet` (forge-auth F6; `[review_fleet.webhook] listen`). Off unless
+  # configured; bind it to loopback and front it with the portal Envoy `webhook`
+  # listener (nix/portal/envoy-spec.nix). Clear of the contiguous seam run like the
+  # gateway, so a newly distributed seam never has to step around it.
+  fleetWebhookPort = 50110;
 }

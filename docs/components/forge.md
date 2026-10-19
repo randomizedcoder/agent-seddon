@@ -215,7 +215,7 @@ use the root), and the
 and the proof fails closed). Limits: a binding made on one replica reaches another only
 at its restart (a miss fails closed); a verified row its claim does not name (only an
 out-of-band write makes one) is left out of the gate and logged, without failing startup;
-uninstall/revoke arrives with F6 webhooks.
+uninstall and suspension reach the gate through [webhooks](#github-app-webhooks-forge-auth-f6).
 
 **Portal (F5d1).** The **Forges** tab (`portal/lib/src/pages/forges_page.dart`, shown to
 `read:forge_registry`) lists the tenant's installs and forge cards. **Connect GitHub**
@@ -248,6 +248,44 @@ supplies only the `repo` slug. The `ForgeRegistry` is threaded into all three fl
 build paths (reconcile's fail-closed check, the poll ticker, and the per-row review
 factory); a `forge_id` with no registry configured, or an id absent from the registry,
 fails closed. This completes D1b.
+
+## GitHub App webhooks (forge-auth F6)
+
+`agent --serve-fleet` can receive the App's webhooks at `POST /webhooks/github`, turning pull
+requests into fleet reviews as they happen and narrowing the `ghapp:` mint gate when an
+installation is removed or suspended. The receiver, its screening and the routing are described in
+[review-fleet.md](review-fleet.md#tenancy-live-re-sync-and-webhook-triggers-forge-auth-f6). Setup:
+
+1. Build with the `forge-ghapp` feature (`--serve-fleet` refuses to start with a `listen` but
+   without it).
+2. Generate a random secret and give it to both sides: in the App's settings (**Webhook secret**)
+   and in bootstrap TOML as a reference, never inline:
+
+   ```toml
+   [github_app]
+   app_id             = "123456"
+   private_key_ref    = "file:/run/secrets/ghapp.pem"
+   webhook_secret_ref = "file:/run/secrets/ghapp-webhook"   # or env:NAME
+
+   [review_fleet.webhook]
+   listen = "127.0.0.1:50110"   # constants::FLEET_WEBHOOK_PORT
+   ```
+
+   A `listen` without a resolvable, non-empty `webhook_secret_ref` is a startup error, so every
+   delivery the fleet acts on is signed.
+3. Expose it through the portal Envoy's `fleet_webhook` listener (`nix run .#grpc-web-up`, port
+   8096, forwarding only `POST /webhooks/github` to the loopback receiver) or your own edge, and set
+   the App's **Webhook URL** to `https://<public host>/webhooks/github`. Content type
+   `application/json`.
+4. Subscribe to the events the fleet consumes: **Pull request**, **Installation** (the App sends
+   `installation` events to every App regardless) and **Installation repositories**. Anything else
+   is acknowledged and ignored.
+
+Use **Recent Deliveries** on the App to check: a `ping` answers `202`, a bad secret `401`, and a
+redelivery of a delivery already handled `200` without re-running. Under `[tenancy] per_tenant`, a
+pull request reaches a tenant only through the installation's verified claim (self-service
+onboarding, F5c2); installs assigned by the operator's `[github_app] installations` table have no
+claim, so their pull requests are covered by the forge poll only.
 
 ## Deferred
 
