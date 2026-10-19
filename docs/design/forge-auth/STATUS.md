@@ -305,7 +305,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   refused, tenant owns a new row / an edit can't move it, edit preserves unshown fields, inline↔card, cards unavailable, viewer/write-only caps) and
   `fleet_session_test` (60: `repoSlug`, `validSessionSegment`, `buildSession` refusals and carry-over).
 
-- **Fleet `Put` binds the owner (follow-up to F5d2, PR #TBD):** F5d2 fixed a row's `user` to the signed-in tenant
+- **Fleet `Put` binds the owner (follow-up to F5d2, PR #645):** F5d2 fixed a row's `user` to the signed-in tenant
   in the portal, but the server stored whatever `user` it was sent — and `user` is the tenant the `ghapp:` mint
   gate checks when the fleet mints the row's forge credential (`mint_or_resolve_tenant_token(&row.user, …)`). A
   tenant-A caller writing `user = "B"` plus a forge card naming one of B's installations would therefore pass
