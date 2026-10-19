@@ -77,6 +77,30 @@ pub fn tempdir() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Leak-test runtime
+// ---------------------------------------------------------------------------
+
+/// A runtime for dhat leak tests: current-thread, with **one** blocking worker kept
+/// alive for the whole test.
+///
+/// Every `tokio::fs` call is a `spawn_blocking`. On the default (512-thread) pool,
+/// tokio spawns a fresh worker whenever the previous one hasn't parked as idle yet —
+/// routine under a CPU-starved gate — and each spawn leaves permanent thread
+/// bookkeeping (`std::thread` boxes, `parking_lot` thread data, the pool's
+/// join-handle map) that a live-block assertion reads as "growth" at whatever
+/// iteration it lands. Pinning the pool to a single long-lived worker makes the
+/// live-block count deterministic; a real per-iteration leak still grows and fails.
+/// Only for tests whose blocking ops are awaited one at a time (extra jobs queue).
+pub fn leak_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .thread_keep_alive(std::time::Duration::from_secs(3600))
+        .build()
+        .expect("build leak-test runtime")
+}
+
+// ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
 

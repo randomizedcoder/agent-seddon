@@ -17,6 +17,13 @@
 //! so we absorb window 1 (base→mid may grow) and assert the **second** window
 //! (mid→after) is flat. That is the semantically correct leak test and is immune to
 //! where one-time init happens to land.
+//!
+//! The windows cannot absorb **blocking-pool thread spawns**, though: on tokio's
+//! default pool a `tokio::fs` call spawns a fresh worker whenever the last one hasn't
+//! parked yet (routine under a CPU-starved gate), each leaving ~3-4 permanent blocks
+//! of thread bookkeeping at *any* iteration — a dhat dump of every failing gate run
+//! showed only those, never tool allocations. So the test runs on
+//! [`agent_testkit::leak_runtime`], which pins the pool to one long-lived worker.
 #![cfg(feature = "dhat-heap")]
 
 #[global_allocator]
@@ -73,10 +80,15 @@ where
 }
 
 // One test builds the single dhat `Profiler` (it is a process-global singleton, so
-// two parallel leak tests would conflict) and checks each tool's hot path in turn.
-#[tokio::test]
-async fn tools_do_not_leak() {
+// two parallel leak tests would conflict) and checks each tool's hot path in turn,
+// on `leak_runtime` (one pinned blocking worker — see the module doc).
+#[test]
+fn tools_do_not_leak() {
     let _profiler = dhat::Profiler::builder().testing().build();
+    agent_testkit::leak_runtime().block_on(tool_hot_paths());
+}
+
+async fn tool_hot_paths() {
     let dir = tempdir();
     let ctx = ToolContext { cwd: dir.clone() };
 
