@@ -317,7 +317,7 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   verified principal, traversal `user`, `boundary_` case/prefix lookalikes). Still open: the fleet process reads
   the roster only at boot, unscoped (F6 — closed below).
 
-- **F6 — tenant-aware fleet, webhooks, installation lifecycle (PR #TBD):** three parts in one PR.
+- **F6 — tenant-aware fleet, webhooks, installation lifecycle (PR #646):** three parts in one PR.
   *Tenancy.* `FleetTrigger` gains a `tenant`, set by the producer (row tenant for poll/Slack/webhook, the
   caller's `scoped_tenant` for `ReviewNow`) and never taken from a payload; the `--serve-fleet` drain runs each
   trigger under it (`agent_core::in_tenant`: empty ⇒ unscoped, invalid ⇒ refused). Tenants are discovered from
