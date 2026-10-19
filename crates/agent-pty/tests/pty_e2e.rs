@@ -113,10 +113,25 @@ async fn positive_interactive_write_then_read() {
 }
 
 /// A cursor resumes where the last read stopped.
+///
+/// Echo is switched off first: with the default termios the line discipline
+/// echoes `first` *and* `cat` prints it, so the cursor could be taken between
+/// the two copies and the resumed read would legitimately contain `first`.
 #[tokio::test]
 async fn positive_cursor_resumes_without_replaying() {
     let pty = LocalPty::new();
-    let id = pty.open(&spec("cat", &[])).await.expect("open");
+    let id = pty
+        .open(&spec("sh", &["-c", "stty -echo; echo __READY__; exec cat"]))
+        .await
+        .expect("open");
+    wait_for(
+        || {
+            let out = futures_lite::future::block_on(pty.read(&id, None)).expect("read");
+            String::from_utf8_lossy(&out.data).contains("__READY__")
+        },
+        "echo off",
+    )
+    .await;
 
     pty.write(&id, b"first\n").await.unwrap();
     let mut cursor = 0u64;
@@ -141,7 +156,10 @@ async fn positive_cursor_resumes_without_replaying() {
         "second line",
     )
     .await;
-    assert!(!tail.contains("first"), "resumed read replayed old output");
+    assert!(
+        !tail.contains("first") && !tail.contains("__READY__"),
+        "resumed read replayed old output: {tail:?}"
+    );
     let _ = pty.close(&id).await;
 }
 
@@ -231,14 +249,17 @@ async fn adversarial_firehose_output_stays_bounded() {
     let pty = LocalPty::new();
     // `yes` produces output as fast as it can be read.
     let id = pty.open(&spec("yes", &["flood"])).await.expect("open");
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Wait for the ring to wrap rather than sleeping a fixed time: under load
+    // `yes` can be starved, and `dropped > 0` below needs more than a buffer's worth.
+    wait_for(
+        || {
+            let info = futures_lite::future::block_on(pty.get(&id)).expect("get");
+            info.bytes_out > agent_pty::buffer::BUFFER_LIMIT as u64
+        },
+        "a firehose larger than the buffer",
+    )
+    .await;
 
-    let info = pty.get(&id).await.expect("get");
-    assert!(
-        info.bytes_out > 100_000,
-        "expected a real firehose, saw {} bytes",
-        info.bytes_out
-    );
     let out = pty.read(&id, None).await.expect("read");
     assert!(
         out.data.len() <= agent_pty::buffer::BUFFER_LIMIT,
