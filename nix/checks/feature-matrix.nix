@@ -27,6 +27,8 @@ craneLib.mkCargoDerivation (
     doInstallCargoArtifacts = false;
     buildPhaseCargoCommand = ''
       cargo check -p agent-runtime --no-default-features
+      cargo check -p agent-runtime --no-default-features --features repo-graph
+      cargo check -p agent-cli --no-default-features --features repo-graph
       cargo check -p agent-runtime --no-default-features --features campaign
       cargo check -p agent-runtime --no-default-features --features campaign-postgres
       cargo check -p agent-runtime --no-default-features --features provider-router

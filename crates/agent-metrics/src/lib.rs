@@ -24,6 +24,10 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Metrics {
     registry: Arc<Registry>,
+    repo_graph_index_seconds: Histogram,
+    repo_graph_nodes: IntGauge,
+    repo_graph_edges: IntGauge,
+    repo_graph_truncated: IntCounter,
 
     // --- loop-level (recorded by agent-runtime) ---------------------------
     api_calls: IntCounterVec,
@@ -374,6 +378,38 @@ fn fold_model_label(model: &str) -> &str {
 impl Metrics {
     pub fn new() -> Self {
         let registry = Registry::new();
+        let repo_graph_index_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_repo_graph_index_seconds",
+            "Repository graph index attempt duration",
+        ))
+        .unwrap();
+        let repo_graph_nodes = IntGauge::new(
+            "agent_repo_graph_nodes",
+            "Nodes in last successful graph index",
+        )
+        .unwrap();
+        let repo_graph_edges = IntGauge::new(
+            "agent_repo_graph_edges",
+            "Edges in last successful graph index",
+        )
+        .unwrap();
+        let repo_graph_truncated = IntCounter::new(
+            "agent_repo_graph_truncated_total",
+            "Incomplete graph index results due to caps",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(repo_graph_index_seconds.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(repo_graph_nodes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(repo_graph_edges.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(repo_graph_truncated.clone()))
+            .unwrap();
 
         // --- loop-level -------------------------------------------------------
         // The curated loop-level families carry a per-tenant `(session, user)` label
@@ -1735,6 +1771,10 @@ impl Metrics {
 
         Self {
             registry: Arc::new(registry),
+            repo_graph_index_seconds,
+            repo_graph_nodes,
+            repo_graph_edges,
+            repo_graph_truncated,
             api_calls,
             api_call_seconds,
             tokens,
@@ -1906,6 +1946,25 @@ impl Metrics {
     }
 
     /// Encode all metrics in the Prometheus text exposition format.
+    /// Label-free indexing metrics; failed attempts record duration without overwriting counts.
+    pub fn on_repo_graph_index(&self, seconds: f64, result: Option<(usize, usize, bool)>) {
+        self.repo_graph_index_seconds
+            .observe(if seconds.is_finite() {
+                seconds.max(0.0)
+            } else {
+                0.0
+            });
+        if let Some((nodes, edges, truncated)) = result {
+            self.repo_graph_nodes
+                .set(i64::try_from(nodes).unwrap_or(i64::MAX));
+            self.repo_graph_edges
+                .set(i64::try_from(edges).unwrap_or(i64::MAX));
+            if truncated {
+                self.repo_graph_truncated.inc();
+            }
+        }
+    }
+
     pub fn encode_text(&self) -> String {
         let mut buf = Vec::new();
         let encoder = TextEncoder::new();

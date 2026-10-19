@@ -30,14 +30,16 @@
 //! deliberately do **not** use `sqlx::migrate!`: its `macros` feature pulls in every sqlx driver,
 //! and `sqlx-mysql` drags in `rsa` (RUSTSEC-2023-0071, rejected by `cargo audit`).
 
+mod lifecycle;
 mod sql;
 
 use agent_core::repo_graph::{
-    Direction, EdgeKind, EdgeRef, ExtractReport, GraphDiff, Lang, Neighbor, Node, NodeId, NodeKey,
-    NodeKind, NodeRow, NodeVersion, Repo, RepoGraph, RepoGraphError, RepoGraphResult,
-    RepoGraphStore, RepoId, RepoSpec, Scope, Shape, Snapshot, SnapshotBegin, SnapshotId,
-    SnapshotStatus, TestHit, MAX_DIFF, MAX_KEYS, MAX_PATHS, MAX_REASON_LEN, MAX_SNAPSHOT_EDGES,
-    MAX_SNAPSHOT_LIST, MAX_SNAPSHOT_NODES,
+    decode_metadata, encode_metadata, validate_recovery_reason, Direction, EdgeKind, EdgeRef,
+    ExtractReport, GraphDiff, Lang, Neighbor, Node, NodeId, NodeKey, NodeKind, NodeRow,
+    NodeVersion, PublishResult, Repo, RepoGraph, RepoGraphError, RepoGraphReadView,
+    RepoGraphResult, RepoGraphStore, RepoId, RepoSpec, Scope, Shape, Snapshot, SnapshotBegin,
+    SnapshotId, SnapshotStatus, TestHit, MAX_DIFF, MAX_KEYS, MAX_PATHS, MAX_REASON_LEN,
+    MAX_SNAPSHOT_EDGES, MAX_SNAPSHOT_LIST, MAX_SNAPSHOT_NODES,
 };
 use agent_core::safe_segment;
 use async_trait::async_trait;
@@ -186,8 +188,7 @@ fn row_to_repo(row: &PgRow) -> RepoGraphResult<Repo> {
 
 fn row_to_snapshot(row: &PgRow) -> RepoGraphResult<Snapshot> {
     let extractors_text: String = col(row, "extractors")?;
-    let extractors = serde_json::from_str(&extractors_text)
-        .map_err(|e| backend(&format!("column extractors: {e}")))?;
+    let (extractors, _) = decode_metadata(&extractors_text)?;
     let status: String = col(row, "status")?;
     let node_count: i32 = col(row, "node_count")?;
     let edge_count: i32 = col(row, "edge_count")?;
@@ -423,26 +424,85 @@ impl RepoGraphStore for PgRepoGraph {
             .collect()
     }
 
-    // -- Snapshots ---------------------------------------------------------
-
-    async fn snapshot_begin(&self, begin: &SnapshotBegin) -> RepoGraphResult<SnapshotId> {
+    async fn snapshot_record_failure(
+        &self,
+        begin: &SnapshotBegin,
+        reason: &str,
+        report: &ExtractReport,
+    ) -> RepoGraphResult<()> {
         begin.validate()?;
-        let now = sql::ms((self.now_ms)());
-        let extractors = serde_json::to_string(&begin.extractors)
-            .map_err(|e| backend(&format!("extractors: {e}")))?;
+        validate_recovery_reason(reason)?;
+        encode_metadata(&begin.extractors, report)?;
         let mut tx = self.pool.begin().await.map_err(map_db)?;
-        if sqlx::query(sql::REPO_EXISTS)
+        let identity = serde_json::to_string(&(
+            &self.tenant,
+            begin.repo,
+            &begin.commit_sha,
+            &begin.extractor_version,
+        ))
+        .map_err(|_| backend("identity"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(identity)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db)?;
+        if sqlx::query(sql::SNAPSHOT_IDENTITY)
             .bind(&self.tenant)
             .bind(begin.repo.0)
+            .bind(&begin.commit_sha)
+            .bind(&begin.extractor_version)
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_db)?
-            .is_none()
+            .is_some()
         {
-            return Err(RepoGraphError::NotFound);
+            return Ok(());
         }
-        // The identity is unique; at most one row. A live one conflicts, a failed one is replaced.
-        if let Some(row) = sqlx::query(sql::BEGIN_FIND)
+        let id = self.snapshot_begin_tx(&mut tx, begin).await?;
+        self.snapshot_finish_tx(&mut tx, id, SnapshotStatus::Failed, reason, report)
+            .await?;
+        tx.commit().await.map_err(map_db)
+    }
+
+    async fn snapshot_find_identity(
+        &self,
+        begin: &SnapshotBegin,
+    ) -> RepoGraphResult<Option<Snapshot>> {
+        begin.validate()?;
+        let row = sqlx::query(sql::SNAPSHOT_IDENTITY)
+            .bind(&self.tenant)
+            .bind(begin.repo.0)
+            .bind(&begin.commit_sha)
+            .bind(&begin.extractor_version)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_db)?;
+        row.as_ref().map(row_to_snapshot).transpose()
+    }
+
+    async fn snapshot_publish(
+        &self,
+        begin: &SnapshotBegin,
+        graph: &RepoGraph,
+        report: &ExtractReport,
+    ) -> RepoGraphResult<PublishResult> {
+        begin.validate()?;
+        encode_metadata(&begin.extractors, report)?;
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        // Hash collisions serialize unrelated identities; the SQL identity comparison remains exact.
+        let identity = serde_json::to_string(&(
+            &self.tenant,
+            begin.repo,
+            &begin.commit_sha,
+            &begin.extractor_version,
+        ))
+        .map_err(|_| backend("identity"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(identity)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db)?;
+        if let Some(row) = sqlx::query(sql::SNAPSHOT_IDENTITY)
             .bind(&self.tenant)
             .bind(begin.repo.0)
             .bind(&begin.commit_sha)
@@ -451,136 +511,109 @@ impl RepoGraphStore for PgRepoGraph {
             .await
             .map_err(map_db)?
         {
-            let status: String = col(&row, "status")?;
-            match status.as_str() {
-                "building" | "ready" => {
-                    return Err(RepoGraphError::Conflict("snapshot identity".to_string()));
-                }
-                "failed" => {
-                    let sid: i64 = col(&row, "snapshot_id")?;
-                    sqlx::query(sql::SNAPSHOT_DELETE_ONE)
-                        .bind(&self.tenant)
-                        .bind(sid)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_db)?;
-                }
-                _ => return Err(backend("snapshot status: unknown value")),
-            }
+            let snapshot = row_to_snapshot(&row)?;
+            let report = decode_metadata(&col::<String>(&row, "extractors")?)?.1;
+            tx.commit().await.map_err(map_db)?;
+            return Ok(PublishResult {
+                snapshot,
+                report,
+                reused: true,
+            });
         }
-        let id: i64 = sqlx::query_scalar(sql::BEGIN_INSERT)
+        let id = self.snapshot_begin_tx(&mut tx, begin).await?;
+        self.snapshot_write_tx(&mut tx, id, graph).await?;
+        self.snapshot_finish_tx(&mut tx, id, SnapshotStatus::Ready, "", report)
+            .await?;
+        let row = sqlx::query(sql::SNAPSHOT_GET)
             .bind(&self.tenant)
             .bind(begin.repo.0)
-            .bind(&begin.commit_sha)
-            .bind(&extractors)
-            .bind(&begin.extractor_version)
-            .bind(now)
+            .bind(id.0)
             .fetch_one(&mut *tx)
             .await
             .map_err(map_db)?;
+        let snapshot = row_to_snapshot(&row)?;
         tx.commit().await.map_err(map_db)?;
-        Ok(SnapshotId(id))
+        Ok(PublishResult {
+            snapshot,
+            report: Some(report.clone()),
+            reused: false,
+        })
     }
 
-    async fn snapshot_write(&self, id: SnapshotId, graph: &RepoGraph) -> RepoGraphResult<()> {
-        if graph.nodes().len() > MAX_SNAPSHOT_NODES {
-            return Err(RepoGraphError::TooLong("nodes".to_string()));
-        }
-        if graph.edges().len() > MAX_SNAPSHOT_EDGES {
-            return Err(RepoGraphError::TooLong("edges".to_string()));
-        }
-        let na = sql::node_arrays(graph);
-        let ea = sql::edge_arrays(graph);
-        // Per-row `name_tokens` bound as a comma-joined `text[]` (tokens are `[a-z0-9]`, no comma),
-        // split back with `string_to_array` — avoids the `text[][]` UNNEST flattening trap.
-        let toks: Vec<String> = na.tokens.iter().map(|t| t.join(",")).collect();
-
-        let mut tx = self.pool.begin().await.map_err(map_db)?;
-        let row = sqlx::query(sql::SNAPSHOT_LOCK)
+    async fn snapshot_report(&self, scope: Scope) -> RepoGraphResult<Option<ExtractReport>> {
+        let row = sqlx::query(sql::SNAPSHOT_GET)
             .bind(&self.tenant)
-            .bind(id.0)
+            .bind(scope.repo.0)
+            .bind(scope.snapshot.0)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_db)?
+            .ok_or(RepoGraphError::NotFound)?;
+        Ok(decode_metadata(&col::<String>(&row, "extractors")?)?.1)
+    }
+
+    async fn snapshot_recover(&self, scope: Scope, reason: &str) -> RepoGraphResult<()> {
+        validate_recovery_reason(reason)?;
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        let exists = sqlx::query(sql::SNAPSHOT_GET)
+            .bind(&self.tenant)
+            .bind(scope.repo.0)
+            .bind(scope.snapshot.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_db)?;
+        if exists.is_none() {
+            return Err(RepoGraphError::NotFound);
+        }
+        self.snapshot_finish_tx(
+            &mut tx,
+            scope.snapshot,
+            SnapshotStatus::Failed,
+            reason,
+            &ExtractReport::default(),
+        )
+        .await?;
+        tx.commit().await.map_err(map_db)
+    }
+
+    async fn read_view(&self, scope: Scope) -> RepoGraphResult<Box<dyn RepoGraphReadView>> {
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db)?;
+        let row = sqlx::query(sql::SNAPSHOT_GET)
+            .bind(&self.tenant)
+            .bind(scope.repo.0)
+            .bind(scope.snapshot.0)
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_db)?
             .ok_or(RepoGraphError::NotFound)?;
-        let repo_id: i64 = col(&row, "repo_id")?;
-        let status: String = col(&row, "status")?;
-        if status != "building" {
-            return Err(RepoGraphError::Conflict(
-                "snapshot not building".to_string(),
-            ));
+        if row_to_snapshot(&row)?.status != SnapshotStatus::Ready {
+            return Err(RepoGraphError::NotFound);
         }
+        Ok(Box::new(lifecycle::PgReadView {
+            tenant: self.tenant.clone(),
+            scope,
+            tx: tokio::sync::Mutex::new(tx),
+        }))
+    }
 
-        for r in sql::chunk_ranges(na.ids.len(), sql::WRITE_CHUNK) {
-            // Bodies: insert new, keep existing (shared across snapshots).
-            sqlx::query(sql::NODES_INSERT)
-                .bind(&self.tenant)
-                .bind(repo_id)
-                .bind(&na.ids[r.clone()])
-                .bind(&na.keys[r.clone()])
-                .bind(&na.kinds[r.clone()])
-                .bind(&na.langs[r.clone()])
-                .bind(&na.names[r.clone()])
-                .bind(&toks[r.clone()])
-                .bind(&na.qualifiers[r.clone()])
-                .execute(&mut *tx)
-                .await
-                .map_err(map_db)?;
-            // A distinct key mapped onto a stored id is a collision: the tx rolls back untouched.
-            let collisions: i64 = sqlx::query_scalar(sql::COLLISION_CHECK)
-                .bind(&self.tenant)
-                .bind(repo_id)
-                .bind(&na.ids[r.clone()])
-                .bind(&na.keys[r.clone()])
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(map_db)?;
-            if collisions > 0 {
-                return Err(RepoGraphError::Conflict("node id collision".to_string()));
-            }
-        }
-        for r in sql::chunk_ranges(na.ids.len(), sql::WRITE_CHUNK) {
-            sqlx::query(sql::VERSIONS_INSERT)
-                .bind(&self.tenant)
-                .bind(repo_id)
-                .bind(id.0)
-                .bind(&na.ids[r.clone()])
-                .bind(&na.files[r.clone()])
-                .bind(&na.line_starts[r.clone()])
-                .bind(&na.line_ends[r.clone()])
-                .bind(&na.sig_hashes[r.clone()])
-                .bind(&na.body_hashes[r.clone()])
-                .bind(&na.exported[r.clone()])
-                .bind(&na.attrs[r.clone()])
-                .execute(&mut *tx)
-                .await
-                .map_err(map_db)?;
-        }
-        for r in sql::chunk_ranges(ea.kinds.len(), sql::WRITE_CHUNK) {
-            sqlx::query(sql::EDGES_INSERT)
-                .bind(&self.tenant)
-                .bind(repo_id)
-                .bind(id.0)
-                .bind(&ea.kinds[r.clone()])
-                .bind(&ea.src_ids[r.clone()])
-                .bind(&ea.dst_ids[r.clone()])
-                .bind(&ea.weights[r.clone()])
-                .bind(&ea.attrs[r.clone()])
-                .execute(&mut *tx)
-                .await
-                .map_err(map_db)?;
-        }
-        sqlx::query(sql::WRITE_META)
-            .bind(&self.tenant)
-            .bind(id.0)
-            .bind(graph.graph_hash())
-            .bind(sql::i32_of(graph.nodes().len()))
-            .bind(sql::i32_of(graph.edges().len()))
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db)?;
+    // -- Snapshots ---------------------------------------------------------
+
+    async fn snapshot_begin(&self, begin: &SnapshotBegin) -> RepoGraphResult<SnapshotId> {
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        let result = self.snapshot_begin_tx(&mut tx, begin).await?;
         tx.commit().await.map_err(map_db)?;
-        Ok(())
+        Ok(result)
+    }
+
+    async fn snapshot_write(&self, id: SnapshotId, graph: &RepoGraph) -> RepoGraphResult<()> {
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        let result = self.snapshot_write_tx(&mut tx, id, graph).await?;
+        tx.commit().await.map_err(map_db)?;
+        Ok(result)
     }
 
     async fn snapshot_finish(
@@ -588,36 +621,14 @@ impl RepoGraphStore for PgRepoGraph {
         id: SnapshotId,
         status: SnapshotStatus,
         reason: &str,
-        _report: &ExtractReport,
+        report: &ExtractReport,
     ) -> RepoGraphResult<()> {
-        let now = (self.now_ms)();
         let mut tx = self.pool.begin().await.map_err(map_db)?;
-        let row = sqlx::query(sql::SNAPSHOT_LOCK)
-            .bind(&self.tenant)
-            .bind(id.0)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(map_db)?
-            .ok_or(RepoGraphError::NotFound)?;
-        let cur: String = col(&row, "status")?;
-        if cur != "building" {
-            return Err(RepoGraphError::Conflict(
-                "snapshot not building".to_string(),
-            ));
-        }
-        let built_at_ms: i64 = col(&row, "built_at_ms")?;
-        let duration = now.saturating_sub(sql::unsigned(built_at_ms));
-        sqlx::query(sql::FINISH_UPDATE)
-            .bind(&self.tenant)
-            .bind(id.0)
-            .bind(status.as_str())
-            .bind(truncate_chars(reason, MAX_REASON_LEN))
-            .bind(sql::ms(duration))
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db)?;
+        let result = self
+            .snapshot_finish_tx(&mut tx, id, status, reason, report)
+            .await?;
         tx.commit().await.map_err(map_db)?;
-        Ok(())
+        Ok(result)
     }
 
     async fn snapshot_find(
@@ -693,16 +704,21 @@ impl RepoGraphStore for PgRepoGraph {
 
     async fn snapshot_diff(&self, a: SnapshotId, b: SnapshotId) -> RepoGraphResult<GraphDiff> {
         // Both snapshots must exist under one repo of this tenant, else `NotFound`.
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db)?;
         let repo_a: Option<i64> = sqlx::query_scalar(sql::SNAPSHOT_REPO)
             .bind(&self.tenant)
             .bind(a.0)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(map_db)?;
         let repo_b: Option<i64> = sqlx::query_scalar(sql::SNAPSHOT_REPO)
             .bind(&self.tenant)
             .bind(b.0)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(map_db)?;
         let (repo_a, repo_b) = match (repo_a, repo_b) {
@@ -713,10 +729,10 @@ impl RepoGraphStore for PgRepoGraph {
             return Err(RepoGraphError::NotFound);
         }
         let repo = repo_a;
-        let ha = self.diff_versions(repo, a).await?;
-        let hb = self.diff_versions(repo, b).await?;
-        let ea = self.diff_edges(repo, a).await?;
-        let eb = self.diff_edges(repo, b).await?;
+        let ha = self.diff_versions(&mut tx, repo, a).await?;
+        let hb = self.diff_versions(&mut tx, repo, b).await?;
+        let ea = self.diff_edges(&mut tx, repo, a).await?;
+        let eb = self.diff_edges(&mut tx, repo, b).await?;
 
         let mut diff = GraphDiff::default();
         for (key, (sig_b, body_b)) in &hb {
@@ -1059,6 +1075,7 @@ impl PgRepoGraph {
     /// `(node_key → (sig_hash, body_hash))` for a snapshot's versions (a `snapshot_diff` half).
     async fn diff_versions(
         &self,
+        conn: &mut sqlx::PgConnection,
         repo: i64,
         snap: SnapshotId,
     ) -> RepoGraphResult<BTreeMap<NodeKey, (String, String)>> {
@@ -1067,7 +1084,7 @@ impl PgRepoGraph {
             .bind(&self.tenant)
             .bind(repo)
             .bind(snap.0)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await
             .map_err(map_db)?
         {
@@ -1079,13 +1096,18 @@ impl PgRepoGraph {
     }
 
     /// The edge set (by `(kind, src_key, dst_key)`) of a snapshot (a `snapshot_diff` half).
-    async fn diff_edges(&self, repo: i64, snap: SnapshotId) -> RepoGraphResult<BTreeSet<EdgeRef>> {
+    async fn diff_edges(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        repo: i64,
+        snap: SnapshotId,
+    ) -> RepoGraphResult<BTreeSet<EdgeRef>> {
         let mut out = BTreeSet::new();
         for row in &sqlx::query(sql::DIFF_EDGES)
             .bind(&self.tenant)
             .bind(repo)
             .bind(snap.0)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await
             .map_err(map_db)?
         {

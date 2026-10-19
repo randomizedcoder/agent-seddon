@@ -100,6 +100,7 @@ in
   # and pg-only (R4) rows are `#[ignore]`-gated and run under `nix run .#pg-integration`;
   # clippy `--all-features` lints the tier in-gate. docs/design/repo-knowledge/06-increments.md.
   repo-graph = craneCheck ./repo-graph.nix { inherit cargoArtifacts; };
+  repo-graph-index = craneCheck ./repo-graph-index.nix { inherit pkgs cargoArtifacts; };
   repo-graph-rust = craneCheck ./repo-graph-rust.nix { inherit cargoArtifacts; };
   # Executes the shared-store `ProviderRegistry` backend (`StoreRegistry`) matrix
   # over the in-memory config store (feature `registry-store`, off by default so

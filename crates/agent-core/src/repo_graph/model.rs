@@ -142,6 +142,9 @@ pub const MAX_DIAGNOSTIC_LEN: usize = 200;
 /// [`super::ExtractReport`]-shaped record.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractReport {
+    /// End-to-end indexing time; zero for legacy rows and direct parser calls.
+    #[serde(default)]
+    pub elapsed_ms: u64,
     pub files: usize,
     pub skipped: usize,
     pub parse_errors: usize,
@@ -156,11 +159,12 @@ impl ExtractReport {
     /// Fold another report into this one: sum the counts, OR the truncation flag, and append the
     /// diagnostics up to the cap (over-long entries truncated on a char boundary).
     pub fn merge(&mut self, other: ExtractReport) {
-        self.files += other.files;
-        self.skipped += other.skipped;
-        self.parse_errors += other.parse_errors;
+        self.elapsed_ms = self.elapsed_ms.saturating_add(other.elapsed_ms);
+        self.files = self.files.saturating_add(other.files);
+        self.skipped = self.skipped.saturating_add(other.skipped);
+        self.parse_errors = self.parse_errors.saturating_add(other.parse_errors);
         self.truncated |= other.truncated;
-        self.dropped_edges += other.dropped_edges;
+        self.dropped_edges = self.dropped_edges.saturating_add(other.dropped_edges);
         for mut d in other.diagnostics {
             if self.diagnostics.len() >= MAX_DIAGNOSTICS {
                 break;

@@ -517,6 +517,9 @@ name = "agent-repo-graph"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-git",
+ "agent-metrics",
+ "agent-sandbox",
  "agent-testkit",
  "async-trait",
  "dhat",
@@ -526,12 +529,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rstest",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",
  "syn 2.0.119",
  "tokio",
  "toml",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -618,6 +624,7 @@ dependencies = [
  "agent-pty",
  "agent-reference",
  "agent-registry",
+ "agent-repo-graph",
  "agent-review",
  "agent-review-fleet",
  "agent-role",

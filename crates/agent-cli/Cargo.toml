@@ -10,6 +10,7 @@ name = "agent"
 path = "src/main.rs"
 
 [features]
+repo-graph = ["agent-runtime/repo-graph"]
 # The shipped `agent` binary is Postgres-capable by default (config C41 / PG-03,
 # decision D1 Option B): `default` turns on the `postgres` umbrella so an operator
 # can run the whole OLTP surface on one Postgres via `config/multi-tenant.toml`

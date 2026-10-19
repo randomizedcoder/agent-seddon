@@ -1,7 +1,6 @@
 # 10 — Nix wiring, integration testing and evaluation
 
-**Design/runbook; future commands below are explicitly marked.** Only RK-01/02 graph storage
-exists today. This document extends [increments](06-increments.md), the
+**Design/runbook; future commands below are explicitly marked.** RK-01–03 are accepted; RK-06 indexing implementation is under validation. This document extends [increments](06-increments.md), the
 [test matrix](08-test-matrix.md), and [decisions/lessons](09-decisions-and-lessons.md).
 RK-03 extraction and its feature-scoped/bench/leak wiring now exist locally; see
 [STATUS](STATUS.md) for validation. Indexing and consumers remain proposed, and this increment
@@ -100,19 +99,20 @@ The runner's container name/port come from existing Nix pins: verify those resou
 zero exit status alone is therefore not evidence that Postgres tests ran. Inspect the output for
 nonzero executed graph test counts and no skip before recording acceptance.
 
-### Required runner extension (RK-06 onward; proposed)
+### Required runner extension (RK-06 onward)
 
-Add `AGENT_REQUIRE_POSTGRES_TESTS=1`. Under this flag, unavailable runtime, missing DSN,
+Set `AGENT_REQUIRE_POSTGRES_TESTS=1`. Under this flag, unavailable runtime, missing DSN,
 missing expected suite, or zero executed tests is a harness failure (exit 1), never a successful
 skip. Default aggregate behavior retains its existing optional skip. Emit a JSON result for each
 suite with `status` (`passed`, `failed`, `skipped`), executed/failed counts, elapsed time and
 sanitized reason. Collect machine-readable test results through the existing harness or an
 explicit named-case inventory; do not infer success merely from Cargo exit zero.
 
-The future acceptance command is:
+The acceptance command is:
 
 ```sh
-AGENT_REQUIRE_POSTGRES_TESTS=1 CONTAINER_RUNTIME=podman nix run .#pg-integration
+AGENT_REQUIRE_POSTGRES_TESTS=1 CONTAINER_RUNTIME=podman \
+  AGENT_PG_ARTIFACT_DIR=/tmp/repo-graph-pg-results nix run .#pg-integration
 ```
 
 Append these future test targets to the runner (after migration/store tests), through the pinned
@@ -193,3 +193,18 @@ For this documentation-only extension run `nix run .#doc-links -- --gate`,
 `nix run .#doc-orphans -- --gate`, Markdown table/render checks, and `git diff --check`.
 Do not report future Rust/Nix targets as tested. Every proposed behavior must map to its
 increment and a named case or scenario in [the matrix](08-test-matrix.md).
+
+## RK-06 as-built validation wiring
+
+`repo-graph-index` executes real-Git indexer tests, runtime configuration/operator tests, CLI
+parsing/help composition, and the seven strict-runner contract cases. The runtime/CLI
+`repo-graph` feature forwards `agent-repo-graph/index`, extraction, and PostgreSQL support.
+Core metadata units run with the ordinary core suite; existing R3 conformance remains unchanged.
+
+`pg-integration` inventories named selected tests, compares actual executions to that inventory,
+and writes per-suite JSON plus sanitized inventory/execution logs into `AGENT_PG_ARTIFACT_DIR`
+(a printed temporary directory if unset). Missing runtime/DSN, zero selected tests, missing
+executions, interruption and cleanup failure are incomplete/failed acceptance. The optional
+no-runtime path remains a recorded skip. Assertion failures retain exit 2; harness failures exit 1.
+The runner includes existing graph conformance plus `indexer_postgres` with the `index` and
+`repo-graph-postgres` features. Future fleet/review/knowledge targets above remain proposed.

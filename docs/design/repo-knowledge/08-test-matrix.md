@@ -176,6 +176,12 @@ RK-06 still owns publication assertions for late/canceled extraction.
 | `adversarial_wrong_root_scope` | Adversarial | Dirty worktree, incorrect registered remote, another tenant handle | Request indexing | Refuse misidentified checkout; no writes outside registered tenant/repo | H / repo-graph-index | RK-06 |
 | `positive_atomic_race` | Positive | Two publishers for identical snapshot | Release simultaneous writes | One ready identity, other reuses it; no partially visible graph | H / repo-graph-index | RK-06 |
 
+RK-06 executes the six store rows above as shared contracts in memory and PostgreSQL.
+`negative_attempt_diagnostic` additionally records a failed attempt atomically, retries it,
+and verifies that a late failure cannot overwrite a ready identity.
+The real-Git indexer rows cover SHA reuse/diff, dirty roots, remote mismatch, missing registration,
+foreign tenants, revision injection, extractor selection and budget fingerprints.
+
 ### I1 metadata and compatibility additions
 
 | Case ID | Class | Description/setup | Action | Expected outcome | Harness/gate | Increment |
@@ -276,6 +282,12 @@ Run shared K1 rows against memory and Postgres; the PG stamp belongs to K5 below
 | `adversarial_pg_replacement_scope` (K5) | Adversarial | Confirmed replacement from another repo/tenant | Supersede | Rejected atomically; neither record changed | PG / pg-integration | RK-19/20 |
 | `negative_required_pg_skipped` (I2) | Negative | Required flag set; missing runtime/DSN or zero selected tests | Run harness | Exit 1 and failed/incomplete artifact; never acceptance PASS | H runner / pg-integration | RK-06 |
 | `corner_optional_pg_skipped` (I2) | Corner | Required flag unset and runtime unavailable | Run aggregate | Explicit skipped result; not counted as executed success | H runner / pg-integration | RK-06 |
+
+RK-06 live `indexer_postgres` executes the index/store portions of the first four I2 rows: real
+Git A/B/C, independent handles/pools, terminated publisher connection, and retention/read parity.
+Fake forge polling, scripted review context, and outage fallback remain RK-07/09.
+`positive_pg_repo_index_operator_workflow` additionally proves config/registration/index/status/shape
+composition and rejection of an escaping state-directory symlink through the operator entry point.
 
 ### Q1 — evaluation runner and measurement integrity
 

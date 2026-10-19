@@ -6,21 +6,23 @@
 
 ## Current baseline and next work
 
-Last reconciled **2026-10-18**, implementation `db9d9948` based on `d648c894` (includes plan PR #638).
-**3 of 22 increments are merged: RK-00–02.** RK-00 is documentation; RK-01/02 are the
-implemented graph foundation. The 19 remaining increments include optional and externally
-owned work; this count is not an estimate of effort or feature readiness.
+Last reconciled **2026-10-19**, RK-06 branch `rk-06-indexer`, based on main `9c698e7e`.
+Frozen-source fingerprints, commands and artifacts are recorded in the journal.
+**4 of 22 increments meet the Merged acceptance state: RK-00–03.** RK-03's integrated
+full gate passed on main `9c698e7e` (87 checks). The remaining 18 increments include optional
+and externally owned work; this count is not an estimate of effort or feature readiness.
 
-**Active: [RK-03 — extraction](IMPLEMENTATION.md#rk-03).** Implementation started
-2026-10-18 on `d648c894`; its prerequisite is merged. Published as draft
-[PR #642](https://github.com/randomizedcoder/agent-seddon/pull/642), branch `rk-03-extraction`,
-after the requested local handoff; full-gate acceptance remains outstanding.
-RK-06 follows once extraction lands. Deliver structural review context before confirmed lessons;
+**Active: [RK-06 — indexer, atomic publication and CLI](IMPLEMENTATION.md#rk-06).**
+Implementation started 2026-10-18 on `9c698e7e`; both prerequisites are accepted.
+Local validation passed on 2026-10-19; review and merge remain outstanding.
+RK-07 follows RK-06 acceptance and merge; RK-08 is also unblocked by that merge.
+Deliver structural review context before confirmed lessons;
 Go/SCIP do not block that path. Migration order is 0002/RK-10 → 0003/RK-15 → 0004/RK-19.
 
 RK-03 extractors, fixtures and Nix wiring are published behind `extract-rust`;
-acceptance is recorded in its journal entry. Indexing and graph/knowledge consumers remain
-planned and disabled by default. Historical RK-01/02 acceptance below is preserved separately.
+acceptance is recorded in its journal entry. Indexing is implemented behind opt-in `repo-graph`;
+graph/knowledge consumers remain planned. Default feature selections and runtime store defaults
+remain unchanged. Historical RK-01/02 acceptance below is preserved separately.
 
 ## State and update rules
 
@@ -30,6 +32,7 @@ planned and disabled by default. Historical RK-01/02 acceptance below is preserv
 | In progress | Implementation has started; link the working PR and remaining acceptance work |
 | Blocked | Work cannot continue; name the concrete blocker, dependency and unblock action |
 | Implemented awaiting validation | Deliverables exist, but required checks/integration/evaluation evidence is incomplete |
+| Validated awaiting merge | Deliverables and required local checks passed; review/PR merge and integrated-revision acceptance remain pending |
 | Merged | Deliverables and required acceptance are evidenced and the PR has merged |
 | Deferred | Explicitly postponed; record the reason and reconsideration condition |
 
@@ -50,10 +53,10 @@ case descriptions and expected outcomes; add missing scenario tables in the owni
 | [RK-00](IMPLEMENTATION.md#rk-00) | Design track | — | Merged | Existing design/index links | #495 |
 | [RK-01](IMPLEMENTATION.md#rk-01) | Core graph and memory store | RK-00 | Merged | R1/R2/R3; gate `a023635a` | #582 |
 | [RK-02](IMPLEMENTATION.md#rk-02) | Postgres graph store | RK-01 | Merged | P1/R3/R4; gate `0d61ff52`; live 57/57 | #585 |
-| [RK-03](IMPLEMENTATION.md#rk-03) | Rust/Cargo/docs extraction | RK-01 (met) | Implemented awaiting validation | E1 33/33, heap 1/1, Ir/lint, both graph Nix checks and 203 existing graph cases pass; full gate 75/76: `forge-ghapp` failure reproduced on untouched `d648c894`. Upstream #640 adds test synchronization; merged-tree gate remains required before acceptance/merge; [journal](PROGRESS.md#2026-10-18--rk-03-extraction) | [Draft #642](https://github.com/randomizedcoder/agent-seddon/pull/642), `db9d9948` |
+| [RK-03](IMPLEMENTATION.md#rk-03) | Rust/Cargo/docs extraction | RK-01 (met) | Merged | E1 33/33, heap 1/1, Ir/lint and graph conformance passed before merge; integrated main full gate passed, 87 checks; [journal](PROGRESS.md#2026-10-18--rk-06-execution-checkpoints) | [Merged #642](https://github.com/randomizedcoder/agent-seddon/pull/642), `9c698e7e` |
 | [RK-04](IMPLEMENTATION.md#rk-04) | Go extraction (additional) | RK-03 | Not started | Pending: Go mapping/helper fixture cases | — |
 | [RK-05](IMPLEMENTATION.md#rk-05) | SCIP spike and extraction (additional) | RK-03 | Not started | Pending: spike, resolved-edge/offline or integration evidence | — |
-| [RK-06](IMPLEMENTATION.md#rk-06) | Indexer, atomic publication and CLI | RK-02, RK-03 | Not started | Pending: I1, applicable I2, strict Pg runner | — |
+| [RK-06](IMPLEMENTATION.md#rk-06) | Indexer, atomic publication and CLI | RK-02, RK-03 (met) | Validated awaiting merge | Full Nix gate passed on frozen source `0a903d562397` (code/build/fixtures); strict Pg 321/321 across 15 suites, including graph 64, indexing 4 and operator workflow 1; seven snapshot identities/hashes exported; cleanup passed. Required/optional no-runtime behavior verified. Review/merge pending; [journal](PROGRESS.md#2026-10-18--rk-06-execution-checkpoints) | Branch `rk-06-indexer` on `9c698e7e`; publication in progress |
 | [RK-07](IMPLEMENTATION.md#rk-07) | Fleet refresh and tenant cache | RK-06 | Not started | Pending: F1, fleet I2 | — |
 | [RK-08](IMPLEMENTATION.md#rk-08) | Graph tool and PgAst | RK-06 | Not started | Pending: R5, AST/config/feature composition | — |
 | [RK-09](IMPLEMENTATION.md#rk-09) | Review collector and A/B evaluation | RK-07, RK-08 | Not started | Pending: C1, full I2, Q1 A/B | — |

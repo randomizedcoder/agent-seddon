@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+repo-graph = ["dep:agent-repo-graph", "agent-repo-graph/index", "agent-repo-graph/repo-graph-postgres", "git"]
 # The batteries-included default. Grows as each milestone's modules land
 # (provider-anthropic, tool-edit, tool-search are added in their milestones).
 default = [
@@ -452,6 +453,7 @@ config-schema = ["dep:schemars"]
 config = ["config-schema", "dep:toml_edit"]
 
 [dependencies]
+agent-repo-graph = { workspace = true, optional = true }
 agent-core.workspace = true
 agent-metrics.workspace = true
 # These default to no features (see workspace deps); features below opt in.

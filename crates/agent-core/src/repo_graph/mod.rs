@@ -18,9 +18,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod builder;
 pub mod key;
+pub mod memory;
+pub mod metadata;
 pub mod model;
 pub use builder::*;
 pub use key::*;
+pub use memory::MemRepoGraph;
+pub use metadata::*;
 pub use model::*;
 
 /// The typed error of the seam (`03-queries.md`, README threat model). The caller's response
@@ -409,6 +413,32 @@ pub trait RepoGraphStore: Send + Sync {
     /// All repos of this tenant, ordered by slug.
     async fn repos(&self) -> RepoGraphResult<Vec<Repo>>;
 
+    /// Publish or reuse a ready identity atomically. No committed intermediate building row.
+    async fn snapshot_publish(
+        &self,
+        begin: &SnapshotBegin,
+        graph: &RepoGraph,
+        report: &ExtractReport,
+    ) -> RepoGraphResult<PublishResult>;
+    /// Record a failed index attempt atomically; never overwrite a ready/building identity.
+    async fn snapshot_record_failure(
+        &self,
+        begin: &SnapshotBegin,
+        reason: &str,
+        report: &ExtractReport,
+    ) -> RepoGraphResult<()>;
+    /// Find the ready snapshot for an exact, validated identity.
+    async fn snapshot_find_identity(
+        &self,
+        begin: &SnapshotBegin,
+    ) -> RepoGraphResult<Option<Snapshot>>;
+    /// Read completeness metadata. Legacy snapshots explicitly have no report.
+    async fn snapshot_report(&self, scope: Scope) -> RepoGraphResult<Option<ExtractReport>>;
+    /// Operator-only: after stopping the writer, fail a legacy building row in this scope.
+    async fn snapshot_recover(&self, scope: Scope, reason: &str) -> RepoGraphResult<()>;
+    /// Pin a ready snapshot for consistent multi-query reads. Drop releases the view.
+    async fn read_view(&self, scope: Scope) -> RepoGraphResult<Box<dyn RepoGraphReadView>>;
+
     // -- Snapshots ---------------------------------------------------------
 
     /// Begin a `building` snapshot; `Conflict` if a `building` / `ready` one with the same
@@ -495,6 +525,67 @@ pub trait RepoGraphStore: Send + Sync {
     ) -> RepoGraphResult<Vec<Vec<NodeKey>>>;
     /// A summary of the snapshot's shape.
     async fn shape(&self, scope: Scope) -> RepoGraphResult<Shape>;
+}
+
+/// Result of atomic publication; reuse is distinct from new publication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishResult {
+    pub snapshot: Snapshot,
+    pub report: Option<ExtractReport>,
+    pub reused: bool,
+}
+
+/// Tenant/repository/snapshot scope is fixed at creation; callers cannot retarget this view.
+#[async_trait::async_trait]
+pub trait RepoGraphReadView: Send + Sync {
+    /// Completeness metadata from the same pinned read as the graph.
+    async fn report(&self) -> RepoGraphResult<Option<ExtractReport>>;
+    async fn nodes_by_key(&self, keys: &[NodeKey]) -> RepoGraphResult<Vec<NodeRow>>;
+    /// Nodes defined in any of the given files (≤ [`MAX_KEYS`]).
+    async fn nodes_by_file(&self, files: &[String]) -> RepoGraphResult<Vec<NodeRow>>;
+    /// Nodes with an exact `name` (optionally a kind), `limit` clamped to `1..=MAX_RESULT`.
+    async fn nodes_by_name(
+        &self,
+        name: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> RepoGraphResult<Vec<NodeRow>>;
+    /// BFS over one edge kind from the seeds; `hops` clamped `1..=MAX_NEIGHBOR_HOPS`, `cap`
+    /// `1..=MAX_RESULT`; rows carry their min depth, ordered by `(depth, key)`.
+    async fn neighbors(
+        &self,
+        seeds: &[NodeId],
+        kind: EdgeKind,
+        dir: Direction,
+        hops: u32,
+        cap: usize,
+    ) -> RepoGraphResult<Vec<Neighbor>>;
+    /// Files reachable inbound over `calls` / `imports` / `implements` from the seed files;
+    /// `hops` clamped `1..=MAX_RADIUS_HOPS`; sorted.
+    async fn blast_radius(
+        &self,
+        files: &[String],
+        hops: u32,
+        cap: usize,
+    ) -> RepoGraphResult<Vec<String>>;
+    /// Tests reaching the seeds inbound over `calls` (≤ 3 hops) then `tests` in-edges.
+    async fn tests_covering(
+        &self,
+        seeds: &[NodeId],
+        hops: u32,
+        cap: usize,
+    ) -> RepoGraphResult<Vec<TestHit>>;
+    /// Up to `max_paths` shortest paths from `src` to `dst` over
+    /// `calls` / `imports` / `depends_on` / `contains`; `max_hops` clamped `1..=MAX_PATH_HOPS`.
+    async fn path_between(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        max_hops: u32,
+        max_paths: usize,
+    ) -> RepoGraphResult<Vec<Vec<NodeKey>>>;
+    /// A summary of the snapshot's shape.
+    async fn shape(&self) -> RepoGraphResult<Shape>;
 }
 
 /// A `forge` / `default_branch` token: non-empty, ≤ 64 ASCII `[A-Za-z0-9._/-]`.

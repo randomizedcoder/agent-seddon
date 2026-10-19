@@ -16,6 +16,7 @@ pkgs.runCommand "agent-cli-help"
     nativeBuildInputs = [
       agent
       pkgs.coreutils
+      pkgs.gnugrep
     ];
   }
   ''
@@ -43,6 +44,8 @@ pkgs.runCommand "agent-cli-help"
     require "--serve-<seam>"
     # The campaign subcommand (docs/design/campaigns, CP-04).
     require "campaign"
+    require "repo <verb>"
+    agent repo --help | grep -q "recover"
 
     # A representative slice of the per-seam gRPC surface (`<seam> = a|b|c|...`).
     # Not the full 28 — enough to catch a gross `flag_names()` regression without

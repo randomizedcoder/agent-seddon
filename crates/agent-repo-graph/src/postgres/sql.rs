@@ -326,6 +326,14 @@ pub const FINISH_UPDATE: &str = "UPDATE graph_snapshots
 // -- snapshots: read / list / retention / diff ----------------------------------
 
 /// The newest ready snapshot for `(repo, sha)`: `$2` repo_id, `$3` sha.
+pub const SNAPSHOT_IDENTITY: &str = concat!(
+    "SELECT ",
+    snapshot_cols!(),
+    " FROM graph_snapshots
+      WHERE tenant = $1 AND repo_id = $2 AND status = 'ready' AND extractor_version = $4 AND commit_sha = $3
+      ORDER BY built_at DESC, snapshot_id DESC LIMIT 1"
+);
+
 pub const SNAPSHOT_FIND: &str = concat!(
     "SELECT ",
     snapshot_cols!(),

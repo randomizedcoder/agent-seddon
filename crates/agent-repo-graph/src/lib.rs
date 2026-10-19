@@ -29,3 +29,6 @@ pub mod extract;
 pub mod postgres;
 #[cfg(feature = "repo-graph-postgres")]
 pub use postgres::PgRepoGraph;
+
+#[cfg(feature = "index")]
+pub mod index;

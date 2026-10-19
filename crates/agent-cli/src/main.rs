@@ -94,6 +94,14 @@ async fn main() -> Result<()> {
     // Record where the config came from so the `ConfigStore` seam (portal
     // settings) can write edits back to the same file.
     config.source_path = Some(config_path.clone());
+    agent_runtime::repo_index::validate(&config)?;
+    if let Mode::Repo(args) = &mode {
+        println!(
+            "{}",
+            agent_runtime::repo_index::execute(&config, args).await?
+        );
+        return Ok(());
+    }
     // A worker child (`--run-task`) re-reads the driver's config, and the driver
     // holds the writer lock on the shared search index: give the child its own
     // disposable index dirs before the build (removed after the leaf).
@@ -927,6 +935,7 @@ async fn main() -> Result<()> {
                 run_task_exit = Some(exit.code());
                 Ok(None)
             }
+            Mode::Repo(_) => unreachable!("repo commands return before building the agent"),
             Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } | Mode::Token { .. } => {
                 unreachable!("login/logout/whoami/token return before the run")
             }
@@ -1050,6 +1059,7 @@ fn init_tracing(
 }
 
 enum Mode {
+    Repo(Vec<String>),
     OneShot(String),
     Repl,
     ServeMcp,
@@ -1272,6 +1282,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut detect_mode_prompt: Option<String> = None;
     let mut check_config = false;
     let mut doctor = false;
+    let mut repo_args: Option<Vec<String>> = None;
     let mut campaign: Option<campaign_cli::CampaignArgs> = None;
     let mut login = false;
     let mut logout = false;
@@ -1327,6 +1338,15 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             // verb parser (so `--title` is never swallowed as a goal word). Unreachable
             // after `--` — the `end_of_opts` branch above runs first — so a
             // scheduled-job goal can never turn a child into a campaign verb.
+            "repo" => {
+                let parsed: Vec<String> = args.collect();
+                if parsed.is_empty() || matches!(parsed[0].as_str(), "--help" | "help") {
+                    println!("{}", agent_runtime::repo_index::USAGE);
+                    std::process::exit(0);
+                }
+                repo_args = Some(parsed);
+                break;
+            }
             "campaign" => {
                 let parsed = campaign_cli::parse(&mut args)?;
                 if parsed.cmd == campaign_cli::CampaignCmd::Help {
@@ -1403,6 +1423,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                      --detect-mode P     classify prompt P's task mode and print the verdict\n  \
                      --check-config      load + validate the config, print the selected impls, and exit\n  \
                      doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
+                     repo <verb> …       index and inspect repository graphs (`agent repo --help`; opt-in build feature)\n  \
                      campaign <verb> …   manage campaigns — add / plan / list / show / approve / answer … (`agent campaign --help`)\n  \
                      login              sign in at the login issuer (device code) and keep an agent token [--issuer NAME] [--endpoint ADDR]\n  \
                      login --browser    sign in through a browser (loopback redirect) instead of a device code\n  \
@@ -1462,6 +1483,11 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
         Mode::CheckConfig
     } else if doctor {
         Mode::Doctor
+    } else if let Some(mut r) = repo_args {
+        if let Some(t) = tenant {
+            r.extend(["--tenant".into(), t]);
+        }
+        Mode::Repo(r)
     } else if let Some(mut c) = campaign {
         // `--tenant` before the `campaign` word binds the same as after it; the
         // verb parser validated its own, this one is validated here.
@@ -1528,6 +1554,22 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positive_repo_commands_parse() {
+        let args = parse(&[
+            "--tenant", "acme", "repo", "index", "--repo", "o__r", "--sha", "HEAD",
+        ])
+        .unwrap();
+        assert!(
+            matches!(args.mode,Mode::Repo(ref args) if args.ends_with(&["--tenant".to_string(),"acme".to_string()]))
+        );
+    }
+    #[test]
+    fn adversarial_repo_commands_after_separator() {
+        let args = parse(&["--", "repo", "recover", "--writer-stopped"]).unwrap();
+        assert!(matches!(args.mode, Mode::OneShot(_)));
+    }
 
     fn parse(argv: &[&str]) -> Result<Args> {
         parse_args_from(argv.iter().map(|s| (*s).to_string()))

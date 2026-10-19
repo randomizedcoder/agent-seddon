@@ -119,6 +119,8 @@ pub struct Config {
     pub github_install_registry: GithubInstallRegistryCfg,
     #[serde(default)]
     pub campaign: CampaignCfg,
+    #[serde(default)]
+    pub repo_graph: RepoGraphCfg,
     /// `[github_app]`: GitHub App server credentials used to MINT installation tokens
     /// for `ghapp:<installation_id>` forge references (forge-auth F2). Absent ⇒ no App
     /// is configured, so a `ghapp:` ref fails closed when resolved.
@@ -4836,6 +4838,79 @@ fn default_flush_ms() -> u64 {
     1_000
 }
 
+/// Opt-in repository indexing. No server is opened when `store` is empty.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+#[serde(default)]
+pub struct RepoGraphCfg {
+    pub store: String,
+    pub dsn_ref: String,
+    pub repo: String,
+    pub extractors: Vec<String>,
+    pub retention: usize,
+    pub max_files: usize,
+    pub max_file_bytes: usize,
+    pub max_nodes: usize,
+    pub max_edges: usize,
+    pub index_timeout_secs: u64,
+    pub pool_max: u32,
+    pub migrate_on_start: bool,
+}
+impl Default for RepoGraphCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            dsn_ref: String::new(),
+            repo: String::new(),
+            extractors: vec!["rust".into(), "cargo".into(), "docs".into()],
+            retention: 10,
+            max_files: 50_000,
+            max_file_bytes: 2 * 1024 * 1024,
+            max_nodes: 250_000,
+            max_edges: 2_000_000,
+            index_timeout_secs: 600,
+            pool_max: 8,
+            migrate_on_start: true,
+        }
+    }
+}
+impl RepoGraphCfg {
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(self.store.as_str(), "" | "memory" | "postgres") {
+            return Err("[repo_graph] unsupported store".into());
+        }
+        if !self.store.is_empty() && !cfg!(feature = "repo-graph") {
+            return Err("[repo_graph] requires the repo-graph build feature".into());
+        }
+        if !self.repo.is_empty() && !agent_core::safe_segment(&self.repo) {
+            return Err("[repo_graph] invalid repo".into());
+        }
+        if self.pool_max == 0 || self.pool_max > 64 {
+            return Err("[repo_graph] pool_max must be 1..=64".into());
+        }
+        #[cfg(feature = "repo-graph")]
+        self.index_options()
+            .validate()
+            .map_err(|_| "[repo_graph] invalid extractors or index limits".to_string())?;
+        Ok(())
+    }
+    #[cfg(feature = "repo-graph")]
+    pub fn index_options(&self) -> agent_repo_graph::index::IndexOptions {
+        agent_repo_graph::index::IndexOptions {
+            extractors: self.extractors.clone(),
+            max_files: self.max_files,
+            max_file_bytes: self.max_file_bytes,
+            max_nodes: self.max_nodes,
+            max_edges: self.max_edges,
+            timeout_secs: self.index_timeout_secs,
+            retention: self.retention,
+        }
+    }
+}
+
 #[cfg(test)]
 impl Config {
     /// A minimal, valid config for unit tests (no network use).
@@ -4930,6 +5005,7 @@ impl Config {
             transport_registry: TransportRegistryCfg::default(),
             github_install_registry: GithubInstallRegistryCfg::default(),
             campaign: CampaignCfg::default(),
+            repo_graph: RepoGraphCfg::default(),
             github_app: None,
             auth: AuthCfg::default(),
             tenancy: TenancyCfg::default(),

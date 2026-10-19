@@ -19,6 +19,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub mod publication;
 pub mod r3;
 
 type Open = dyn Fn(&str) -> RepoGraphResult<Arc<dyn RepoGraphStore>> + Send + Sync;
