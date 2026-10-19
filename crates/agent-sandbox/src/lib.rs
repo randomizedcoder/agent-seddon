@@ -23,13 +23,21 @@ use tokio::io::AsyncReadExt;
 /// tagged; the child is then killed so it can't block writing to a full pipe.
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Bytes per `read` while capturing a stream (one heap buffer per stream, see [`read_capped`]).
+const READ_CHUNK: usize = 64 * 1024;
+
 /// Read from `r` into a `Vec`, buffering at most `cap` bytes. Returns the bytes and whether
 /// the source had **more** than `cap` (⇒ truncated). Reads in bounded chunks so a hostile
 /// program can't force a single huge allocation, and never buffers more than `cap`. Exactly
 /// `cap` bytes with nothing after is *not* flagged truncated.
+///
+/// The read chunk is **heap**-allocated: a `[u8; READ_CHUNK]` held across the `.await` would
+/// live inline in this future's state, and that state is nested (two streams joined, then
+/// timeout, then the backend's `exec`, then every caller's future) and moved by value on poll
+/// in a debug build — which overflowed a 2 MiB tokio worker stack on a fleet review's git spawn.
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bool) {
     let mut buf = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
+    let mut chunk = vec![0u8; READ_CHUNK].into_boxed_slice();
     loop {
         match r.read(&mut chunk).await {
             Ok(0) => return (buf, false),
@@ -568,6 +576,7 @@ mod tests {
     #[rstest]
     #[case::positive_under_cap(50, 100)]
     #[case::boundary_exactly_cap(100, 100)]
+    #[case::corner_spans_several_chunks(2 * READ_CHUNK + 1, 4 * READ_CHUNK)]
     #[tokio::test]
     async fn read_capped_keeps_all_when_it_fits(#[case] len: usize, #[case] cap: usize) {
         let src = vec![b'x'; len];
@@ -587,6 +596,20 @@ mod tests {
         let (buf, truncated) = read_capped(&src[..], cap).await;
         assert_eq!(buf.len(), cap, "buffer never exceeds the cap");
         assert!(truncated, "oversized source is flagged truncated");
+    }
+
+    /// The capture futures stay small: nothing chunk-sized is held inline across an
+    /// `.await`. A stack `[u8; READ_CHUNK]` there made every spawn's future ≥ 128 KiB (two
+    /// streams), which nested callers multiplied until a fleet review's git spawn overflowed
+    /// a 2 MiB tokio worker stack in a debug build. The bound is far below one chunk.
+    #[rstest]
+    #[case::positive_read_capped(std::mem::size_of_val(&read_capped(&[][..], 1)))]
+    #[case::boundary_run_argv(std::mem::size_of_val(&run_argv(&[], &ExecSpec::argv(Vec::<String>::new(), "."))))]
+    fn capture_futures_hold_no_inline_chunk(#[case] size: usize) {
+        assert!(
+            size < READ_CHUNK / 8,
+            "capture future is {size} bytes (chunk = {READ_CHUNK})"
+        );
     }
 
     /// End-to-end: a command whose stdout exceeds `MAX_CAPTURE_BYTES` is captured up to the
