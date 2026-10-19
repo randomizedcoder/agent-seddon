@@ -1481,6 +1481,7 @@ pub async fn build_agent_with_mode(
         fleet_max_total: cfg.review_fleet.max_total,
         fleet_max_per_user: cfg.review_fleet.max_per_user,
         fleet_slack_app_token_ref: cfg.review_fleet.slack.app_token_ref.clone(),
+        fleet_webhook_listen: cfg.review_fleet.webhook.listen.trim().to_string(),
         // OIDC/JWT auth for served seams (`[auth]`, C33/B1); `mode` empty ⇒ disabled.
         grpc_auth: crate::agent::GrpcAuthSettings {
             mode: cfg.auth.mode.clone(),
@@ -1649,7 +1650,8 @@ pub async fn build_agent_with_mode(
     // fleet orchestrator consumes it in increment 3c.
     #[cfg(feature = "fleet")]
     let agent = match resolve_fleet_registry(&cfg, &metrics)? {
-        Some(r) => agent.with_fleet_registry(r),
+        Some((r, Some(t))) => agent.with_fleet_registry(r).with_fleet_tenants(t),
+        Some((r, None)) => agent.with_fleet_registry(r),
         None => agent,
     };
     // The approve→post idempotency lease (review-fleet C17): a durable, cross-process
@@ -1715,6 +1717,24 @@ pub async fn build_agent_with_mode(
     };
     #[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
     let agent = wire_github_install_onboarding(&cfg, install_backend.as_ref(), agent).await?;
+    // The GitHub webhook secret (forge-auth F6), resolved in the operator scope at startup
+    // so a bad reference fails closed here, not on the first delivery.
+    #[cfg(feature = "forge-ghapp")]
+    let agent = match cfg
+        .github_app
+        .as_ref()
+        .map(|ga| ga.webhook_secret_ref.trim())
+    {
+        Some(r) if !r.is_empty() => {
+            let secret = crate::secrets::resolve(crate::secrets::SecretScope::Operator, r)
+                .map_err(|e| anyhow::anyhow!("[github_app] webhook_secret_ref: {e}"))?;
+            if secret.expose().is_empty() {
+                anyhow::bail!("[github_app] webhook_secret_ref resolved to an empty secret");
+            }
+            agent.with_github_webhook_secret(secret)
+        }
+        _ => agent,
+    };
     // The fleet's persisted review-history reader (review-fleet C16), over the same
     // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
     // enabled — with no store there's nothing to read back, and the FSM reviews without
@@ -3514,14 +3534,25 @@ pub(crate) fn resolve_provider_registry(
 /// the feature is off) and a `bail!` on an unknown value. `""` ⇒ no roster (the
 /// seam stays absent). The metered decorator + gauge land in 3c; 3a/3b keep the
 /// resolver minimal.
+/// The resolved roster and, for a per-tenant shared store, its tenant discovery.
+#[cfg(feature = "fleet")]
+pub(crate) type FleetStore = (
+    Arc<dyn agent_core::FleetRegistry>,
+    Option<Arc<dyn agent_core::FleetTenants>>,
+);
+
 #[cfg(feature = "fleet")]
 pub(crate) fn resolve_fleet_registry(
     cfg: &Config,
     metrics: &Metrics,
-) -> anyhow::Result<Option<Arc<dyn agent_core::FleetRegistry>>> {
+) -> anyhow::Result<Option<FleetStore>> {
     // Only the (off-by-default) shared-store arms build a config-store backend to meter.
     #[cfg(not(any(feature = "fleet-postgres", feature = "fleet-sqlite")))]
     let _ = metrics;
+    // Set by the per-tenant shared-store arms: the driver-side tenant discovery the fleet
+    // process fans its background work out over (forge-auth F6).
+    #[allow(unused_mut)]
+    let mut tenants: Option<Arc<dyn agent_core::FleetTenants>> = None;
     let store: Option<Arc<dyn agent_core::FleetRegistry>> = match cfg.review_fleet.store.as_str() {
         "" => None,
         "file" => Some(Arc::new(agent_review_fleet::FileFleet::new(expand_tilde(
@@ -3538,6 +3569,7 @@ pub(crate) fn resolve_fleet_registry(
                 metrics,
             )?;
             if cfg.tenancy.per_tenant {
+                tenants = Some(Arc::new(agent_review_fleet::StoreFleetTenants::new(backend.clone())));
                 let b = backend.clone();
                 Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
                     agent_review_fleet::StoreFleet::with_tenant(b.clone(), t)
@@ -3568,6 +3600,7 @@ pub(crate) fn resolve_fleet_registry(
             let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
             // Per-tenant plane (config C35 / C2): route per verified tenant when on.
             if cfg.tenancy.per_tenant {
+                tenants = Some(Arc::new(agent_review_fleet::StoreFleetTenants::new(backend.clone())));
                 let b = backend.clone();
                 Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
                     agent_review_fleet::StoreFleet::with_tenant(b.clone(), t)
@@ -3584,7 +3617,7 @@ pub(crate) fn resolve_fleet_registry(
         ),
         other => anyhow::bail!("unknown [review_fleet] store `{other}`"),
     };
-    Ok(store)
+    Ok(store.map(|registry| (registry, tenants)))
 }
 
 /// Build the approve→post idempotency lease (review-fleet C17): a durable, cross-process
@@ -3932,6 +3965,10 @@ async fn wire_github_install_onboarding(
         );
     }
     crate::secrets::install_github_app_store_bindings(seed.bindings);
+    // Webhook-driven uninstall/suspend/repo sync (forge-auth F6) over the same store.
+    let agent = agent.with_github_install_lifecycle(Arc::new(
+        crate::install_lifecycle::InstallLifecycle::new(backend.clone()),
+    ));
     if !ga.onboarding_enabled() {
         return Ok(agent);
     }

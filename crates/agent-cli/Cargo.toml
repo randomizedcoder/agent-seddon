@@ -29,6 +29,10 @@ postgres = ["agent-runtime/postgres"]
 # agent-runtime/auth (→ agent-grpc/auth). On by default; a `--no-default-features`
 # build without it refuses `[auth] mode = "oidc"` when the config is loaded.
 auth = ["agent-runtime/auth"]
+# The GitHub App path (forge-auth F2–F6): `ghapp:` installation tokens, install
+# onboarding, and `--serve-fleet`'s HMAC-verified webhook receiver. Off by default
+# (pulls `ring` + `jsonwebtoken` into agent-forge); exercised by the `forge-ghapp` check.
+forge-ghapp = ["agent-runtime/forge-ghapp"]
 
 [dependencies]
 agent-core.workspace = true
@@ -55,6 +59,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 tiny_http.workspace = true
+# The fleet webhook target (forge-auth F6) implements an async seam trait.
+async-trait.workspace = true
 reqwest.workspace = true
 rustyline.workspace = true
 
@@ -69,6 +75,8 @@ rstest.workspace = true
 # `tempdir()` for the campaign parser's `--goal-file` rows; `pki` for the SIGHUP
 # reload rows (throwaway certificates on disk).
 agent-testkit = { workspace = true, features = ["pki"] }
+# Signs webhook deliveries in the receiver's socket test (forge-auth F6).
+ring.workspace = true
 
 # Pty-driven CLI tests (tests/repl_pty.rs). Unix-only: it spawns the binary on a
 # real terminal to reach the REPL's line editor and the policy guard's operator

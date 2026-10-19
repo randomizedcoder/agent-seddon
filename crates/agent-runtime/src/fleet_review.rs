@@ -158,7 +158,9 @@ fn pr_ref_template_for(
 /// the row's clone URL, so the first `fetch_pr` bootstraps the mirror), the row's forge, and a
 /// [`ReviewOrchestrator`] with the
 /// **same** `[review]` collector set as the in-loop path — only the repo/forge/root differ.
-/// Built contexts are cached by `row.id` so repeated triggers reuse the clone + engine.
+/// Built contexts are cached per `(user, id)` — the tenant is part of the key, since two
+/// tenants may hold the same row id — so repeated triggers reuse the clone + engine; a row
+/// whose repo or forge changed (a live roster edit, forge-auth F6) is rebuilt.
 pub(crate) struct FleetReviewCtxFactory {
     fleet_root: PathBuf,
     review: ReviewCfg,
@@ -176,8 +178,9 @@ pub(crate) struct FleetReviewCtxFactory {
     /// `forge_id` builds from the persisted card. `None` ⇒ only inline-forge rows work.
     forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
     metrics: Metrics,
-    /// Built `(repo, grounder)` by `row.id`. A repeated trigger reuses the checkout + engine.
-    cache: Mutex<HashMap<String, FleetReviewCtx>>,
+    /// Built `(repo, grounder)` by `(user, id)`, with the [`CacheFingerprint`] it was built
+    /// from. A repeated trigger reuses the checkout + engine while the fingerprint matches.
+    cache: Mutex<HashMap<(String, String), (CacheFingerprint, FleetReviewCtx)>>,
 }
 
 impl FleetReviewCtxFactory {
@@ -213,15 +216,19 @@ impl FleetReviewCtxFactory {
 #[async_trait]
 impl FleetReviewFactory for FleetReviewCtxFactory {
     async fn build(&self, row: &FleetSession) -> Result<FleetReviewCtx> {
-        // Cache hit: a repeated trigger for the same row reuses the checkout + engine.
-        if let Some(ctx) = self
+        // Cache hit: a repeated trigger for the same (unchanged) row reuses the checkout +
+        // engine. A changed repo/forge falls through and replaces the entry below.
+        let key = (row.user.clone(), row.id.clone());
+        let fingerprint = CacheFingerprint::of(row);
+        if let Some((fp, ctx)) = self
             .cache
             .lock()
             .expect("fleet review cache poisoned")
-            .get(&row.id)
-            .cloned()
+            .get(&key)
         {
-            return Ok(ctx);
+            if *fp == fingerprint {
+                return Ok(ctx.clone());
+            }
         }
 
         // Confine the row's workspace under the fleet root: `<root>/<user>/<id>` with both
@@ -337,8 +344,31 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         self.cache
             .lock()
             .expect("fleet review cache poisoned")
-            .insert(row.id.clone(), ctx.clone());
+            .insert(key, (fingerprint, ctx.clone()));
         Ok(ctx)
+    }
+}
+
+/// The row fields a built review context depends on — the repo and how its forge is
+/// reached. A cached context is reused only while these are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheFingerprint {
+    repo: String,
+    backend: String,
+    base_url: String,
+    token_ref: String,
+    forge_id: String,
+}
+
+impl CacheFingerprint {
+    fn of(row: &FleetSession) -> Self {
+        Self {
+            repo: row.repo.clone(),
+            backend: row.backend.clone(),
+            base_url: row.base_url.clone(),
+            token_ref: row.token_ref.clone(),
+            forge_id: row.forge_id.clone(),
+        }
     }
 }
 
@@ -700,6 +730,39 @@ mod tests {
             Arc::ptr_eq(&a.grounder, &b.grounder),
             "same row.id reuses the cached grounder"
         );
+    }
+
+    // A cached context is reused only for the same tenant's unchanged row: another tenant's
+    // row with the same id, or an edited repo, builds its own.
+    #[rstest::rstest]
+    #[case::positive_same_row_reused("randomizedcoder", "randomizedcoder__rtl-fun", true)]
+    #[case::adversarial_other_tenant_same_id_not_shared(
+        "globex",
+        "randomizedcoder__rtl-fun",
+        false
+    )]
+    #[case::corner_edited_repo_rebuilt("randomizedcoder", "randomizedcoder__uds-rdma-proxy", false)]
+    #[tokio::test]
+    async fn cache_keyed_by_tenant_and_fingerprint(
+        #[case] user: &str,
+        #[case] repo: &str,
+        #[case] shared: bool,
+    ) {
+        let tmp = agent_testkit::tempdir();
+        let f = factory(tmp.as_path().to_path_buf());
+        let first = row(
+            "rtl-fun",
+            "randomizedcoder",
+            "randomizedcoder__rtl-fun",
+            "github",
+            "",
+        );
+        let a = f.build(&first).await.unwrap();
+        let b = f
+            .build(&row("rtl-fun", user, repo, "github", ""))
+            .await
+            .unwrap();
+        assert_eq!(Arc::ptr_eq(&a.repo, &b.repo), shared);
     }
 
     // boundary: two distinct rows get isolated checkouts (no cross-repo bleed).

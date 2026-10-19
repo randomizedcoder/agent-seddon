@@ -2,7 +2,7 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d1 lands the portal Forges tab (Connect GitHub round trip + one-click `ghapp:` forge cards); F5d2 lands fleet-session create/edit/delete on a forge card on the Fleet tab; F6 designed, not built.** The design-of-record
+**Track state: 🟡 F1 + F2 + F2b + F3 + F4a built; F4b lands the store→gate building blocks but the gate rewire itself is deferred to F5 (ownership-verified); F5a lands the install-time user-OAuth ownership-proof primitive (no consumer); F5b serve-mounts the install registry (CRUD only, gate untouched); F5c1 lands the admin-ownership proof; F5c2 lands self-service onboarding (`BeginInstall`/`CompleteInstall` → verified-installs collection) and the mint gate = bootstrap OR verified; F5d1 lands the portal Forges tab (Connect GitHub round trip + one-click `ghapp:` forge cards); F5d2 lands fleet-session create/edit/delete on a forge card on the Fleet tab; F6 lands the tenant-aware, live-re-synced fleet process, the HMAC-verified `POST /webhooks/github` receiver and the installation lifecycle (uninstall/suspend narrow the gate).** The design-of-record
 ([`README.md`](README.md)) was written 2026-10-14. Forge auth is still operator-pasted PAT
 (`ForgeCard.token_ref = env:/file:`) in practice; F1 adds the `ghapp:` *reference* kind but resolution
 (the mint) is deferred to F2, so a `ghapp:` ref parses and stores yet fails closed when resolved. This
@@ -23,7 +23,7 @@ authorization** half (a GitHub App installation), kept deliberately separate.
 | F3 | App server credentials | bootstrap TOML: `app_id`, `private_key_ref` (landed with F2), webhook `secret_ref` (+ the constant-time HMAC verify primitive F6 will call) | ✅ |
 | F4 | Per-tenant install store | `{installation_id, selected_repos[], installed_at}` card/registry row (tenant = the store scope), gRPC CRUD, tenant-scoped. **F4a**: card + store + trait + gRPC CRUD + `PerTenant` (built). **F4b**: land the store→mint-gate building blocks (sync snapshot + CRUD-refresh decorator + store enumerator) but **keep the gate bootstrap-only** — the store union is unsound while store rows are tenant-self-asserted, so it is deferred to F5 behind an ownership proof (built). | 🟡 |
 | F5 | Portal onboarding flow | GitHub OAuth handshake → App install redirect → install-callback → **ownership-verified** roster-row write with a `ghapp:` ref, then the mint-gate union. Multi-slice. **F5a**: install-time user-OAuth ownership-proof primitive (`agent-forge`, no consumer) (built). **F5b**: serve-mount `GithubInstallRegistryService` (built — CRUD only, mint gate untouched). **F5c1**: admin-ownership proof `prove_admin` (built). **F5c2**: portal-relayed `BeginInstall`/`CompleteInstall` RPCs + verified-installs collection + gate union (built). **F5d1**: portal Forges tab — Connect GitHub round trip + one-click `ghapp:` forge cards (built). **F5d2**: FleetSession create/edit/delete on a forge card (`forge_id`) on the Fleet tab (built). | 🟡 |
-| F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop | ⬜ |
+| F6 | Webhook receiver | HMAC-verified `pull_request` → `FleetTrigger`; removes the roster-read-at-BOOT limit; poll stays as backstop. Built as one PR: tenant-aware fleet drivers + live re-sync, the receiver, installation lifecycle (uninstall/suspend/unsuspend/repo sync), Envoy `fleet_webhook` listener | ✅ |
 
 **Suggested first increment:** F1 + F2 + F3 behind a feature flag, validated against our own
 `randomizedcoder/agent-seddon` install (replacing the file-PAT on that one row), before the portal
@@ -315,7 +315,46 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   a silent re-owning). No tenant in scope (single-operator, no identity) ⇒ stored as sent, unchanged. Table:
   `fleet_put_binds_owner_to_caller_tenant` (11: incl. `adversarial_` header claiming another tenant under a
   verified principal, traversal `user`, `boundary_` case/prefix lookalikes). Still open: the fleet process reads
-  the roster only at boot, unscoped (F6).
+  the roster only at boot, unscoped (F6 — closed below).
+
+- **F6 — tenant-aware fleet, webhooks, installation lifecycle (PR #TBD):** three parts in one PR.
+  *Tenancy.* `FleetTrigger` gains a `tenant`, set by the producer (row tenant for poll/Slack/webhook, the
+  caller's `scoped_tenant` for `ReviewNow`) and never taken from a payload; the `--serve-fleet` drain runs each
+  trigger under it (`agent_core::in_tenant`: empty ⇒ unscoped, invalid ⇒ refused). Tenants are discovered from
+  the fleet store (`FleetTenants` → `Backend::tenants("fleet_sessions")`, `safe_segment`-filtered). The trigger
+  queue coalesces and the orchestrator guards in-flight work per `(tenant, session, pr)` (without `per_tenant`
+  the tenant is cleared, so poll and `ReviewNow` still coalesce); the per-row review factory caches by
+  `(user, id)` plus a forge-field fingerprint. *Live re-sync* (`agent-cli/src/fleet_sync.rs`): a `FleetSync`
+  pass at boot and every 60 s re-reads each tenant's roster under its scope, reconciles, drops the owner
+  session of a removed/disabled row and diffs the poll jobs (`<tenant>/<id>`, pure `plan_jobs`, ≤ 4096 jobs);
+  a failed discovery changes nothing, a failed tenant read leaves that tenant alone. The Slack watch iterates
+  tenants but stays boot-only. *Receiver* (`agent-cli/src/fleet_webhook.rs`, `forge-ghapp`): `tiny_http` on
+  `[review_fleet.webhook] listen` (default port `FLEET_WEBHOOK_PORT` = 50110), started only with a resolved
+  non-empty `[github_app] webhook_secret_ref` (else startup error; a `listen` in a binary without `forge-ghapp`
+  is one too). A pure `screen` orders the checks path 404 → method 405 → body ≤ 1 MiB 413 → signature 401 →
+  event/delivery shape 400 → replay (bounded TTL `agent_core::pending::SeenSet`, 1 h / 10k ⇒ `200`), HMAC
+  before any parse; ≤ 16 concurrent requests (else 503); accepted ⇒ `202` and dispatch on the runtime. The
+  pure parser + router (`agent-review-fleet/src/webhook.rs`) allowlists `ping`/`pull_request`/`installation`/
+  `installation_repositories`, PR actions opened/reopened/synchronize/ready_for_review (drafts ignored), PR
+  number 1..=u32::MAX, `valid_installation_id`, repo `owner/name` = valid GitHub login + `safe_segment` name
+  ≤ 100 → `owner__name`, repo lists ≤ `MAX_SELECTED_REPOS` (one bad entry refuses the event). A PR routes via
+  the verified install claim to its owner tenant (unclaimed ⇒ ignored) and triggers that tenant's enabled
+  GitHub rows with the matching repo. *Lifecycle* (`agent-runtime/src/install_lifecycle.rs`): `deleted` ⇒
+  `ghapp_store_unbind` + `InstallationTokenMinter::forget` (new) + `VerifiedInstalls::revoke` (new: one batch
+  CAS-re-asserting the claim, then deleting claim + verified row — a claim naming another tenant is left
+  alone) + display-row delete; `suspend` ⇒ unbind + forget; `unsuspend` rebinds only while `holds` (verified row
+  + matching claim); repo changes merge into the display row's `selected_repos` (capped) and never touch the
+  gate. Single-operator lifecycle events only forget cached tokens. *Edge*: portal Envoy `fleet_webhook`
+  listener (:8096) — exact `POST /webhooks/github` route, everything else direct 404, `buffer` body cap,
+  header/request timeouts, h1 cluster to the loopback receiver, **no** `jwt_authn` (the HMAC is the auth);
+  the spec's path and cap are validated fail-closed. Limits: delivery dedup per process; unbind reaches other
+  replicas at restart (they fail closed at GitHub); suspension isn't persisted; operator-assigned
+  installs have no claim, so their PRs are poll-only under `per_tenant`. Tables: `webhook` parse/dispatch (56),
+  `screen_cases` (GitHub's published HMAC vector) + body cap/empty secret/replay + a real-socket round trip
+  (19), `fleet_sync` (27), `install_lifecycle` (15), `SeenSet` (table + 2 `adversarial_`), `revoke` (4),
+  `forget` (2), `queue_coalesces_per_tenant` (5), `cache_keyed_by_tenant_and_fingerprint` (3),
+  `review_now_stamps_caller_tenant` (7), portal-envoy webhook spec/listener (13, plus `envoy --mode validate`
+  over the real spec). The `forge-ghapp` check now also runs agent-cli's receiver and `install_lifecycle`.
 
 ## Links
 

@@ -85,6 +85,9 @@ pub struct Settings {
     /// Socket-Mode trigger watch (review-fleet C7). Empty ⇒ no Slack watch. Resolved to a
     /// secret only on the fleet host (never stored raw).
     pub fleet_slack_app_token_ref: String,
+    /// `[review_fleet.webhook] listen` — where `--serve-fleet` serves the GitHub webhook
+    /// receiver (forge-auth F6). Empty ⇒ no receiver.
+    pub fleet_webhook_listen: String,
     /// OIDC/JWT authentication for served gRPC seams (`[auth]`, config C33/B1). Default
     /// (`mode` empty) ⇒ disabled (today's trusted-header path). Read by the serve path
     /// to build the `AuthLayer`.
@@ -219,6 +222,8 @@ pub struct Agent {
     /// the full fleet process that admits + drives sessions from it arrives in
     /// review-fleet 3c.
     fleet_registry: Option<Arc<dyn agent_core::FleetRegistry>>,
+    /// Tenant discovery for a per-tenant roster (forge-auth F6); `None` ⇒ unscoped.
+    fleet_tenants: Option<Arc<dyn agent_core::FleetTenants>>,
     /// The approve→post idempotency lease (review-fleet C17), held for `--serve-fleet`.
     /// A durable, read-your-writes, cross-process compare-and-set that guarantees a review
     /// posts to its forge **at most once** across concurrent/repeated approves. `None` ⇒
@@ -247,6 +252,10 @@ pub struct Agent {
     /// `BeginInstall`/`CompleteInstall` on the same registry service. `None` ⇒ onboarding
     /// is not configured (`[github_app] slug` + OAuth client), and those RPCs refuse.
     github_install_onboarding: Option<Arc<dyn agent_core::GithubInstallOnboarding>>,
+    /// The webhook-driven install lifecycle (forge-auth F6), over the same store.
+    github_install_lifecycle: Option<Arc<dyn agent_core::GithubInstallLifecycle>>,
+    /// The resolved `[github_app] webhook_secret_ref` (forge-auth F6). Never logged.
+    github_webhook_secret: Option<agent_core::Secret>,
     /// The fleet's persisted review-history reader (review-fleet C16), held for
     /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
     /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
@@ -1020,12 +1029,15 @@ impl Agent {
             config_store: None,
             provider_registry: None,
             fleet_registry: None,
+            fleet_tenants: None,
             fleet_post_lease: None,
             role_registry: None,
             forge_registry: None,
             transport_registry: None,
             github_install_registry: None,
             github_install_onboarding: None,
+            github_install_lifecycle: None,
+            github_webhook_secret: None,
             fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -1400,6 +1412,12 @@ impl Agent {
         self
     }
 
+    /// Attach the roster's tenant discovery (a per-tenant shared store, forge-auth F6).
+    pub fn with_fleet_tenants(mut self, t: Arc<dyn agent_core::FleetTenants>) -> Self {
+        self.fleet_tenants = Some(t);
+        self
+    }
+
     /// Attach the approve→post idempotency lease (review-fleet C17), used by the fleet
     /// approver to post each review at most once. Not consumed by the loop.
     pub fn with_fleet_post_lease(mut self, l: Arc<dyn agent_core::FleetPostLease>) -> Self {
@@ -1440,6 +1458,21 @@ impl Agent {
         o: Arc<dyn agent_core::GithubInstallOnboarding>,
     ) -> Self {
         self.github_install_onboarding = Some(o);
+        self
+    }
+
+    /// Attach the webhook-driven install lifecycle (forge-auth F6).
+    pub fn with_github_install_lifecycle(
+        mut self,
+        l: Arc<dyn agent_core::GithubInstallLifecycle>,
+    ) -> Self {
+        self.github_install_lifecycle = Some(l);
+        self
+    }
+
+    /// Attach the resolved GitHub webhook secret (forge-auth F6).
+    pub fn with_github_webhook_secret(mut self, secret: agent_core::Secret) -> Self {
+        self.github_webhook_secret = Some(secret);
         self
     }
 
@@ -1747,6 +1780,13 @@ impl Agent {
         self.fleet_registry.clone()
     }
 
+    /// The tenants the fleet process drives (forge-auth F6): `Some` only for a per-tenant
+    /// shared roster store, whose background work (reconcile, poll, webhook) must run under
+    /// each tenant's scope; `None` ⇒ one unscoped roster.
+    pub fn fleet_tenants(&self) -> Option<Arc<dyn agent_core::FleetTenants>> {
+        self.fleet_tenants.clone()
+    }
+
     /// The approve→post idempotency lease, if one was resolved from config
     /// (`[review_fleet] store`); `None` ⇒ the approver uses an in-process fallback.
     pub fn fleet_post_lease(&self) -> Option<Arc<dyn agent_core::FleetPostLease>> {
@@ -1816,6 +1856,22 @@ impl Agent {
     /// `--serve-fleet`'s trigger watch (review-fleet C7). Empty ⇒ no Slack watch.
     pub fn fleet_slack_app_token_ref(&self) -> &str {
         &self.settings.fleet_slack_app_token_ref
+    }
+
+    /// Where `--serve-fleet` serves the GitHub webhook receiver (forge-auth F6); empty ⇒
+    /// none.
+    pub fn fleet_webhook_listen(&self) -> &str {
+        &self.settings.fleet_webhook_listen
+    }
+
+    /// The webhook-driven install lifecycle, when the install store is wired (forge-auth F6).
+    pub fn github_install_lifecycle(&self) -> Option<Arc<dyn agent_core::GithubInstallLifecycle>> {
+        self.github_install_lifecycle.clone()
+    }
+
+    /// The resolved GitHub webhook secret, when `[github_app] webhook_secret_ref` is set.
+    pub fn github_webhook_secret(&self) -> Option<&agent_core::Secret> {
+        self.github_webhook_secret.as_ref()
     }
 
     pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {
@@ -5423,6 +5479,7 @@ mod tests {
             fleet_max_total: 0,
             fleet_max_per_user: 0,
             fleet_slack_app_token_ref: String::new(),
+            fleet_webhook_listen: String::new(),
             grpc_auth: GrpcAuthSettings::default(),
             grpc_tls: GrpcTlsSettings::default(),
             per_tenant: false,

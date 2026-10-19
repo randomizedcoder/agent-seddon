@@ -143,6 +143,17 @@ impl InstallationTokenMinter {
         Ok(secret)
     }
 
+    /// Drop the cached token for `installation_id`, so the next use mints fresh (and so
+    /// fails closed once GitHub refuses) — the uninstall/suspend path (forge-auth F6).
+    /// Returns whether a token was cached.
+    pub fn forget(&self, installation_id: &str) -> bool {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(installation_id)
+            .is_some()
+    }
+
     fn cached(&self, id: &str, now: u64) -> Option<Secret> {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache
@@ -503,6 +514,24 @@ mod tests {
         clock.0.fetch_add(advance, Ordering::SeqCst);
         let second = m.token("42").await.expect("second resolves");
         assert_eq!(first.expose(), second.expose());
+        assert_eq!(seen.lock().unwrap().len(), want_requests);
+    }
+
+    // --- forget: the next use mints again; another installation is untouched ----
+    #[rstest]
+    #[case::positive_forgotten_mints_again("42", true, 2)]
+    #[case::negative_other_installation_stays_cached("7", false, 1)]
+    #[tokio::test]
+    async fn forget_drops_only_that_installation(
+        #[case] forget: &str,
+        #[case] was_cached: bool,
+        #[case] want_requests: usize,
+    ) {
+        let (base, seen) = spawn(vec![(201, false), (201, false)]);
+        let m = minter(base, 0, at(1_000));
+        m.token("42").await.expect("mints");
+        assert_eq!(m.forget(forget), was_cached);
+        m.token("42").await.expect("resolves");
         assert_eq!(seen.lock().unwrap().len(), want_requests);
     }
 

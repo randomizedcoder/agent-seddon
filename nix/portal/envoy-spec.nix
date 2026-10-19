@@ -20,16 +20,19 @@ let
   # derivation that reads it — the `portal-envoy` check) a build dependency on the
   # descriptor, so `envoy --mode validate` sees a real file, IFD-free.
   restDescriptor = import ../rest-descriptor.nix { inherit pkgs versions; };
+  constants = import ../constants.nix;
   ports = {
     grpcWeb = 8090; # browser -> gateway
     grpcWebSessions = 8091; # browser -> sessions
     portalWeb = 8092; # static server for the built web bundle
     grpcWebFleet = 8093; # browser -> fleet (--serve-fleet)
     rest = 8094; # browser/curl -> gateway via grpc_json_transcoder (REST/JSON)
+    webhook = 8096; # GitHub -> the fleet's webhook receiver (8095 is l2's llama)
     # The gateways the proxy forwards to (mirror nix/constants.nix gateway/sessions).
     gateway = 50100;
     sessions = 50080;
     fleet = 50086; # the full review-fleet process (--serve-fleet)
+    fleetWebhook = constants.fleetWebhookPort; # --serve-fleet's plain-HTTP webhook receiver
     # OTLP/gRPC collector (the decomposed HyperDX otel-collector), reached on host
     # loopback since envoy runs --network host.
     otelCollector = versions.otlpGrpcPort;
@@ -72,6 +75,20 @@ in
         upstream_port = ports.gateway;
         descriptor = "${restDescriptor}/agent_descriptor.pb";
         services_file = "${restDescriptor}/services.txt";
+      };
+      # The GitHub App webhook listener (forge-auth F6). Its own listener kind: plain
+      # HTTP/1.1 to the fleet's receiver, ONE exact route (`POST /webhooks/github`,
+      # everything else 404 at the edge), a request-body cap and header/request
+      # timeouts (the receiver's tiny_http has no read timeout, so the edge absorbs slow
+      # clients) — and deliberately NO jwt_authn: GitHub sends no bearer, the receiver
+      # verifies every delivery's `X-Hub-Signature-256` HMAC before parsing it.
+      webhook = {
+        name = "fleet_webhook";
+        port = ports.webhook;
+        cluster = "agent_fleet_webhook";
+        upstream_port = ports.fleetWebhook;
+        path = "/webhooks/github";
+        max_body = 1048576; # = the receiver's MAX_WEBHOOK_BODY
       };
       otel_port = ports.otelCollector;
       gateway_port = ports.gateway;

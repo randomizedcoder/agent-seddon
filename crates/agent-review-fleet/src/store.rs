@@ -36,6 +36,27 @@ const FLEET: &str = "fleet_sessions";
 /// then the roster is one un-namespaced control plane under this key.
 pub const DEFAULT_TENANT: &str = "local";
 
+/// [`FleetTenants`](agent_core::FleetTenants) over a shared [`Backend`]: the tenants
+/// owning at least one roster card (forge-auth F6). A tenant segment the backend returns
+/// that is not `safe_segment` (an out-of-band tamper) is dropped, never driven.
+pub struct StoreFleetTenants {
+    backend: Arc<dyn Backend>,
+}
+
+impl StoreFleetTenants {
+    pub fn new(backend: Arc<dyn Backend>) -> Self {
+        Self { backend }
+    }
+}
+
+#[async_trait]
+impl agent_core::FleetTenants for StoreFleetTenants {
+    async fn tenants(&self) -> Result<Vec<String>> {
+        let tenants = self.backend.tenants(FLEET).await?;
+        Ok(tenants.into_iter().filter(|t| safe_segment(t)).collect())
+    }
+}
+
 /// A [`FleetRegistry`] persisted on a shared [`Backend`]. Cheap to clone (an
 /// `Arc` handle plus the tenant key).
 pub struct StoreFleet {

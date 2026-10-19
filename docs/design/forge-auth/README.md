@@ -186,6 +186,10 @@ flag, validated against our own `agent-seddon` install, before the portal flow (
   host-agnostic "mint-on-demand" ref may be worth generalizing, but GitHub first.
 - **Marketplace vs. direct install.** Listing on the GitHub Marketplace affects the OAuth/billing
   handshake; out of scope here, but the install-callback shape should not foreclose it.
-- **Webhook delivery guarantees.** GitHub retries failed deliveries, but we still want poll as a
-  backstop for missed events; the two trigger sources must dedup (the fleet already dedups per
-  PR head sha via `FleetPostLease`).
+- **Webhook delivery guarantees.** *(Resolved in F6.)* GitHub retries failed deliveries, but the
+  poll stays as a backstop for missed events, and the two trigger sources dedup downstream: the
+  trigger queue coalesces per `(tenant, session, pr)`, and the C16 history check (a live draft for
+  the exact resolved head oid ⇒ `UpToDate`) makes a re-trigger of an unchanged head a no-op. (An
+  earlier draft of this note credited `FleetPostLease`; that lease only dedups the *post* of an
+  approved draft, not review triggers.) Redelivered ids are also dropped at the receiver, per
+  process.

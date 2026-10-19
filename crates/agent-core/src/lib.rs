@@ -3405,6 +3405,18 @@ pub trait FleetRegistry: Send + Sync {
     async fn set_enabled(&self, id: &str, enabled: bool) -> Result<FleetSession>;
 }
 
+/// Enumerates the tenants that hold roster rows (forge-auth F6) — the **driver-side**
+/// discovery a multi-tenant `--serve-fleet` needs: its background drivers (reconcile,
+/// forge poll, the webhook receiver) have no ambient caller, so they must ask which
+/// tenants have rows and then act under each one's scope. A request-driven path is
+/// already scoped to its caller and never needs this. Absent ⇒ the roster is not
+/// per-tenant and the drivers run unscoped.
+#[async_trait]
+pub trait FleetTenants: Send + Sync {
+    /// The distinct tenants owning at least one roster row, each a `safe_segment`.
+    async fn tenants(&self) -> Result<Vec<String>>;
+}
+
 /// A request to review one pull/merge request on one roster session — the unit the
 /// fleet orchestrator turns into a review (review-fleet C8). `session_id` names the
 /// **roster row** (a [`FleetSession::id`]); the PR-scoped `SessionKey` is minted from
@@ -3413,6 +3425,12 @@ pub trait FleetRegistry: Send + Sync {
 /// increment 4; until then the `ReviewNow` control-plane RPC injects these manually.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetTrigger {
+    /// The tenant owning the roster row (forge-auth F6). The fleet process drives each
+    /// trigger **scoped to this tenant**, so a per-tenant roster resolves `session_id` in
+    /// the right tenant. Empty ⇒ unscoped (single-operator / the default `local` tenant).
+    /// Filled by the producer from where the row was found — the roster scope the poller
+    /// or webhook listed, or the caller's tenant for `ReviewNow` — never from the payload.
+    pub tenant: String,
     /// The roster row id this review belongs to (a `FleetSession::id`).
     pub session_id: String,
     /// The pull/merge-request number to review.

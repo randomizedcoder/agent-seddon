@@ -312,6 +312,25 @@ where
     AGENT_IDENTITY.scope(identity, fut)
 }
 
+/// The session segment of the identity a background driver acts under when it works
+/// for a tenant with no caller (the fleet's reconcile/poll/webhook, forge-auth F6). The
+/// tenant is the `user` segment, which is what scopes a per-tenant store.
+pub const DRIVER_SESSION: &str = "driver";
+
+/// Run `fut` scoped to `tenant`, so a per-tenant store resolves that tenant's data — the
+/// shape a background driver uses to act for one tenant. An empty `tenant` runs unscoped
+/// (a single-operator deployment). A `tenant` that is not a valid segment never runs:
+/// `None` (the caller logs it) — never a fallback to another tenant.
+pub async fn in_tenant<F: std::future::Future>(tenant: &str, fut: F) -> Option<F::Output> {
+    if tenant.is_empty() {
+        return Some(fut.await);
+    }
+    match SessionKey::parse(tenant, DRIVER_SESSION) {
+        Ok(key) => Some(scope(key, fut).await),
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

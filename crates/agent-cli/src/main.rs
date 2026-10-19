@@ -8,6 +8,9 @@
 //! session; `--resume ID` resumes a specific one.
 
 mod campaign_cli;
+mod fleet_sync;
+#[cfg(feature = "forge-ghapp")]
+mod fleet_webhook;
 mod grpc_server;
 mod mcp_server;
 mod metrics_server;
