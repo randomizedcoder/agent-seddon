@@ -336,6 +336,17 @@ async fn with_prep_timeout<T>(
     }
 }
 
+/// Run a tenant-data read for a review as the row's org (`key.user`) when nothing else
+/// names a tenant, so a tenant-scoped reader binds the tenant the review's rows are written
+/// under. An ambient tenant wins: a per-tenant fleet's read never widens to another org.
+async fn as_row_tenant<F: std::future::Future>(key: &SessionKey, read: F) -> F::Output {
+    if agent_core::scoped_tenant().is_some() {
+        read.await
+    } else {
+        agent_core::scope(key.clone(), read).await
+    }
+}
+
 /// Drives one PR through the review state machine `triggered → cloning → reviewing →
 /// drafted`. **Single consumer:** [`Self::handle`] is called serially by one drain loop
 /// (the bounded [`TriggerQueue`] serializes triggers) and is **non-blocking** for the
@@ -689,12 +700,19 @@ impl FleetOrchestrator {
 
         // C16 cross-round: consult the persisted history before doing any expensive work.
         // Fail-soft — a read error means "no prior", so a review still runs (just uncorrelated).
+        // The read is scoped to the row's owning org — the tenant its drafts are written
+        // under (`key.user`). A single-operator fleet drains unscoped, and a tenant-scoped
+        // (RLS) reader refuses a read with no tenant, so without this every read failed and
+        // the head-oid dedup never fired. An ambient tenant (a per-tenant fleet) is kept,
+        // never replaced by the row's: a row naming another org reads nothing of it.
         let prior: PriorReview = match &self.history {
-            Some(h) => h.prior(&row.repo, pr).await.unwrap_or_else(|e| {
-                tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
+            Some(h) => as_row_tenant(&key, h.prior(&row.repo, pr))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
                     "fleet: history read failed; proceeding without cross-round state");
-                PriorReview::default()
-            }),
+                    PriorReview::default()
+                }),
             None => PriorReview::default(),
         };
         // Precise dedup: this exact head oid already has a (live, non-superseded) draft ⇒
@@ -1248,6 +1266,8 @@ mod tests {
     struct FakeHistory {
         prior: PriorReview,
         calls: Mutex<Vec<(String, u64)>>,
+        /// The tenant each read ran under (`scoped_tenant()` at call time).
+        tenants: Mutex<Vec<Option<String>>>,
         fail: bool,
     }
     impl FakeHistory {
@@ -1255,6 +1275,7 @@ mod tests {
             Arc::new(Self {
                 prior,
                 calls: Mutex::new(Vec::new()),
+                tenants: Mutex::new(Vec::new()),
                 fail: false,
             })
         }
@@ -1262,17 +1283,25 @@ mod tests {
             Arc::new(Self {
                 prior: PriorReview::default(),
                 calls: Mutex::new(Vec::new()),
+                tenants: Mutex::new(Vec::new()),
                 fail: true,
             })
         }
         fn calls(&self) -> Vec<(String, u64)> {
             self.calls.lock().unwrap().clone()
         }
+        fn tenants(&self) -> Vec<Option<String>> {
+            self.tenants.lock().unwrap().clone()
+        }
     }
     #[async_trait::async_trait]
     impl FleetHistory for FakeHistory {
         async fn prior(&self, repo: &str, pr: u64) -> agent_core::Result<PriorReview> {
             self.calls.lock().unwrap().push((repo.to_string(), pr));
+            self.tenants
+                .lock()
+                .unwrap()
+                .push(agent_core::scoped_tenant());
             if self.fail {
                 return Err(agent_core::Error::Fleet("history boom".into()));
             }
@@ -2686,6 +2715,52 @@ mod tests {
         );
         assert!(grounder.calls().is_empty(), "engine never ran on a dedup");
         assert_eq!(host.reviews_len(), 0, "no review started");
+    }
+
+    /// desc: the C16 history read runs under a tenant, so a tenant-scoped (RLS) reader can
+    /// bind one instead of refusing. Live on a single-operator fleet the drain was unscoped,
+    /// every read failed "no verified tenant in scope", and the head-oid dedup never fired.
+    /// expect: unscoped ⇒ the row's org (`acme`, what its drafts are written under); an
+    /// ambient tenant is kept as is — a row naming another org never widens the read to it.
+    #[rstest]
+    #[case::positive_single_operator_reads_as_the_row_org("", Some("acme"))]
+    #[case::corner_ambient_tenant_matching_the_row("acme", Some("acme"))]
+    #[case::adversarial_row_org_never_replaces_the_ambient_tenant("other", Some("other"))]
+    #[tokio::test]
+    async fn history_read_runs_under_a_tenant(#[case] ambient: &str, #[case] expect: Option<&str>) {
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let head = agent_core::pr_local_ref(42);
+        let history = FakeHistory::with_prior(PriorReview {
+            last_draft: Some(draft_rec(&head, "drafted")),
+            open_items: vec![],
+        });
+        let o = orch(roster, repo, host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_history(history.clone());
+        let trigger = FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+            requested_by: Vec::new(),
+            tenant: String::new(),
+        };
+        let got = agent_core::in_tenant(ambient, o.handle(trigger))
+            .await
+            .expect("valid tenant")
+            .expect("handle ok");
+        assert!(
+            matches!(got, Handled::UpToDate),
+            "the read served the dedup"
+        );
+        assert_eq!(history.tenants(), vec![expect.map(str::to_string)]);
+    }
+
+    /// desc: check-the-check for the case above — outside any fleet the test thread names
+    /// no tenant, so the `acme` it sees comes from the orchestrator, not from ambient state.
+    #[tokio::test]
+    async fn negative_no_tenant_outside_a_scope() {
+        assert_eq!(agent_core::scoped_tenant(), None);
     }
 
     #[tokio::test]
