@@ -1274,6 +1274,17 @@ pub struct RouteCfg {
     /// tenant can set its own.
     #[serde(default)]
     pub max_spend_per_hour: Option<f64>,
+    /// Active liveness probe cadence (seconds): each upstream gets a 1-token
+    /// completion this often and the result drives its breaker, so an upstream
+    /// that lists its model but cannot answer (a pod still loading) is skipped
+    /// before real traffic reaches it, and re-admitted as soon as it answers.
+    /// `0` (the default) ⇒ no probe — the breaker stays passive. Clamped
+    /// `[5, 3600]`; keep it under `cooldown_secs` so a dark upstream stays open.
+    #[serde(default)]
+    pub probe_interval_secs: u64,
+    /// Per-probe deadline in seconds (clamped `[1, 60]`).
+    #[serde(default = "default_route_probe_timeout")]
+    pub probe_timeout_secs: u64,
 }
 
 impl Default for RouteCfg {
@@ -1291,6 +1302,8 @@ impl Default for RouteCfg {
             saturation_wait_ms: default_saturation_wait_ms(),
             max_cost: None,
             max_spend_per_hour: None,
+            probe_interval_secs: 0,
+            probe_timeout_secs: default_route_probe_timeout(),
         }
     }
 }
@@ -1786,6 +1799,11 @@ fn default_probe_interval() -> u64 {
 }
 fn default_probe_timeout() -> u64 {
     3
+}
+/// A routed upstream is usually a remote gateway, slower to a first token than a
+/// local pool member, so its probe gets a longer default deadline.
+fn default_route_probe_timeout() -> u64 {
+    10
 }
 
 /// General task-mode detection (`docs/design/adaptive-cognition/01-mode.md`). The
@@ -5913,6 +5931,22 @@ mod tests {
         let cfg: RouteCfg = toml::from_str("max_spend_per_hour = 5.0").unwrap();
         assert_eq!(cfg.max_spend_per_hour, Some(5.0));
         assert_eq!(RouteCfg::default().max_spend_per_hour, None);
+    }
+
+    /// `[route] probe_interval_secs` / `probe_timeout_secs`: the active probe is
+    /// opt-in (off when unset, in TOML and in `Default` alike) with a 10 s deadline.
+    #[rstest::rstest]
+    #[case::boundary_unset_is_off("", 0, 10)]
+    #[case::positive_probe_configured("probe_interval_secs = 15\nprobe_timeout_secs = 5", 15, 5)]
+    #[case::corner_interval_only("probe_interval_secs = 20", 20, 10)]
+    fn route_probe_parses(#[case] toml_src: &str, #[case] interval: u64, #[case] timeout: u64) {
+        let cfg: RouteCfg = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            (cfg.probe_interval_secs, cfg.probe_timeout_secs),
+            (interval, timeout)
+        );
+        let d = RouteCfg::default();
+        assert_eq!((d.probe_interval_secs, d.probe_timeout_secs), (0, 10));
     }
 
     /// `[route] on_saturation` → the router's policy: soft/empty = `None`, the

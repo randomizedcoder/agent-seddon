@@ -476,6 +476,47 @@ pub struct TaskRouter {
     /// policy's `max_spend_per_hour` (gap §8.7 item 7). Fresh per router by
     /// default; shared across rebuilds via [`Self::with_spend_ledger`].
     spend: Arc<SpendLedger>,
+    /// The active liveness probe's targets, when [`Self::with_probe`] started one.
+    /// The probe task holds only a `Weak` to it, so dropping the router (a
+    /// `RegistryRouter` rebuild retires the old fleet) ends the task.
+    probe: Option<Arc<ProbeSet>>,
+}
+
+/// What the active liveness probe pings: each upstream's provider and the breaker
+/// a result feeds. A failed ping is a breaker failure exactly like a failed
+/// request, so an upstream that answers `/models` but not completions (a pod whose
+/// model is still loading) opens its breaker before real traffic reaches it, and a
+/// successful ping closes it again without waiting out the cooldown.
+struct ProbeSet {
+    targets: Vec<(String, Arc<dyn LlmProvider>, Arc<Health>)>,
+    failure_threshold: usize,
+    timeout: std::time::Duration,
+    now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl ProbeSet {
+    /// One probe cycle: ping every upstream concurrently with a 1-token request,
+    /// feed each result to its breaker, and log the transitions (an upstream going
+    /// dark, or answering again) — never the error body, which is server-controlled.
+    async fn probe_all(&self) {
+        let pings = self.targets.iter().map(|(id, provider, health)| async move {
+            let outcome =
+                tokio::time::timeout(self.timeout, provider.complete(crate::router::ping())).await;
+            let failing_before = health.failures();
+            if matches!(outcome, Ok(Ok(_))) {
+                health.record_success();
+                if failing_before > 0 {
+                    tracing::info!(upstream = %id, "route probe: upstream answering; breaker closed");
+                }
+            } else {
+                health.record_failure((self.now_ms)(), self.failure_threshold);
+                if failing_before + 1 == self.failure_threshold {
+                    tracing::warn!(upstream = %id, "route probe: upstream not answering; breaker open");
+                }
+            }
+        });
+        futures_util::future::join_all(pings).await;
+    }
 }
 
 impl TaskRouter {
@@ -513,6 +554,7 @@ impl TaskRouter {
             saturation_wait_ms: 0,
             snapshot_version: 0,
             spend: Arc::default(),
+            probe: None,
         })
     }
 
@@ -592,6 +634,48 @@ impl TaskRouter {
     }
     pub fn with_spend_ledger(mut self, ledger: Arc<SpendLedger>) -> Self {
         self.spend = ledger;
+        self
+    }
+    /// The probe targets for this router's upstreams and (current) breakers.
+    fn probe_set(&self, timeout_secs: u64) -> ProbeSet {
+        ProbeSet {
+            targets: self
+                .upstreams
+                .iter()
+                .zip(&self.health)
+                .map(|(u, h)| (u.id.clone(), u.provider.clone(), h.clone()))
+                .collect(),
+            failure_threshold: self.failure_threshold,
+            timeout: std::time::Duration::from_secs(timeout_secs.clamp(1, 60)),
+            now_ms: self.now_ms.clone(),
+        }
+    }
+
+    /// Start the **active liveness probe** (opt-in; `interval_secs == 0` ⇒ none):
+    /// every `interval_secs` (clamped `[5, 3600]`) each upstream gets a 1-token
+    /// completion bounded by `timeout_secs` (clamped `[1, 60]`), and the result
+    /// drives its breaker. The first cycle runs at once, so an upstream that is down
+    /// at boot is marked before the first request. Call it **last** in the builder
+    /// chain: it captures the breakers, threshold and clock in place at that point
+    /// (after [`Self::with_shared_state`], so a probe feeds the shared breakers).
+    /// Spawns only inside a tokio runtime; a probe never blocks the request path.
+    pub fn with_probe(mut self, interval_secs: u64, timeout_secs: u64) -> Self {
+        if interval_secs == 0 || tokio::runtime::Handle::try_current().is_err() {
+            return self;
+        }
+        let interval = std::time::Duration::from_secs(interval_secs.clamp(5, 3600));
+        let set = Arc::new(self.probe_set(timeout_secs));
+        let weak = Arc::downgrade(&set);
+        self.probe = Some(set);
+        // unscoped-spawn: background liveness probe, no caller identity to carry.
+        tokio::spawn(async move {
+            loop {
+                let Some(set) = weak.upgrade() else { break };
+                set.probe_all().await;
+                drop(set);
+                tokio::time::sleep(interval).await;
+            }
+        });
         self
     }
     /// Take the spend-budget hold a dispatch to upstream `i` needs: `Ok(None)`
@@ -3676,5 +3760,183 @@ mod tests {
         let shared = r.health.iter().zip(&health).all(|(a, b)| Arc::ptr_eq(a, b))
             && r.live.iter().zip(&live).all(|(a, b)| Arc::ptr_eq(a, b));
         assert_eq!(shared && n == 2, used);
+    }
+
+    // --- active liveness probe ---------------------------------------------
+
+    /// A provider that fails like a still-loading gateway until `ready` is set,
+    /// counting every call (probes included).
+    struct LoadingProvider {
+        ready: Arc<std::sync::atomic::AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl LlmProvider for LoadingProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps(true, false, 1000)
+        }
+        async fn complete(&self, r: CompletionRequest) -> Result<CompletionResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.ready.load(Ordering::SeqCst) {
+                ok("from-kimi", true, false).complete(r).await
+            } else {
+                Err(Error::Provider(
+                    "http 503: service not ready yet; the model is still loading".into(),
+                ))
+            }
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            Err(Error::Provider("no stream".into()))
+        }
+    }
+
+    /// A provider that never answers (a hung upstream).
+    struct HungProvider;
+    #[async_trait]
+    impl LlmProvider for HungProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps(true, false, 1000)
+        }
+        async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+            std::future::pending().await
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            std::future::pending().await
+        }
+    }
+
+    fn loading() -> (
+        Arc<LoadingProvider>,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<AtomicUsize>,
+    ) {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(LoadingProvider {
+            ready: ready.clone(),
+            calls: calls.clone(),
+        });
+        (p, ready, calls)
+    }
+
+    /// `cycles` probe cycles against one upstream (breaker threshold 2): is its
+    /// breaker open afterwards?
+    #[rstest::rstest]
+    #[case::positive_dead_upstream_opens_at_threshold(
+        Arc::new(FailProvider::new("http 503: model is still loading")) as Arc<dyn LlmProvider>, 2, true
+    )]
+    #[case::negative_healthy_upstream_stays_closed(ok("x", true, false), 5, false)]
+    #[case::boundary_one_failure_below_threshold_stays_closed(
+        Arc::new(FailProvider::new("http 503: model is still loading")) as Arc<dyn LlmProvider>, 1, false
+    )]
+    #[case::adversarial_hung_upstream_times_out_as_a_failure(
+        Arc::new(HungProvider) as Arc<dyn LlmProvider>, 2, true
+    )]
+    #[case::adversarial_terminal_error_counts_as_down(
+        Arc::new(FailProvider::new("http 401: unauthorized")) as Arc<dyn LlmProvider>, 2, true
+    )]
+    #[tokio::test(start_paused = true)]
+    async fn probe_cycles_drive_the_breaker(
+        #[case] provider: Arc<dyn LlmProvider>,
+        #[case] cycles: usize,
+        #[case] want_open: bool,
+    ) {
+        let r = router(vec![up("kimi", provider)], prefer(&["kimi"])).with_breaker(2, 60_000);
+        let set = r.probe_set(1);
+        for _ in 0..cycles {
+            set.probe_all().await;
+        }
+        assert_eq!(r.health[0].is_open(0, 60_000), want_open);
+    }
+
+    /// The point of the probe: a still-loading primary is found dark by the probe,
+    /// so real traffic goes straight to the backup and never pays the primary's
+    /// failures; once it loads, one probe re-admits it before the cooldown ends.
+    #[tokio::test]
+    async fn positive_probe_steers_traffic_around_a_loading_upstream_and_back() {
+        let (kimi, ready, calls) = loading();
+        let r = router(
+            vec![
+                up("kimi", kimi as Arc<dyn LlmProvider>),
+                up("glm", ok("from-glm", true, false)),
+            ],
+            prefer(&["kimi", "glm"]),
+        )
+        .with_breaker(2, 60_000);
+        let set = r.probe_set(5);
+        set.probe_all().await;
+        set.probe_all().await;
+        let probes = calls.load(Ordering::SeqCst);
+
+        let resp = r.complete(req()).await.expect("backup answers");
+        assert_eq!(resp.message.content_text(), "from-glm");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            probes,
+            "a probe-opened upstream must not see real traffic"
+        );
+
+        ready.store(true, Ordering::SeqCst);
+        set.probe_all().await;
+        let resp = r.complete(req()).await.expect("primary answers");
+        assert_eq!(resp.message.content_text(), "from-kimi");
+    }
+
+    /// The probe feeds the breakers the router was built with at the time — the
+    /// shared ones when a `RegistryRouter` hands them in first.
+    #[tokio::test]
+    async fn corner_probe_feeds_shared_breakers() {
+        let shared = vec![Arc::new(Health::new())];
+        let live = vec![Arc::default()];
+        let r = router(
+            vec![up(
+                "kimi",
+                Arc::new(FailProvider::new("http 503: loading")) as Arc<dyn LlmProvider>,
+            )],
+            prefer(&["kimi"]),
+        )
+        .with_breaker(1, 60_000)
+        .with_shared_state(shared.clone(), live);
+        r.probe_set(1).probe_all().await;
+        assert!(shared[0].is_open(0, 60_000));
+    }
+
+    /// `interval_secs == 0` is "no probe": nothing is spawned or held.
+    #[tokio::test]
+    async fn corner_zero_interval_starts_no_probe() {
+        let r = router(vec![up("kimi", ok("x", true, false))], prefer(&["kimi"])).with_probe(0, 10);
+        assert!(r.probe.is_none());
+    }
+
+    /// Outside a runtime (a sync caller) the probe cannot spawn, so it stays off
+    /// rather than panicking.
+    #[test]
+    fn negative_no_runtime_starts_no_probe() {
+        let r =
+            router(vec![up("kimi", ok("x", true, false))], prefer(&["kimi"])).with_probe(15, 10);
+        assert!(r.probe.is_none());
+    }
+
+    /// The spawned loop runs its first cycle at once and ends when the router is
+    /// dropped (it holds only a `Weak`).
+    #[tokio::test(start_paused = true)]
+    async fn positive_probe_task_runs_at_once_and_ends_with_the_router() {
+        let (kimi, _ready, calls) = loading();
+        let r = router(
+            vec![up("kimi", kimi as Arc<dyn LlmProvider>)],
+            prefer(&["kimi"]),
+        )
+        .with_probe(5, 1);
+        let weak = Arc::downgrade(r.probe.as_ref().expect("probe started"));
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "first cycle runs at once");
+        drop(r);
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        assert!(weak.upgrade().is_none());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no probe after the router is gone"
+        );
     }
 }

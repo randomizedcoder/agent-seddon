@@ -849,6 +849,7 @@ pub fn register_builtins(r: &mut Registry) {
                     cfg.cooldown_secs.saturating_mul(1_000),
                 )
                 .with_saturation(cfg.saturation(), cfg.saturation_wait_ms)
+                .with_probe(cfg.probe_interval_secs, cfg.probe_timeout_secs)
                 .with_observer(Arc::new(move |ev| {
                     crate::metered::record_route_event(&obs, ev);
                 }));
@@ -906,7 +907,9 @@ pub fn register_builtins(r: &mut Registry) {
                 .with_saturation(cfg.saturation(), cfg.saturation_wait_ms)
                 .with_observer(Arc::new(move |ev| {
                     crate::metered::record_route_event(&metrics, ev);
-                }));
+                }))
+                // Last: the probe captures the breakers/threshold set above.
+                .with_probe(cfg.probe_interval_secs, cfg.probe_timeout_secs);
         Ok(Arc::new(router) as Arc<dyn LlmProvider>)
     });
 

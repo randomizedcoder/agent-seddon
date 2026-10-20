@@ -75,13 +75,16 @@ pub fn fallback_findings(content: &str) -> Vec<Finding> {
         });
     };
 
-    // AWS access keys: AKIA/ASIA + 16 uppercase alphanumerics.
+    // AWS access keys: AKIA/ASIA + 16 uppercase alphanumerics. Scan the *bytes*: `i`
+    // steps one byte at a time, so a `&str` slice at `i` would panic inside a
+    // multi-byte char (an em dash in a PR body killed the fleet's review). A match is
+    // all ASCII, so its span is always on char boundaries.
     let bytes = content.as_bytes();
     let mut i = 0usize;
     while i + 20 <= bytes.len() {
-        let w = &content[i..];
-        if (w.starts_with("AKIA") || w.starts_with("ASIA"))
-            && w.as_bytes()[4..20]
+        let w = &bytes[i..];
+        if (w.starts_with(b"AKIA") || w.starts_with(b"ASIA"))
+            && w[4..20]
                 .iter()
                 .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
         {
@@ -197,6 +200,14 @@ mod tests {
     #[case::negative_prose("nothing secret in this sentence at all", false)]
     #[case::negative_lookalike("AKIA is a prefix but this is not a key", false)]
     #[case::boundary_empty("", false)]
+    #[case::positive_aws_key_after_multibyte("— café → AKIAIOSFODNN7EXAMPLE", true)]
+    #[case::adversarial_multibyte_prose(
+        "an em dash — in a PR body, then more than twenty bytes of prose",
+        false
+    )]
+    #[case::adversarial_multibyte_only("éééééééééééééééééééééééé", false)]
+    #[case::adversarial_emoji_run("🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀", false)]
+    #[case::adversarial_multibyte_inside_key("AKIAIOSFODNN7EXAMPL—", false)]
     fn fallback_matcher_cases(#[case] input: &str, #[case] expect_hit: bool) {
         assert_eq!(!fallback_findings(input).is_empty(), expect_hit);
     }

@@ -245,7 +245,10 @@ trigger is a no-op (`Handled::UpToDate` — precise dedup, upgrading inc-4's coa
 head arrives over a still-`drafted` prior round, that draft is marked `superseded`; and the prior
 round's still-open items flow into the draft so the renderer shows a grouped "prior feedback status"
 (Resolved on this head / Still open, redacted). Every history step is **fail-soft** (a read error ⇒
-review without dedup/carry, never a crash).
+review without dedup/carry, never a crash). The read runs under a tenant so a tenant-scoped
+(`reader_user`, RLS) reader can bind one: the drain's ambient tenant on a per-tenant fleet, else the
+row's org (`row.user`, which its drafts are written under) on a single-operator fleet, which drains
+unscoped. The row's org never replaces an ambient tenant.
 
 **Approve → post (C17, inc 6c)** is the approve→post tail — the human approval gesture, and the
 **only** path that posts. The fleet stops at `drafted`; nothing reaches a PR until an operator calls
