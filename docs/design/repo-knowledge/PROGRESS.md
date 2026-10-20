@@ -4,15 +4,14 @@ Status board: [`STATUS.md`](STATUS.md). Sequence: [`06-increments.md`](06-increm
 Test matrix: [`08-test-matrix.md`](08-test-matrix.md). Design: [`README.md`](README.md).
 
 This file is the working journal: the decisions taken as each increment lands, the gate rows
-(each citing the committed hash the gate ran on), and what is deferred. It is where a reader
+(each citing its revision or frozen-source fingerprint), and what is deferred. It is where a reader
 learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-00–02 are merged; RK-03 is published in draft PR #642, awaiting full-gate acceptance.** Current states and acceptance evidence live in
+**RK-00–03 are accepted and merged; RK-06 is locally validated and published in [PR #650](https://github.com/randomizedcoder/agent-seddon/pull/650), awaiting review and merge.** Current states and acceptance evidence live in
 [STATUS](STATUS.md); implementation steps and dependencies live in
-[IMPLEMENTATION](IMPLEMENTATION.md). RK-06 waits for RK-03, rather than running independently
-of its extractor prerequisite.
+[IMPLEMENTATION](IMPLEMENTATION.md). RK-03 passed its integrated baseline gate before RK-06 implementation began.
 
 ## 2026-10-18 — RK-03 extraction
 
@@ -22,6 +21,16 @@ as commit `db9d9948` on branch `rk-03-extraction` in draft
 Delivers Rust/Cargo/docs extraction, E1 fixtures, feature-scoped Nix execution and bench/leak
 gates. RK-06 remains queued until RK-03 acceptance and merge.
 Historical RK-01/02 results below are not new evidence for this implementation.
+
+### Merge checkpoint
+
+[PR #642](https://github.com/randomizedcoder/agent-seddon/pull/642) merged on 2026-10-18
+at `9c698e7ea4094d06ca4202bc5efd1c1c612cfc17`. Local `main` was updated with
+`git pull --ff-only origin main`, including the other upstream changes. GitHub reports no PR
+check results. The integrated revision includes #640's synchronization change for the previously
+failing forge test. RK-03 subsequently passed all 87 full-gate checks during the
+[RK-06 prerequisite checkpoint](#2026-10-18--rk-06-execution-checkpoints), and is accepted.
+The validation below remains historical pre-merge evidence.
 
 ### Implementation decisions
 
@@ -218,3 +227,126 @@ added a Nix wiring and integration runbook that distinguishes existing commands 
 checks and makes successful skips insufficient for Postgres acceptance. Evaluation compares
 baseline, structural graph and confirmed-knowledge arms with indexing cost reported separately.
 No measurements of future behavior are claimed.
+
+## 2026-10-18 — RK-06 execution checkpoints
+
+Baseline: merged main `9c698e7ea4094d06ca4202bc5efd1c1c612cfc17`, with the existing
+post-merge STATUS/PROGRESS reconciliation preserved. RK-03 acceptance is the first prerequisite.
+
+- [x] Accept RK-03: integrated baseline `nix flake check --no-write-lock-file --keep-going --max-jobs 2`
+  passed (exit 0, **87 checks**); log `/tmp/rk06-baseline-flake-check.log`.
+  Source was main `9c698e7e` plus documentation-only reconciliation. RK-03 accepted; RK-06 started.
+- [x] Extend store publication, report compatibility, recovery and consistent read views.
+  Memory graph suite: 63 passed, including six shared publication contracts.
+  Logs: `/tmp/rk06-memory-tests.log`; live PostgreSQL execution pending.
+- [x] Add immutable-revision indexer, identity fingerprint and retention outcomes.
+  Graph all-feature run: 36 unit cases passed (63 live cases ignored), extraction 31,
+  real-Git indexing 10, heap 1. Log `/tmp/rk06-graph-tests.log`; final rerun pending.
+- [x] Wire opt-in runtime/config/CLI and metrics.
+  `nix develop -c cargo check -p agent-cli --features repo-graph` passed;
+  `/tmp/rk06-cli-check.log`. Feature-specific runtime/CLI execution pending.
+- [x] Add hermetic I1 and strict PostgreSQL I2 evidence; final full gate and strict Pg passed.
+- [x] Produce the local review handoff below; publication was subsequently requested on 2026-10-19.
+
+Podman preflight succeeded (rootless runtime available). No live PostgreSQL acceptance run yet.
+
+Implementation notes: promoted the existing memory store to `agent_core::repo_graph::memory`,
+with the original testkit import re-exported, so production runtime support introduces no
+testkit dependency and all existing conformance uses the same implementation.
+No migration or default feature change. Legacy metadata arrays remain readable with unknown
+completeness. Envelope writers require upgraded readers; disable indexing before rollback.
+
+### RK-06 initial validation checkpoint
+
+Frozen source: `/tmp/rk06-final-source`; manifest `/tmp/rk06-final-manifest.json`.
+Baseline `9c698e7ea4094d06ca4202bc5efd1c1c612cfc17`; source SHA-256
+`c4315146a499f1f211714200dc2cf695fda2a5fdf646adfb5b42dcc172aa7d2e`;
+code/build/fixture SHA-256 (`crates`, `nix`, Cargo/flake files)
+`d72b72e649d01ed5cb36acfea380a2be79160d6ed6a68ed4ca44b2e0c0ba81df`.
+
+- Final changed-crate all-feature/all-target clippy with `-D warnings`: **passed**,
+  `/tmp/rk06-final-clippy.log`. Standalone graph lint exposed an unused sandbox helper under the newly added
+  local-only test dependency. The graph test dependency now enables the same local/Nix
+  sandbox feature set as runtime; standalone lint passed (`/tmp/rk06-final-index-clippy.log`).
+- Strict PostgreSQL: **passed**, exit 0; **321 executed / 0 failed across 15 suites**.
+  Graph store 64 (57 existing + 7 shared publication contracts), indexer 4, operator workflow 1.
+  Cleanup verified the test container was removed. Artifacts: `/tmp/rk06-acceptance-pg-results`;
+  aggregate log `/tmp/rk06-acceptance-pg-integration.log`. Test code was checked against the
+  frozen code fingerprint before execution.
+- Initial strict-run artifacts `/tmp/rk06-pg-results` are superseded: assertions passed but a
+  dev-shell background notice split a test status; the named-case counter rejected incomplete
+  accounting. The parser now handles this and has a regression case. A second attempted run
+  from `/tmp/rk06-final-source` failed closed before tests because nested Nix discovered an
+  unrelated `/tmp/.git`; acceptance ran from the real checkout with identical frozen code.
+- Initial final full gate: **failed** at the `leak` and `mt-audit` checks. Benchmark, new index check, CLI/config,
+  feature matrix and clippy passed. Missing classification of four new metrics is corrected
+  in the tenancy manifest as label-free health metrics. The memory dimensional summarize heap
+  test observed 27 live blocks against an 18+8 allowance; an unchanged-source/limit rerun
+  passed (exit 0, `/tmp/rk06-leak-rerun.log`). No heap allowance was loosened.
+  Log `/tmp/rk06-final-flake-check.log`. This failed run is not acceptance evidence;
+  the final results below supersede it.
+
+### 2026-10-19 — Final validation and local review handoff
+
+**RK-06 is Validated awaiting merge.** At this local handoff, no commit, push or PR had been performed. RK-07 remains
+Not started until RK-06 review/merge acceptance; RK-08 is independently unblocked by that merge.
+
+Final frozen tree: `/tmp/rk06-handoff-source`; manifest `/tmp/rk06-handoff-manifest.json`.
+Baseline: `9c698e7ea4094d06ca4202bc5efd1c1c612cfc17`.
+
+- Source SHA-256: `6799f146732078ed3359cf0b3260b17c4c11cc55b82cdc01fb309f3f0eb86bbd`.
+- Code/build/fixture SHA-256 (`crates`, `nix`, Cargo/flake files):
+  `0a903d562397a092b1fe37c94742eae7e4eb184335340d9a2471e865e42e7f6c`.
+- **Full gate passed**, exit 0: `nix flake check path:/tmp/rk06-handoff-source
+  --no-write-lock-file --keep-going --max-jobs 2`; `/tmp/rk06-handoff-flake-check.log`.
+  This includes clippy, formatting, workspace tests, the new index check, config/CLI/feature
+  checks, metric classification, benchmarks and heap checks with unchanged limits.
+- **Strict PostgreSQL passed**, exit 0: `AGENT_REQUIRE_POSTGRES_TESTS=1
+  CONTAINER_RUNTIME=podman AGENT_PG_ARTIFACT_DIR=/tmp/rk06-handoff-pg-results
+  AGENT_TEST_REVISION=9c698e7e+rk06-0a903d562397
+  nix run path:/tmp/rk06-handoff-source#pg-integration`. The caller ran from the real checkout
+  to resolve the nested pinned dev shell; its source matched the frozen manifest.
+  **321 executed, 0 failed across 15 suites**; graph store 64, indexer 4, operator workflow 1.
+  Aggregate log `/tmp/rk06-handoff-pg-integration.log`; per-suite JSON and sanitized logs in
+  `/tmp/rk06-handoff-pg-results`. Seven ready snapshot identities/hashes are exported to
+  `indexed-snapshots.jsonl`; `snapshot-export.json` and `cleanup.json` both passed.
+- Required unavailable-runtime mode returned **exit 1**, with failed/zero-execution artifacts
+  in `/tmp/rk06-required-missing-pg`. Optional mode returned **exit 0 with explicit skipped
+  artifacts**, not acceptance, in `/tmp/rk06-optional-missing-pg`. The runner's seven contract
+  tests also cover missing DSN, zero inventory, missing execution, assertion failure, status
+  interleaving and secret redaction.
+- Changed-crate all-feature/all-target clippy with `-D warnings` passed in
+  `/tmp/rk06-final-clippy.log`; graph-only lint passed in `/tmp/rk06-final-index-clippy.log`.
+
+Review entry points: the [store contract](../../../crates/agent-core/src/repo_graph/mod.rs),
+[indexer](../../../crates/agent-repo-graph/src/index.rs),
+[operator wiring](../../../crates/agent-runtime/src/repo_index.rs) and
+[strict runner](../../../nix/pg-integration.nix). Atomic failed-attempt recording preserves
+ready identities; publication returns the stored winner's report; pinned read views include
+completeness metadata. Recovery remains an explicit operator action after stopping the writer.
+
+No migration, default enablement, remote protocol or fleet/review consumer was added. Memory
+storage is process-local; PostgreSQL supports the persistent operator workflow. The versioned
+metadata rollout/rollback requirements and commands are in [consumption](05-consumption.md#rk-06-operator-interface).
+
+Only this journal/status reconciliation changed after frozen validation. Documentation link,
+orphan and whitespace checks **passed** after reconciliation (exit 0):
+`/tmp/rk06-handoff-doc-links.log`, `/tmp/rk06-handoff-doc-orphans.log`, and `git diff --check`.
+
+
+### 2026-10-19 — Publication checkpoint
+
+Publication requested after the validated local handoff. Branch: `rk-06-indexer`, based on
+`9c698e7e`. The code/build/fixture bytes match the final validated manifest (`0a903d562397`);
+only this journal and the status board have changed since that validation. Origin was fetched:
+main is now `6bd57d2d`, six commits beyond the tested baseline.
+
+Implementation commit `7ed8bfda` was pushed to origin and published as
+[PR #650](https://github.com/randomizedcoder/agent-seddon/pull/650), targeting main.
+`git merge-tree --write-tree HEAD origin/main` passed without conflicts against `6bd57d2d`;
+this checks merge compatibility, not the full gate on the combined revision. The PR records
+that distinction and the validated baseline. RK-06 remains **Validated awaiting merge**;
+the accepted increment count stays at 4 of 22 until merge acceptance.
+
+The publication follow-up changes only this journal and the status board to link the PR.
+Documentation link/orphan gates and `git diff --check` passed after these edits.

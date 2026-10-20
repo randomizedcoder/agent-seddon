@@ -129,7 +129,7 @@ cannot be constructed from a model-supplied value.
 
 ## Snapshot publication and recovery (RK-06)
 
-**Proposed extension; the store is implemented, this lifecycle is not.** The as-built
+**RK-06 implementation; acceptance evidence is tracked in [STATUS](STATUS.md).** The as-built
 `Scope { repo, snapshot }` is used on a tenant-bound handle. Register repository identity before
 indexing; fleet enrollment must resolve `(tenant, forge identity, repo slug)` to that registration
 and reject a mismatched remote. A missing registration records an indexing skip and does not
@@ -201,3 +201,51 @@ Keep `[review] repo_knowledge = false` until the evaluation gate is met.
 revision; if only ancestor evidence is available, omit confirmed guidance as unverifiable for
 that target. Candidate, rejected, superseded, stale and unverifiable records never appear as
 current guidance. This separate consumer does not replace existing review approval or posting.
+
+## RK-06 operator interface
+
+Build the CLI with `--features repo-graph`; the default binary keeps graph support off.
+`[repo_graph] store` accepts `""` (off), `"memory"` (process-local), or `"postgres"`.
+The `grpc`, Go, SCIP, profile, history and on-demand selectors above describe later work
+and are not implemented by RK-06. This increment accepts `rust`, `cargo`, and `docs`.
+
+```toml
+[repo_graph]
+store = "postgres"
+dsn_ref = "env:AGENT_REPO_GRAPH_DSN"
+repo = "owner__repo"
+extractors = ["rust", "cargo", "docs"]
+retention = 10
+max_files = 50000
+max_file_bytes = 2097152
+max_nodes = 250000
+max_edges = 2000000
+index_timeout_secs = 600
+pool_max = 8
+migrate_on_start = true
+```
+
+Use the existing local operator tenant convention (`--tenant`, otherwise the current tenant).
+No model tool or remote service exposes these commands. Register a remote before indexing:
+
+```sh
+agent --config graph.toml repo add --tenant local --repo owner__repo --forge github --remote https://github.com/owner/repo.git
+agent --config graph.toml repo index --repo owner__repo --sha HEAD --root /path/to/clean/checkout
+agent --config graph.toml repo status --repo owner__repo
+agent --config graph.toml repo shape --repo owner__repo --snapshot 1
+agent --config graph.toml repo diff --repo owner__repo --from 1 --to 2
+agent --config graph.toml repo recover --repo owner__repo --snapshot 3 --reason 'legacy writer stopped' --writer-stopped
+```
+
+Output is JSON, with escaped strings. `index` reports reuse, extraction completeness, elapsed
+time, retention failure and checkout cleanup failure separately. A ready graph can be incomplete.
+`status` lists at most 200 snapshots and identifies building rows needing explicit recovery.
+Recovery records its reason on the failed snapshot; that row follows the existing failed-row
+replacement/retention lifecycle. Recovery requires stopping the old writer first.
+
+The memory backend has no persistence across commands; use PostgreSQL for this operator workflow.
+The shared memory implementation now lives in core, with the original testkit path re-exported.
+Legacy extractor arrays decode with unknown completeness; new report envelopes are versioned
+and bounded to 16 KiB. Deploy upgraded readers before enabling new indexing. Before rolling back
+to an older reader, disable indexing and retain upgraded readers for envelope-bearing snapshots.
+No SQL migration, protocol, fleet/review integration, or default enablement is added here.

@@ -13,6 +13,7 @@ license.workspace = true
 # (RK-06). The default feature set remains a thin, DB-free core re-export.
 
 [features]
+index = ["extract-rust", "dep:serde", "dep:uuid", "dep:agent-metrics", "dep:url"]
 # Rust/Cargo/Markdown parsers and bounded worker admission; no repository execution.
 extract-rust = ["dep:ignore", "dep:globset", "dep:syn", "dep:quote", "dep:proc-macro2", "dep:toml", "dep:sha2", "dep:serde_json", "dep:tokio"]
 dhat-heap = ["dep:dhat"]
@@ -24,9 +25,13 @@ dhat-heap = ["dep:dhat"]
 # (the `#[async_trait] impl RepoGraphStore`) and `serde_json` (JSON attrs / profile), so the
 # default build is `agent-core` alone. The pure, DB-free unit tables (`with_tenant` refusals,
 # clamps, the `UNNEST` array builders, `map_db`) run in the gate via `nix/checks/repo-graph.nix`.
-repo-graph-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]
+repo-graph-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json", "dep:tokio"]
 
 [dependencies]
+serde = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+agent-metrics = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
 globset = { workspace = true, optional = true }
 syn = { workspace = true, optional = true }
@@ -42,6 +47,8 @@ serde_json = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
+agent-git = { workspace = true, features = ["git-cli"] }
+agent-sandbox = { workspace = true, features = ["sandbox-local", "sandbox-nix"] }
 agent-testkit.workspace = true
 rstest.workspace = true
 tokio.workspace = true

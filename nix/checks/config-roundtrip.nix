@@ -88,6 +88,14 @@ pkgs.runCommand "agent-config-roundtrip"
       "tokenizer = approx" \
       "tools     = 3 enabled"
 
+    # Graph stays disabled in the shipped/default build; unsupported backends fail closed.
+    cp "$HOME/default.toml" "$HOME/repo-graph-off.toml"
+    printf '\n[repo_graph]\nstore = ""\n' >> "$HOME/repo-graph-off.toml"
+    expect_ok repo-graph-off "$HOME/repo-graph-off.toml" "config: OK"
+    cp "$HOME/default.toml" "$HOME/repo-graph-unsupported.toml"
+    printf '\n[repo_graph]\nstore = "grpc"\n' >> "$HOME/repo-graph-unsupported.toml"
+    expect_fail repo-graph-unsupported "$HOME/repo-graph-unsupported.toml"
+
     # 2) A different provider must select a different impl — both are built into the
     #    default feature set, so swapping is a one-line config change.
     cat > "$HOME/anthropic.toml" <<TOML

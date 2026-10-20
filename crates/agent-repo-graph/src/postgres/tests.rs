@@ -582,3 +582,17 @@ async fn boundary_diff_capped() {
         "added list capped to MAX_DIFF"
     );
 }
+
+#[rstest]
+#[case::positive_atomic_race("positive_atomic_race")]
+#[case::negative_attempt_diagnostic("negative_attempt_diagnostic")]
+#[case::positive_report_roundtrip("positive_report_roundtrip")]
+#[case::corner_legacy_building("corner_legacy_building")]
+#[case::boundary_retention("boundary_retention")]
+#[case::adversarial_wrong_scope("adversarial_wrong_scope")]
+#[case::negative_publish_failure("negative_publish_failure")]
+#[tokio::test]
+#[ignore = "requires AGENT_REPO_GRAPH_TEST_DSN"]
+async fn publication_contract(#[case] case: &str) {
+    agent_testkit::repo_graph::conformance::publication::run(&pg_harness().await, case).await;
+}

@@ -45,6 +45,19 @@ impl ExtractionWorker {
         .await
     }
 
+    /// Extract a normalized subset using the same bounded, cancelable worker.
+    pub async fn extract_selected(
+        &self,
+        root: PathBuf,
+        budget: ExtractBudget,
+        modes: [bool; 3],
+    ) -> RepoGraphResult<(RepoGraph, ExtractReport)> {
+        self.run(budget.deadline, move |cancel| {
+            super::extract_selected(&root, &budget, modes, Some(cancel))
+        })
+        .await
+    }
+
     async fn run<T: Send + 'static>(
         &self,
         until: std::time::Instant,

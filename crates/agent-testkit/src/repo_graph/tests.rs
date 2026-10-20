@@ -93,3 +93,16 @@ fn positive_debug_names_tenant_only() {
 // The shared R3 rows (`08-test-matrix.md`) against `MemRepoGraph`:
 // `repo_graph::tests::mem::r3::positive_repo_put_get`, …
 crate::repo_graph_conformance_suite!(mem, Harness::mem());
+
+#[rstest]
+#[case::positive_atomic_race("positive_atomic_race")]
+#[case::negative_attempt_diagnostic("negative_attempt_diagnostic")]
+#[case::positive_report_roundtrip("positive_report_roundtrip")]
+#[case::corner_legacy_building("corner_legacy_building")]
+#[case::boundary_retention("boundary_retention")]
+#[case::adversarial_wrong_scope("adversarial_wrong_scope")]
+#[case::negative_publish_failure("negative_publish_failure")]
+#[tokio::test]
+async fn publication_contract(#[case] case: &str) {
+    super::conformance::publication::run(&Harness::mem(), case).await;
+}

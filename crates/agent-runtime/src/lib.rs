@@ -60,13 +60,15 @@ pub mod skills;
     feature = "forge-registry-postgres",
     feature = "transport-registry-postgres",
     feature = "digest-postgres",
-    feature = "campaign-postgres"
+    feature = "campaign-postgres",
+    feature = "repo-graph"
 ))]
 mod dsn;
 // The `[campaign] store` resolver (docs/design/campaigns, CP-04): opens the
 // campaign store the `agent campaign …` verbs run against. Lazy by design.
 #[cfg(feature = "campaign")]
 pub mod campaign;
+pub mod repo_index;
 // The `[campaign]` driver wiring (CP-05): config → `DriverConfig`, the tenant
 // selection rule, `build_driver` over the opened backend.
 #[cfg(feature = "campaign")]
@@ -201,6 +203,7 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
         .map_err(anyhow::Error::msg)?;
     cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
     cfg.campaign.validate().map_err(anyhow::Error::msg)?;
+    cfg.repo_graph.validate().map_err(anyhow::Error::msg)?;
     if let Some(ga) = &cfg.github_app {
         ga.validate().map_err(anyhow::Error::msg)?;
     }

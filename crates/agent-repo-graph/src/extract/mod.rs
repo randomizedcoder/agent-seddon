@@ -71,8 +71,17 @@ fn extract_with_cancel(
     budget: &ExtractBudget,
     cancel: Option<Arc<AtomicBool>>,
 ) -> RepoGraphResult<(RepoGraph, ExtractReport)> {
+    extract_selected(root, budget, [true; 3], cancel)
+}
+
+fn extract_selected(
+    root: &Path,
+    budget: &ExtractBudget,
+    modes: [bool; 3],
+    cancel: Option<Arc<AtomicBool>>,
+) -> RepoGraphResult<(RepoGraph, ExtractReport)> {
     let mut builder = GraphBuilder::new(caps(budget));
-    let mut report = run(root, &mut builder, budget, [true; 3], cancel)?;
+    let mut report = run(root, &mut builder, budget, modes, cancel)?;
     let built = builder
         .finish()
         .map_err(|_| RepoGraphError::Invalid("graph validation".into()))?;
