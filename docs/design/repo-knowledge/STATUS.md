@@ -14,7 +14,7 @@ and externally owned work; this count is not an estimate of effort or feature re
 
 **Active: [RK-06 — indexer, atomic publication and CLI](IMPLEMENTATION.md#rk-06).**
 Implementation started 2026-10-18 on `9c698e7e`; both prerequisites are accepted.
-Local validation passed on 2026-10-19; review and merge remain outstanding.
+Local validation passed on 2026-10-19; [PR #650](https://github.com/randomizedcoder/agent-seddon/pull/650) is open for review and merge.
 RK-07 follows RK-06 acceptance and merge; RK-08 is also unblocked by that merge.
 Deliver structural review context before confirmed lessons;
 Go/SCIP do not block that path. Migration order is 0002/RK-10 → 0003/RK-15 → 0004/RK-19.
@@ -56,7 +56,7 @@ case descriptions and expected outcomes; add missing scenario tables in the owni
 | [RK-03](IMPLEMENTATION.md#rk-03) | Rust/Cargo/docs extraction | RK-01 (met) | Merged | E1 33/33, heap 1/1, Ir/lint and graph conformance passed before merge; integrated main full gate passed, 87 checks; [journal](PROGRESS.md#2026-10-18--rk-06-execution-checkpoints) | [Merged #642](https://github.com/randomizedcoder/agent-seddon/pull/642), `9c698e7e` |
 | [RK-04](IMPLEMENTATION.md#rk-04) | Go extraction (additional) | RK-03 | Not started | Pending: Go mapping/helper fixture cases | — |
 | [RK-05](IMPLEMENTATION.md#rk-05) | SCIP spike and extraction (additional) | RK-03 | Not started | Pending: spike, resolved-edge/offline or integration evidence | — |
-| [RK-06](IMPLEMENTATION.md#rk-06) | Indexer, atomic publication and CLI | RK-02, RK-03 (met) | Validated awaiting merge | Full Nix gate passed on frozen source `0a903d562397` (code/build/fixtures); strict Pg 321/321 across 15 suites, including graph 64, indexing 4 and operator workflow 1; seven snapshot identities/hashes exported; cleanup passed. Required/optional no-runtime behavior verified. Review/merge pending; [journal](PROGRESS.md#2026-10-18--rk-06-execution-checkpoints) | Branch `rk-06-indexer` on `9c698e7e`; publication in progress |
+| [RK-06](IMPLEMENTATION.md#rk-06) | Indexer, atomic publication and CLI | RK-02, RK-03 (met) | Validated awaiting merge | Full Nix gate passed on frozen source `0a903d562397` (code/build/fixtures); strict Pg 321/321 across 15 suites, including graph 64, indexing 4 and operator workflow 1; seven snapshot identities/hashes exported; cleanup passed. Required/optional no-runtime behavior verified. Review/merge pending; [journal](PROGRESS.md#2026-10-18--rk-06-execution-checkpoints) | [PR #650](https://github.com/randomizedcoder/agent-seddon/pull/650), branch `rk-06-indexer`, implementation `7ed8bfda` |
 | [RK-07](IMPLEMENTATION.md#rk-07) | Fleet refresh and tenant cache | RK-06 | Not started | Pending: F1, fleet I2 | — |
 | [RK-08](IMPLEMENTATION.md#rk-08) | Graph tool and PgAst | RK-06 | Not started | Pending: R5, AST/config/feature composition | — |
 | [RK-09](IMPLEMENTATION.md#rk-09) | Review collector and A/B evaluation | RK-07, RK-08 | Not started | Pending: C1, full I2, Q1 A/B | — |

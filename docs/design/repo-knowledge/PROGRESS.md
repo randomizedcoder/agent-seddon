@@ -9,7 +9,7 @@ learns *why* the as-built code differs from the design docs.
 
 ## Now
 
-**RK-00–03 are accepted and merged; RK-06 is locally validated, awaiting review and merge.** Current states and acceptance evidence live in
+**RK-00–03 are accepted and merged; RK-06 is locally validated and published in [PR #650](https://github.com/randomizedcoder/agent-seddon/pull/650), awaiting review and merge.** Current states and acceptance evidence live in
 [STATUS](STATUS.md); implementation steps and dependencies live in
 [IMPLEMENTATION](IMPLEMENTATION.md). RK-03 passed its integrated baseline gate before RK-06 implementation began.
 
@@ -339,6 +339,14 @@ orphan and whitespace checks **passed** after reconciliation (exit 0):
 Publication requested after the validated local handoff. Branch: `rk-06-indexer`, based on
 `9c698e7e`. The code/build/fixture bytes match the final validated manifest (`0a903d562397`);
 only this journal and the status board have changed since that validation. Origin was fetched:
-main is now `6bd57d2d`, six commits beyond the tested baseline. PR publication and merge
-compatibility are recorded below when completed. RK-06 remains **Validated awaiting merge**;
+main is now `6bd57d2d`, six commits beyond the tested baseline.
+
+Implementation commit `7ed8bfda` was pushed to origin and published as
+[PR #650](https://github.com/randomizedcoder/agent-seddon/pull/650), targeting main.
+`git merge-tree --write-tree HEAD origin/main` passed without conflicts against `6bd57d2d`;
+this checks merge compatibility, not the full gate on the combined revision. The PR records
+that distinction and the validated baseline. RK-06 remains **Validated awaiting merge**;
 the accepted increment count stays at 4 of 22 until merge acceptance.
+
+The publication follow-up changes only this journal and the status board to link the PR.
+Documentation link/orphan gates and `git diff --check` passed after these edits.
