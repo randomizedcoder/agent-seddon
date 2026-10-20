@@ -153,6 +153,9 @@ pub struct RegistryRouter {
     /// `None` = soft. See [`TaskRouter::with_saturation`].
     saturation: Option<Saturation>,
     saturation_wait_ms: u64,
+    /// Active liveness probe for every rebuilt fleet: `(interval_secs,
+    /// timeout_secs)`, `interval_secs == 0` ⇒ off. See [`TaskRouter::with_probe`].
+    probe: (u64, u64),
     observer: Option<RouteObserver>,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// When set, each verified tenant gets its **own** fleet cell (snapshot +
@@ -176,6 +179,7 @@ impl RegistryRouter {
             breaker_cooldown_ms: 30_000,
             saturation: None,
             saturation_wait_ms: 0,
+            probe: (0, 0),
             observer: None,
             now_ms: Arc::new(crate::router::wall_clock_ms),
             per_tenant: false,
@@ -203,6 +207,13 @@ impl RegistryRouter {
     }
     pub fn with_observer(mut self, observer: RouteObserver) -> Self {
         self.observer = Some(observer);
+        self
+    }
+    /// Run the active liveness probe on every fleet this router builds; forwarded
+    /// to [`TaskRouter::with_probe`]. Each rebuild's probe ends with its fleet, and
+    /// feeds the breakers shared across rebuilds.
+    pub fn with_probe(mut self, interval_secs: u64, timeout_secs: u64) -> Self {
+        self.probe = (interval_secs, timeout_secs);
         self
     }
     pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
@@ -479,7 +490,7 @@ impl RegistryRouter {
         if let Some(o) = &self.observer {
             router = router.with_observer(o.clone());
         }
-        Some(router)
+        Some(router.with_probe(self.probe.0, self.probe.1))
     }
 
     async fn snapshot(&self) -> Result<Arc<TaskRouter>> {

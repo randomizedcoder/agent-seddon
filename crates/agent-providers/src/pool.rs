@@ -15,7 +15,7 @@ pub use crate::route::Saturation;
 use crate::router::{is_capable, poll_for_capacity, wall_clock_ms, Health};
 use crate::Candidate;
 use agent_core::{
-    CompletionRequest, CompletionResponse, Error, HealthReport, LlmPool, Message, PoolMemberHealth,
+    CompletionRequest, CompletionResponse, Error, HealthReport, LlmPool, PoolMemberHealth,
     PoolMemberResult, PoolMemberState, PoolTier, Result,
 };
 use async_trait::async_trait;
@@ -458,9 +458,11 @@ impl PoolInner {
         let futures = (0..self.members.len()).map(|i| async move {
             let m = &self.members[i];
             let started = Instant::now();
-            let outcome =
-                tokio::time::timeout(self.probe_timeout, m.candidate.provider.complete(ping()))
-                    .await;
+            let outcome = tokio::time::timeout(
+                self.probe_timeout,
+                m.candidate.provider.complete(crate::router::ping()),
+            )
+            .await;
             let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
             m.last_probe_ms.store(duration_ms as u64, Ordering::SeqCst);
             let alive = matches!(outcome, Ok(Ok(_)));
@@ -773,18 +775,6 @@ impl LlmPool for PoolProvider {
     }
 }
 
-/// The active-probe request: one token, cheap, tool-free.
-fn ping() -> CompletionRequest {
-    CompletionRequest {
-        messages: vec![Message::user("ping")],
-        tools: vec![],
-        max_tokens: 1,
-        temperature: 0.0,
-        response_format: None,
-        route: None,
-    }
-}
-
 /// Reduce a provider error to a short class/status string — never a raw body.
 fn classify_error(e: &Error) -> String {
     let msg = e.to_string();
@@ -796,7 +786,7 @@ fn classify_error(e: &Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{ChunkStream, LlmProvider, ModelCapabilities};
+    use agent_core::{ChunkStream, LlmProvider, Message, ModelCapabilities};
     use agent_testkit::{final_turn, ScriptedProvider};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;

@@ -239,6 +239,39 @@ goal is to move across the fleet fast. `max_retries` is also dropped from
 `RegistryRouter::provider_key` (the built provider no longer depends on it), so a
 budget-only card edit reuses the live connection and only rebuilds the router.
 
+### Active liveness probe — `[route] probe_interval_secs`
+
+The breaker above is **passive**: it learns an upstream is down only from real
+requests failing, and after `cooldown_secs` it re-admits the upstream by letting a
+real request try it again. That costs real turns twice: the failures that open it,
+and every re-try while the upstream stays down. It also misses a failure mode the
+review fleet hit live: a RunPod gateway whose model was **still loading** answered
+`/models` with 200 but every completion with `503 … the model is still loading`.
+
+`probe_interval_secs` (opt-in; `0`, the default, keeps the breaker passive) starts a
+background probe, the same one `[pool]` runs: every interval (clamped `[5, 3600]`)
+each upstream gets a **1-token completion**, not a `/models` call, bounded by
+`probe_timeout_secs` (default 10, clamped `[1, 60]`). A failed or timed-out ping is a
+breaker failure like a failed request, so a dark upstream opens before traffic
+reaches it and stays open while pings keep failing; one good ping closes it at once,
+without waiting out the cooldown. The first cycle runs at boot. Keep the interval
+under `cooldown_secs`, or a dark upstream gets a window where real traffic retries it.
+
+```toml
+[route]
+failure_threshold   = 2
+cooldown_secs       = 60
+probe_interval_secs = 15    # a ping per upstream every 15 s
+probe_timeout_secs  = 10
+```
+
+The probe feeds the breakers the router routes on, including the ones a
+`source = "registry"` fleet shares across rebuilds; each rebuild's probe ends with
+its fleet. Transitions are logged (`route probe: upstream not answering; breaker
+open` / `… answering; breaker closed`) by upstream name, never with the error body.
+Each ping is a real (1-token) call, so on a priced upstream it costs that much per
+interval, and under `[tenancy] per_tenant` each tenant cell probes its own fleet.
+
 ### Hard capacity — opt-in per-upstream cap (gap §8.7 item 3)
 
 By default `max_concurrency` is **soft** on the router path

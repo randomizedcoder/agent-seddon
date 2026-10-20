@@ -234,6 +234,20 @@ pub(crate) async fn poll_for_capacity<T>(
     None
 }
 
+/// The active liveness-probe request (`LlmPool` and `TaskRouter`): one token, cheap,
+/// tool-free. It asks for a real completion, not `/models`, because a gateway can list
+/// a model whose backend is still loading.
+pub(crate) fn ping() -> CompletionRequest {
+    CompletionRequest {
+        messages: vec![agent_core::Message::user("ping")],
+        tools: vec![],
+        max_tokens: 1,
+        temperature: 0.0,
+        response_format: None,
+        route: None,
+    }
+}
+
 pub(crate) fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
