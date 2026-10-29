@@ -490,6 +490,7 @@ mod tests {
             _key: SessionKey,
             _goal: String,
             _skill: Option<String>,
+            _workspace: agent_core::ReviewWorkspace,
         ) -> std::result::Result<String, DriverError> {
             unreachable!("sync never runs a review")
         }
