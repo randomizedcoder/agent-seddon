@@ -819,6 +819,13 @@ impl FleetOrchestrator {
         // nothing else reaps the per-row factory repo). Captured before `repo` is
         // shadowed below by the repo *name* string used in the draft record.
         let review_repo = repo.clone();
+        // Root the review session's tools at THIS PR: its read-only worktree for the
+        // filesystem tools and the row's repo (with the PR head fetched) for `git_*`.
+        // Without it the session's tools would read the fleet process's own checkout.
+        let review_ws = agent_core::ReviewWorkspace {
+            worktree: worktree.path.clone(),
+            repo: repo.clone(),
+        };
         // The per-review worktree id, moved into the task so it reaps exactly this
         // review's worktree (matching the `(session_id, pr)`-keyed add above).
         let wt_id_task = wt_id;
@@ -873,7 +880,7 @@ impl FleetOrchestrator {
                 }
                 // Run the review, then draft on success. NOT an early return on error:
                 // the worktree cleanup below must run on both paths (there is no `Drop`).
-                match host.run_review(key_run, goal, skill).await {
+                match host.run_review(key_run, goal, skill, review_ws).await {
                     Ok(narrative) => {
                         // drafted: render + persist. Fail-soft — a draft error is logged.
                         if let (Some(drafter), Some(facts)) = (drafter, facts) {
@@ -1007,6 +1014,9 @@ mod tests {
         /// `(key, goal, skill)` per started review — recorded when `run_review` runs
         /// (inside the orchestrator's spawned task, so a test `join`s before asserting).
         reviews: Vec<(SessionKey, String, Option<String>)>,
+        /// The worktree each started review's tools were rooted at (same order as
+        /// `reviews`) — the fleet must hand the session the PR's checkout.
+        workspaces: Vec<std::path::PathBuf>,
     }
 
     /// A [`FleetHost`] double with a configurable global cap. Admits are idempotent, so
@@ -1063,6 +1073,9 @@ mod tests {
         fn reviews_len(&self) -> usize {
             self.state.lock().unwrap().reviews.len()
         }
+        fn workspaces(&self) -> Vec<std::path::PathBuf> {
+            self.state.lock().unwrap().workspaces.clone()
+        }
         fn removed(&self) -> Vec<SessionKey> {
             self.state.lock().unwrap().removed.clone()
         }
@@ -1096,9 +1109,11 @@ mod tests {
             key: SessionKey,
             goal: String,
             skill: Option<String>,
+            workspace: agent_core::ReviewWorkspace,
         ) -> Result<String, DriverError> {
             {
                 let mut s = self.state.lock().unwrap();
+                s.workspaces.push(workspace.worktree);
                 if self.max_total > 0
                     && !s.admitted.contains(&key)
                     && s.admitted.len() >= self.max_total
@@ -2371,6 +2386,102 @@ mod tests {
         assert_ne!(
             roots[0], roots[1],
             "distinct sessions ⇒ distinct worktrees for the same PR"
+        );
+    }
+
+    // ---- the review session's tools are rooted at the PR worktree -------------
+    //
+    // Grounding at the worktree is not enough: the model's own tools must read the
+    // same checkout. `run_review` receives the worktree (and the row's repo for
+    // `git_*`); before this, the host rooted the tools at the fleet's process cwd —
+    // an unrelated checkout — so the model read and cited the wrong repository.
+
+    #[rstest]
+    #[case::positive_review_rooted_at_pr_worktree(
+        "one row: the review's tools are rooted at the worktree the PR was grounded at",
+        &["web"], 42, false
+    )]
+    #[case::negative_ungrounded_review_still_rooted(
+        "grounding fails: the fallback (ungrounded) review is still rooted at the worktree",
+        &["web"], 42, true
+    )]
+    #[case::corner_two_rows_same_pr_root_distinct_worktrees(
+        "two rows on the same PR: each review session is rooted at its own worktree",
+        &["web", "api"], 5, false
+    )]
+    #[case::boundary_pr_zero_rooted(
+        "the smallest PR number still gets its own worktree",
+        &["web"], 0, false
+    )]
+    #[tokio::test]
+    async fn review_session_rooted_at_pr_worktree(
+        #[case] description: &str,
+        #[case] sessions: &[&str],
+        #[case] pr: u64,
+        #[case] broken_grounder: bool,
+    ) {
+        let rows: Vec<_> = sessions.iter().map(|s| row(s, true)).collect();
+        let roster = seeded(&rows).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = if broken_grounder {
+            FakeGrounder::broken()
+        } else {
+            FakeGrounder::ok("brief")
+        };
+        let o = orch(roster, repo, host.clone()).with_grounder(grounder.clone());
+
+        for s in sessions {
+            o.handle(FleetTrigger {
+                session_id: (*s).into(),
+                pr_number: pr,
+                requested_by: Vec::new(),
+                tenant: String::new(),
+            })
+            .await
+            .expect("handle ok");
+            assert!(o.join(s, pr).await, "{description}: review task ran");
+        }
+
+        let want: Vec<_> = sessions.iter().map(|s| expected_worktree(pr, s)).collect();
+        assert_eq!(host.workspaces(), want, "{description}");
+        assert!(
+            host.workspaces()
+                .iter()
+                .all(|w| w != std::path::Path::new("/fixture")),
+            "{description}: never rooted at the bare mirror"
+        );
+        if !broken_grounder {
+            assert_eq!(
+                host.workspaces(),
+                grounder.roots(),
+                "{description}: the model's tools read the same checkout the facts came from"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn adversarial_hostile_session_never_starts_a_rooted_review() {
+        // desc: a trigger whose `session_id` carries traversal.
+        // expect: fail closed before any review — no session is ever rooted at a path
+        // derived from a hostile id.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo, host.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "../../etc/web".into(),
+                pr_number: 1,
+                requested_by: Vec::new(),
+                tenant: String::new(),
+            })
+            .await;
+        assert!(got.is_err(), "an unmatched/hostile session is an error");
+        assert!(
+            host.workspaces().is_empty(),
+            "no review session was rooted anywhere"
         );
     }
 

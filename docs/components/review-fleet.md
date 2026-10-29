@@ -217,6 +217,18 @@ wired only when a **local** review engine is configured **and** `[review_fleet] 
 `serve_fleet` prefers it when present and keeps the single grounder as the fail-soft fallback (a
 factory build error falls back to the process-global repo + grounder — the review still runs).
 
+**Review session tools are rooted at the PR.** Grounding reads the worktree, and so must the
+model's own tools. The orchestrator passes a
+[`ReviewWorkspace`](../../crates/agent-core/src/lib.rs) `{ worktree, repo }` (the per-review
+read-only worktree + the row's repo, holding the fetched PR head) to `FleetHost::run_review`. The
+runtime's `SessionManager` seeds the new review session with it (`Session::bind_review_workspace`):
+the filesystem tools' `ToolContext.cwd` becomes the worktree (so `read_file`/`grep`/`find`/`ls`
+confine to the PR checkout), and every **advertised** `git_*` tool is rebound to the row's repo as a
+per-session override that dispatch prefers over the backend's same-named tool. The process-wide tools
+stay rooted at the process cwd / `[git]` repo, which for a fleet is an unrelated checkout, so without
+this a review read and cited the wrong tree. Binding never widens the read-only set `seed_review`
+chose: `bash`, `git_worktree` and `git_checkpoint` stay unadvertised and refused.
+
 **Draft (C13/C14, inc 6a)** completes the `reviewing → drafted` step. The FSM is **completion-aware**:
 `handle` does the synchronous prep then spawns a per-review task (so the drain loop never blocks) that
 awaits [`FleetHost::run_review`](../../crates/agent-core/src/lib.rs) (the model's narrative) and, when a

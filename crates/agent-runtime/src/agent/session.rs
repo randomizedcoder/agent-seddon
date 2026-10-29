@@ -44,6 +44,10 @@ pub struct Session {
     pub(super) budget: TokenBudget,
     pub(super) tool_ctx: ToolContext,
     pub(super) tool_schemas: Vec<ToolSchema>,
+    /// Session-bound tools that shadow the backend's same-named ones at dispatch. Empty
+    /// for an ordinary session; a fleet review session binds its `git_*` tools to the
+    /// reviewed row's repo here (see [`Self::bind_review_workspace`]).
+    pub(super) tool_overrides: ToolRegistry,
     /// Whether the initial context (system prompt + recall) has been assembled or
     /// a saved transcript loaded.
     pub(super) started: bool,
@@ -246,6 +250,28 @@ impl Session {
         // full mutating set. An operator's max_tokens is floored in run_loop.
         self.tool_schemas
             .retain(|s| REVIEW_READONLY_TOOLS.contains(&s.name.as_str()));
+    }
+
+    /// Root this review session's tools at the PR under review (review-fleet): the
+    /// filesystem tools' cwd becomes the PR's read-only worktree, and every advertised
+    /// `git_*` tool is rebound to the row's repo, which holds the fetched PR head. The
+    /// backend's own tools stay rooted at the process cwd/`[git]` repo, which for a
+    /// fleet is an unrelated checkout; without this, a review would read and cite
+    /// that tree instead of the PR's. Only tools already advertised are rebound, so
+    /// this never widens the read-only set [`Self::seed_review`] chose.
+    pub(super) fn bind_review_workspace(&mut self, workspace: agent_core::ReviewWorkspace) {
+        self.tool_ctx = ToolContext {
+            cwd: workspace.worktree,
+        };
+        #[cfg(feature = "git")]
+        for tool in agent_tools::git_tools(workspace.repo) {
+            if self.tool_schemas.iter().any(|s| s.name == tool.name()) {
+                self.tool_overrides
+                    .register(crate::metered::tool(tool, self.agent.metrics.clone()));
+            }
+        }
+        #[cfg(not(feature = "git"))]
+        let _ = workspace.repo;
     }
 
     /// Seed this session as a campaign worker (CP-06b): implement mode from the
@@ -465,6 +491,7 @@ impl Session {
                 &self.budget,
                 &self.tool_ctx,
                 &self.tool_schemas,
+                &self.tool_overrides,
                 &mut self.pending_switch,
                 self.current_mode,
                 &self.events,

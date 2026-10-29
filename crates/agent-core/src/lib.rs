@@ -3745,6 +3745,21 @@ impl std::error::Error for DriverError {}
 /// live key is a no-op success, which is what makes reconcile a crash-safe
 /// rebuild-from-roster. (The observing side of driving a session is the separate
 /// [`SessionDriver`]/`AgentSessionService`; the fleet only needs to *start* a run.)
+/// Where a fleet review session's tools point: the PR's checked-out worktree and the
+/// repo backend it was checked out from. The fleet orchestrator materializes both per
+/// review (per-row mirror + read-only worktree at the PR head) and hands them to
+/// [`FleetHost::run_review`], so the model's `read_file`/`grep`/`find`/`ls` read the
+/// PR's files and its `git_*` tools resolve the PR head — not the fleet process's own
+/// cwd/repo, which is an unrelated checkout (often the agent's own source tree).
+#[derive(Clone)]
+pub struct ReviewWorkspace {
+    /// The read-only worktree checked out at the PR head; the review's tool cwd.
+    pub worktree: PathBuf,
+    /// The repo backend owning `worktree` (the row's mirror, with the PR head ref
+    /// fetched); backs the review session's `git_*` tools.
+    pub repo: Arc<dyn RepoBackend>,
+}
+
 #[async_trait]
 pub trait FleetHost: Send + Sync {
     /// Admit (or resolve) the owner session for `key`, enforcing capacity. `Err` only
@@ -3775,11 +3790,16 @@ pub trait FleetHost: Send + Sync {
     /// default). The host seeds the new session so it runs in review mode with a
     /// `skill:<name>` prompt tag — the review checklist fragments are then selected
     /// deterministically (review-fleet C11), not left to per-turn mode classification.
+    ///
+    /// `workspace` roots the session's tools at the PR under review (see
+    /// [`ReviewWorkspace`]); it is required so a review can never silently run its
+    /// tools against the host process's own checkout.
     async fn run_review(
         &self,
         key: SessionKey,
         goal: String,
         skill: Option<String>,
+        workspace: ReviewWorkspace,
     ) -> std::result::Result<String, DriverError>;
 }
 

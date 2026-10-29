@@ -2201,6 +2201,7 @@ impl Agent {
             },
             tool_ctx: ToolContext { cwd },
             tool_schemas: self.tools.describe_all(),
+            tool_overrides: ToolRegistry::new(),
             started: false,
             pending_context: Vec::new(),
             current_mode: agent_core::TaskMode::default(),
@@ -2289,6 +2290,7 @@ impl Agent {
         budget: &TokenBudget,
         tool_ctx: &ToolContext,
         tool_schemas: &[ToolSchema],
+        tool_overrides: &ToolRegistry,
         pending_switch: &mut Option<(agent_core::TaskMode, agent_core::TaskMode)>,
         mode: agent_core::TaskMode,
         events: &crate::SessionEvents,
@@ -2704,10 +2706,10 @@ impl Agent {
             }
 
             let parallel = self.settings.parallel_tools
-                && assistant
-                    .tool_calls
-                    .iter()
-                    .all(|c| self.tools.get(&c.name).is_none_or(|t| t.parallel_safe()));
+                && assistant.tool_calls.iter().all(|c| {
+                    lookup_tool(tool_overrides, &self.tools, &c.name)
+                        .is_none_or(|t| t.parallel_safe())
+                });
 
             // Publish tool-call starts to any live observer before execution
             // (docs/design/portal). Guarded so an unobserved run does not stringify
@@ -2747,30 +2749,34 @@ impl Agent {
                         }
                         match dec {
                             Decision::Deny(_) => None,
-                            Decision::Allow => Some(match tools.get(&call.name) {
-                                // Present in the registry but not advertised to this
-                                // session (e.g. a review session's read-only subset):
-                                // refuse it — fail closed, don't fall through to run it.
-                                Some(_) if !advertised.iter().any(|s| s.name == call.name) => {
-                                    Observation::error(format!(
-                                        "tool `{}` is not available in this session",
-                                        call.name
-                                    ))
-                                }
-                                // Guarded: a hung tool times out and a panicking tool
-                                // is isolated — either way an error observation, so
-                                // one bad tool never freezes or crashes the loop.
-                                Some(tool) => {
-                                    run_tool_guarded(
-                                        tool,
-                                        call.arguments.clone(),
-                                        cwd,
-                                        tool_timeout,
-                                    )
-                                    .await
-                                }
-                                None => Observation::error(format!("unknown tool `{}`", call.name)),
-                            }),
+                            Decision::Allow => {
+                                Some(match lookup_tool(tool_overrides, tools, &call.name) {
+                                    // Present in the registry but not advertised to this
+                                    // session (e.g. a review session's read-only subset):
+                                    // refuse it — fail closed, don't fall through to run it.
+                                    Some(_) if !advertised.iter().any(|s| s.name == call.name) => {
+                                        Observation::error(format!(
+                                            "tool `{}` is not available in this session",
+                                            call.name
+                                        ))
+                                    }
+                                    // Guarded: a hung tool times out and a panicking tool
+                                    // is isolated — either way an error observation, so
+                                    // one bad tool never freezes or crashes the loop.
+                                    Some(tool) => {
+                                        run_tool_guarded(
+                                            tool,
+                                            call.arguments.clone(),
+                                            cwd,
+                                            tool_timeout,
+                                        )
+                                        .await
+                                    }
+                                    None => {
+                                        Observation::error(format!("unknown tool `{}`", call.name))
+                                    }
+                                })
+                            }
                         }
                     }
                     .instrument(span)
@@ -3302,6 +3308,16 @@ fn ensure_dir_0700(dir: &Path) -> std::result::Result<(), String> {
     }
     b.create(dir)
         .map_err(|e| format!("creating session workspace {}: {e}", dir.display()))
+}
+
+/// Resolve a tool for dispatch: a session-bound override (e.g. a review session's
+/// `git_*` rebound to the reviewed repo) shadows the backend's same-named tool.
+fn lookup_tool(
+    overrides: &ToolRegistry,
+    tools: &ToolRegistry,
+    name: &str,
+) -> Option<Arc<dyn Tool>> {
+    overrides.get(name).or_else(|| tools.get(name))
 }
 
 /// Wrap the recent working-set tail as synthetic `MemoryEvent`s for the per-step
@@ -6534,6 +6550,252 @@ mod tests {
         assert!(
             !tool_msgs[0].contains("bash ran"),
             "bash must NOT execute: {tool_msgs:?}"
+        );
+    }
+
+    // ---- a fleet review session's tools are rooted at the PR under review ---
+    //
+    // The backend's tools are rooted at the process cwd / `[git]` repo — for a fleet,
+    // an unrelated checkout. `bind_review_workspace` must make the filesystem tools
+    // see the PR worktree and rebind the advertised `git_*` tools to the row's repo,
+    // without widening the review session's read-only set.
+
+    /// A filesystem-style tool that reports the cwd it was handed.
+    #[cfg(feature = "git")]
+    struct CwdTool(&'static str);
+    #[cfg(feature = "git")]
+    #[async_trait::async_trait]
+    impl agent_core::Tool for CwdTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: self.0.into(),
+                description: "test tool".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            Ok(Observation::ok(format!("cwd={}", c.cwd.display())))
+        }
+    }
+
+    #[cfg(feature = "git")]
+    #[rstest::rstest]
+    #[case::positive_git_read_served_by_pr_repo(
+        true, "git_read", json!({"rev": "HEAD", "path": "f.rs"}), "PR-SIDE", "BACKEND-SIDE"
+    )]
+    #[case::positive_file_tool_cwd_is_pr_worktree(
+        true, "read_file", json!({}), "cwd=/fleet/acme/web/worktrees/pr-42", "cwd=/srv/fleet-process"
+    )]
+    #[case::negative_unbound_session_keeps_backend_repo(
+        false, "git_read", json!({"rev": "HEAD", "path": "f.rs"}), "BACKEND-SIDE", "PR-SIDE"
+    )]
+    #[case::corner_missing_blob_errors_from_pr_repo_not_backend(
+        true, "git_read", json!({"rev": "HEAD", "path": "only-in-backend.rs"}), "", "BACKEND-ONLY"
+    )]
+    #[case::adversarial_injected_bash_still_refused(
+        true, "bash", json!({}), "not available in this session", "bash ran"
+    )]
+    #[case::adversarial_mutating_git_tool_not_revived(
+        true, "git_worktree", json!({"action": "add", "rev": "HEAD"}), "not available in this session", "/fixture"
+    )]
+    #[tokio::test]
+    async fn review_workspace_binding(
+        #[case] bind: bool,
+        #[case] tool: &str,
+        #[case] args: serde_json::Value,
+        #[case] want: &str,
+        #[case] never: &str,
+    ) {
+        let backend_repo = Arc::new(
+            agent_testkit::FixtureRepo::new()
+                .with_blob("HEAD", "f.rs", "BACKEND-SIDE")
+                .with_blob("HEAD", "only-in-backend.rs", "BACKEND-ONLY"),
+        );
+        let pr_repo =
+            Arc::new(agent_testkit::FixtureRepo::new().with_blob("HEAD", "f.rs", "PR-SIDE"));
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(CwdTool("read_file")));
+        tools.register(Arc::new(NamedTool("bash")));
+        for t in agent_tools::git_tools(backend_repo) {
+            tools.register(t);
+        }
+        let memory = RecordingMemory::new();
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![ToolCall {
+                id: "t0".into(),
+                name: tool.into(),
+                arguments: args,
+            }]),
+            final_turn("done"),
+        ]);
+        let mut s = settings(false);
+        s.cwd = std::path::PathBuf::from("/srv/fleet-process");
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        let mut session = agent.session();
+        session.seed_review(None);
+        if bind {
+            session.bind_review_workspace(agent_core::ReviewWorkspace {
+                worktree: std::path::PathBuf::from("/fleet/acme/web/worktrees/pr-42"),
+                repo: pr_repo,
+            });
+        }
+        assert_eq!(session.send("review this").await.unwrap(), "done");
+
+        let obs: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| e.message.content_text())
+            .collect();
+        assert_eq!(obs.len(), 1, "{tool}: {obs:?}");
+        assert!(obs[0].contains(want), "{tool}: want {want:?} in {obs:?}");
+        assert!(
+            !obs[0].contains(never),
+            "{tool}: {never:?} leaked into {obs:?}"
+        );
+    }
+
+    #[cfg(feature = "git")]
+    #[tokio::test]
+    async fn positive_fleet_run_review_roots_tools_at_workspace() {
+        // Composition: the FleetHost seam (SessionManager::run_review) carries the
+        // workspace into the admitted review session — its git_read is served by the
+        // PR repo and its file tools see the PR worktree, in one review run.
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(CwdTool("read_file")));
+        for t in agent_tools::git_tools(Arc::new(agent_testkit::FixtureRepo::new().with_blob(
+            "HEAD",
+            "f.rs",
+            "BACKEND-SIDE",
+        ))) {
+            tools.register(t);
+        }
+        let memory = RecordingMemory::new();
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![
+                ToolCall {
+                    id: "t0".into(),
+                    name: "git_read".into(),
+                    arguments: json!({"rev": "HEAD", "path": "f.rs"}),
+                },
+                ToolCall {
+                    id: "t1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({}),
+                },
+            ]),
+            final_turn("REVIEW"),
+        ]);
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ));
+        let mgr = SessionManager::new(agent);
+        let narrative = agent_core::FleetHost::run_review(
+            &mgr,
+            agent_core::SessionKey::parse("acme", "web-pr-42").unwrap(),
+            "review PR 42".into(),
+            None,
+            agent_core::ReviewWorkspace {
+                worktree: std::path::PathBuf::from("/fleet/acme/web/worktrees/pr-42"),
+                repo: Arc::new(
+                    agent_testkit::FixtureRepo::new().with_blob("HEAD", "f.rs", "PR-SIDE"),
+                ),
+            },
+        )
+        .await
+        .expect("review ran");
+        assert_eq!(narrative, "REVIEW");
+        let obs: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| e.message.content_text())
+            .collect();
+        assert!(
+            obs.iter().any(|o| o.contains("PR-SIDE")),
+            "git_read served by the PR repo: {obs:?}"
+        );
+        assert!(
+            obs.iter().all(|o| !o.contains("BACKEND-SIDE")),
+            "the process repo never served the review: {obs:?}"
+        );
+        assert!(
+            obs.iter()
+                .any(|o| o.contains("cwd=/fleet/acme/web/worktrees/pr-42")),
+            "file tools rooted at the PR worktree: {obs:?}"
+        );
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn negative_binding_never_widens_advertised_tools() {
+        // Binding rebinds only what seed_review already advertised: the mutating git
+        // tools (git_worktree/git_checkpoint) and bash stay unadvertised.
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(NamedTool("bash")));
+        for t in agent_tools::git_tools(Arc::new(agent_testkit::FixtureRepo::new())) {
+            tools.register(t);
+        }
+        let agent = Arc::new(Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ));
+        let mut session = agent.session();
+        session.seed_review(None);
+        let before: Vec<String> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        session.bind_review_workspace(agent_core::ReviewWorkspace {
+            worktree: std::env::temp_dir(),
+            repo: Arc::new(agent_testkit::FixtureRepo::new()),
+        });
+        let after: Vec<String> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(before, after, "advertised set unchanged by binding");
+        for name in ["bash", "git_worktree", "git_checkpoint"] {
+            assert!(
+                !after.iter().any(|n| n == name),
+                "{name} advertised: {after:?}"
+            );
+            assert!(
+                session.tool_overrides.get(name).is_none(),
+                "{name} must not be rebound"
+            );
+        }
+        assert!(
+            session.tool_overrides.get("git_read").is_some(),
+            "advertised read-only git tools are rebound"
         );
     }
 
