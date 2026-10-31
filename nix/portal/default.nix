@@ -841,8 +841,40 @@ let
       contract_exit "PASS: portal-e2e drove the curated mutating subset over the real wire; every non-skipped action proven by metrics delta + read-RPC."
     '';
   };
+
+  # Hermetic builders for a NixOS deployment (`services.agentSeddon`, nix/nixos/agent-stack.nix):
+  # the portal web bundle as a store path, and the Envoy grpc-web config rendered at
+  # build time by the same `portal_envoy.py render` the `portal-envoy` check validates.
+  mkWebBundle = import ./web-bundle.nix { inherit pkgs lib versions; };
+
+  # `PORTAL_AUTH=off` is required here: `auto`/`on` would fetch the agent's JWKS over
+  # the network at render time, which a build cannot do. No OTLP ingestion key is
+  # passed, so no secret lands in the (world-readable) store path.
+  mkEnvoyConfig =
+    {
+      host ? "127.0.0.1",
+      origins ? [
+        "http://127.0.0.1:${toString portalWebPort}"
+        "http://localhost:${toString portalWebPort}"
+      ],
+    }:
+    pkgs.runCommand "agent-grpc-web-envoy.json"
+      {
+        nativeBuildInputs = [ pkgs.python3 ];
+        PORTAL_AUTH = "off";
+        PORTAL_GRPC_WEB_HOST = host;
+        PORTAL_WEB_ORIGIN = lib.concatStringsSep "," origins;
+      }
+      ''
+        python3 ${../../test/portal-envoy}/portal_envoy.py --spec ${envoySpec.file} \
+          render --out "$out"
+      '';
 in
 {
+  # Not an app: builders for the NixOS deployment (kept out of `mkApps` in nix/default.nix).
+  deploy = {
+    inherit mkWebBundle mkEnvoyConfig envoySpec;
+  };
   inherit
     gen-dart
     portal

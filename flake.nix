@@ -116,6 +116,7 @@
       {
         inherit (aggregator)
           packages
+          legacyPackages
           devShells
           checks
           apps
@@ -131,6 +132,9 @@
       # module header (nix/nixos/agent-postgres.nix) for the import snippet.
       nixosModules = {
         agent-postgres = import ./nix/nixos/agent-postgres.nix;
+        # The whole stack (agents + ClickHouse + grpc-web + portal) as services; closes
+        # over `self` for its per-system packages/builders (nix/nixos/agent-stack.nix).
+        agent-stack = import ./nix/nixos/agent-stack.nix { inherit self; };
         default = import ./nix/nixos/agent-postgres.nix;
       };
     };

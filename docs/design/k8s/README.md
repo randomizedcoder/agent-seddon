@@ -11,6 +11,8 @@ Today agent-seddon runs **natively**:
 - ClickHouse, HyperDX, Postgres, Envoy, Prometheus and Grafana run as podman containers, started by
   the `*-up` apps built on [`nix/lib/mk-container-app.nix`](../../../nix/lib/mk-container-app.nix).
 - Postgres can also run as a NixOS service, from `nixosModules.agent-postgres`.
+- The whole native stack (agents, fleet, ClickHouse, Envoy, portal) can run as NixOS services, from
+  `nixosModules.agent-stack` ([deployment-nixos.md](../../deployment-nixos.md)).
 
 Certificates come from step-ca or `nix run .#pki-dev`, and a renewed one is picked up on SIGHUP
 ([07 as-built S20a/b](../security-hardening/07-transport-tls-and-pki.md)).
