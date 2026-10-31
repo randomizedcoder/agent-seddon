@@ -158,6 +158,9 @@ let
     fleet = {
       flag = "--serve-fleet";
       port = ports.fleet;
+      # Each roster row is reviewed in its own checkout under the fleet root, made by
+      # the per-row review factory, which needs the local review engine.
+      extra.review.backend = "local";
       extra.review_fleet = {
         root = "${stateDir}/fleet/workspaces";
       }

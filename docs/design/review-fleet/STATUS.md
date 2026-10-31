@@ -85,6 +85,13 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
 > foundation for the [multi-tenancy track](../multi-tenancy/) (components C24/C25), tracked
 > there — not fleet increments 1–8.
 
+- **2026-10-31** — **Fix: the NixOS fleet never made a per-repo checkout.** The per-row
+  review factory is wired only when `[review] backend = "local"` and `[review_fleet] root`
+  are both set. `nixosModules.agent-stack` set only the root, so every trigger on l2 since
+  the systemd cutover fetched into an empty workspace (`fatal: not a git repository`) and
+  no draft was made. The module now sets the backend, and `--serve-fleet` refuses to start
+  with a root but no factory instead of reviewing the wrong repo.
+
 ## Decisions of record
 
 - **Multi-tenancy is its own track** (2026-09-05): the system-wide tenancy work (process

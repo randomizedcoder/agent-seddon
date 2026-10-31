@@ -1290,6 +1290,17 @@ pub async fn serve_fleet(
     );
     spawn_fleet_resync(sync.clone());
 
+    // A fleet root means a checkout per roster row, which only the per-row review
+    // factory makes. Without it the orchestrator falls back to the process-global repo
+    // (the service's working directory), and every trigger fails with "not a git
+    // repository". Refuse to start instead of reviewing nothing.
+    if let Some(problem) = fleet_root_without_factory(
+        agent.fleet_root().is_some(),
+        agent.fleet_review_factory().is_some(),
+    ) {
+        anyhow::bail!(problem);
+    }
+
     // Orchestrator + bounded trigger queue. The queue's sink drives `ReviewNow`; a
     // background loop drains it through the FSM. Wired only when a repo backend exists
     // (the FSM's `cloning` needs one); otherwise `ReviewNow` stays `UNIMPLEMENTED`.
@@ -1764,10 +1775,62 @@ async fn serve_seams(
     Ok(())
 }
 
+/// Why `--serve-fleet` must not start: a `[review_fleet] root` is set (per-row
+/// checkouts) but no per-row review factory is wired, which needs `[review] backend =
+/// "local"` and the `review` feature. `None` when the two agree.
+fn fleet_root_without_factory(root_set: bool, factory_wired: bool) -> Option<&'static str> {
+    (root_set && !factory_wired).then_some(
+        "[review_fleet] root is set but no per-repo review checkout can be made: set \
+         [review] backend = \"local\" (and build with the `review` feature), or clear \
+         [review_fleet] root to review the working directory's repo",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[rstest]
+    #[case::positive_root_and_factory(
+        "a fleet root with the local review factory starts",
+        true,
+        true,
+        false
+    )]
+    #[case::positive_single_repo(
+        "no fleet root and no factory: single-repo mode starts",
+        false,
+        false,
+        false
+    )]
+    #[case::corner_factory_without_root(
+        "a factory with no root is unused but harmless",
+        false,
+        true,
+        false
+    )]
+    #[case::negative_root_without_factory(
+        "a fleet root without a local review backend is refused (l2: every trigger failed with \"not a git repository\")",
+        true,
+        false,
+        true
+    )]
+    fn fleet_root_needs_the_review_factory(
+        #[case] description: &str,
+        #[case] root_set: bool,
+        #[case] factory_wired: bool,
+        #[case] refused: bool,
+    ) {
+        let got = fleet_root_without_factory(root_set, factory_wired);
+        assert_eq!(got.is_some(), refused, "{description}");
+        if let Some(msg) = got {
+            assert!(
+                msg.contains("backend = \"local\""),
+                "{description}: the fix is named"
+            );
+        }
+    }
 
     /// The table replaces the compiler's exhaustiveness check, so this test *is*
     /// that check: a new `Seam` variant with no `SEAMS` row would otherwise get
