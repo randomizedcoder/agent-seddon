@@ -125,6 +125,11 @@ store = "postgres"
 [github_install_registry]
 store = "postgres"
 
+# Portal themes (docs/design/visual/03, 04): user themes and each signed-in user's
+# active theme on Postgres (`--serve-theme`). Keyed by the verified (tenant, subject).
+[themes]
+store = "postgres"
+
 # Campaigns (docs/design/campaigns, CP-04): the `agent campaign …` task tree on
 # Postgres. Opened lazily (no dial until the first verb) over the same
 # `[config_store] dsn_ref`; the schema is applied on the first verb under

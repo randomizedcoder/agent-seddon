@@ -150,6 +150,15 @@ pub(crate) fn require(action: Action, resource_type: ResourceType) -> Result<(),
     decide_on_span(&principal, action, resource_type, &tenant)
 }
 
+/// Whether the caller holds `action` on `resource_type` in their own tenant, without
+/// refusing anything: a capability probe that shapes what a handler allows (the
+/// themes service asks whether the caller may share with the tenant). Nothing is
+/// refused here, so no audit row is written; the handler's own refusal is the
+/// decision. `true` with auth disabled, like [`require`].
+pub(crate) fn holds(action: Action, resource_type: ResourceType) -> bool {
+    current_principal().is_none_or(|p| allowed(&p, action, resource_type, &p.tenant))
+}
+
 /// [`require`] against an object in `tenant` rather than the caller's own (a live
 /// session opened by someone else). A tenant-scoped role is denied outside its own
 /// tenant; only a host-global one crosses.

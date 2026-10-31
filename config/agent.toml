@@ -259,6 +259,19 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists rows onto the shared config store (the [config_store]
 # block supplies the DSN + pool); needs the `forge-registry-postgres` feature (opt-in).
 
+# [themes] — portal themes (docs/design/visual/03, 04): themes users store and
+# each signed-in user's active theme, keyed by the verified (tenant, subject). A
+# user theme is validated on Put (colours, bundled fonts only, contrast, caps); a
+# private theme is its owner's; sharing one with the tenant needs (approve, theme).
+# Empty `store` (the default) ⇒ no ThemeService: the portal uses its bundled
+# built-ins and remembers the pick in the browser only.
+# [themes]
+# store = "file"                  # "" (off) | "file" | "postgres"
+# file  = ".agent/themes.json"    # `file` backend only; tilde-expanded
+# default_theme = "prototype"     # a built-in, or a tenant-shared theme's id
+# store = "postgres" persists onto the shared config store (the [config_store]
+# block supplies the DSN + pool); needs the `theme-postgres` feature (in `postgres`).
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. Backends (config-selected like every seam):
@@ -1217,6 +1230,12 @@ job         = "agent-seddon"
 # [github_install_registry] store to advertise anything.
 # [grpc.github_install_registry]
 # listen = "127.0.0.1:50090"                          # --serve-github-install-registry binds this
+#
+# The portal themes seam (docs/design/visual/03): user themes + each user's active
+# theme. Hosted by `--serve-theme` / `--serve-all`. Default port 50091. Needs a
+# [themes] store to advertise anything.
+# [grpc.theme]
+# listen = "127.0.0.1:50091"                          # --serve-theme binds this
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

@@ -46,6 +46,7 @@ Gaps:
 | LLM | upstreams, routing, pools | `ProviderRegistryService.*` | `(read \| write \| delete, registry)` | high |
 | Prompts | view; edit; set the active personality | `PromptService.*` | `(read, prompt)` / `(write \| delete, prompt)` | medium |
 | Cognition graphs | view; edit | `GraphService.*` | `(read, graph)` / `(write, graph)` | medium |
+| Portal themes | view and pick a theme; keep private themes; share one with the tenant ([visual/03](../visual/03-user-themes.md)) | `ThemeService.List/Get/GetActive/SetActive`; `Put/Delete`; `Put` of a tenant-shared theme | `(read, theme)`; `(write \| delete, theme)`; plus `(approve, theme)` | low |
 | Scheduler | list and history; schedule and cancel | `SchedulerService.*` | `(read, scheduler)` / `(schedule \| delete, scheduler)` | medium |
 | Observability | metrics proxy, digests, review telemetry, the auth audit | `MetricsProxyService.*`, `DigestService.*`, `ReviewService.*` | `(read, telemetry)` | medium |
 | Access control | view roles, bindings, sessions | `RoleService.List/Get/ListBindings/GetBinding`, `AuthService.ListSessions` | `(read, role)` / `(read, binding)` | low |
@@ -69,11 +70,11 @@ optional follow-up).
 | Role | Grants | Persona |
 |---|---|---|
 | `viewer` (renames `reader`; the old id stays as an alias) | `read` on every resource except `config` | auditor, stakeholder |
-| `review_viewer` | `(read, review)` | "view the code reviews" |
-| `agent_user` | `(use, agent)`, `(read, prompt)`, `(read, review)`, `(read, graph)` | "log in and use the agent interactively" |
+| `review_viewer` | `(read, review)`, `(read, theme)` | "view the code reviews" |
+| `agent_user` | `(use, agent)`, `(read, prompt)`, `(read, review)`, `(read, graph)`, `(read \| write \| delete, theme)` | "log in and use the agent interactively" |
 | `reviewer` | `agent_user` + `(write, review)`, `(approve, review)`, `(trigger, fleet)`, `(read, fleet)` | edits and **approves / posts** reviews |
 | `fleet_admin` | `reviewer` + `(write \| delete, fleet)`, `(read \| write \| delete, forge_registry)`, `(read \| write \| delete, transport_registry)`, `(read, registry)`, `(read, telemetry)` | "add a new repo": API keys, Slack channels |
-| `access_admin` | `(read \| write \| delete, role)`, `(read \| write \| delete, binding)`, under the rules below | "control permissions" |
+| `access_admin` | `(read \| write \| delete, role)`, `(read \| write \| delete, binding)`, `(read, theme)`, under the rules below | "control permissions" |
 | `svc_fleet` | `(use, agent)`, `(read \| write, review)`, `(trigger, fleet)`, `(read, fleet \| registry \| prompt)` | the review fleet's own identity (mTLS-bound) |
 | `svc_seam` | seam-internal reads: `(read, prompt \| graph \| registry \| scheduler)` | seam-to-seam service identity (mTLS-bound) |
 | `org_admin` | all, own tenant (unchanged) | tenant owner |

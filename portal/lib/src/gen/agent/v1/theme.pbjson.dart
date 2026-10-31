@@ -61,6 +61,39 @@ final $typed_data.Uint8List visibilityDescriptor = $convert.base64Decode(
     'CgpWaXNpYmlsaXR5EhoKFlZJU0lCSUxJVFlfVU5TUEVDSUZJRUQQABIWChJWSVNJQklMSVRZX1'
     'BSSVZBVEUQARIVChFWSVNJQklMSVRZX1RFTkFOVBAC');
 
+@$core.Deprecated('Use themeModeDescriptor instead')
+const ThemeMode$json = {
+  '1': 'ThemeMode',
+  '2': [
+    {'1': 'THEME_MODE_UNSPECIFIED', '2': 0},
+    {'1': 'THEME_MODE_SYSTEM', '2': 1},
+    {'1': 'THEME_MODE_LIGHT', '2': 2},
+    {'1': 'THEME_MODE_DARK', '2': 3},
+  ],
+};
+
+/// Descriptor for `ThemeMode`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List themeModeDescriptor = $convert.base64Decode(
+    'CglUaGVtZU1vZGUSGgoWVEhFTUVfTU9ERV9VTlNQRUNJRklFRBAAEhUKEVRIRU1FX01PREVfU1'
+    'lTVEVNEAESFAoQVEhFTUVfTU9ERV9MSUdIVBACEhMKD1RIRU1FX01PREVfREFSSxAD');
+
+@$core.Deprecated('Use activeSourceDescriptor instead')
+const ActiveSource$json = {
+  '1': 'ActiveSource',
+  '2': [
+    {'1': 'ACTIVE_SOURCE_UNSPECIFIED', '2': 0},
+    {'1': 'ACTIVE_SOURCE_USER', '2': 1},
+    {'1': 'ACTIVE_SOURCE_SERVER_DEFAULT', '2': 2},
+    {'1': 'ACTIVE_SOURCE_BUILTIN', '2': 3},
+  ],
+};
+
+/// Descriptor for `ActiveSource`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List activeSourceDescriptor = $convert.base64Decode(
+    'CgxBY3RpdmVTb3VyY2USHQoZQUNUSVZFX1NPVVJDRV9VTlNQRUNJRklFRBAAEhYKEkFDVElWRV'
+    '9TT1VSQ0VfVVNFUhABEiAKHEFDVElWRV9TT1VSQ0VfU0VSVkVSX0RFRkFVTFQQAhIZChVBQ1RJ'
+    'VkVfU09VUkNFX0JVSUxUSU4QAw==');
+
 @$core.Deprecated('Use themeDescriptor instead')
 const Theme$json = {
   '1': 'Theme',
@@ -315,3 +348,158 @@ final $typed_data.Uint8List accessibilityDescriptor = $convert.base64Decode(
     'ZlbFIIY29udHJhc3QSKAoQZm9jdXNfcmluZ193aWR0aBgCIAEoDVIOZm9jdXNSaW5nV2lkdGgS'
     'JgoPbWluX3RhcmdldF9zaXplGAMgASgNUg1taW5UYXJnZXRTaXplEiMKDXJlZHVjZV9tb3Rpb2'
     '4YBCABKAhSDHJlZHVjZU1vdGlvbhIhCgxzdGF0dXNfaWNvbnMYBSABKAhSC3N0YXR1c0ljb25z');
+
+@$core.Deprecated('Use listThemesRequestDescriptor instead')
+const ListThemesRequest$json = {
+  '1': 'ListThemesRequest',
+};
+
+/// Descriptor for `ListThemesRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listThemesRequestDescriptor =
+    $convert.base64Decode('ChFMaXN0VGhlbWVzUmVxdWVzdA==');
+
+@$core.Deprecated('Use listThemesResponseDescriptor instead')
+const ListThemesResponse$json = {
+  '1': 'ListThemesResponse',
+  '2': [
+    {
+      '1': 'themes',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.agent.v1.Theme',
+      '10': 'themes'
+    },
+  ],
+};
+
+/// Descriptor for `ListThemesResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List listThemesResponseDescriptor = $convert.base64Decode(
+    'ChJMaXN0VGhlbWVzUmVzcG9uc2USJwoGdGhlbWVzGAEgAygLMg8uYWdlbnQudjEuVGhlbWVSBn'
+    'RoZW1lcw==');
+
+@$core.Deprecated('Use getThemeRequestDescriptor instead')
+const GetThemeRequest$json = {
+  '1': 'GetThemeRequest',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 9, '10': 'id'},
+  ],
+};
+
+/// Descriptor for `GetThemeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getThemeRequestDescriptor =
+    $convert.base64Decode('Cg9HZXRUaGVtZVJlcXVlc3QSDgoCaWQYASABKAlSAmlk');
+
+@$core.Deprecated('Use deleteThemeRequestDescriptor instead')
+const DeleteThemeRequest$json = {
+  '1': 'DeleteThemeRequest',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 9, '10': 'id'},
+  ],
+};
+
+/// Descriptor for `DeleteThemeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deleteThemeRequestDescriptor =
+    $convert.base64Decode('ChJEZWxldGVUaGVtZVJlcXVlc3QSDgoCaWQYASABKAlSAmlk');
+
+@$core.Deprecated('Use deleteThemeResponseDescriptor instead')
+const DeleteThemeResponse$json = {
+  '1': 'DeleteThemeResponse',
+  '2': [
+    {'1': 'restored_builtin', '3': 1, '4': 1, '5': 8, '10': 'restoredBuiltin'},
+  ],
+};
+
+/// Descriptor for `DeleteThemeResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deleteThemeResponseDescriptor = $convert.base64Decode(
+    'ChNEZWxldGVUaGVtZVJlc3BvbnNlEikKEHJlc3RvcmVkX2J1aWx0aW4YASABKAhSD3Jlc3Rvcm'
+    'VkQnVpbHRpbg==');
+
+@$core.Deprecated('Use activeThemeDescriptor instead')
+const ActiveTheme$json = {
+  '1': 'ActiveTheme',
+  '2': [
+    {
+      '1': 'theme',
+      '3': 1,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.Theme',
+      '10': 'theme'
+    },
+    {
+      '1': 'mode',
+      '3': 2,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.ThemeMode',
+      '10': 'mode'
+    },
+    {
+      '1': 'source',
+      '3': 3,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.ActiveSource',
+      '10': 'source'
+    },
+  ],
+};
+
+/// Descriptor for `ActiveTheme`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List activeThemeDescriptor = $convert.base64Decode(
+    'CgtBY3RpdmVUaGVtZRIlCgV0aGVtZRgBIAEoCzIPLmFnZW50LnYxLlRoZW1lUgV0aGVtZRInCg'
+    'Rtb2RlGAIgASgOMhMuYWdlbnQudjEuVGhlbWVNb2RlUgRtb2RlEi4KBnNvdXJjZRgDIAEoDjIW'
+    'LmFnZW50LnYxLkFjdGl2ZVNvdXJjZVIGc291cmNl');
+
+@$core.Deprecated('Use getActiveThemeRequestDescriptor instead')
+const GetActiveThemeRequest$json = {
+  '1': 'GetActiveThemeRequest',
+};
+
+/// Descriptor for `GetActiveThemeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getActiveThemeRequestDescriptor =
+    $convert.base64Decode('ChVHZXRBY3RpdmVUaGVtZVJlcXVlc3Q=');
+
+@$core.Deprecated('Use setActiveThemeRequestDescriptor instead')
+const SetActiveThemeRequest$json = {
+  '1': 'SetActiveThemeRequest',
+  '2': [
+    {'1': 'theme_id', '3': 1, '4': 1, '5': 9, '10': 'themeId'},
+    {
+      '1': 'mode',
+      '3': 2,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.ThemeMode',
+      '10': 'mode'
+    },
+  ],
+};
+
+/// Descriptor for `SetActiveThemeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List setActiveThemeRequestDescriptor = $convert.base64Decode(
+    'ChVTZXRBY3RpdmVUaGVtZVJlcXVlc3QSGQoIdGhlbWVfaWQYASABKAlSB3RoZW1lSWQSJwoEbW'
+    '9kZRgCIAEoDjITLmFnZW50LnYxLlRoZW1lTW9kZVIEbW9kZQ==');
+
+@$core.Deprecated('Use userPrefsDescriptor instead')
+const UserPrefs$json = {
+  '1': 'UserPrefs',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 9, '10': 'id'},
+    {'1': 'theme_id', '3': 2, '4': 1, '5': 9, '10': 'themeId'},
+    {
+      '1': 'mode',
+      '3': 3,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.ThemeMode',
+      '10': 'mode'
+    },
+  ],
+};
+
+/// Descriptor for `UserPrefs`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List userPrefsDescriptor = $convert.base64Decode(
+    'CglVc2VyUHJlZnMSDgoCaWQYASABKAlSAmlkEhkKCHRoZW1lX2lkGAIgASgJUgd0aGVtZUlkEi'
+    'cKBG1vZGUYAyABKA4yEy5hZ2VudC52MS5UaGVtZU1vZGVSBG1vZGU=');

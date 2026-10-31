@@ -5,10 +5,14 @@
 // field is untrusted: the server (`agent-theme::validate`) and the portal mapper
 // both check colours are strict hex, fonts are bundled families, numbers are in
 // range, and text meets the declared WCAG contrast level — fail closed.
-// `ThemeService` (CRUD + the per-user active theme) lands in increment 3.
+// `ThemeService` stores user themes and each user's active theme
+// (docs/design/visual/03, 04).
 syntax = "proto3";
 
 package agent.v1;
+
+// REST transcoding (docs/design/rest-openapi/): Envoy exposes the service as JSON.
+import "google/api/annotations.proto";
 
 // One portal look. Built-ins ship as `config/themes/<id>.textproto`.
 message Theme {
@@ -106,5 +110,96 @@ enum ContrastLevel {
 enum Visibility {
   VISIBILITY_UNSPECIFIED = 0; // = PRIVATE
   VISIBILITY_PRIVATE = 1; // the owner only
-  VISIBILITY_TENANT = 2; // everyone in the tenant (needs publish:theme)
+  VISIBILITY_TENANT = 2; // everyone in the tenant (needs approve:theme)
+}
+
+// User themes and the caller's active theme (docs/design/visual/03, 04), gated by
+// `(read|write|delete|approve, theme)`. A theme the caller may not see is reported
+// as missing, never as forbidden.
+service ThemeService {
+  // Built-ins, the tenant's shared themes and the caller's own private ones.
+  rpc List(ListThemesRequest) returns (ListThemesResponse) {
+    option (google.api.http) = {get: "/v1/themes"};
+  }
+  rpc Get(GetThemeRequest) returns (Theme) {
+    option (google.api.http) = {get: "/v1/themes/{id}"};
+  }
+  // Create or update a user theme; returns it as stored. `version` must equal the
+  // stored version (0 to create), else ABORTED. Built-in ids are refused.
+  rpc Put(Theme) returns (Theme) {
+    option (google.api.http) = {
+      put: "/v1/themes/{id}"
+      body: "*"
+    };
+  }
+  rpc Delete(DeleteThemeRequest) returns (DeleteThemeResponse) {
+    option (google.api.http) = {delete: "/v1/themes/{id}"};
+  }
+  // The caller's theme, resolved: their pick, else the server default, else
+  // `prototype`.
+  rpc GetActive(GetActiveThemeRequest) returns (ActiveTheme) {
+    option (google.api.http) = {get: "/v1/active-theme"};
+  }
+  rpc SetActive(SetActiveThemeRequest) returns (ActiveTheme) {
+    option (google.api.http) = {
+      put: "/v1/active-theme"
+      body: "*"
+    };
+  }
+}
+
+message ListThemesRequest {}
+
+message ListThemesResponse {
+  repeated Theme themes = 1;
+}
+
+message GetThemeRequest {
+  string id = 1;
+}
+
+message DeleteThemeRequest {
+  string id = 1;
+}
+
+message DeleteThemeResponse {
+  // Always false until operators can override a built-in.
+  bool restored_builtin = 1;
+}
+
+// Light, dark or follow the browser.
+enum ThemeMode {
+  THEME_MODE_UNSPECIFIED = 0; // = SYSTEM
+  THEME_MODE_SYSTEM = 1;
+  THEME_MODE_LIGHT = 2;
+  THEME_MODE_DARK = 3;
+}
+
+// Which step of the fallback chain answered GetActive.
+enum ActiveSource {
+  ACTIVE_SOURCE_UNSPECIFIED = 0;
+  ACTIVE_SOURCE_USER = 1; // the caller's own pick
+  ACTIVE_SOURCE_SERVER_DEFAULT = 2; // no pick, or the picked theme is gone
+  ACTIVE_SOURCE_BUILTIN = 3; // the server default is missing too: `prototype`
+}
+
+message ActiveTheme {
+  Theme theme = 1; // the resolved document, so the portal needs one round trip
+  ThemeMode mode = 2;
+  ActiveSource source = 3;
+}
+
+message GetActiveThemeRequest {}
+
+message SetActiveThemeRequest {
+  string theme_id = 1;
+  ThemeMode mode = 2;
+}
+
+// A user's stored preference (collection `user_prefs`), keyed by a hash of the
+// verified subject inside the caller's tenant. Never sent by a client.
+message UserPrefs {
+  string id = 1;
+  string theme_id = 2;
+  ThemeMode mode = 3;
 }

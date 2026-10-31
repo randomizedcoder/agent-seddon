@@ -59,6 +59,11 @@ bounded.
 
 ## Storage
 
+> **As built (3a):** built-in overrides are not implemented yet (built-in ids are
+> refused), `publish:theme` is `(approve, theme)`, the active-theme route is
+> `/v1/active-theme`, and the backends are `file` and `postgres`. See
+> [STATUS](STATUS.md#3a--themeservice-store-rbac).
+
 Themes are cards in `agent-config-store`, collection `themes`, keyed by
 `(tenant, id)`, exactly like prompts (`crates/agent-prompt/src/store.rs`):
 

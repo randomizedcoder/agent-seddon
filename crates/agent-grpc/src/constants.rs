@@ -215,6 +215,11 @@ pub const GITHUB_INSTALL_REGISTRY: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/github_install_registry.sock",
     metrics_port: 9640,
 };
+pub const THEME: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50091,
+    uds_path: "/tmp/agent-seddon/theme.sock",
+    metrics_port: 9641,
+};
 
 /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
 /// session registry + a driving `AgentSessionService`).

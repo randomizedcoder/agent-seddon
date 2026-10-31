@@ -12,7 +12,7 @@ One PR per increment. Every increment that changes the UI gets the Playwright re
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **merged** (#657) |
 | 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | **merged** (#658; 2b #659, landed on main by #660) |
-| 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | planned |
+| 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | **3a in progress** (service); 3b (portal) next |
 | 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | — | — | ✅ | editor widget tables | ✅ | planned |
 
 ## As built
@@ -78,6 +78,58 @@ review).
   `FocusTraversalGroup`). Still open: on `accessible`, a focused rail item shows only a darker
   pill rather than the 3px ring; the Fleet filter bar clips below ~800px (this predates
   themes).
+
+### 3a — `ThemeService`, store, RBAC
+
+Increment 3 is split like 2: **3a** is the server (this section), **3b** the portal
+(`GetActive` at sign-in, `SetActive` on pick, the browser cache keyed by subject, the
+Playwright review).
+
+- `ThemeService` in `theme.proto`; `agent_theme::ThemeBook` (store rules) and
+  `validate_user` (user-theme rules); `server/theme.rs`; `agent --serve-theme` on 50091
+  (metrics 9641) and in `--serve-all`; `[themes] store = file | postgres` and
+  `default_theme`; `theme.store = "postgres"` in the NixOS module and
+  `config/multi-tenant.toml`. Component doc: [theme.md](../../components/theme.md).
+- RBAC: new resource `theme`. `agent_user` gets `(read | write | delete, theme)`;
+  `review_viewer` and `access_admin` get `(read, theme)`; `viewer` reads everything
+  already. Sharing with the tenant is `(approve, theme)`, so only the admin roles hold it.
+- Gates: `List`, `Get`, `GetActive` and `SetActive` need `(read, theme)`; `Put` and
+  `Delete` are field-checked (`write` / `delete`, plus `approve` for a shared theme).
+- Differences from the design:
+  - **Built-ins cannot be overridden yet.** `Put` and `Delete` refuse a built-in id, and
+    `DeleteThemeResponse.restored_builtin` is always false. Built-ins change in
+    `config/themes/` by PR. An operator override (03) can come later with its own
+    permission.
+  - **`publish:theme` is `(approve, theme)`.** The RBAC model has a fixed set of actions;
+    `approve` is the one that already means "make this visible to others". There is no
+    `write:theme_builtin` (see above).
+  - **`/v1/active-theme`, not `/v1/themes:active`.** A custom verb on the collection
+    route sits next to `/v1/themes/{id}`; a sibling singleton cannot collide with a theme
+    whose id is `active`.
+  - **Seeded text needs a written `surface`.** 06 said `Put` would derive the Material 3
+    tonal palette from the seed and check semantic text against it. Rust does not
+    reproduce Material's tonal maths, so instead a user theme that colours text on a
+    seeded palette must write `surface` (and, by the core-pair rule, `on_surface`,
+    `background` and `focus`), and the explicit pairs are checked. A seed alone is
+    still accepted.
+  - **Lookalike names are refused.** A name or id whose skeleton (NFKD, accents
+    dropped, lower-cased, Cyrillic/Greek homoglyphs and `1`/`i`/`l`, `0`/`o`, `rn`/`m`
+    folded) matches a built-in's is `INVALID_ARGUMENT`. 2a left this to 3.
+  - **The preference key is `(tenant, sha256(subject))`, without the issuer.** The
+    verified principal carries no issuer, and one deployment trusts one issuer. Service
+    tokens are not told apart from people; picking a theme with one is harmless.
+  - **`[themes] default_theme`**, not `[portal] default_theme`: the server owns it.
+  - **`file` and `postgres` only.** The shipped binary has no SQLite config-store tier
+    in its default features, as for the other registries.
+  - **Explicit tenant keys, not the `PerTenant` wrap.** The book passes the verified
+    tenant to every store call itself, so isolation does not depend on how the backend
+    was wrapped. `[tenancy] per_tenant` off puts every caller in `local`; subjects still
+    keep their private themes and picks apart.
+  - **`owner` is returned only to the owner**, so a shared theme does not reveal who
+    stored it beyond its `author`.
+  - **A stored theme that no longer validates is treated as gone** (skipped by `List`,
+    `NOT_FOUND` for `Get`, dropped through by `GetActive`), so tightening a rule never
+    renders an unchecked theme.
 
 ## Open questions
 

@@ -86,5 +86,57 @@ class Visibility extends $pb.ProtobufEnum {
   const Visibility._(super.value, super.name);
 }
 
+/// Light, dark or follow the browser.
+class ThemeMode extends $pb.ProtobufEnum {
+  static const ThemeMode THEME_MODE_UNSPECIFIED =
+      ThemeMode._(0, _omitEnumNames ? '' : 'THEME_MODE_UNSPECIFIED');
+  static const ThemeMode THEME_MODE_SYSTEM =
+      ThemeMode._(1, _omitEnumNames ? '' : 'THEME_MODE_SYSTEM');
+  static const ThemeMode THEME_MODE_LIGHT =
+      ThemeMode._(2, _omitEnumNames ? '' : 'THEME_MODE_LIGHT');
+  static const ThemeMode THEME_MODE_DARK =
+      ThemeMode._(3, _omitEnumNames ? '' : 'THEME_MODE_DARK');
+
+  static const $core.List<ThemeMode> values = <ThemeMode>[
+    THEME_MODE_UNSPECIFIED,
+    THEME_MODE_SYSTEM,
+    THEME_MODE_LIGHT,
+    THEME_MODE_DARK,
+  ];
+
+  static final $core.List<ThemeMode?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static ThemeMode? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ThemeMode._(super.value, super.name);
+}
+
+/// Which step of the fallback chain answered GetActive.
+class ActiveSource extends $pb.ProtobufEnum {
+  static const ActiveSource ACTIVE_SOURCE_UNSPECIFIED =
+      ActiveSource._(0, _omitEnumNames ? '' : 'ACTIVE_SOURCE_UNSPECIFIED');
+  static const ActiveSource ACTIVE_SOURCE_USER =
+      ActiveSource._(1, _omitEnumNames ? '' : 'ACTIVE_SOURCE_USER');
+  static const ActiveSource ACTIVE_SOURCE_SERVER_DEFAULT =
+      ActiveSource._(2, _omitEnumNames ? '' : 'ACTIVE_SOURCE_SERVER_DEFAULT');
+  static const ActiveSource ACTIVE_SOURCE_BUILTIN =
+      ActiveSource._(3, _omitEnumNames ? '' : 'ACTIVE_SOURCE_BUILTIN');
+
+  static const $core.List<ActiveSource> values = <ActiveSource>[
+    ACTIVE_SOURCE_UNSPECIFIED,
+    ACTIVE_SOURCE_USER,
+    ACTIVE_SOURCE_SERVER_DEFAULT,
+    ACTIVE_SOURCE_BUILTIN,
+  ];
+
+  static final $core.List<ActiveSource?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static ActiveSource? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ActiveSource._(super.value, super.name);
+}
+
 const $core.bool _omitEnumNames =
     $core.bool.fromEnvironment('protobuf.omit_enum_names');

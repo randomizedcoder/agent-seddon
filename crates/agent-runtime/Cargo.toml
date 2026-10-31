@@ -56,6 +56,7 @@ default = [
     "scheduler-store",
     "forge-registry-store",
     "transport-registry-store",
+    "theme-store",
     "campaign",
     "metrics-proxy",
     "session-export",
@@ -392,6 +393,13 @@ transport-registry-postgres = [
   "agent-slack/transport-store-postgres",
   "agent-config-store/config-store-postgres",
 ]
+# Portal themes (docs/design/visual/03, 04): user themes + each user's active theme
+# as `agent-config-store` cards (file/postgres) via `ThemeBook` in `agent-theme`,
+# held for `--serve-theme`. On by default.
+theme-store = ["dep:agent-theme", "dep:agent-config-store"]
+# The Postgres arm of the themes store. Off by default; NOT hermetic (needs a live
+# Postgres server).
+theme-postgres = ["theme-store", "agent-config-store/config-store-postgres"]
 # The "first-class Postgres" umbrella (config C41 / PG-03): turns on the Postgres
 # arm of EVERY shared-store domain at once, so one build can run the whole OLTP
 # surface on a single Postgres via `config/multi-tenant.toml` (`[config_store]`
@@ -411,6 +419,7 @@ postgres = [
   "role-postgres",
   "forge-registry-postgres",
   "transport-registry-postgres",
+  "theme-postgres",
   "digest-postgres",
   "campaign-postgres",
   "auth-postgres",
@@ -489,6 +498,7 @@ agent-cache = { workspace = true, optional = true }
 agent-web-search = { workspace = true, optional = true }
 agent-forge = { workspace = true, optional = true }
 agent-slack = { workspace = true, optional = true }
+agent-theme = { workspace = true, optional = true }
 agent-mode = { workspace = true, optional = true }
 agent-review = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }
@@ -527,6 +537,8 @@ url.workspace = true
 [dev-dependencies]
 agent-testkit = { workspace = true, features = ["oidc", "pki"] }
 rstest.workspace = true
+# The `Theme`/`ActiveTheme` messages the `[themes]` store tests build and read.
+agent-proto.workspace = true
 # Loopback GitHub-App token endpoint for the `ghapp:` mint-wiring test (forge-auth F2).
 tiny_http.workspace = true
 # The distiller tests drive a real (in-memory) ledger.

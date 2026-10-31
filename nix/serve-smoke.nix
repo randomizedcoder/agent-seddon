@@ -137,6 +137,12 @@ pkgs.writeShellApplication {
     store = "file"
     file  = "$work/.agent/github_installs.json"
 
+    # A file-backed themes store (docs/design/visual/03), so --serve-all advertises
+    # the ThemeService and the SetActive->GetActive roundtrip below can exercise it.
+    [themes]
+    store = "file"
+    file  = "$work/.agent/themes.json"
+
     # A file-backed durable scheduler (config C2c), so --serve-all advertises the
     # Scheduler control plane over the persistent StoreScheduler and the
     # Schedule->List roundtrip below can exercise it over the wire. 'enabled' wires the
@@ -337,6 +343,36 @@ pkgs.writeShellApplication {
       if grpcurl -d '{}' "''${dial[@]}" \
           agent.v1.GithubInstallRegistryService.List 2>/dev/null | grep -qF '../'; then
         echo "CONTRACT[$transport]: GithubInstallRegistryService/List surfaced a traversal id" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      fi
+
+      # ---- Themes: SetActive→GetActive roundtrip (docs/design/visual/04) ----------
+      # Pick a built-in, then read the active theme back. Proves the ThemeService is
+      # on the wire and the pick persists through the shared store.
+      if ! grpcurl -d '{"theme_id":"tn3270","mode":"THEME_MODE_DARK"}' "''${dial[@]}" \
+          agent.v1.ThemeService.SetActive >/dev/null 2>"$work/theme_set.$transport.err"; then
+        echo "CONTRACT[$transport]: ThemeService/SetActive round-trip failed" >&2
+        cat "$work/theme_set.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local theme_got
+        theme_got="$(grpcurl -d '{}' "''${dial[@]}" \
+          agent.v1.ThemeService.GetActive 2>"$work/theme_get.$transport.err" || true)"
+        if ! echo "$theme_got" | grep -q '"tn3270"'; then
+          echo "CONTRACT[$transport]: ThemeService/GetActive did not return the pick" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
+      fi
+      # Adversarial: a traversal theme id is attacker-controlled — it can be neither
+      # stored nor picked.
+      if grpcurl -d '{"id":"../x","name":"x"}' "''${dial[@]}" \
+          agent.v1.ThemeService.Put >/dev/null 2>&1; then
+        echo "CONTRACT[$transport]: ThemeService/Put ACCEPTED a traversal id" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      fi
+      if grpcurl -d '{"theme_id":"../x"}' "''${dial[@]}" \
+          agent.v1.ThemeService.SetActive >/dev/null 2>&1; then
+        echo "CONTRACT[$transport]: ThemeService/SetActive ACCEPTED a traversal id" >&2
         [ "$rc" -lt 2 ] && rc=2
       fi
 

@@ -36,6 +36,10 @@ touching `Theme`.
 
 ## Whose preference
 
+> **As built (3a):** the key is `(tenant, sha256(subject))` (the verified principal
+> has no issuer), service tokens are not refused, and the server default is
+> `[themes] default_theme`. See [STATUS](STATUS.md#3a--themeservice-store-rbac).
+
 The key comes from the verified identity the auth layer installs
 (`VerifiedIdentity` in `crates/agent-grpc/src/server/auth.rs`):
 `(tenant, issuer, subject)`, hashed to a `safe_segment` card id. It is never read from a

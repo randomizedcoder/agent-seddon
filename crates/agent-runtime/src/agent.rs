@@ -248,6 +248,10 @@ pub struct Agent {
     /// CRUD only — NOT consulted by the `ghapp:` mint gate, since a row is
     /// tenant-self-asserted.
     github_install_registry: Option<Arc<dyn agent_core::GithubInstallRegistry>>,
+    /// User themes and each user's active theme (docs/design/visual/03), held for
+    /// `--serve-theme`. `None` ⇒ `[themes] store` is off.
+    #[cfg(feature = "theme-store")]
+    theme_book: Option<Arc<agent_theme::ThemeBook>>,
     /// The ownership-verified install onboarding backend (forge-auth F5c2), served as
     /// `BeginInstall`/`CompleteInstall` on the same registry service. `None` ⇒ onboarding
     /// is not configured (`[github_app] slug` + OAuth client), and those RPCs refuse.
@@ -1035,6 +1039,8 @@ impl Agent {
             forge_registry: None,
             transport_registry: None,
             github_install_registry: None,
+            #[cfg(feature = "theme-store")]
+            theme_book: None,
             github_install_onboarding: None,
             github_install_lifecycle: None,
             github_webhook_secret: None,
@@ -1488,6 +1494,14 @@ impl Agent {
         self
     }
 
+    /// Attach the themes store (docs/design/visual/03), so it can be hosted over gRPC
+    /// (`--serve-theme`).
+    #[cfg(feature = "theme-store")]
+    pub fn with_theme_book(mut self, book: Arc<agent_theme::ThemeBook>) -> Self {
+        self.theme_book = Some(book);
+        self
+    }
+
     /// Attach the fleet's persisted review-history reader (review-fleet C16), consulted by
     /// the fleet orchestrator for head-oid dedup + cross-round carry-forward.
     pub fn with_fleet_history(mut self, h: Arc<dyn agent_core::FleetHistory>) -> Self {
@@ -1814,6 +1828,12 @@ impl Agent {
     /// configured (`--serve-github-install-registry`).
     pub fn github_install_registry(&self) -> Option<Arc<dyn agent_core::GithubInstallRegistry>> {
         self.github_install_registry.clone()
+    }
+
+    /// The themes store, if `[themes] store` is configured (`--serve-theme`).
+    #[cfg(feature = "theme-store")]
+    pub fn theme_book(&self) -> Option<Arc<agent_theme::ThemeBook>> {
+        self.theme_book.clone()
     }
 
     /// The install onboarding backend, if `[github_app]` enables it (forge-auth F5c2).

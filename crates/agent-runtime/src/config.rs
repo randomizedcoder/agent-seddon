@@ -118,6 +118,8 @@ pub struct Config {
     #[serde(default)]
     pub github_install_registry: GithubInstallRegistryCfg,
     #[serde(default)]
+    pub themes: ThemesCfg,
+    #[serde(default)]
     pub campaign: CampaignCfg,
     #[serde(default)]
     pub repo_graph: RepoGraphCfg,
@@ -363,6 +365,47 @@ impl Default for GithubInstallRegistryCfg {
 
 fn default_github_install_registry_file() -> String {
     ".agent/github_installs.json".to_string()
+}
+
+/// The `[themes]` block (docs/design/visual/03, 04): where user themes and each
+/// user's active theme live, served by `--serve-theme`. Empty `store` ⇒ no themes
+/// service; the portal then uses its bundled built-ins and remembers the pick in the
+/// browser only.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct ThemesCfg {
+    /// Theme backend: `"file"` | `"postgres"` (feature `theme-postgres`) | `""` (off,
+    /// the default).
+    #[serde(default)]
+    pub store: String,
+    /// JSON card-bundle path (`file` backend only). Tilde-expanded.
+    #[serde(default = "default_themes_file")]
+    pub file: String,
+    /// The theme a user sees before they pick one. A built-in id or a tenant-shared
+    /// theme's id; if it names nothing the caller can see, `prototype` answers.
+    #[serde(default = "default_theme_id")]
+    pub default_theme: String,
+}
+
+impl Default for ThemesCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_themes_file(),
+            default_theme: default_theme_id(),
+        }
+    }
+}
+
+fn default_themes_file() -> String {
+    ".agent/themes.json".to_string()
+}
+
+fn default_theme_id() -> String {
+    "prototype".to_string()
 }
 
 /// The `[transport_registry]` block (config C37 / D2): where the message-transport
@@ -3064,6 +3107,9 @@ pub struct GrpcCfg {
     /// The GitHub-App install-row seam (`--serve-github-install-registry`, forge-auth F5b).
     #[serde(default)]
     pub github_install_registry: GrpcSeamCfg,
+    /// The portal themes seam (`--serve-theme`, docs/design/visual/03).
+    #[serde(default)]
+    pub theme: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
@@ -5053,6 +5099,7 @@ impl Config {
             forge_registry: ForgeRegistryCfg::default(),
             transport_registry: TransportRegistryCfg::default(),
             github_install_registry: GithubInstallRegistryCfg::default(),
+            themes: ThemesCfg::default(),
             campaign: CampaignCfg::default(),
             repo_graph: RepoGraphCfg::default(),
             github_app: None,

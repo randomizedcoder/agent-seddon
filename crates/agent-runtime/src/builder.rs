@@ -1734,6 +1734,12 @@ pub async fn build_agent_with_mode(
     };
     #[cfg(all(feature = "forge-ghapp", feature = "forge-registry-store"))]
     let agent = wire_github_install_onboarding(&cfg, install_backend.as_ref(), agent).await?;
+    // User themes + per-user active theme (docs/design/visual/03), for `--serve-theme`.
+    #[cfg(feature = "theme-store")]
+    let agent = match resolve_theme_book(&cfg, &metrics)? {
+        Some(book) => agent.with_theme_book(book),
+        None => agent,
+    };
     // The GitHub webhook secret (forge-auth F6), resolved in the operator scope at startup
     // so a bad reference fails closed here, not on the first delivery.
     #[cfg(feature = "forge-ghapp")]
@@ -3948,6 +3954,37 @@ fn resolve_github_install_backend(
     })
 }
 
+/// The `[themes]` store (docs/design/visual/03): a [`agent_theme::ThemeBook`] over
+/// the shared config-store backend, or `None` when `store = ""`. The book keys every
+/// card by the verified caller's tenant itself, so it takes the bare backend (no
+/// `PerTenant` wrap).
+#[cfg(feature = "theme-store")]
+pub(crate) fn resolve_theme_book(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<Arc<agent_theme::ThemeBook>>> {
+    let backend: Arc<dyn agent_config_store::Backend> = match cfg.themes.store.as_str() {
+        "" => return Ok(None),
+        "file" => crate::metered::config_store(
+            Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                &cfg.themes.file,
+            ))),
+            metrics.clone(),
+            "file",
+        ),
+        #[cfg(feature = "theme-postgres")]
+        "postgres" => crate::store_backend::pg_backend(&cfg.config_store, metrics)?,
+        #[cfg(not(feature = "theme-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[themes] store = \"postgres\" requires building with the `theme-postgres` feature"
+        ),
+        other => anyhow::bail!("unknown [themes] store `{other}`"),
+    };
+    let book = agent_theme::ThemeBook::new(backend, &cfg.themes.default_theme)
+        .map_err(|e| anyhow::anyhow!("[themes] built-in themes: {e}"))?;
+    Ok(Some(Arc::new(book)))
+}
+
 /// forge-auth F5c2: seed the mint gate's verified snapshot from the verified-install
 /// collection, and — when `[github_app]` enables onboarding (`slug` + OAuth client) —
 /// attach the [`crate::install_gate::InstallOnboarding`] backend over the same `backend`.
@@ -5904,6 +5941,81 @@ mod synth_secret_tests {
             }
             (got, want) => panic!("got {got:?}, want {want:?}"),
         }
+    }
+}
+
+/// `[themes] store` resolution (docs/design/visual/03): which stores open a book,
+/// and that a `file` book keeps a theme across a reopen.
+#[cfg(all(test, feature = "theme-store"))]
+mod theme_store_tests {
+    use super::*;
+    use agent_proto::pb;
+    use agent_theme::Caller;
+    use rstest::rstest;
+
+    fn cfg_with(store: &str, dir: &std::path::Path) -> Config {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.themes.store = store.into();
+        cfg.themes.file = dir.join("themes.json").to_string_lossy().into_owned();
+        cfg
+    }
+
+    /// One row: the `store` string and whether it opens a book, opens none, or fails.
+    #[rstest]
+    #[case::positive_file("a file store opens a book", "file", Some(true))]
+    #[case::corner_off("the default empty store opens nothing", "", Some(false))]
+    #[case::negative_unknown("an unknown store fails startup", "redis", None)]
+    #[case::adversarial_case_folded("store names are exact, not case-folded", "FILE", None)]
+    #[case::adversarial_path_as_store("a path is not a store name", "../themes.json", None)]
+    fn resolve_table(
+        #[case] description: &str,
+        #[case] store: &str,
+        #[case] expected: Option<bool>,
+    ) {
+        let dir = agent_testkit::tempdir();
+        let got = resolve_theme_book(&cfg_with(store, &dir), &Metrics::new())
+            .ok()
+            .map(|b| b.is_some());
+        assert_eq!(got, expected, "{description}");
+    }
+
+    #[test]
+    fn corner_default_config_is_off_with_prototype_default() {
+        let cfg = crate::config::Config::minimal_for_test();
+        assert_eq!(
+            (cfg.themes.store.as_str(), cfg.themes.default_theme.as_str()),
+            ("", "prototype")
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_file_store_round_trips_across_reopen() {
+        let dir = agent_testkit::tempdir();
+        let cfg = cfg_with("file", &dir);
+        let open = || resolve_theme_book(&cfg, &Metrics::new()).unwrap().unwrap();
+        let alice = Caller {
+            tenant: "local".into(),
+            subject: "alice".into(),
+            may_publish: false,
+        };
+        let mut t = agent_theme::builtins()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "macos")
+            .unwrap();
+        t.id = "mine".into();
+        t.name = "Mine".into();
+        t.builtin = false;
+        open().put(&alice, t).await.unwrap();
+        open()
+            .set_active(&alice, "mine", pb::ThemeMode::Dark as i32)
+            .await
+            .unwrap();
+        let active = open().get_active(&alice).await.unwrap();
+        assert_eq!(
+            (active.theme.map(|t| t.id), active.source),
+            (Some("mine".into()), pb::ActiveSource::User as i32)
+        );
     }
 }
 

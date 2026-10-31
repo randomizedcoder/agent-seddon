@@ -15,11 +15,38 @@ progress is in its [STATUS](../design/visual/STATUS.md).
 | Colour parse + WCAG contrast | `agent_theme::color` |
 | Textproto parse, JSON export | `agent_theme::textproto` |
 | Compiled-in built-ins | `agent_theme::builtins()` |
-
 | Portal: validator port, mapper, controller, pickers | `portal/lib/src/theme/` (below) |
+| User themes + each user's active theme | `agent_theme::ThemeBook` (`book.rs`) over `agent-config-store` |
+| User-theme rules (seeded text pairs, lookalikes) | `agent_theme::validate_user` (`user.rs`) |
+| gRPC `ThemeService` | `crates/agent-grpc/src/server/theme.rs`, `agent --serve-theme` (port 50091) or `--serve-all` |
 
-There is no service or config key yet. `ThemeService` and the per-user active theme
-arrive in increment 3.
+## Service and storage
+
+`[themes] store = "file" | "postgres"` (empty, the default, serves nothing) opens a
+`ThemeBook` over the shared config store; `[themes] default_theme` (default `prototype`)
+is what a user sees before picking. The NixOS `agent-stack` module sets `postgres`.
+
+- Collections `themes` (one `Theme` card per id) and `user_prefs` (one `UserPrefs` card
+  per user, id = the first 16 bytes of `sha256(subject)` in hex). Both are keyed by the
+  verified caller's tenant, which the book passes to the store explicitly; with
+  `[tenancy] per_tenant` off every caller is in `local`.
+- **Who sees what.** Built-ins: everyone. `VISIBILITY_TENANT`: the tenant. Private: the
+  owner. A theme the caller cannot see is `NOT_FOUND` for every RPC.
+- **Who changes what.** Built-in ids are refused (built-ins change in `config/themes/`).
+  The owner changes a private theme; sharing one, or changing a shared one, needs
+  `(approve, theme)`. `owner` comes from the caller and is returned only to the owner.
+- **Versions.** Create at `version` 0; update at the stored version; anything else is
+  `ABORTED`. The write is a compare-and-swap, so two racing creates cannot both win.
+- **Caps.** 200 stored themes per tenant (`RESOURCE_EXHAUSTED`), 64 KiB per theme.
+- **Validation on `Put`.** `validate` plus `validate_user`: a seeded palette that colours
+  text (`error`, `success`, `warning`, `info`, `muted`) must write `surface` and the roles
+  paired with it, and a name or id whose skeleton matches a built-in's (`w1ndows`,
+  `Ρrototype` with a Greek rho, fullwidth letters) is refused.
+- **Active theme.** `GetActive` answers the user's pick if they can still see it, else
+  `default_theme`, else `prototype`, and says which (`ActiveSource`). `SetActive` needs
+  only `(read, theme)`, so a viewer can pick.
+
+REST: `GET /v1/themes`, `GET|PUT|DELETE /v1/themes/{id}`, `GET|PUT /v1/active-theme`.
 
 ## In the portal
 
@@ -71,3 +98,6 @@ and the contrast and tap-target guidelines for each theme and brightness).
 | `tests/shared_cases.rs` | colour and font rows from `test/themes/validation_cases.json`, which the portal's Dart tests load too |
 | `tests/portal_assets_parity.rs` | the JSON assets equal their textprotos; no stray assets |
 | `src/color.rs` | contrast maths against known WCAG values |
+| `src/user.rs` | `skeleton` and `validate_user` tables |
+| `tests/book_table.rs` | the `ThemeService` and fallback-chain tables over an in-memory store: visibility, ownership, versions, the cap, tenants, hostile ids and fields |
+| `agent-grpc` `server/theme.rs` | wire codes per role, tenant from the principal not the header, `per_tenant` |

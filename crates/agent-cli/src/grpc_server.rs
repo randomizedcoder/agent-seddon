@@ -62,6 +62,7 @@ pub enum Seam {
     ForgeRegistry,
     TransportRegistry,
     GithubInstallRegistry,
+    Theme,
     Config,
     SessionStream,
 }
@@ -105,6 +106,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::ForgeRegistry,
     Seam::TransportRegistry,
     Seam::GithubInstallRegistry,
+    Seam::Theme,
     Seam::Config,
     Seam::SessionStream,
 ];
@@ -384,6 +386,13 @@ const SEAMS: &[SeamInfo] = &[
         endpoint: constants::GITHUB_INSTALL_REGISTRY,
     },
     SeamInfo {
+        seam: Seam::Theme,
+        flag: "--serve-theme",
+        name: "theme",
+        service: "agent.v1.ThemeService",
+        endpoint: constants::THEME,
+    },
+    SeamInfo {
         seam: Seam::Config,
         flag: "--serve-config",
         name: "config",
@@ -482,6 +491,7 @@ impl Seam {
             Seam::ForgeRegistry => &cfg.grpc.forge_registry.listen,
             Seam::TransportRegistry => &cfg.grpc.transport_registry.listen,
             Seam::GithubInstallRegistry => &cfg.grpc.github_install_registry.listen,
+            Seam::Theme => &cfg.grpc.theme.listen,
             Seam::Config => &cfg.grpc.config.listen,
             Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
@@ -777,6 +787,19 @@ fn add_seam_service(
                 };
                 (router.add_service(svc.into_server()), true)
             }
+            None => (router, false),
+        },
+        // docs/design/visual/03: user themes + each user's active theme. The book keys
+        // by the verified caller; `per_tenant` off collapses to the one `local` view.
+        Seam::Theme => match agent.theme_book() {
+            Some(b) => (
+                router.add_service(
+                    srv::ThemeSvc::new(b)
+                        .tenant_scoped(agent.per_tenant())
+                        .into_server(),
+                ),
+                true,
+            ),
             None => (router, false),
         },
         Seam::Config => match agent.config_store() {
@@ -1854,6 +1877,8 @@ mod tests {
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::boundary_github_install_registry_prefix("--serve-github-install", None)]
     #[case::adversarial_empty("", None)]
+    #[case::positive_theme("--serve-theme", Some(Seam::Theme))]
+    #[case::adversarial_theme_plural("--serve-themes", None)]
     #[case::adversarial_prefix_only("--serve-", None)]
     #[case::adversarial_github_install_registry_underscored(
         "--serve-github_install_registry",
@@ -1874,6 +1899,7 @@ mod tests {
         "github-install-registry",
         Some(Seam::GithubInstallRegistry)
     )]
+    #[case::positive_theme("theme", Some(Seam::Theme))]
     #[case::negative_unknown("nope", None)]
     #[case::negative_flag_not_name("--serve-sandbox", None)]
     #[case::corner_forge_registry_is_not_install_registry(

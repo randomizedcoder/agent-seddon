@@ -85,6 +85,7 @@ let
     forge_registry.store = "postgres";
     github_install_registry.store = "postgres";
     transport_registry.store = "postgres";
+    themes.store = "postgres";
   };
 
   isLoopback = h: h == "127.0.0.1" || h == "localhost" || h == "::1";

@@ -54,6 +54,7 @@ pub fn class_of(service: &str) -> Option<IdentityClass> {
         | "ReviewFleetService"
         | "SchedulerService"
         | "SearchService"
+        | "ThemeService"
         | "TransportRegistryService" => Scoped,
         "AgentSessionService" | "SessionRegistryService" | "SessionService" => FieldScoped,
         "AstService"
