@@ -173,11 +173,12 @@ let
   # silently degraded — e.g. the call-graph collector exited 127 and reported
   # `agent-go-ast not found on PATH`, skipping the whole component. Wrapping fixes
   # that without relying on the ambient environment (the dev shell / a NixOS host).
-  agent =
-    pkgs.runCommand "agent"
+  wrapAgent =
+    name: unwrapped:
+    pkgs.runCommand name
       {
         nativeBuildInputs = [ pkgs.makeWrapper ];
-        meta = agent-unwrapped.meta or { };
+        meta = unwrapped.meta or { };
       }
       ''
         mkdir -p "$out/bin"
@@ -185,11 +186,30 @@ let
         # tools `k8s-secrets` (crates/agent-k8s-secrets) and `k8s-status`
         # (crates/agent-k8s-status), but those run on the deployer's workstation, not
         # in the agent runtime/image — they are wrapped separately below.
-        makeWrapper "${agent-unwrapped}/bin/agent" "$out/bin/agent" \
+        makeWrapper "${unwrapped}/bin/agent" "$out/bin/agent" \
           --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
           --set-default AGENT_ADVISORY_DB ${advisory-db} \
           --set-default AGENT_NIXPKGS_FLAKEREF "${nixpkgsFlakeRef}"
       '';
+
+  agent = wrapAgent "agent" agent-unwrapped;
+
+  # The same `agent`, built with the GitHub App forge credential (`ghapp:<id>`
+  # token refs, F1-F6). A plain `agent` silently keeps every `ghapp:` roster row
+  # disabled ("needs the `forge-ghapp` feature"), so a fleet watching repos through
+  # a GitHub App installation — the NixOS `services.agentSeddon` deployment — runs
+  # this one. Only `agent-cli` is built; its tests are not re-run here (the
+  # `forge-ghapp` check and `agent-unwrapped` already cover them).
+  agent-ghapp-unwrapped = craneLib.buildPackage (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      pname = "agent-ghapp";
+      cargoExtraArgs = "--locked -p agent-cli --features forge-ghapp";
+      doCheck = false;
+    }
+  );
+  agent-ghapp = wrapAgent "agent-ghapp" agent-ghapp-unwrapped;
 
   # The stdlib-only Go call-graph helper (crates/../helpers/go-ast), invoked by the
   # review flow's call-graph collector via the Sandbox. No external Go deps, so
@@ -577,8 +597,33 @@ let
     '';
   };
 
+  # What `nixosModules.agent-stack` needs per system (exported as
+  # `legacyPackages.agentSeddon`; the module's eval check builds a stub `self` from it).
+  agentSeddonDeploy = {
+    inherit agent agent-ghapp;
+    inherit (portal.deploy) mkWebBundle mkEnvoyConfig envoySpec;
+    clickhouseSchema = ./clickhouse/schema.sql;
+    chCreds = clickhouse.clickhouse-creds;
+    envoy = versions.envoy-bin;
+    staticWebServer = versions.static-web-server;
+  };
+
+  # Opt-in VM boot test of `nixosModules.agent-stack` (KVM; not in the gate — the
+  # eval-only `nixos-agent-stack-eval` check is). The module is handed the same stub
+  # `self` the eval check builds.
+  nixos-agent-stack-vm = import ./nixos/agent-stack-vm-test.nix {
+    inherit pkgs;
+    module = import ./nixos/agent-stack.nix {
+      self = {
+        outPath = src;
+        legacyPackages.${pkgs.stdenv.hostPlatform.system}.agentSeddon = agentSeddonDeploy;
+      };
+    };
+  };
+
   # Static analysis + tests.
   checks = import ./checks {
+    inherit agentSeddonDeploy;
     inherit
       pkgs
       lib
@@ -858,6 +903,8 @@ in
   packages = {
     inherit
       agent
+      agent-ghapp
+      nixos-agent-stack-vm
       libnix-smoke
       go-ast
       go-graph
@@ -947,7 +994,11 @@ in
     // mkApps { } hyperdx
     // mkApps { } prometheus
     // mkApps { } grafana
-    // mkApps { } portal;
+    // mkApps { } (removeAttrs portal [ "deploy" ]);
+
+  # Builders + packages the NixOS module (`nixosModules.agent-stack`) consumes per
+  # system. Functions, so they live under `legacyPackages`, not `packages`.
+  legacyPackages.agentSeddon = agentSeddonDeploy;
 
   formatter = versions.nixfmt;
 }

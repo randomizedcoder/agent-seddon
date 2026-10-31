@@ -5,6 +5,8 @@ podman-only GPU box, reached from a browser on the LAN. This is the concrete
 topology behind the [portal + observability runbook](portal-obs-mcp-runbook.md);
 see [`docs/llm-endpoints.md`](llm-endpoints.md) for the upstream LLM endpoints and
 [`docs/architecture.md`](architecture.md) for the seam model.
+The declarative replacement for this hand-started stack is the NixOS module in
+[deployment-nixos.md](deployment-nixos.md).
 
 ```
                                 host  l   (user's desktop)

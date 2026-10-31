@@ -24,6 +24,7 @@
   k8sRenderedTree,
   k8sTargetNames,
   doc-links,
+  agentSeddonDeploy,
 }:
 
 let
@@ -331,6 +332,13 @@ in
   # firewall closed, scram + tuning applied). Pure eval — no VM/KVM. The NixOS twin of
   # config-roundtrip. docs/design/config/STATUS.md (PG-05).
   nixos-agent-postgres-eval = import ./nixos-agent-postgres-eval.nix { inherit pkgs; };
+
+  # Eval-only gate for the whole-stack module (nixosModules.agent-stack): a throwaway
+  # NixOS config with it enabled, loopback then LAN, asserting the units, ClickHouse
+  # wiring, secret handling and firewall surface. Pure eval — no VM.
+  nixos-agent-stack-eval = import ./nixos-agent-stack-eval.nix {
+    inherit pkgs src agentSeddonDeploy;
+  };
 
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
   # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.
