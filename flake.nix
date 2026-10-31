@@ -131,11 +131,13 @@
       # sets `services.agentPostgres.enable = true` + a `passwordFile`. See the
       # module header (nix/nixos/agent-postgres.nix) for the import snippet.
       nixosModules = {
-        agent-postgres = import ./nix/nixos/agent-postgres.nix;
+        # Paths (not imported functions), so agent-stack's own import of agent-postgres
+        # dedupes with a host's.
+        agent-postgres = ./nix/nixos/agent-postgres.nix;
         # The whole stack (agents + ClickHouse + grpc-web + portal) as services; closes
         # over `self` for its per-system packages/builders (nix/nixos/agent-stack.nix).
         agent-stack = import ./nix/nixos/agent-stack.nix { inherit self; };
-        default = import ./nix/nixos/agent-postgres.nix;
+        default = ./nix/nixos/agent-postgres.nix;
       };
     };
 }

@@ -52,6 +52,18 @@ let
     scramEncryption = (c.services.postgresql.settings.password_encryption or "") == "scram-sha-256";
     # Tuning threaded through to the server settings.
     tuningApplied = (c.services.postgresql.settings.shared_buffers or "") == "256MB";
+    # Loopback bind wins over nixpkgs' own normal-priority "localhost" (forcing the
+    # option is what catches a definition conflict).
+    loopbackBind = c.services.postgresql.settings.listen_addresses == "127.0.0.1";
+    # The role password is applied by postgresql-setup, after ensureUsers creates it.
+    passwordAppliedInSetup = lib.hasInfix "ALTER ROLE \"agent\" WITH PASSWORD :'pw';" c.systemd.services.postgresql-setup.script;
+    ownershipGrantedInSetup = lib.hasInfix ''ALTER DATABASE "agent_config" OWNER TO "agent"'' c.systemd.services.postgresql-setup.script;
+    # nixpkgs' own postgresql assertions (e.g. ensureDBOwnership needing a same-named
+    # database) hold. Filtered: a bare eval also trips the root-fs/bootloader ones.
+    noPostgresAssertionFails =
+      lib.filter (
+        a: !a.assertion && (lib.hasInfix "postgresql" a.message || lib.hasInfix "database" a.message)
+      ) c.assertions == [ ];
   };
 
   failed = lib.filterAttrs (_: v: !v) checks;
@@ -60,7 +72,7 @@ in
 pkgs.runCommand "nixos-agent-postgres-eval" { } (
   if ok then
     ''
-      echo "nixosModules.agent-postgres evaluates: postgresql enabled, agent_config DB + agent role ensured, loopback firewall closed, scram + tuning applied" > "$out"
+      echo "nixosModules.agent-postgres evaluates: postgresql enabled, agent_config DB + agent role ensured, loopback bind + firewall closed, scram + tuning applied, password set in setup" > "$out"
     ''
   else
     throw "nixos-agent-postgres-eval: unmet assertions: ${lib.concatStringsSep ", " (lib.attrNames failed)}"

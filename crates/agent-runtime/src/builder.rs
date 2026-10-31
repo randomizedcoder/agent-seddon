@@ -1648,10 +1648,27 @@ pub async fn build_agent_with_mode(
     };
     // The review-fleet roster (review-fleet C2/C3), held for `--serve-fleet`; the
     // fleet orchestrator consumes it in increment 3c.
+    //
+    // `[review_fleet] seed_file` upserts the declared roster into it first (a run-time
+    // write, so `--check-config` skips it like the role catalog read below).
     #[cfg(feature = "fleet")]
     let agent = match resolve_fleet_registry(&cfg, &metrics)? {
-        Some((r, Some(t))) => agent.with_fleet_registry(r).with_fleet_tenants(t),
-        Some((r, None)) => agent.with_fleet_registry(r),
+        Some((r, t)) => {
+            if mode == BuildMode::Run && !cfg.review_fleet.seed_file.is_empty() {
+                let seed = expand_tilde(&cfg.review_fleet.seed_file);
+                let n = agent_review_fleet::seed_from_file(r.as_ref(), &seed)
+                    .await
+                    .with_context(|| format!("[review_fleet] seed_file `{seed}`"))?;
+                tracing::info!(rows = n, seed = %seed, "fleet roster seeded");
+            }
+            match t {
+                Some(t) => agent.with_fleet_registry(r).with_fleet_tenants(t),
+                None => agent.with_fleet_registry(r),
+            }
+        }
+        None if !cfg.review_fleet.seed_file.is_empty() => {
+            anyhow::bail!("[review_fleet] seed_file needs a roster `store`")
+        }
         None => agent,
     };
     // The approve→post idempotency lease (review-fleet C17): a durable, cross-process

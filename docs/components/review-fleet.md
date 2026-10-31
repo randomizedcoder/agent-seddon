@@ -91,8 +91,9 @@ is ever at rest in a store or on the wire.
 
 ```toml
 [review_fleet]
-store        = ""                          # "file" | "sqlite" (feature) | "" (off, default)
+store        = ""                          # "file" | "sqlite" | "postgres" | "grpc" | "" (off, default)
 file         = ".agent/review-fleet.json"  # JSON roster bundle (file backend)
+seed_file    = ""                          # JSON roster bundle upserted into `store` at startup
 path         = ".agent/review-fleet.sqlite3"  # sqlite roster (sqlite backend)
 root         = ""                          # per-session workspace root (R1a); empty ⇒ shared cwd
 max_total    = 0                           # cap on total admitted sessions (0 = unbounded; inc 3c)
@@ -108,6 +109,14 @@ listen = ""                                # e.g. "127.0.0.1:50110"; needs [gith
 
 Both Slack tokens are C5-style **references** (`env:`/`file:`), never raw secrets; the
 app-level token is resolved on the fleet host only.
+
+`seed_file` makes a database-backed roster declarative. At startup, before the first
+reconcile, every row of the bundle (the `file` format, with the same size cap and
+validation) is upserted into `store`. A declared row replaces a stored row with the same
+id, and rows the bundle does not name, such as ones added from the portal, are kept. The
+bundle is validated whole first, so an invalid one seeds nothing and fails startup, as does
+a missing file. `--check-config` skips it. The NixOS module sets it from `fleet.roster`
+([deployment-nixos.md](../deployment-nixos.md)).
 
 ## Storage backends
 
