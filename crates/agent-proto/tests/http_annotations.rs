@@ -133,6 +133,13 @@ enum Expect {
     "ThemeService.SetActive",
     Expect::Routes(&[("PUT", "/v1/active-theme")])
 )]
+// corner — the editor's stateless import is a POST beside the collection, so it
+// cannot collide with a theme whose id is `import`.
+#[case::corner_theme_import_is_a_sibling_post(
+    "ThemeService.Import -> POST /v1/theme-import (body: *)",
+    "ThemeService.Import",
+    Expect::Routes(&[("POST", "/v1/theme-import")])
+)]
 // --- 03c: registries (forge / transport / provider-router) ------------------
 // positive — ForgeRegistryService is a third CRUD mirror in a distinct proto group.
 #[case::positive_forge_get_maps_to_get_with_id(

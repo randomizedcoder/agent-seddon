@@ -1170,6 +1170,238 @@ class DeleteThemeResponse extends $pb.GeneratedMessage {
   void clearRestoredBuiltin() => $_clearField(1);
 }
 
+class ImportThemeRequest extends $pb.GeneratedMessage {
+  factory ImportThemeRequest({
+    $core.String? text,
+  }) {
+    final result = create();
+    if (text != null) result.text = text;
+    return result;
+  }
+
+  ImportThemeRequest._();
+
+  factory ImportThemeRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ImportThemeRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ImportThemeRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ImportThemeRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ImportThemeRequest copyWith(void Function(ImportThemeRequest) updates) =>
+      super.copyWith((message) => updates(message as ImportThemeRequest))
+          as ImportThemeRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ImportThemeRequest create() => ImportThemeRequest._();
+  @$core.override
+  ImportThemeRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ImportThemeRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ImportThemeRequest>(create);
+  static ImportThemeRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+}
+
+class ImportThemeResponse extends $pb.GeneratedMessage {
+  factory ImportThemeResponse({
+    Theme? theme,
+    $core.String? problem,
+  }) {
+    final result = create();
+    if (theme != null) result.theme = theme;
+    if (problem != null) result.problem = problem;
+    return result;
+  }
+
+  ImportThemeResponse._();
+
+  factory ImportThemeResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ImportThemeResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ImportThemeResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOM<Theme>(1, _omitFieldNames ? '' : 'theme', subBuilder: Theme.create)
+    ..aOS(2, _omitFieldNames ? '' : 'problem')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ImportThemeResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ImportThemeResponse copyWith(void Function(ImportThemeResponse) updates) =>
+      super.copyWith((message) => updates(message as ImportThemeResponse))
+          as ImportThemeResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ImportThemeResponse create() => ImportThemeResponse._();
+  @$core.override
+  ImportThemeResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ImportThemeResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ImportThemeResponse>(create);
+  static ImportThemeResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  Theme get theme => $_getN(0);
+  @$pb.TagNumber(1)
+  set theme(Theme value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasTheme() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearTheme() => $_clearField(1);
+  @$pb.TagNumber(1)
+  Theme ensureTheme() => $_ensure(0);
+
+  @$pb.TagNumber(2)
+  $core.String get problem => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set problem($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasProblem() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearProblem() => $_clearField(2);
+}
+
+class ExportThemeRequest extends $pb.GeneratedMessage {
+  factory ExportThemeRequest({
+    Theme? theme,
+  }) {
+    final result = create();
+    if (theme != null) result.theme = theme;
+    return result;
+  }
+
+  ExportThemeRequest._();
+
+  factory ExportThemeRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ExportThemeRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ExportThemeRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOM<Theme>(1, _omitFieldNames ? '' : 'theme', subBuilder: Theme.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ExportThemeRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ExportThemeRequest copyWith(void Function(ExportThemeRequest) updates) =>
+      super.copyWith((message) => updates(message as ExportThemeRequest))
+          as ExportThemeRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ExportThemeRequest create() => ExportThemeRequest._();
+  @$core.override
+  ExportThemeRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ExportThemeRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ExportThemeRequest>(create);
+  static ExportThemeRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  Theme get theme => $_getN(0);
+  @$pb.TagNumber(1)
+  set theme(Theme value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasTheme() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearTheme() => $_clearField(1);
+  @$pb.TagNumber(1)
+  Theme ensureTheme() => $_ensure(0);
+}
+
+class ExportThemeResponse extends $pb.GeneratedMessage {
+  factory ExportThemeResponse({
+    $core.String? text,
+  }) {
+    final result = create();
+    if (text != null) result.text = text;
+    return result;
+  }
+
+  ExportThemeResponse._();
+
+  factory ExportThemeResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ExportThemeResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ExportThemeResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ExportThemeResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ExportThemeResponse copyWith(void Function(ExportThemeResponse) updates) =>
+      super.copyWith((message) => updates(message as ExportThemeResponse))
+          as ExportThemeResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ExportThemeResponse create() => ExportThemeResponse._();
+  @$core.override
+  ExportThemeResponse createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ExportThemeResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ExportThemeResponse>(create);
+  static ExportThemeResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+}
+
 class ActiveTheme extends $pb.GeneratedMessage {
   factory ActiveTheme({
     Theme? theme,

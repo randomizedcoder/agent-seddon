@@ -5529,6 +5529,72 @@
         ]
       }
     },
+    "/v1/theme-import": {
+      "post": {
+        "summary": "Parse a textproto theme (the file form) for the editor. Stores nothing.\nText that does not parse is INVALID_ARGUMENT; a theme that parses but would\nnot be accepted by Put comes back with `problem` set, so it can be fixed.",
+        "operationId": "ThemeService_Import",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ImportThemeResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ImportThemeRequest"
+            }
+          }
+        ],
+        "tags": [
+          "ThemeService"
+        ]
+      }
+    },
+    "/v1/theme-export": {
+      "post": {
+        "summary": "A theme as textproto, for sharing or committing to config/themes/. Stores\nnothing; the server-set fields are left out.",
+        "operationId": "ThemeService_Export",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ExportThemeResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ExportThemeRequest"
+            }
+          }
+        ],
+        "tags": [
+          "ThemeService"
+        ]
+      }
+    },
     "/v1/tokenizer/count": {
       "get": {
         "summary": "REST mappings (docs/design/rest-openapi/), under /v1/tokenizer/. Count takes a\nscalar (text + model) → GET; CountMessages carries a repeated nested `Message`\n→ POST body:*. Both are side-effect-free.",
@@ -7544,6 +7610,23 @@
         }
       }
     },
+    "agent.v1.ExportThemeRequest": {
+      "type": "object",
+      "properties": {
+        "theme": {
+          "$ref": "#/definitions/agent.v1.Theme"
+        }
+      }
+    },
+    "agent.v1.ExportThemeResponse": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "title": "pretty textproto"
+        }
+      }
+    },
     "agent.v1.FetchRequest": {
       "type": "object"
     },
@@ -8072,6 +8155,28 @@
         },
         "backend": {
           "type": "string"
+        }
+      }
+    },
+    "agent.v1.ImportThemeRequest": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "title": "textproto, ≤ 64 KiB"
+        }
+      }
+    },
+    "agent.v1.ImportThemeResponse": {
+      "type": "object",
+      "properties": {
+        "theme": {
+          "$ref": "#/definitions/agent.v1.Theme",
+          "title": "server-set fields cleared"
+        },
+        "problem": {
+          "type": "string",
+          "title": "why Put would refuse it; empty when it would not"
         }
       }
     },

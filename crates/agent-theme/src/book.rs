@@ -308,6 +308,34 @@ impl ThemeBook {
         Ok(for_caller(theme, caller))
     }
 
+    /// Parse `text` (textproto) for the editor; stores nothing. Text that does not
+    /// parse is an error. A theme that parses comes back with the server-set
+    /// fields cleared and, when [`ThemeBook::put`] would refuse it, the reason.
+    pub fn import(
+        &self,
+        text: &str,
+    ) -> std::result::Result<(pb::Theme, Option<String>), ThemeError> {
+        let mut theme = crate::textproto::parse(text)?;
+        clear_server_fields(&mut theme);
+        let problem = if self.builtin(&theme.id).is_some() {
+            Some(format!(
+                "`{}` is a built-in theme's id; give the copy its own id",
+                theme.id
+            ))
+        } else {
+            validate_user(&theme, &self.builtins)
+                .err()
+                .map(|e| e.to_string())
+        };
+        Ok((theme, problem))
+    }
+
+    /// `theme` as textproto without the server-set fields; stores nothing.
+    pub fn export(&self, mut theme: pb::Theme) -> std::result::Result<String, ThemeError> {
+        clear_server_fields(&mut theme);
+        crate::textproto::print(&theme)
+    }
+
     /// Delete a user theme the caller may change.
     pub async fn delete(&self, caller: &Caller, id: &str) -> Result<()> {
         if self.builtin(id).is_some() {
@@ -516,6 +544,14 @@ fn prefs_write(caller: &Caller, prefs: &Prefs, next: &pb::UserPrefs) -> Write {
         expected: prefs.bytes.clone(),
         blob: next.encode_to_vec(),
     }
+}
+
+/// Clear what only the server sets, so a file never carries another store's
+/// owner, version or built-in flag.
+fn clear_server_fields(t: &mut pb::Theme) {
+    t.builtin = false;
+    t.version = 0;
+    t.owner.clear();
 }
 
 /// `t` as `caller` should see it: `owner` only when it is theirs.

@@ -47,7 +47,7 @@ Gaps:
 | LLM | upstreams, routing, pools | `ProviderRegistryService.*` | `(read \| write \| delete, registry)` | high |
 | Prompts | view; edit; set the active personality | `PromptService.*` | `(read, prompt)` / `(write \| delete, prompt)` | medium |
 | Cognition graphs | view; edit | `GraphService.*` | `(read, graph)` / `(write, graph)` | medium |
-| Portal themes | view and pick a theme; keep private themes; share one with the tenant ([visual/03](../visual/03-user-themes.md)) | `ThemeService.List/Get/GetActive/SetActive`; `Put/Delete`; `Put` of a tenant-shared theme | `(read, theme)`; `(write \| delete, theme)`; plus `(approve, theme)` | low |
+| Portal themes | view and pick a theme; keep private themes; share one with the tenant ([visual/03](../visual/03-user-themes.md)) | `ThemeService.List/Get/GetActive/SetActive/Import/Export`; `Put/Delete`; `Put` of a tenant-shared theme | `(read, theme)`; `(write \| delete, theme)`; plus `(approve, theme)` | low |
 | Scheduler | list and history; schedule and cancel | `SchedulerService.*` | `(read, scheduler)` / `(schedule \| delete, scheduler)` | medium |
 | Observability | metrics proxy, digests, review telemetry, the auth audit | `MetricsProxyService.*`, `DigestService.*`, `ReviewService.*` | `(read, telemetry)` | medium |
 | Access control | view roles, bindings, sessions | `RoleService.List/Get/ListBindings/GetBinding`, `AuthService.ListSessions` | `(read, role)` / `(read, binding)` | low |

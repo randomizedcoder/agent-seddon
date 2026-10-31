@@ -146,6 +146,23 @@ service ThemeService {
       body: "*"
     };
   }
+  // Parse a textproto theme (the file form) for the editor. Stores nothing.
+  // Text that does not parse is INVALID_ARGUMENT; a theme that parses but would
+  // not be accepted by Put comes back with `problem` set, so it can be fixed.
+  rpc Import(ImportThemeRequest) returns (ImportThemeResponse) {
+    option (google.api.http) = {
+      post: "/v1/theme-import"
+      body: "*"
+    };
+  }
+  // A theme as textproto, for sharing or committing to config/themes/. Stores
+  // nothing; the server-set fields are left out.
+  rpc Export(ExportThemeRequest) returns (ExportThemeResponse) {
+    option (google.api.http) = {
+      post: "/v1/theme-export"
+      body: "*"
+    };
+  }
 }
 
 message ListThemesRequest {}
@@ -165,6 +182,23 @@ message DeleteThemeRequest {
 message DeleteThemeResponse {
   // Always false until operators can override a built-in.
   bool restored_builtin = 1;
+}
+
+message ImportThemeRequest {
+  string text = 1; // textproto, ≤ 64 KiB
+}
+
+message ImportThemeResponse {
+  Theme theme = 1; // server-set fields cleared
+  string problem = 2; // why Put would refuse it; empty when it would not
+}
+
+message ExportThemeRequest {
+  Theme theme = 1;
+}
+
+message ExportThemeResponse {
+  string text = 1; // pretty textproto
 }
 
 // Light, dark or follow the browser.

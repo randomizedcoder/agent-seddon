@@ -159,7 +159,10 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         // Themes (docs/design/visual/03): picking your own theme is a read-level
         // right, so a viewer can pick; sharing with the tenant, or changing a
         // shared theme, is the handler's extra `(approve, theme)` check.
-        ("ThemeService", "List" | "Get" | "GetActive" | "SetActive") => Require(Read, Theme),
+        // Import and Export parse and print a draft and store nothing.
+        ("ThemeService", "List" | "Get" | "GetActive" | "SetActive" | "Import" | "Export") => {
+            Require(Read, Theme)
+        }
         ("ThemeService", "Put") => FieldChecked(Write, Theme),
         ("ThemeService", "Delete") => FieldChecked(Delete, Theme),
         ("GraphService", "Get" | "Validate" | "DescribeNodeTypes") => Require(Read, Graph),
