@@ -175,9 +175,9 @@ async fn run_go(
 
 /// Fold one `go test` sub-run into the report: parse its findings, and record its status.
 /// A non-zero exit is normal (a data race or failing test makes `go test` exit 1), so the
-/// output is always parsed; but a run whose packages never built (no C compiler for
-/// `-race`'s cgo, a module that can't resolve offline) ran nothing, so it is `failed`
-/// with the cause, never a silent `ok` with zero findings.
+/// output is always parsed; but a run in which a package failed to build or set up (no C
+/// compiler for `-race`'s cgo, a module that can't resolve offline) is `failed` with the
+/// cause, never a silent `ok`. Findings from the packages that did run are still kept.
 fn record(
     tool: &str,
     out: GoRun,
@@ -209,7 +209,8 @@ fn record(
 /// `[build failed]` / `[setup failed]` package line. The output comes from the reviewed
 /// code, so the line is stripped of control characters and bounded.
 fn build_failure(out: &str) -> Option<String> {
-    const CAUSES: [&str; 2] = ["requires cgo", "C compiler"];
+    // Go's own wording, so a passing test that merely prints "C compiler" doesn't match.
+    const CAUSES: [&str; 2] = ["-race requires cgo", "cgo: C compiler"];
     const SUMMARIES: [&str; 2] = ["[build failed]", "[setup failed]"];
     let pick = |needles: &[&str]| {
         out.lines()
@@ -785,6 +786,11 @@ PASS";
         output: "FAIL\texample.com/a [build failed]\ngo: -race requires cgo\n",
         expected: Some("requires cgo"),
     })]
+    #[case::adversarial_test_output_mentioning_a_compiler(BuildCase {
+        description: "a passing test that prints \"C compiler\" is not a build failure",
+        output: "=== RUN   TestProbe\n    probe_test.go:9: looking for a C compiler\n--- PASS: TestProbe\nok  \texample.com/review\t0.2s\n",
+        expected: None,
+    })]
     #[case::boundary_empty_output(BuildCase {
         description: "no output at all is not a build failure",
         output: "",
@@ -822,7 +828,7 @@ PASS";
         assert!(
             got.chars().count() <= MAX_REASON + " …[truncated]".chars().count(),
             "bounded, got {} chars",
-            got.len()
+            got.chars().count()
         );
     }
 
@@ -856,6 +862,15 @@ PASS";
         expected_status: "failed",
         expected_findings: 0,
     })]
+    #[case::corner_partial_build_keeps_findings(RecordCase {
+        description: "one package raced and another never built: failed, and the race is kept",
+        out: || GoRun::Output {
+            stdout: "WARNING: DATA RACE\n  x/a.go:3 +0x0\nFAIL\tx\t0.1s\nFAIL\ty [build failed]\n".into(),
+            stderr: String::new(),
+        },
+        expected_status: "failed",
+        expected_findings: 1,
+    })]
     #[case::corner_skipped_passes_through(RecordCase {
         description: "no go toolchain stays skipped",
         out: || GoRun::Skipped("go toolchain not found on PATH".into()),
@@ -870,16 +885,24 @@ PASS";
     })]
     fn record_table(#[case] c: RecordCase) {
         let (mut runs, mut findings) = (Vec::new(), Vec::new());
+        // Started 50 ms ago: the duration is measured from before the run, not after it.
+        let started = now() - std::time::Duration::from_millis(50);
         record(
             "go test -race",
             (c.out)(),
-            now(),
+            started,
             &mut runs,
             &mut findings,
             |o| parse_races(o, &root()),
         );
         assert_eq!(runs.len(), 1, "{}", c.description);
         assert_eq!(runs[0].status, c.expected_status, "{}", c.description);
+        assert!(
+            runs[0].duration_ms >= 50,
+            "{}: {} ms",
+            c.description,
+            runs[0].duration_ms
+        );
         assert_eq!(
             runs[0].finding_count, c.expected_findings,
             "{}",

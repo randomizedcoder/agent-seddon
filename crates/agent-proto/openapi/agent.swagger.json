@@ -4612,7 +4612,7 @@
         ]
       },
       "post": {
-        "summary": "Rewrite a draft's markdown body (C14, the portal's edit). Opt-in: needs the draft\neditor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved` draft\nis locked. This edits the local draft only — it never posts; posting stays the\nseparate `Approve` gesture.",
+        "summary": "Rewrite a draft's markdown body (C14, the portal's edit). Opt-in: needs the draft\neditor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved`/`skipped`\ndraft is locked. This edits the local draft only — it never posts; posting stays the\nseparate `Approve` gesture.",
         "operationId": "ReviewFleetService_UpdateReview",
         "responses": {
           "200": {
@@ -10112,7 +10112,7 @@
           "type": "string"
         }
       },
-      "description": "Rewrite a draft's markdown body in place (review-fleet C14, the portal's GitHub-style edit).\n`review_id` is untrusted wire input, looked up as a bound query arg; the new `body` is written\nto the draft's own server-minted `draft_path` (confined under the fleet root, size-capped) —\nnever a wire-supplied path. Only an un-posted draft is editable: a draft whose status is\n`posted` or `approved` is locked (an edit would diverge from what was posted)."
+      "description": "Rewrite a draft's markdown body in place (review-fleet C14, the portal's GitHub-style edit).\n`review_id` is untrusted wire input, looked up as a bound query arg; the new `body` is written\nto the draft's own server-minted `draft_path` (confined under the fleet root, size-capped) —\nnever a wire-supplied path. Only an un-posted draft is editable: a draft whose status is\n`posted`, `approved` or `skipped` is locked (an edit would diverge from what was posted,\nor reopen a draft that was set aside)."
     },
     "agent.v1.ReviewForgeHost": {
       "type": "string",
@@ -12033,7 +12033,7 @@
           "type": "string"
         }
       },
-      "description": "The outcome of an UpdateReview. `status` is one of:\n  \"updated\"   — the body was rewritten.\n  \"not_found\" — no persisted draft for this `review_id`.\n  \"locked\"    — the draft is `posted`/`approved` and cannot be edited."
+      "description": "The outcome of an UpdateReview. `status` is one of:\n  \"updated\"   — the body was rewritten.\n  \"not_found\" — no persisted draft for this `review_id`.\n  \"locked\"    — the draft is `posted`/`approved`/`skipped` and cannot be edited."
     },
     "agent.v1.Upstream": {
       "type": "object",

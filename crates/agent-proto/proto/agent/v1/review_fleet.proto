@@ -174,7 +174,8 @@ message GetReviewReply {
 // `review_id` is untrusted wire input, looked up as a bound query arg; the new `body` is written
 // to the draft's own server-minted `draft_path` (confined under the fleet root, size-capped) —
 // never a wire-supplied path. Only an un-posted draft is editable: a draft whose status is
-// `posted` or `approved` is locked (an edit would diverge from what was posted).
+// `posted`, `approved` or `skipped` is locked (an edit would diverge from what was posted,
+// or reopen a draft that was set aside).
 message UpdateReviewRequest {
   string review_id = 1;
   string body = 2;
@@ -183,7 +184,7 @@ message UpdateReviewRequest {
 // The outcome of an UpdateReview. `status` is one of:
 //   "updated"   — the body was rewritten.
 //   "not_found" — no persisted draft for this `review_id`.
-//   "locked"    — the draft is `posted`/`approved` and cannot be edited.
+//   "locked"    — the draft is `posted`/`approved`/`skipped` and cannot be edited.
 message UpdateReviewReply {
   string status = 1;
 }
@@ -287,8 +288,8 @@ service ReviewFleetService {
     option (google.api.http) = {get: "/v1/fleet/reviews/{review_id}"};
   }
   // Rewrite a draft's markdown body (C14, the portal's edit). Opt-in: needs the draft
-  // editor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved` draft
-  // is locked. This edits the local draft only — it never posts; posting stays the
+  // editor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved`/`skipped`
+  // draft is locked. This edits the local draft only — it never posts; posting stays the
   // separate `Approve` gesture.
   rpc UpdateReview(UpdateReviewRequest) returns (UpdateReviewReply) {
     option (google.api.http) = {
