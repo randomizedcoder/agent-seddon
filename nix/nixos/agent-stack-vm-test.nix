@@ -32,6 +32,9 @@ pkgs.testers.runNixOSTest {
       services.agentSeddon = {
         enable = true;
         credentials."llm.token" = pkgs.writeText "dummy-llm-token" "not-a-real-key";
+        # A fresh state dir has no `.agent/`: the sqlite digest ledger at its default
+        # relative path must create it (the first l2 cutover failed on exactly this).
+        settings.digest.store = "sqlite";
         settings.provider = {
           base_url = "http://127.0.0.1:9/v1";
           model = "dummy";

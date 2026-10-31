@@ -40,8 +40,13 @@ pub struct SqliteDigests {
 }
 
 impl SqliteDigests {
-    /// Open (creating file + schema as needed).
+    /// Open (creating parent dirs + file + schema as needed). The default path is the
+    /// relative `.agent/digests.sqlite3`, and SQLite will not create `.agent/` — so a
+    /// fresh working dir (a new systemd StateDirectory) would fail to start without it.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent).map_err(Error::Io)?;
+        }
         let conn = Connection::open(path).map_err(sql_err)?;
         Self::from_conn(conn)
     }
@@ -427,6 +432,24 @@ mod tests {
         s.put(big).await.unwrap();
         let rows = s.query(&q("s1")).await.unwrap();
         assert!(rows[0].text.len() <= crate::MAX_TEXT_BYTES);
+    }
+
+    #[rstest::rstest]
+    #[case::positive_existing_dir("digests.sqlite3")]
+    #[case::positive_missing_parent(".agent/digests.sqlite3")]
+    #[case::corner_missing_nested_parents("a/b/c/digests.sqlite3")]
+    fn open_creates_missing_parent_dirs(#[case] rel: &str) {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join(rel);
+        SqliteDigests::open(&path).unwrap();
+        assert!(path.is_file(), "{rel}: ledger file not created");
+    }
+
+    #[test]
+    fn negative_open_parent_is_a_file() {
+        let dir = agent_testkit::tempdir();
+        std::fs::write(dir.join("blocker"), b"x").unwrap();
+        assert!(SqliteDigests::open(dir.join("blocker/digests.sqlite3")).is_err());
     }
 
     #[tokio::test]
