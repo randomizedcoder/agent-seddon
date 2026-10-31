@@ -71,7 +71,7 @@ in
         this is where the config-store `cards`/`tenants` tables live. The role
         password is fixed at first initialisation of an empty dir (standard
         PostgreSQL behaviour) but this module RE-APPLIES it from `passwordFile` on
-        every start (see `postStart`), so rotating the secret takes effect on
+        every start (appended to `postgresql-setup.service`), so rotating the secret takes effect on
         the next restart without wiping the data.
       '';
     };
@@ -166,16 +166,14 @@ in
       dataDir = cfg.dataDir;
 
       ensureDatabases = [ cfg.database ];
-      ensureUsers = [
-        {
-          name = cfg.user;
-          ensureDBOwnership = true;
-        }
-      ];
+      # Not `ensureDBOwnership`: nixpkgs only allows it when the database is named after
+      # the role. Ownership is granted in the setup script below instead.
+      ensureUsers = [ { name = cfg.user; } ];
 
       settings = {
         port = cfg.port;
-        listen_addresses = lib.concatStringsSep "," cfg.listenAddresses;
+        # Forced: nixpkgs sets it at normal priority ("localhost", or "*" with enableTCPIP).
+        listen_addresses = lib.mkForce (lib.concatStringsSep "," cfg.listenAddresses);
         shared_buffers = cfg.settings.sharedBuffers;
         max_connections = cfg.settings.maxConnections;
         work_mem = cfg.settings.workMem;
@@ -187,7 +185,7 @@ in
 
       # pg_hba, per bind (D5). Loopback always admits `user`→`database` via SCRAM
       # (the agent's DSN carries a password); each `trustedCidrs` entry extends that
-      # to a LAN client. Local (unix-socket) peer auth is kept for admin/`postStart`.
+      # to a LAN client. Local (unix-socket) peer auth is kept for admin and the setup script.
       authentication = lib.mkOverride 10 (
         lib.concatStringsSep "\n" (
           [
@@ -203,16 +201,20 @@ in
       );
     };
 
-    # Apply the role password from the secret file on every start. `ensureUsers`
-    # creates the role (no password / peer only); this sets its SCRAM password so
-    # TCP clients can authenticate. psql's `:'pw'` form quotes+escapes the value, so
-    # a password containing quotes can neither break nor inject the statement.
-    systemd.services.postgresql.postStart = lib.mkAfter ''
-      set -euo pipefail
+    # Apply the role password from the secret file on every start, and make the role
+    # own `database`. `ensureUsers` creates the role (no password / peer only) in
+    # `postgresql-setup.service`, which runs after the server is up; this appends to
+    # that script so the role exists when its SCRAM password is set (a
+    # `postgresql.service` postStart runs first and fails on a fresh data dir). psql's
+    # `:'pw'` form quotes+escapes the value, so a password containing quotes can
+    # neither break nor inject the statement.
+    systemd.services.postgresql-setup.script = lib.mkAfter ''
       pw="$(cat ${lib.escapeShellArg (toString cfg.passwordFile)})"
-      ${cfg.package}/bin/psql --port=${toString cfg.port} -v ON_ERROR_STOP=1 \
-        --set=pw="$pw" \
-        -c 'ALTER ROLE ${cfg.user} WITH PASSWORD :'"'"'pw'"'"';'
+      # On stdin, not `-c`: psql expands `:'pw'` only in input it reads itself.
+      psql -d postgres -v ON_ERROR_STOP=1 --set=pw="$pw" <<'SQL'
+      ALTER ROLE "${cfg.user}" WITH PASSWORD :'pw';
+      ALTER DATABASE "${cfg.database}" OWNER TO "${cfg.user}";
+      SQL
     '';
 
     # Open the firewall ONLY when actually LAN-bound — loopback-only needs nothing.

@@ -120,11 +120,38 @@ impl FleetRegistry for FileFleet {
     }
 }
 
+/// Upsert every row of the JSON roster bundle at `path` into `registry`, returning how
+/// many were applied: the declarative roster for a database-backed store
+/// (`[review_fleet] seed_file`). The bundle is the [`FileFleet`] format, so it gets the
+/// same size cap and per-row validation, and is checked whole before the first write:
+/// an invalid bundle seeds nothing. A seeded row replaces a stored row with the same
+/// id (the declaration wins); rows the bundle does not name are left alone. A missing
+/// file is an error, not an empty roster: a configured seed that is not there is a typo.
+pub async fn seed_from_file(
+    registry: &dyn FleetRegistry,
+    path: impl Into<PathBuf>,
+) -> Result<usize> {
+    let seed = FileFleet::new(path);
+    if !seed.path.is_file() {
+        return Err(Error::Fleet(format!(
+            "fleet seed `{}`: not a file",
+            seed.path.display()
+        )));
+    }
+    let rows = seed.load()?;
+    let n = rows.len();
+    for row in rows {
+        registry.put(row).await?;
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testdata::row;
     use agent_testkit::tempdir;
+    use rstest::rstest;
 
     fn store_in(dir: &Path) -> FileFleet {
         FileFleet::new(dir.join("review-fleet.json"))
@@ -207,5 +234,93 @@ mod tests {
         }
         assert_eq!(file.list().await.unwrap(), mem.list().await.unwrap());
         assert_eq!(file.get("r2").await.unwrap(), mem.get("r2").await.unwrap());
+    }
+
+    fn write_seed(dir: &Path, rows: &[FleetSession]) -> PathBuf {
+        let path = dir.join("seed.json");
+        std::fs::write(&path, serde_json::to_string(rows).unwrap()).unwrap();
+        path
+    }
+
+    #[rstest]
+    #[case::positive_seeds_an_empty_store(&[], &["r1", "r2"])]
+    #[case::corner_keeps_rows_the_seed_does_not_name(&["other"], &["other", "r1", "r2"])]
+    #[case::corner_replaces_a_stored_row_with_the_same_id(&["r1"], &["r1", "r2"])]
+    #[tokio::test]
+    async fn seed_upserts_the_bundle(#[case] stored: &[&str], #[case] want: &[&str]) {
+        let dir = tempdir();
+        let mem = crate::MemoryFleet::new();
+        for id in stored {
+            let mut r = row(id);
+            r.enabled = false;
+            mem.put(r).await.unwrap();
+        }
+        let seed = write_seed(&dir, &[row("r1"), row("r2")]);
+        assert_eq!(seed_from_file(&mem, &seed).await.expect("seed"), 2);
+        let mut ids: Vec<String> = mem
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, want);
+        // The declaration wins over the stored row (r1 was stored disabled).
+        assert!(mem.get("r1").await.unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn boundary_empty_bundle_seeds_nothing() {
+        let dir = tempdir();
+        let mem = crate::MemoryFleet::new();
+        let seed = write_seed(&dir, &[]);
+        assert_eq!(seed_from_file(&mem, &seed).await.expect("seed"), 0);
+        assert!(mem.list().await.unwrap().is_empty());
+    }
+
+    #[rstest]
+    #[case::negative_missing_file("absent.json")]
+    #[case::negative_directory("")]
+    #[tokio::test]
+    async fn seed_refuses_a_path_that_is_not_a_file(#[case] name: &str) {
+        let dir = tempdir();
+        let mem = crate::MemoryFleet::new();
+        let err = seed_from_file(&mem, dir.join(name))
+            .await
+            .expect_err("no seed file");
+        assert!(err.to_string().contains("not a file"), "{err}");
+    }
+
+    #[rstest]
+    #[case::negative_bad_json("{not json")]
+    #[case::adversarial_traversal_id(
+        r#"[{"id":"../../etc","user":"acme","repo":"acme__widget","backend":"github","base_url":"","token_ref":"env:T","skill":"","slack_trigger_channel":"","slack_progress_channel":"","poll_secs":300,"enabled":true,"created_at":0,"updated_at":0,"forge_id":"","transport_id":""}]"#
+    )]
+    #[case::adversarial_raw_secret_token(
+        r#"[{"id":"r1","user":"acme","repo":"acme__widget","backend":"github","base_url":"","token_ref":"ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","skill":"","slack_trigger_channel":"","slack_progress_channel":"","poll_secs":300,"enabled":true,"created_at":0,"updated_at":0,"forge_id":"","transport_id":""}]"#
+    )]
+    #[tokio::test]
+    async fn seed_with_an_invalid_bundle_writes_nothing(#[case] text: &str) {
+        let dir = tempdir();
+        let mem = crate::MemoryFleet::new();
+        let path = dir.join("seed.json");
+        std::fs::write(&path, text).unwrap();
+        assert!(seed_from_file(&mem, &path).await.is_err());
+        assert!(mem.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adversarial_one_bad_row_rejects_the_whole_bundle() {
+        let dir = tempdir();
+        let mem = crate::MemoryFleet::new();
+        let mut bad = row("bad");
+        bad.id = "../escape".into();
+        let seed = write_seed(&dir, &[row("good"), bad]);
+        assert!(seed_from_file(&mem, &seed).await.is_err());
+        assert!(
+            mem.list().await.unwrap().is_empty(),
+            "nothing partially seeded"
+        );
     }
 }

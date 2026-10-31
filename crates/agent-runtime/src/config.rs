@@ -174,13 +174,21 @@ pub struct ReviewFleetCfg {
     #[serde(default)]
     pub root: String,
     /// Roster backend (review-fleet C2): `"file"` | `"sqlite"` (feature
-    /// `fleet-sqlite`) | `""` (off, the default). Empty ⇒ no durable roster is
-    /// opened; the fleet control plane / server (later increments) is inert.
+    /// `fleet-sqlite`) | `"postgres"` (feature `fleet-postgres`, DSN from
+    /// `[config_store]`) | `"grpc"` | `""` (off, the default). Empty ⇒ no durable
+    /// roster is opened; the fleet control plane / server is inert.
     #[serde(default)]
     pub store: String,
     /// JSON roster bundle path (`file` backend only). Tilde-expanded.
     #[serde(default = "default_fleet_file")]
     pub file: String,
+    /// A JSON roster bundle (the `file` format) upserted into `store` at startup: the
+    /// declarative roster for a database-backed store. Declared rows replace stored
+    /// rows with the same id; others (e.g. added from the portal) are kept. Empty (the
+    /// default) ⇒ no seeding. A set path that is missing or invalid fails startup.
+    /// Tilde-expanded. Skipped by `--check-config`.
+    #[serde(default)]
+    pub seed_file: String,
     /// SQLite roster path (`sqlite` backend only). Tilde-expanded.
     #[serde(default = "default_fleet_path")]
     pub path: String,
@@ -207,6 +215,7 @@ impl Default for ReviewFleetCfg {
             root: String::new(),
             store: String::new(),
             file: default_fleet_file(),
+            seed_file: String::new(),
             path: default_fleet_path(),
             max_total: 0,
             max_per_user: 0,
@@ -1533,7 +1542,8 @@ pub(crate) fn default_graph_file() -> String {
     derive(serde::Serialize, schemars::JsonSchema)
 )]
 pub struct RegistryCfg {
-    /// "file" (default) | "sqlite" (feature `registry-sqlite`) | "grpc" (a
+    /// "file" (default) | "sqlite" (feature `registry-sqlite`) | "postgres" (feature
+    /// `registry-postgres`, DSN from `[config_store]`) | "grpc" (a
     /// central registry service) | "" (off).
     #[serde(default = "default_registry_store")]
     pub store: String,

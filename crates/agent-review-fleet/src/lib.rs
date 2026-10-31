@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use std::sync::Mutex;
 
 pub mod file;
-pub use file::FileFleet;
+pub use file::{seed_from_file, FileFleet};
 pub mod lease;
 #[cfg(feature = "fleet-store")]
 pub use lease::StorePostLease;

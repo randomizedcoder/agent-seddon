@@ -3,7 +3,8 @@
 # Hermetic EVAL-ONLY gate for the whole-stack NixOS module
 # (`nixosModules.agent-stack`). It instantiates two throwaway NixOS configurations
 # with the module enabled — loopback (the default) and LAN-published — and asserts
-# the units, ClickHouse wiring, secret handling and firewall surface it promises.
+# the units, ClickHouse and Postgres wiring, secret handling and firewall surface it
+# promises.
 #
 # The module closes over the flake's `self` (it reads
 # `self.legacyPackages.<system>.agentSeddon`), so this check hands it a STUB `self`
@@ -52,6 +53,9 @@ let
       openFirewall = true;
     };
   };
+  # A host that also imports agent-postgres itself (the module is imported once).
+  both = evalWith { imports = [ ../nixos/agent-postgres.nix ]; };
+  noPg = evalWith { services.agentSeddon.postgres.enable = false; };
 
   svc = c: name: c.systemd.services.${name};
   execOf = c: name: toString (svc c name).serviceConfig.ExecStart;
@@ -84,6 +88,25 @@ let
     .after;
     fleetNeedsSchema = builtins.elem "agent-seddon-clickhouse-schema.service" (svc lo "agent-seddon-fleet")
     .requires;
+    postgresNative = lo.services.postgresql.enable && lo.services.agentPostgres.enable;
+    postgresLoopback = lo.services.postgresql.settings.listen_addresses == "127.0.0.1";
+    # The generated password reaches postgres-owned postgresql-setup by credential, not by path.
+    postgresPasswordByCredential =
+      builtins.elem "agent-pg-password:/var/lib/agent-seddon/postgres/password" (svc lo "postgresql-setup")
+      .serviceConfig.LoadCredential
+      && lib.hasPrefix "/run/credentials/postgresql-setup.service/" (
+        toString lo.services.agentPostgres.passwordFile
+      );
+    postgresSetupAfterCreds = builtins.elem "agent-seddon-postgres-creds.service" (svc lo "postgresql-setup")
+    .requires;
+    # The role password is set after ensureUsers creates the role, not in postgresql's postStart.
+    postgresPasswordInSetup = lib.hasInfix ''ALTER ROLE "agent"'' (svc lo "postgresql-setup").script;
+    fleetNeedsPostgres = builtins.elem "postgresql-setup.service" (svc lo "agent-seddon-fleet")
+    .requires;
+    dedupesWithAgentPostgres = both.services.postgresql.enable;
+    postgresOptional =
+      !noPg.services.postgresql.enable
+      && !(builtins.elem "postgresql-setup.service" (svc noPg "agent-seddon-fleet").requires);
     grpcWebUnit = lo.systemd.services ? agent-seddon-grpc-web;
     portalUnit = lib.hasInfix "--port 8092" (execOf lo "agent-seddon-portal");
     # Loopback default ⇒ nothing opened.
@@ -96,7 +119,7 @@ let
       8092
       8093
     ];
-    lanKeepsInternalClosed = !(has lan 8094) && !(has lan 9000) && !(has lan 8123);
+    lanKeepsInternalClosed = !(has lan 8094) && !(has lan 9000) && !(has lan 8123) && !(has lan 5432);
     portalLanBind = lib.hasInfix "--host 0.0.0.0" (execOf lan "agent-seddon-portal");
   };
 
@@ -105,7 +128,7 @@ in
 pkgs.runCommand "nixos-agent-stack-eval" { } (
   if failed == { } then
     ''
-      echo "nixosModules.agent-stack evaluates: ${toString (lib.length (lib.attrNames checks))} checks (units, user, credentials, clickhouse, firewall loopback+LAN)" > "$out"
+      echo "nixosModules.agent-stack evaluates: ${toString (lib.length (lib.attrNames checks))} checks (units, user, credentials, clickhouse, postgres, firewall loopback+LAN)" > "$out"
     ''
   else
     throw "nixos-agent-stack-eval: unmet assertions: ${lib.concatStringsSep ", " (lib.attrNames failed)}"

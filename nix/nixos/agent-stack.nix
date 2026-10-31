@@ -3,7 +3,11 @@
 # NixOS-native deployment of the whole agent-seddon stack on one host (the l2 box):
 #
 #   clickhouse                       native `services.clickhouse` + the agent schema,
-#                                    per-role passwords, row-level security
+#                                    per-role passwords, row-level security; also the
+#                                    digest ledger
+#   postgresql                       `services.agentPostgres` (nixosModules.agent-postgres):
+#                                    the transactional stores — roster, post leases,
+#                                    scheduler jobs, provider/role/forge/transport cards
 #   agent-seddon-gateway             agent --serve-all      (:50100, metrics :9700)
 #   agent-seddon-sessions            agent --serve-sessions (:50080, metrics :9630)
 #   agent-seddon-fleet               agent --serve-fleet    (:50086, metrics :9636)
@@ -35,7 +39,8 @@
 # whatever the host file's owner); a config value of `/run/credentials/@unit@/<name>`
 # is rewritten to the unit's own credentials directory. The ClickHouse passwords are
 # generated on first start into /var/lib/agent-seddon/clickhouse (0700, the service
-# user) by the same `ch_creds.py` the container apps use.
+# user) by the same `ch_creds.py` the container apps use; the Postgres password and DSN
+# likewise into /var/lib/agent-seddon/postgres.
 #
 # SECURITY: the agents run model-driven tools, and the gateway includes the `bash`/
 # `sandbox` seams — reaching :8090 is code execution as the `agent-seddon` user. With
@@ -60,6 +65,27 @@ let
   stateDir = "/var/lib/agent-seddon";
   chCredsDir = "${stateDir}/clickhouse";
   chEnabled = cfg.clickhouse.enable;
+  pgCredsDir = "${stateDir}/postgres";
+  pgEnabled = cfg.postgres.enable;
+  pg = config.services.agentPostgres;
+
+  # The `[config_store]`-backed stores the managed Postgres holds. Each opens its own
+  # lazy pool, hence the small `pool_max`: 3 agents × 6 stores × 4 stays under the
+  # server's default 100 connections.
+  pgSettings = {
+    config_store = {
+      backend = "postgres";
+      dsn_ref = "file:${pgCredsDir}/dsn";
+      pool_max = 4;
+      migrate_on_start = true;
+    };
+    registry.store = "postgres";
+    scheduler.store = "postgres";
+    role.store = "postgres";
+    forge_registry.store = "postgres";
+    github_install_registry.store = "postgres";
+    transport_registry.store = "postgres";
+  };
 
   isLoopback = h: h == "127.0.0.1" || h == "localhost" || h == "::1";
   lan = !(isLoopback cfg.publicHost);
@@ -92,28 +118,30 @@ let
       lib.recursiveUpdate c { provider.api_key = "ollama"; };
 
   # Settings every agent process shares, over the repo config: the prompt library +
-  # context files (from this flake's source, read-only) and, with the managed
-  # ClickHouse, telemetry.
-  baseSettings =
-    lib.recursiveUpdate
-      {
-        prompts = {
-          backend = "file";
-          dir = "${self}/prompts";
-        };
-        context_files.dir = "${self}/context.d";
-      }
-      (
-        lib.optionalAttrs chEnabled {
-          telemetry = {
-            enabled = true;
-            clickhouse_url = "127.0.0.1:${toString cfg.clickhouse.nativePort}";
-            database = "agent";
-            user = "agent_writer";
-            password_file = "${chCredsDir}/writer.password";
-          };
-        }
-      );
+  # context files (from this flake's source, read-only: they are versioned with the
+  # code), with the managed ClickHouse the telemetry and digest ledger, and with the
+  # managed Postgres the transactional stores.
+  baseSettings = lib.foldl' lib.recursiveUpdate { } [
+    {
+      prompts = {
+        backend = "file";
+        dir = "${self}/prompts";
+      };
+      context_files.dir = "${self}/context.d";
+    }
+    (lib.optionalAttrs chEnabled {
+      telemetry = {
+        enabled = true;
+        clickhouse_url = "127.0.0.1:${toString cfg.clickhouse.nativePort}";
+        database = "agent";
+        user = "agent_writer";
+        password_file = "${chCredsDir}/writer.password";
+      };
+      # Rides the telemetry connection (agent_writer may write agent_turn_digests).
+      digest.store = "clickhouse";
+    })
+    (lib.optionalAttrs pgEnabled pgSettings)
+  ];
 
   services = {
     gateway = {
@@ -131,9 +159,19 @@ let
       port = ports.fleet;
       extra.review_fleet = {
         root = "${stateDir}/fleet/workspaces";
-        store = "file";
-        file = "${stateDir}/fleet/roster.json";
-      };
+      }
+      // (
+        if pgEnabled then
+          {
+            store = "postgres";
+          }
+          // lib.optionalAttrs (cfg.fleet.roster != null) { seed_file = "${rosterFile}"; }
+        else
+          {
+            store = "file";
+            file = "${stateDir}/fleet/roster.json";
+          }
+      );
     };
   };
 
@@ -215,15 +253,16 @@ let
       after = [
         "network-online.target"
       ]
-      ++ lib.optional chEnabled "agent-seddon-clickhouse-schema.service";
-      requires = lib.optional chEnabled "agent-seddon-clickhouse-schema.service";
+      ++ dbUnits;
+      requires = dbUnits;
       environment = {
         HOME = "${stateDir}/${name}";
         RUST_LOG = cfg.logLevel;
       };
-      # The roster is declarative: re-installed from the store on every start, so a
-      # runtime Put/Delete lasts until the next restart (edit `fleet.roster` to keep it).
-      preStart = lib.optionalString (name == "fleet" && cfg.fleet.roster != null) ''
+      # The roster is declarative. With Postgres its rows are upserted at start
+      # (`seed_file`), so portal-added rows persist; with the file store the bundle is
+      # re-installed, so a runtime Put/Delete lasts until the next restart.
+      preStart = lib.optionalString (name == "fleet" && cfg.fleet.roster != null && !pgEnabled) ''
         install -m 0600 ${rosterFile} ${stateDir}/fleet/roster.json
       '';
       serviceConfig = hardening // {
@@ -244,6 +283,11 @@ let
 
   enabledAgents = lib.filterAttrs (name: _: cfg.${name}.enable) services;
 
+  # What every agent unit waits for: the ClickHouse schema and the Postgres role.
+  dbUnits =
+    lib.optional chEnabled "agent-seddon-clickhouse-schema.service"
+    ++ lib.optional pgEnabled "postgresql-setup.service";
+
   agentOpts = name: {
     enable = lib.mkOption {
       type = lib.types.bool;
@@ -262,6 +306,9 @@ let
   };
 in
 {
+  # A path import, so a host that also imports `nixosModules.agent-postgres` gets one copy.
+  imports = [ ./agent-postgres.nix ];
+
   options.services.agentSeddon = {
     enable = lib.mkEnableOption "the agent-seddon stack (agents, ClickHouse, grpc-web bridge, portal)";
 
@@ -352,7 +399,9 @@ in
         description = ''
           The review roster (FleetSession rows, as in .fleet-demo/*-roster.json). Rows carry
           `token_ref` references (`ghapp:<installation>`, `file:<path>`), never secrets.
-          `null` leaves /var/lib/agent-seddon/fleet/roster.json to the runtime control plane.
+          With Postgres they are upserted into the roster at every fleet start (rows added
+          at runtime are kept); without it they replace /var/lib/agent-seddon/fleet/roster.json.
+          `null` leaves the roster to the runtime control plane.
         '';
       };
     };
@@ -371,6 +420,17 @@ in
         default = 9000;
         description = "ClickHouse native-protocol port (loopback).";
       };
+    };
+
+    postgres.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Run a loopback PostgreSQL (`services.agentPostgres`, generated password) and keep
+        the transactional stores in it: the fleet roster and post leases, scheduler jobs,
+        and the provider, role, forge, GitHub-install and transport cards. Off: the
+        roster is a JSON file and the rest stay at their defaults.
+      '';
     };
 
     grpcWeb.enable = lib.mkOption {
@@ -455,6 +515,47 @@ in
             ExecStart = "${seddon.staticWebServer}/bin/static-web-server --root ${webBundle} --host ${bindHost} --port ${toString ports.portalWeb} --cache-control-headers=false";
             Restart = "on-failure";
             RestartSec = 5;
+          };
+        };
+      })
+
+      (lib.mkIf pgEnabled {
+        services.agentPostgres = {
+          enable = true;
+          # Copied in by LoadCredential below: postgresql-setup runs as `postgres`, which
+          # cannot read the agent user's 0700 directory.
+          passwordFile = lib.mkDefault "/run/credentials/postgresql-setup.service/agent-pg-password";
+        };
+
+        systemd.services.postgresql-setup = {
+          after = [ "agent-seddon-postgres-creds.service" ];
+          requires = [ "agent-seddon-postgres-creds.service" ];
+          serviceConfig.LoadCredential = [ "agent-pg-password:${pgCredsDir}/password" ];
+        };
+
+        # Generate the role password once (never rotated) and the DSN the agents read
+        # through `[config_store] dsn_ref = "file:…"`. Hex, so it needs no URL escaping.
+        systemd.services.agent-seddon-postgres-creds = {
+          description = "agent-seddon PostgreSQL credentials";
+          before = [ "postgresql-setup.service" ];
+          path = [ pkgs.coreutils ];
+          script = ''
+            cd ${pgCredsDir}
+            if [ ! -s password ]; then
+              od -An -tx1 -N24 /dev/urandom | tr -d ' \n' > password.tmp
+              mv password.tmp password
+            fi
+            printf 'postgres://%s:%s@127.0.0.1:%s/%s' ${pg.user} "$(cat password)" \
+              ${toString pg.port} ${pg.database} > dsn.tmp
+            mv dsn.tmp dsn
+          '';
+          serviceConfig = hardening // {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = cfg.user;
+            Group = cfg.group;
+            StateDirectory = "agent-seddon/postgres";
+            StateDirectoryMode = "0700";
           };
         };
       })

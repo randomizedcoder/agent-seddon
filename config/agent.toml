@@ -185,6 +185,8 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists the roster onto the shared transactional config store
 # (config C41 / A3b) — the [config_store] block supplies the DSN and pool. Needs the
 # `fleet-postgres` feature (a live Postgres server, opt-in).
+# seed_file = ""             # JSON roster bundle upserted into `store` at startup (declared
+#                            # rows win; others are kept); empty ⇒ none
 #
 # GitHub App webhooks for `--serve-fleet` (forge-auth F6, `forge-ghapp` build): a
 # `pull_request` delivery triggers a review at once (the forge poll stays as backstop)
