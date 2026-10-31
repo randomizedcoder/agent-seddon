@@ -63,10 +63,26 @@ impl GrpcFleet {
             "posted" => Ok(ApproveOutcome::Posted { url: resp.detail }),
             "already_posted" => Ok(ApproveOutcome::AlreadyPosted),
             "not_found" => Ok(ApproveOutcome::NotFound),
+            "skipped" => Ok(ApproveOutcome::Skipped),
             other => Err(Error::Fleet(format!(
                 "approve: unrecognized status {other:?} from server"
             ))),
         }
+    }
+
+    /// Skip a persisted draft so it is never posted. Shares Approve's post lease
+    /// server-side. An unrecognized wire status is a protocol fault (`Err`).
+    pub async fn skip_review(&self, review_id: &str) -> Result<agent_core::SkipOutcome> {
+        let req = pb::SkipReviewRequest {
+            review_id: review_id.to_string(),
+        };
+        let status = unary!(self, skip_review, req)
+            .map_err(status_to_err)?
+            .into_inner()
+            .status;
+        agent_core::SkipOutcome::from_wire(&status).ok_or_else(|| {
+            Error::Fleet(format!("skip: unrecognized status {status:?} from server"))
+        })
     }
 
     /// Operational self-diagnosis of a running fleet (docs/design/doctor/): run the
@@ -108,6 +124,7 @@ impl GrpcFleet {
             session_id: filter.session_id.clone().unwrap_or_default(),
             status: filter.status.clone().unwrap_or_default(),
             limit: filter.limit.min(u32::MAX as usize) as u32,
+            exclude_status: filter.exclude_status.clone(),
         };
         let resp = unary!(self, list_reviews, req)
             .map_err(status_to_err)?

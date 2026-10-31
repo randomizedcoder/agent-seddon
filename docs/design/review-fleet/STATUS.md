@@ -91,6 +91,11 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   the systemd cutover fetched into an empty workspace (`fatal: not a git repository`) and
   no draft was made. The module now sets the backend, and `--serve-fleet` refuses to start
   with a root but no factory instead of reviewing the wrong repo.
+- **2026-10-31** — **Skip a draft, and filter the Fleet tab by repo.** `SkipReview` marks a
+  draft `skipped` (never posted; shares the approve post lease so the two cannot both win;
+  `(approve, review)`). `ListReviews.exclude_status` lets the portal hide skipped drafts by
+  default. The Fleet tab's repo filter is now a menu of known repos (shown as `owner/name`),
+  and the status menu gains "not skipped" (default), "skipped" and "all".
 
 ## Decisions of record
 

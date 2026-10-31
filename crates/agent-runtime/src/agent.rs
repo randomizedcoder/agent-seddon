@@ -631,6 +631,8 @@ struct EngineApprover {
 enum ApprovePlan {
     NotFound,
     AlreadyPosted,
+    /// A human skipped this draft: it is never posted.
+    Skipped,
     /// Boxed: the resolved draft + row dwarf the unit variants (clippy `large_enum_variant`).
     Post(Box<PostPlan>),
 }
@@ -678,6 +680,11 @@ fn plan_approve(
     if record.status == agent_core::draft_status::POSTED {
         return Ok(ApprovePlan::AlreadyPosted);
     }
+    // A skipped draft is never posted. (The post lease also stops it, before this status
+    // has flushed: a skip commits the lease.)
+    if record.status == agent_core::draft_status::SKIPPED {
+        return Ok(ApprovePlan::Skipped);
+    }
     // Resolve the roster row whose repo this draft belongs to → its operational forge.
     // Prefer an enabled row (the live reviewer) but accept any row for the repo; a draft
     // whose repo has no row at all (deleted after drafting) is a misconfiguration we
@@ -697,9 +704,86 @@ fn plan_approve(
     Ok(ApprovePlan::Post(Box::new(PostPlan { record, row })))
 }
 
+/// What a skip should do, decided purely from the looked-up draft: `Ok(record)` to go on
+/// and claim the post lease, `Err(outcome)` when there is nothing to skip.
+#[cfg(all(feature = "review", feature = "fleet"))]
+fn plan_skip(
+    record: Option<agent_core::ReviewDraftRecord>,
+) -> std::result::Result<agent_core::ReviewDraftRecord, agent_core::SkipOutcome> {
+    use agent_core::{draft_status, SkipOutcome};
+    match record {
+        None => Err(SkipOutcome::NotFound),
+        Some(r) if r.status == draft_status::POSTED => Err(SkipOutcome::AlreadyPosted),
+        Some(r) if r.status == draft_status::SKIPPED => Err(SkipOutcome::AlreadySkipped),
+        // drafted, superseded, approved (a post that failed or is in flight: the lease
+        // decides), or anything else.
+        Some(r) => Ok(r),
+    }
+}
+
+/// Close `review_id`'s post lease for a skip, returning the `skipped` record to persist.
+/// The lease is the guard Approve uses, so exactly one of a racing skip and approve wins,
+/// and once a skip has committed it every later approve stands down even before the
+/// `skipped` status reaches the (eventually-consistent) history. A held lease means a post
+/// is in flight: the draft is reported posted and not skipped.
+#[cfg(all(feature = "review", feature = "fleet"))]
+async fn skip_with_lease(
+    lease: &dyn agent_core::FleetPostLease,
+    record: agent_core::ReviewDraftRecord,
+    skipped_by: Option<&str>,
+) -> agent_core::Result<(
+    agent_core::SkipOutcome,
+    Option<agent_core::ReviewDraftRecord>,
+)> {
+    match lease.acquire(&record.review_id).await? {
+        agent_core::PostLease::Acquired => {}
+        agent_core::PostLease::AlreadyPosted | agent_core::PostLease::Held => {
+            return Ok((agent_core::SkipOutcome::AlreadyPosted, None));
+        }
+    }
+    // Best-effort, like approve: a lease left `held` still makes every approve stand down.
+    if let Err(e) = lease.commit(&record.review_id).await {
+        tracing::warn!(review_id = %record.review_id, error = %e,
+            "skip: committing the post lease failed (soft; the held lease still blocks a post)");
+    }
+    let mut skipped = record;
+    skipped.status = agent_core::draft_status::SKIPPED.to_string();
+    // Who decided, in the same column as an approval (S19).
+    skipped.approved_by = skipped_by.unwrap_or_default().to_string();
+    Ok((agent_core::SkipOutcome::Skipped, Some(skipped)))
+}
+
 #[cfg(all(feature = "review", feature = "fleet"))]
 #[async_trait::async_trait]
 impl agent_core::FleetApprover for EngineApprover {
+    async fn skip(
+        &self,
+        review_id: &str,
+        skipped_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::SkipOutcome> {
+        let span = tracing::info_span!("fleet.skip", outcome = tracing::field::Empty);
+        let sp = span.clone();
+        async move {
+            // Bound query arg — `review_id` is untrusted wire input, never a path.
+            let record = match plan_skip(self.history.draft_by_id(review_id).await?) {
+                Ok(r) => r,
+                Err(outcome) => {
+                    sp.record("outcome", format!("{outcome:?}").as_str());
+                    return Ok(outcome);
+                }
+            };
+            let (outcome, persist) =
+                skip_with_lease(self.post_lease.as_ref(), record, skipped_by).await?;
+            if let Some(skipped) = persist {
+                self.agent.record_draft(skipped).await;
+            }
+            sp.record("outcome", format!("{outcome:?}").as_str());
+            Ok(outcome)
+        }
+        .instrument(span)
+        .await
+    }
+
     async fn approve(
         &self,
         review_id: &str,
@@ -739,6 +823,10 @@ impl agent_core::FleetApprover for EngineApprover {
                         record_fleet_approval(&self.agent.metrics(), &r.user, &r.repo, "already");
                     }
                     return Ok(agent_core::ApproveOutcome::AlreadyPosted);
+                }
+                ApprovePlan::Skipped => {
+                    sp.record("outcome", "skipped");
+                    return Ok(agent_core::ApproveOutcome::Skipped);
                 }
                 ApprovePlan::Post(plan) => (plan.record, plan.row),
             };
@@ -8015,7 +8103,7 @@ mod tests {
     #[cfg(all(feature = "review", feature = "fleet"))]
     mod approve_plan {
         use super::*;
-        use agent_core::{draft_status, FleetSession, ReviewDraftRecord};
+        use agent_core::{draft_status, FleetSession, ReviewDraftRecord, SkipOutcome};
 
         fn rec(status: &str, repo: &str) -> ReviewDraftRecord {
             ReviewDraftRecord {
@@ -8114,6 +8202,17 @@ mod tests {
             }
         }
 
+        /// desc: a skipped draft is never posted, and needs no live row to say so.
+        /// expect: Skipped even with an empty roster.
+        #[rstest]
+        fn negative_skipped_draft_is_not_posted() {
+            let rows: [FleetSession; 0] = [];
+            assert!(matches!(
+                plan_approve(Some(rec(draft_status::SKIPPED, "o__n")), &rows).unwrap(),
+                ApprovePlan::Skipped
+            ));
+        }
+
         /// desc: repo matching is EXACT — a hostile `repo` on the draft (traversal/separator)
         /// cannot substring- or wildcard-match a legitimate row and borrow its forge.
         /// expect: Err (no match), never a post against the wrong row.
@@ -8126,6 +8225,112 @@ mod tests {
             assert!(
                 plan_approve(Some(rec(draft_status::DRAFTED, hostile)), &rows).is_err(),
                 "hostile repo {hostile:?} must not match the real row"
+            );
+        }
+
+        /// The pure skip decision: name, description, the looked-up draft's status (None ⇒
+        /// no draft), and whether the skip goes on to the lease (`None`) or stops.
+        #[rstest]
+        #[case::positive_drafted(
+            "a drafted review can be skipped",
+            Some(draft_status::DRAFTED),
+            None
+        )]
+        #[case::positive_superseded(
+            "an old superseded round can be skipped to tidy the list",
+            Some(draft_status::SUPERSEDED),
+            None
+        )]
+        #[case::corner_approved_goes_to_the_lease(
+            "approved but not posted: the post lease decides",
+            Some(draft_status::APPROVED),
+            None
+        )]
+        #[case::negative_missing("no draft for the id", None, Some(SkipOutcome::NotFound))]
+        #[case::negative_posted(
+            "a posted review cannot be skipped",
+            Some(draft_status::POSTED),
+            Some(SkipOutcome::AlreadyPosted)
+        )]
+        #[case::boundary_already_skipped(
+            "skipping twice is a no-op",
+            Some(draft_status::SKIPPED),
+            Some(SkipOutcome::AlreadySkipped)
+        )]
+        #[case::adversarial_lookalike_status(
+            "a status that only looks posted (case, padding) is not trusted as posted: the lease decides",
+            Some("POSTED "),
+            None
+        )]
+        fn plan_skip_table(
+            #[case] description: &str,
+            #[case] status: Option<&str>,
+            #[case] expected: Option<SkipOutcome>,
+        ) {
+            let got = plan_skip(status.map(|s| rec(s, "o__n"))).err();
+            assert_eq!(got, expected, "{description}");
+        }
+
+        /// Skip and approve share the post lease. Each row: the lease's state before the
+        /// skip, the skip's outcome, and whether a later approve could still take the lease.
+        #[rstest]
+        #[case::positive_fresh_skip_blocks_approve(
+            "a skip of an untouched draft wins and closes the lease",
+            None,
+            SkipOutcome::Skipped,
+            false
+        )]
+        #[case::negative_post_in_flight(
+            "a post holding the lease beats the skip",
+            Some(false),
+            SkipOutcome::AlreadyPosted,
+            false
+        )]
+        #[case::negative_already_posted(
+            "a committed post beats the skip",
+            Some(true),
+            SkipOutcome::AlreadyPosted,
+            false
+        )]
+        #[tokio::test]
+        async fn skip_shares_the_post_lease(
+            #[case] description: &str,
+            #[case] before: Option<bool>, // None: no lease; Some(committed)
+            #[case] expected: SkipOutcome,
+            #[case] approve_can_post: bool,
+        ) {
+            use agent_core::{FleetPostLease, PostLease};
+            let lease = agent_review_fleet::MemoryPostLease::new();
+            if let Some(committed) = before {
+                assert_eq!(lease.acquire("r-uuid").await.unwrap(), PostLease::Acquired);
+                if committed {
+                    lease.commit("r-uuid").await.unwrap();
+                }
+            }
+            let (got, persist) = skip_with_lease(
+                &lease,
+                rec(draft_status::DRAFTED, "o__n"),
+                Some("acme/alice"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(got, expected, "{description}");
+            match &persist {
+                Some(r) => {
+                    assert_eq!(r.status, draft_status::SKIPPED, "{description}");
+                    assert_eq!(r.approved_by, "acme/alice", "{description}: who skipped");
+                }
+                None => assert_ne!(
+                    got,
+                    SkipOutcome::Skipped,
+                    "{description}: nothing persisted"
+                ),
+            }
+            let approve = lease.acquire("r-uuid").await.unwrap();
+            assert_eq!(
+                approve == PostLease::Acquired,
+                approve_can_post,
+                "{description}: a later approve's lease"
             );
         }
     }

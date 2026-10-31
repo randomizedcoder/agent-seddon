@@ -40,6 +40,7 @@ class FleetRobot extends Robot {
 
   static const _list = 'agent.v1.ReviewFleetService/ListReviews';
   static const _approve = 'agent.v1.ReviewFleetService/Approve';
+  static const _skip = 'agent.v1.ReviewFleetService/SkipReview';
   static const _update = 'agent.v1.ReviewFleetService/UpdateReview';
   static const _reviewNow = 'agent.v1.ReviewFleetService/ReviewNow';
   static const _setEnabled = 'agent.v1.ReviewFleetService/SetEnabled';
@@ -159,13 +160,27 @@ class FleetRobot extends Robot {
         until: () => log.countOf(_list) > before);
   }
 
-  Future<void> submitRepo(String repo) async {
+  /// Open the repo dropdown (no RPC); the menu's items are then on screen.
+  Future<void> openRepoMenu() async {
+    await tester.tap(byKey('fleet.filter.repo'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300)); // menu enter animation
+  }
+
+  /// Choose the repo whose menu label (`owner/name`) is [label].
+  Future<void> selectRepo(String label) async {
+    await openRepoMenu();
+    await pickRepo(label);
+  }
+
+  /// With the repo menu open, choose [label].
+  Future<void> pickRepo(String label) async {
     final before = log.countOf(_list);
-    await enterText('fleet.filter.repo', repo);
-    await tester.runAsync(() async {
-      await tester.testTextInput.receiveAction(TextInputAction.done);
-    });
-    await pumpUntil(() => log.countOf(_list) > before, reason: 'repo submit');
+    await tester.tap(find.text(label, skipOffstage: false).hitTestable().last);
+    await tester.pump();
+    await pumpUntil(() => log.countOf(_list) > before, reason: 'repo filter');
+    // The re-list is in flight; its spinner never settles a later menu open.
+    await pumpUntil(() => !showsSpinner, reason: 'repo re-list');
   }
 
   Future<void> selectStatus(String label) async {
@@ -175,6 +190,7 @@ class FleetRobot extends Robot {
     await tester.tap(find.text(label, skipOffstage: false).hitTestable());
     await tester.pump(); // selecting fires _reload — settle it via the RPC below
     await pumpUntil(() => log.countOf(_list) > before, reason: 'status filter');
+    await pumpUntil(() => !showsSpinner, reason: 'status re-list');
   }
 
   // ── sessions strip ──────────────────────────────────────────────────────────
@@ -374,6 +390,36 @@ class FleetRobot extends Robot {
     await tester.pump(const Duration(seconds: 5));
     await tester.pump(const Duration(minutes: 6));
     await tester.pumpAndSettle();
+  }
+
+  // ── skip dialog (a plain confirm, like approve) ────────────────────────────
+  Future<void> openSkip() async {
+    await tester.tap(byKey('fleet.detail.skip'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> confirmSkip() async {
+    final before = log.countOf(_skip);
+    await tester.runAsync(() async {
+      await tester.tap(byKey('fleet.skip.confirm'));
+    });
+    await tester.pump();
+    await pumpUntil(() => log.countOf(_skip) > before, reason: 'skip fires');
+  }
+
+  Future<void> cancelSkip() async {
+    await tester.tap(byKey('fleet.skip.cancel'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  /// Two taps on confirm with no frame between them; see [doubleConfirmApprove].
+  Future<void> doubleConfirmSkip() async {
+    await tester.tap(byKey('fleet.skip.confirm'), warnIfMissed: false);
+    await tester.tap(byKey('fleet.skip.confirm'), warnIfMissed: false);
+    await tester.pump();
+    await pumpUntil(() => log.fired(_skip), reason: 'one skip to fire');
   }
 
   // ── settle ──────────────────────────────────────────────────────────────────

@@ -107,6 +107,7 @@ message ApproveRequest {
 //   "posted"         — the draft was posted this call (freshly).
 //   "already_posted" — idempotent no-op: the draft was already posted.
 //   "not_found"      — no persisted draft for this `review_id`.
+//   "skipped"        — the draft was skipped; nothing is posted.
 // `detail` carries the posted comment/review URL when `status = "posted"`, else "".
 message ApproveReply {
   string status = 1;
@@ -117,7 +118,7 @@ message ApproveReply {
 // fields of `agent_core::ReviewDraftRecord` — the `.md` body is fetched separately
 // via `GetReview` (it is large + LLM-authored, so it is never bundled into a list).
 // `repo` is the roster repo key (`owner__name`); `status` is one of drafted |
-// approved | posted | superseded.
+// approved | posted | superseded | skipped.
 message ReviewSummary {
   string review_id = 1;
   string repo = 2;
@@ -133,8 +134,8 @@ message ReviewSummary {
   // Who asked for this review (security-hardening S19): `tenant/subject` of each
   // ReviewNow caller, at most 8; empty when the forge poller or Slack watcher started it.
   repeated string requested_by = 12;
-  // Who approved the post (`tenant/subject`); empty until posted, or on a server
-  // without auth.
+  // Who approved the post, or skipped the draft (`tenant/subject`); empty until then,
+  // or on a server without auth.
   string approved_by = 13;
 }
 
@@ -144,8 +145,10 @@ message ReviewSummary {
 message ListReviewsRequest {
   string repo = 1;       // roster repo key `owner__name`; "" ⇒ any
   string session_id = 2; // roster row id; "" ⇒ any
-  string status = 3;     // drafted|approved|posted|superseded; "" ⇒ any
+  string status = 3;     // drafted|approved|posted|superseded|skipped; "" ⇒ any
   uint32 limit = 4;      // 0 ⇒ server cap; clamped to the cap
+  // Current statuses to leave out (e.g. ["skipped"]); at most 8.
+  repeated string exclude_status = 5;
 }
 
 message ListReviewsReply {
@@ -182,6 +185,22 @@ message UpdateReviewRequest {
 //   "not_found" — no persisted draft for this `review_id`.
 //   "locked"    — the draft is `posted`/`approved` and cannot be edited.
 message UpdateReviewReply {
+  string status = 1;
+}
+
+// Skip a review draft: it is never posted, and leaves the default review list. Shares
+// Approve's post lease, so a skip and an approve can't both win. `review_id` is untrusted
+// wire input, looked up as a bound query arg.
+message SkipReviewRequest {
+  string review_id = 1;
+}
+
+// The outcome of a SkipReview. `status` is one of:
+//   "skipped"         — the draft is now skipped.
+//   "already_skipped" — idempotent no-op.
+//   "already_posted"  — the draft was posted, or a post is in flight; nothing to skip.
+//   "not_found"       — no persisted draft for this `review_id`.
+message SkipReviewReply {
   string status = 1;
 }
 
@@ -274,6 +293,15 @@ service ReviewFleetService {
   rpc UpdateReview(UpdateReviewRequest) returns (UpdateReviewReply) {
     option (google.api.http) = {
       post: "/v1/fleet/reviews/{review_id}"
+      body: "*"
+    };
+  }
+  // Skip a draft so it is never posted (needs approve:review, like Approve). Opt-in:
+  // served only by the `--serve-fleet` process with persisted history; else
+  // UNIMPLEMENTED.
+  rpc SkipReview(SkipReviewRequest) returns (SkipReviewReply) {
+    option (google.api.http) = {
+      post: "/v1/fleet/reviews/{review_id}/skip"
       body: "*"
     };
   }

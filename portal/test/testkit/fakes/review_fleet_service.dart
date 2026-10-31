@@ -31,6 +31,7 @@ class FakeReviewFleetService extends ReviewFleetServiceBase {
   GetReviewReply getReviewResponse = GetReviewReply();
   UpdateReviewReply updateReviewResponse = UpdateReviewReply();
   ApproveReply approveResponse = ApproveReply();
+  SkipReviewReply skipReviewResponse = SkipReviewReply();
   ReviewNowReply reviewNowResponse = ReviewNowReply();
   FleetSession setEnabledResponse = FleetSession();
   // Unwired by the page today, but abstract on the base — implemented so the
@@ -122,6 +123,14 @@ class FakeReviewFleetService extends ReviewFleetServiceBase {
     _log.record('$_svc/Approve', request);
     await _guard('Approve');
     return approveResponse;
+  }
+
+  @override
+  Future<SkipReviewReply> skipReview(
+      ServiceCall call, SkipReviewRequest request) async {
+    _log.record('$_svc/SkipReview', request);
+    await _guard('SkipReview');
+    return skipReviewResponse;
   }
 
   // ── review drafts ──────────────────────────────────────────────────────────

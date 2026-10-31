@@ -220,6 +220,7 @@ const ListReviewsRequest$json = {
     {'1': 'session_id', '3': 2, '4': 1, '5': 9, '10': 'sessionId'},
     {'1': 'status', '3': 3, '4': 1, '5': 9, '10': 'status'},
     {'1': 'limit', '3': 4, '4': 1, '5': 13, '10': 'limit'},
+    {'1': 'exclude_status', '3': 5, '4': 3, '5': 9, '10': 'excludeStatus'},
   ],
 };
 
@@ -227,7 +228,7 @@ const ListReviewsRequest$json = {
 final $typed_data.Uint8List listReviewsRequestDescriptor = $convert.base64Decode(
     'ChJMaXN0UmV2aWV3c1JlcXVlc3QSEgoEcmVwbxgBIAEoCVIEcmVwbxIdCgpzZXNzaW9uX2lkGA'
     'IgASgJUglzZXNzaW9uSWQSFgoGc3RhdHVzGAMgASgJUgZzdGF0dXMSFAoFbGltaXQYBCABKA1S'
-    'BWxpbWl0');
+    'BWxpbWl0EiUKDmV4Y2x1ZGVfc3RhdHVzGAUgAygJUg1leGNsdWRlU3RhdHVz');
 
 @$core.Deprecated('Use listReviewsReplyDescriptor instead')
 const ListReviewsReply$json = {
@@ -308,6 +309,30 @@ const UpdateReviewReply$json = {
 /// Descriptor for `UpdateReviewReply`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List updateReviewReplyDescriptor = $convert.base64Decode(
     'ChFVcGRhdGVSZXZpZXdSZXBseRIWCgZzdGF0dXMYASABKAlSBnN0YXR1cw==');
+
+@$core.Deprecated('Use skipReviewRequestDescriptor instead')
+const SkipReviewRequest$json = {
+  '1': 'SkipReviewRequest',
+  '2': [
+    {'1': 'review_id', '3': 1, '4': 1, '5': 9, '10': 'reviewId'},
+  ],
+};
+
+/// Descriptor for `SkipReviewRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List skipReviewRequestDescriptor = $convert.base64Decode(
+    'ChFTa2lwUmV2aWV3UmVxdWVzdBIbCglyZXZpZXdfaWQYASABKAlSCHJldmlld0lk');
+
+@$core.Deprecated('Use skipReviewReplyDescriptor instead')
+const SkipReviewReply$json = {
+  '1': 'SkipReviewReply',
+  '2': [
+    {'1': 'status', '3': 1, '4': 1, '5': 9, '10': 'status'},
+  ],
+};
+
+/// Descriptor for `SkipReviewReply`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List skipReviewReplyDescriptor = $convert
+    .base64Decode('Cg9Ta2lwUmV2aWV3UmVwbHkSFgoGc3RhdHVzGAEgASgJUgZzdGF0dXM=');
 
 @$core.Deprecated('Use preflightRequestDescriptor instead')
 const PreflightRequest$json = {

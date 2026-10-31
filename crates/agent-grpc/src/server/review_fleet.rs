@@ -83,6 +83,9 @@ fn caller_label() -> Option<String> {
     agent_core::current_principal().map(|p| agent_core::requester_label(&p))
 }
 
+/// Cap on `ListReviewsRequest.exclude_status` entries (there are five statuses).
+const MAX_EXCLUDE_STATUS: usize = 8;
+
 /// An empty wire string means "no constraint" (the proto default); a non-empty one is a bound
 /// filter value. Keeps the `""` ⇒ `None` mapping in one place.
 fn filter_opt(s: String) -> Option<String> {
@@ -307,10 +310,43 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 ApproveOutcome::Posted { url } => ("posted", url),
                 ApproveOutcome::AlreadyPosted => ("already_posted", String::new()),
                 ApproveOutcome::NotFound => ("not_found", String::new()),
+                ApproveOutcome::Skipped => ("skipped", String::new()),
             };
             Ok(Response::new(pb::ApproveReply {
                 status: status.to_string(),
                 detail,
+            }))
+        }
+        .instrument(sp);
+        super::run_scoped(key, work).await
+    }
+
+    async fn skip_review(
+        &self,
+        request: Request<pb::SkipReviewRequest>,
+    ) -> Result<Response<pb::SkipReviewReply>, Status> {
+        // Deciding a draft is never posted is the approver's call, like Approve.
+        super::authz::require(
+            agent_core::Action::Approve,
+            agent_core::ResourceType::Review,
+        )?;
+        let key = super::identity_key(request.metadata());
+        let sp = span("fleet.skip_review", request.metadata());
+        let skipped_by = caller_label();
+        let Some(approver) = self.approver.clone() else {
+            return Err(Status::unimplemented(
+                "SkipReview requires the fleet orchestrator with persisted history \
+                 (run `agent --serve-fleet` with `[telemetry]` enabled)",
+            ));
+        };
+        let work = async move {
+            let review_id = request.into_inner().review_id;
+            let outcome = approver
+                .skip(&review_id, skipped_by.as_deref())
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            Ok(Response::new(pb::SkipReviewReply {
+                status: outcome.as_wire().to_string(),
             }))
         }
         .instrument(sp);
@@ -368,10 +404,18 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         };
         let work = async move {
             let req = request.into_inner();
+            // Untrusted: bound the list (each value only ever compared, never queried).
+            if req.exclude_status.len() > MAX_EXCLUDE_STATUS {
+                return Err(Status::invalid_argument(format!(
+                    "exclude_status has {} entries; at most {MAX_EXCLUDE_STATUS}",
+                    req.exclude_status.len()
+                )));
+            }
             let filter = ReviewDraftFilter {
                 repo: filter_opt(req.repo),
                 session_id: filter_opt(req.session_id),
                 status: filter_opt(req.status),
+                exclude_status: req.exclude_status,
                 limit: req.limit as usize, // 0 ⇒ the impl's row cap; over-cap is clamped there
             };
             let rows = history

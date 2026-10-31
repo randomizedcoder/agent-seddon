@@ -38,6 +38,7 @@ Gaps:
 | Reviews | view drafts and history | `ReviewFleet.ListReviews/GetReview` | `(read, review)` | low |
 | Reviews | edit a draft | `ReviewFleet.UpdateReview` | `(write, review)` | medium |
 | Reviews | **approve, which posts to the forge** | `ReviewFleet.Approve` | `(approve, review)` | high, irreversible |
+| Reviews | skip a draft so it is never posted | `ReviewFleet.SkipReview` | `(approve, review)` | medium, final for that head |
 | Reviews | trigger a review now | `ReviewFleet.ReviewNow` | `(trigger, fleet)` | medium (spend) |
 | Repo onboarding | view the roster (token refs are never returned) | `ReviewFleet.List/Get/Preflight` | `(read, fleet)` | medium |
 | Repo onboarding | add, enable, disable, remove a repo | `ReviewFleet.Put/Delete/SetEnabled` | `(write \| delete, fleet)` | **high** |

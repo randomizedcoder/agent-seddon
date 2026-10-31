@@ -4551,7 +4551,7 @@
           },
           {
             "name": "status",
-            "description": "drafted|approved|posted|superseded; \"\" ⇒ any",
+            "description": "drafted|approved|posted|superseded|skipped; \"\" ⇒ any",
             "in": "query",
             "required": false,
             "type": "string"
@@ -4563,6 +4563,17 @@
             "required": false,
             "type": "integer",
             "format": "int64"
+          },
+          {
+            "name": "excludeStatus",
+            "description": "Current statuses to leave out (e.g. [\"skipped\"]); at most 8.",
+            "in": "query",
+            "required": false,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "collectionFormat": "multi"
           }
         ],
         "tags": [
@@ -4630,6 +4641,45 @@
             "required": true,
             "schema": {
               "$ref": "#/definitions/agent.v1.ReviewFleetService.UpdateReviewBody"
+            }
+          }
+        ],
+        "tags": [
+          "ReviewFleetService"
+        ]
+      }
+    },
+    "/v1/fleet/reviews/{reviewId}/skip": {
+      "post": {
+        "summary": "Skip a draft so it is never posted (needs approve:review, like Approve). Opt-in:\nserved only by the `--serve-fleet` process with persisted history; else\nUNIMPLEMENTED.",
+        "operationId": "ReviewFleetService_SkipReview",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.SkipReviewReply"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "reviewId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ReviewFleetService.SkipReviewBody"
             }
           }
         ],
@@ -6253,7 +6303,7 @@
           "type": "string"
         }
       },
-      "description": "The outcome of an Approve. `status` is one of:\n  \"posted\"         — the draft was posted this call (freshly).\n  \"already_posted\" — idempotent no-op: the draft was already posted.\n  \"not_found\"      — no persisted draft for this `review_id`.\n`detail` carries the posted comment/review URL when `status = \"posted\"`, else \"\"."
+      "description": "The outcome of an Approve. `status` is one of:\n  \"posted\"         — the draft was posted this call (freshly).\n  \"already_posted\" — idempotent no-op: the draft was already posted.\n  \"not_found\"      — no persisted draft for this `review_id`.\n  \"skipped\"        — the draft was skipped; nothing is posted.\n`detail` carries the posted comment/review URL when `status = \"posted\"`, else \"\"."
     },
     "agent.v1.AssembleResponse": {
       "type": "object",
@@ -10051,6 +10101,10 @@
         }
       }
     },
+    "agent.v1.ReviewFleetService.SkipReviewBody": {
+      "type": "object",
+      "description": "Skip a review draft: it is never posted, and leaves the default review list. Shares\nApprove's post lease, so a skip and an approve can't both win. `review_id` is untrusted\nwire input, looked up as a bound query arg."
+    },
     "agent.v1.ReviewFleetService.UpdateReviewBody": {
       "type": "object",
       "properties": {
@@ -10418,10 +10472,10 @@
         },
         "approvedBy": {
           "type": "string",
-          "description": "Who approved the post (`tenant/subject`); empty until posted, or on a server\nwithout auth."
+          "description": "Who approved the post, or skipped the draft (`tenant/subject`); empty until then,\nor on a server without auth."
         }
       },
-      "description": "One persisted review draft's METADATA (review-fleet C14). Mirrors the non-body\nfields of `agent_core::ReviewDraftRecord` — the `.md` body is fetched separately\nvia `GetReview` (it is large + LLM-authored, so it is never bundled into a list).\n`repo` is the roster repo key (`owner__name`); `status` is one of drafted |\napproved | posted | superseded."
+      "description": "One persisted review draft's METADATA (review-fleet C14). Mirrors the non-body\nfields of `agent_core::ReviewDraftRecord` — the `.md` body is fetched separately\nvia `GetReview` (it is large + LLM-authored, so it is never bundled into a list).\n`repo` is the roster repo key (`owner__name`); `status` is one of drafted |\napproved | posted | superseded | skipped."
     },
     "agent.v1.ReviewSummaryReport": {
       "type": "object",
@@ -11368,6 +11422,15 @@
         }
       },
       "description": "Corners, borders, shadows."
+    },
+    "agent.v1.SkipReviewReply": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        }
+      },
+      "description": "The outcome of a SkipReview. `status` is one of:\n  \"skipped\"         — the draft is now skipped.\n  \"already_skipped\" — idempotent no-op.\n  \"already_posted\"  — the draft was posted, or a post is in flight; nothing to skip.\n  \"not_found\"       — no persisted draft for this `review_id`."
     },
     "agent.v1.StatusResponse": {
       "type": "object",

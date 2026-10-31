@@ -44,12 +44,36 @@ class FleetPage extends StatefulWidget {
   State<FleetPage> createState() => _FleetPageState();
 }
 
-/// The draft-status filter. `any` maps to an empty wire filter.
-enum _StatusFilter { any, drafted, approved, posted, superseded }
+/// The draft-status filter. `active` (the default) is every status but
+/// `skipped`; `all` sends no filter at all.
+enum _StatusFilter { active, drafted, approved, posted, superseded, skipped, all }
+
+extension on _StatusFilter {
+  String get label => switch (this) {
+        _StatusFilter.active => 'not skipped',
+        _StatusFilter.all => 'all',
+        _ => name,
+      };
+
+  /// The wire `status`: empty for the two catch-alls.
+  String get wire =>
+      this == _StatusFilter.active || this == _StatusFilter.all ? '' : name;
+
+  /// The wire `exclude_status`.
+  List<String> get exclude =>
+      this == _StatusFilter.active ? const ['skipped'] : const [];
+}
+
+/// A roster repo key (`owner__name`) as people write it.
+String _repoLabel(String key) => key.replaceFirst('__', '/');
 
 class _FleetPageState extends State<FleetPage> {
-  final _repo = TextEditingController();
-  _StatusFilter _status = _StatusFilter.any;
+  // The repo filter: a roster repo key, or '' for every repo.
+  String _repo = '';
+  // Every repo seen in the roster or a listing, so the dropdown keeps its
+  // choices while one repo is selected.
+  final Set<String> _knownRepos = {};
+  _StatusFilter _status = _StatusFilter.active;
 
   List<ReviewSummary> _reviews = [];
   List<FleetSession> _sessions = [];
@@ -67,12 +91,6 @@ class _FleetPageState extends State<FleetPage> {
     _reload();
   }
 
-  @override
-  void dispose() {
-    _repo.dispose();
-    super.dispose();
-  }
-
   Future<void> _reload() async {
     setState(() {
       _loading = true;
@@ -80,8 +98,9 @@ class _FleetPageState extends State<FleetPage> {
     });
     try {
       final req = ListReviewsRequest()
-        ..repo = _repo.text.trim()
-        ..status = _status == _StatusFilter.any ? '' : _status.name
+        ..repo = _repo
+        ..status = _status.wire
+        ..excludeStatus.addAll(_status.exclude)
         ..limit = 0; // 0 ⇒ the server's row cap
       // Roster + drafts in parallel; roster is best-effort (the strip is
       // secondary), so a roster failure doesn't blank the drafts list.
@@ -107,6 +126,10 @@ class _FleetPageState extends State<FleetPage> {
       setState(() {
         _reviews = reviews;
         _sessions = sessions;
+        _knownRepos
+          ..addAll(sessions.map((s) => s.repo))
+          ..addAll(reviews.map((r) => r.repo))
+          ..removeWhere((r) => r.isEmpty);
         _cards = cards;
         _cardsError = cardsError;
         // Re-select by id so an action keeps the detail pane in place.
@@ -283,12 +306,61 @@ class _FleetPageState extends State<FleetPage> {
           _snack('Already posted.');
         case 'not_found':
           _snack('Draft not found (superseded?).');
+        case 'skipped':
+          _snack('This draft was skipped; nothing posted.');
         default:
           _snack('Approve: ${reply.status}');
       }
       await _reload();
     } catch (e) {
       _snack('Approve failed: $e');
+    }
+  }
+
+  /// Skip a draft: it is never posted and leaves the default list.
+  Future<void> _skip(ReviewSummary r) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Skip review of PR #${r.prNumber}?'),
+        content: const Text(
+          'The draft is never posted, and is hidden unless the status filter '
+          'shows skipped drafts. A new commit on the PR gets a fresh review.',
+        ),
+        actions: [
+          TextButton(
+            key: const Key('fleet.skip.cancel'),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('fleet.skip.confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Skip'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final reply = await widget.clients.fleet.skipReview(
+        SkipReviewRequest()..reviewId = r.reviewId,
+      );
+      switch (reply.status) {
+        case 'skipped':
+          _snack('Skipped PR #${r.prNumber}.');
+        case 'already_skipped':
+          _snack('Already skipped.');
+        case 'already_posted':
+          _snack('Already posted; nothing to skip.');
+        case 'not_found':
+          _snack('Draft not found.');
+        default:
+          _snack('Skip: ${reply.status}');
+      }
+      await _reload();
+    } catch (e) {
+      _snack('Skip failed: $e');
     }
   }
 
@@ -303,34 +375,57 @@ class _FleetPageState extends State<FleetPage> {
           color: theme.colorScheme.surfaceContainerHighest,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
+            // A Wrap, not a Row: on a narrow window the filters move to a
+            // second line instead of clipping off the edge.
+            child: Wrap(
+              spacing: 12,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                const Icon(Icons.rate_review_outlined, size: 18),
-                const SizedBox(width: 8),
-                const Text('Review drafts',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(width: 16),
+                const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.rate_review_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('Review drafts',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                // Fixed width: a long owner/name ellipsizes rather than
+                // widening the bar.
                 SizedBox(
-                  width: 220,
-                  child: TextField(
+                  width: 260,
+                  child: DropdownButton<String>(
                     key: const Key('fleet.filter.repo'),
-                    controller: _repo,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      labelText: 'repo (owner__name)',
-                      border: OutlineInputBorder(),
-                    ),
-                    onSubmitted: (_) => _reload(),
+                    isExpanded: true,
+                    value: _repo,
+                    items: [
+                      const DropdownMenuItem(
+                          value: '', child: Text('all repos')),
+                      for (final r in ({
+                        ..._knownRepos,
+                        if (_repo.isNotEmpty) _repo
+                      }.toList()
+                        ..sort()))
+                        DropdownMenuItem(
+                            value: r,
+                            child: Text(_repoLabel(r),
+                                overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setState(() => _repo = v);
+                      _reload();
+                    },
                   ),
                 ),
-                const SizedBox(width: 12),
                 DropdownButton<_StatusFilter>(
                   key: const Key('fleet.filter.status'),
                   value: _status,
                   items: _StatusFilter.values
                       .map((s) => DropdownMenuItem(
                             value: s,
-                            child: Text(s.name),
+                            child: Text(s.label),
                           ))
                       .toList(),
                   onChanged: (v) {
@@ -339,7 +434,6 @@ class _FleetPageState extends State<FleetPage> {
                     _reload();
                   },
                 ),
-                const Spacer(),
                 OutlinedButton.icon(
                   key: const Key('fleet.filter.refresh'),
                   onPressed: _reload,
@@ -377,6 +471,7 @@ class _FleetPageState extends State<FleetPage> {
                   clients: widget.clients,
                   summary: _selected!,
                   onApprove: () => _approve(_selected!),
+                  onSkip: () => _skip(_selected!),
                 ),
         ),
       ],
@@ -511,6 +606,7 @@ class _FleetPageState extends State<FleetPage> {
       'posted' => (Icons.upload, c.success),
       'approved' => (Icons.check_circle_outline, c.info),
       'superseded' => (Icons.remove_circle_outline, c.muted),
+      'skipped' => (Icons.block, c.muted),
       _ => (Icons.edit_note, c.warning), // drafted
     };
     final glyph = Icon(icon, size: 18, color: color, semanticLabel: status);
@@ -540,11 +636,13 @@ class _DraftDetail extends StatefulWidget {
   final PortalClients clients;
   final ReviewSummary summary;
   final VoidCallback onApprove;
+  final VoidCallback onSkip;
   const _DraftDetail({
     super.key,
     required this.clients,
     required this.summary,
     required this.onApprove,
+    required this.onSkip,
   });
 
   @override
@@ -569,6 +667,7 @@ class _DraftDetailState extends State<_DraftDetail> {
   bool get _locked =>
       widget.summary.status == 'posted' ||
       widget.summary.status == 'approved' ||
+      widget.summary.status == 'skipped' ||
       !CapabilityScope.of(context).can('write', 'review');
 
   /// The edit buffer differs from the persisted body.
@@ -660,10 +759,12 @@ class _DraftDetailState extends State<_DraftDetail> {
   Widget build(BuildContext context) {
     final r = widget.summary;
     final posted = r.status == 'posted';
+    final skipped = r.status == 'skipped';
     // Approving posts the *persisted* body, so block it while there are unsaved
     // edits — the operator should Save first (edit → save → approve). Also block
     // when there's no readable body here (an unavailable/cross-root draft).
-    final canApprove = !posted && !_dirty && !_saving && !_unavailable;
+    final canApprove =
+        !posted && !skipped && !_dirty && !_saving && !_unavailable;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -691,7 +792,7 @@ class _DraftDetailState extends State<_DraftDetail> {
                           if (r.requestedBy.isNotEmpty)
                             'requested by ${r.requestedBy.join(", ")}',
                           if (r.approvedBy.isNotEmpty)
-                            'approved by ${r.approvedBy}',
+                            '${skipped ? "skipped" : "approved"} by ${r.approvedBy}',
                         ].join(' · '),
                         key: const Key('fleet.detail.attribution'),
                         maxLines: 2,
@@ -702,12 +803,29 @@ class _DraftDetailState extends State<_DraftDetail> {
                 ),
               ),
               const SizedBox(width: 12),
+              // Skip: never post this draft. Not offered once it is posted or
+              // already skipped.
+              if (CapabilityScope.of(context).can('approve', 'review') &&
+                  !posted &&
+                  !skipped) ...[
+                OutlinedButton.icon(
+                  key: const Key('fleet.detail.skip'),
+                  onPressed: _saving ? null : widget.onSkip,
+                  icon: const Icon(Icons.block, size: 18),
+                  label: const Text('Skip'),
+                ),
+                const SizedBox(width: 8),
+              ],
               if (CapabilityScope.of(context).can('approve', 'review'))
                 FilledButton.icon(
                   key: const Key('fleet.detail.approve'),
                   onPressed: canApprove ? widget.onApprove : null,
                   icon: const Icon(Icons.send, size: 18),
-                  label: Text(posted ? 'Posted' : 'Approve & post'),
+                  label: Text(posted
+                      ? 'Posted'
+                      : skipped
+                          ? 'Skipped'
+                          : 'Approve & post'),
                 ),
             ],
           ),

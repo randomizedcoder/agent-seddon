@@ -60,6 +60,12 @@ enum Expect {
     "ReviewFleetService.Approve",
     Expect::Routes(&[("POST", "/v1/fleet/reviews/{review_id}/approve")])
 )]
+// positive — skip is a second action on the same draft id, its own sub-path.
+#[case::positive_skip_maps_to_post_with_id(
+    "action RPC ReviewFleetService.SkipReview -> POST /v1/fleet/reviews/{review_id}/skip",
+    "ReviewFleetService.SkipReview",
+    Expect::Routes(&[("POST", "/v1/fleet/reviews/{review_id}/skip")])
+)]
 // corner — a delete maps to the DELETE verb by id (a less common verb in the surface).
 #[case::corner_delete_maps_to_delete_verb(
     "ReviewFleetService.Delete -> DELETE /v1/fleet/sessions/{id}",

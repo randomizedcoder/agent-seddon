@@ -2756,6 +2756,7 @@ async fn positive_fleet_list_reviews_round_trip(#[case] transport: Transport) {
         session_id: None,
         status: None,
         limit: 0,
+        ..Default::default()
     };
     let got = client.list_reviews(&filter).await.unwrap();
     assert_eq!(got.len(), 2, "both drafts crossed the wire");
@@ -3083,4 +3084,140 @@ async fn adversarial_fleet_update_hostile_review_id_is_opaque_data(#[case] hosti
         "hostile id is looked up (not found), never actioned as a path"
     );
     assert_eq!(*draft.body.lock().unwrap(), "safe", "no write occurred");
+}
+
+// ---- SkipReview over the wire ---------------------------------------------
+//
+// A `FleetApprover` double whose `skip` returns a preset outcome and records the ids it saw.
+struct SkipApprover {
+    outcome: agent_core::SkipOutcome,
+    seen: std::sync::Mutex<Vec<String>>,
+}
+#[async_trait]
+impl agent_core::FleetApprover for SkipApprover {
+    async fn approve(
+        &self,
+        _review_id: &str,
+        _approved_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::ApproveOutcome> {
+        Ok(agent_core::ApproveOutcome::Skipped)
+    }
+    async fn skip(
+        &self,
+        review_id: &str,
+        _skipped_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::SkipOutcome> {
+        self.seen.lock().unwrap().push(review_id.to_string());
+        Ok(self.outcome.clone())
+    }
+}
+
+fn fleet_client_router(
+    approver: Arc<dyn agent_core::FleetApprover>,
+) -> tonic::transport::server::Router {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_approver(approver)
+            .into_server(),
+    )
+}
+
+// Every skip outcome is an ordinary reply that maps back to itself, and the review_id
+// reaches the approver. An approve of a skipped draft maps back to `Skipped` too.
+#[rstest]
+#[case::positive_skipped("the skip happened", agent_core::SkipOutcome::Skipped)]
+#[case::boundary_already_skipped("a repeat skip", agent_core::SkipOutcome::AlreadySkipped)]
+#[case::negative_already_posted("posted first", agent_core::SkipOutcome::AlreadyPosted)]
+#[case::negative_not_found("no such draft", agent_core::SkipOutcome::NotFound)]
+#[tokio::test]
+async fn fleet_skip_review_outcomes(
+    #[case] description: &str,
+    #[case] outcome: agent_core::SkipOutcome,
+) {
+    let approver = Arc::new(SkipApprover {
+        outcome: outcome.clone(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        fleet_client_router(approver.clone() as Arc<dyn agent_core::FleetApprover>),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert_eq!(
+        client.skip_review("r-uuid-9").await.unwrap(),
+        outcome,
+        "{description}"
+    );
+    assert_eq!(
+        *approver.seen.lock().unwrap(),
+        vec!["r-uuid-9".to_string()],
+        "{description}"
+    );
+    assert_eq!(
+        client.approve("r-uuid-9").await.unwrap(),
+        agent_core::ApproveOutcome::Skipped,
+        "{description}: approve's `skipped` status maps back"
+    );
+}
+
+// Skip is opt-in like Approve: no approver ⇒ UNIMPLEMENTED; an approver that can't skip
+// (the trait default) surfaces its error rather than pretending it skipped.
+#[rstest]
+#[case::negative_no_approver("the bare control plane", false)]
+#[case::corner_approver_without_skip("an approver using the default skip", true)]
+#[tokio::test]
+async fn negative_fleet_skip_unsupported(#[case] description: &str, #[case] wire_approver: bool) {
+    let router = if wire_approver {
+        fleet_client_router(Arc::new(RecordingApprover {
+            outcome: agent_core::ApproveOutcome::NotFound,
+            seen: std::sync::Mutex::new(Vec::new()),
+        }) as Arc<dyn agent_core::FleetApprover>)
+    } else {
+        agent_grpc::server::review_fleet_router(Arc::new(agent_review_fleet::MemoryFleet::new()))
+    };
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert!(client.skip_review("r-x").await.is_err(), "{description}");
+}
+
+// `exclude_status` crosses to the history as sent; more than 8 entries is refused before
+// the history is asked.
+#[rstest]
+#[case::positive_hide_skipped("hide skipped", vec!["skipped"], true)]
+#[case::boundary_none("no exclusions", vec![], true)]
+#[case::boundary_eight("eight entries is the cap", vec!["x"; 8], true)]
+#[case::adversarial_nine("nine entries is refused", vec!["x"; 9], false)]
+#[tokio::test]
+async fn fleet_list_exclude_status(
+    #[case] description: &str,
+    #[case] exclude: Vec<&str>,
+    #[case] accepted: bool,
+) {
+    let history = Arc::new(RecordingHistory {
+        drafts: Vec::new(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_history(history.clone() as Arc<dyn agent_core::FleetHistory>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let exclude: Vec<String> = exclude.into_iter().map(String::from).collect();
+    let filter = agent_core::ReviewDraftFilter {
+        exclude_status: exclude.clone(),
+        ..Default::default()
+    };
+    let got = client.list_reviews(&filter).await;
+    assert_eq!(got.is_ok(), accepted, "{description}");
+    let seen = history.seen.lock().unwrap();
+    if accepted {
+        assert_eq!(seen[0].exclude_status, exclude, "{description}");
+    } else {
+        assert!(seen.is_empty(), "{description}: the history is not asked");
+    }
 }

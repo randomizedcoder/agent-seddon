@@ -22,6 +22,7 @@ void main() {
   const rosterRpc = 'agent.v1.ReviewFleetService/List';
   const getRpc = 'agent.v1.ReviewFleetService/GetReview';
   const approveRpc = 'agent.v1.ReviewFleetService/Approve';
+  const skipRpc = 'agent.v1.ReviewFleetService/SkipReview';
   const updateRpc = 'agent.v1.ReviewFleetService/UpdateReview';
   const reviewNowRpc = 'agent.v1.ReviewFleetService/ReviewNow';
   const setEnabledRpc = 'agent.v1.ReviewFleetService/SetEnabled';
@@ -35,8 +36,10 @@ void main() {
     String status = 'drafted',
     double risk = 0.42,
     int findings = 3,
+    String approvedBy = '',
   }) =>
       ReviewSummary(
+        approvedBy: approvedBy,
         reviewId: id,
         repo: repo,
         prNumber: Int64(pr),
@@ -140,11 +143,54 @@ void main() {
 
         // ── filter bar ─────────────────────────────────────────────────────────
         case 'positive_filter_by_repo':
-          fake.listReviewsResponse = reviews([summary()]);
+          fake.listReviewsResponse =
+              reviews([summary(id: 'r1', repo: 'acme__widgets')]);
           await robot.load();
-          await robot.submitRepo('acme__widgets');
+          await robot.selectRepo('acme/widgets');
           final call = robot.log.last(listRpc);
           expect((call!.request as ListReviewsRequest).repo, 'acme__widgets');
+          await robot.settle();
+
+        case 'corner_repo_menu_from_roster_and_drafts':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'r1', repo: 'randomizedcoder__xtcp2'),
+            summary(id: 'r2', repo: 'randomizedcoder__xtcp2'),
+          ]);
+          fake.sessionListResponse =
+              roster([session(repo: 'NixOS__nixpkgs')]);
+          await robot.load();
+          await robot.openRepoMenu();
+          for (final label in [
+            'all repos',
+            'NixOS/nixpkgs',
+            'randomizedcoder/xtcp2'
+          ]) {
+            expect(find.text(label, skipOffstage: false).hitTestable(),
+                findsWidgets,
+                reason: label);
+          }
+          expect(robot.textShown('randomizedcoder__xtcp2'), isTrue,
+              reason: 'the list rows still show the stored key');
+          await robot.pickRepo('NixOS/nixpkgs');
+          await robot.settle();
+
+        case 'boundary_all_repos_clears_filter':
+          fake.listReviewsResponse =
+              reviews([summary(id: 'r1', repo: 'acme__widgets')]);
+          await robot.load();
+          await robot.selectRepo('acme/widgets');
+          await robot.selectRepo('all repos');
+          final call = robot.log.last(listRpc);
+          expect((call!.request as ListReviewsRequest).repo, '');
+          await robot.settle();
+
+        case 'adversarial_hostile_repo_name_is_text':
+          const hostile = '<img src=x>\u202e__\nevil';
+          fake.listReviewsResponse = reviews([summary(id: 'r1', repo: hostile)]);
+          await robot.load();
+          await robot.selectRepo('<img src=x>\u202e/\nevil');
+          final call = robot.log.last(listRpc);
+          expect((call!.request as ListReviewsRequest).repo, hostile);
           await robot.settle();
 
         case 'positive_filter_by_status':
@@ -153,6 +199,32 @@ void main() {
           await robot.selectStatus('approved');
           final call = robot.log.last(listRpc);
           expect((call!.request as ListReviewsRequest).status, 'approved');
+          await robot.settle();
+
+        case 'boundary_default_hides_skipped':
+          fake.listReviewsResponse = reviews([summary()]);
+          await robot.load();
+          final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.status, '');
+          expect(req.excludeStatus, ['skipped']);
+          await robot.settle();
+
+        case 'positive_show_skipped':
+          fake.listReviewsResponse = reviews([summary()]);
+          await robot.load();
+          await robot.selectStatus('skipped');
+          final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.status, 'skipped');
+          expect(req.excludeStatus, isEmpty);
+          await robot.settle();
+
+        case 'corner_all_includes_skipped':
+          fake.listReviewsResponse = reviews([summary()]);
+          await robot.load();
+          await robot.selectStatus('all');
+          final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.status, '');
+          expect(req.excludeStatus, isEmpty);
           await robot.settle();
 
         case 'positive_refresh_relists':
@@ -459,6 +531,124 @@ void main() {
           expect(robot.exists('fleet.session.reviewNow.s1'), isFalse);
           expect(robot.switchEnabled('fleet.session.enable.s1'), isFalse);
           expect(robot.log.fired(approveRpc), isFalse);
+          await robot.settle();
+
+        // ── skip ───────────────────────────────────────────────────────────────
+        case 'positive_skip_marks_skipped':
+          fake.listReviewsResponse = reviews([summary(id: 'r1', pr: 7)]);
+          fake.getReviewResponse = body('# Body');
+          fake.skipReviewResponse = SkipReviewReply()..status = 'skipped';
+          await robot.load();
+          await robot.selectReview('r1');
+          final lists = robot.log.countOf(listRpc);
+          await robot.openSkip();
+          expect(robot.exists('fleet.skip.confirm'), isTrue);
+          await robot.confirmSkip();
+          await robot.pumpUntil(() => robot.textShown('Skipped PR #7'),
+              reason: 'skipped snack');
+          final call = robot.log.last(skipRpc);
+          expect((call!.request as SkipReviewRequest).reviewId, 'r1');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) > lists,
+              reason: 're-list after skip');
+          expect(robot.log.fired(approveRpc), isFalse);
+          await robot.settle();
+
+        case 'positive_confirm_fires_skip':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.getReviewResponse = body('# Body');
+          fake.skipReviewResponse = SkipReviewReply()..status = 'skipped';
+          await robot.load();
+          await robot.selectReview('r1');
+          await robot.openSkip();
+          await robot.confirmSkip();
+          expect(robot.log.fired(skipRpc), isTrue);
+          await robot.settle();
+
+        case 'positive_skip_cancel_no_rpc':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.getReviewResponse = body('# Body');
+          await robot.load();
+          await robot.selectReview('r1');
+          await robot.openSkip();
+          await robot.cancelSkip();
+          expect(robot.exists('fleet.skip.confirm'), isFalse);
+          expect(robot.log.fired(skipRpc), isFalse);
+          await robot.settle();
+
+        case 'corner_skipped_draft_is_final':
+          fake.listReviewsResponse = reviews([
+            summary(
+                id: 'r1',
+                status: 'skipped',
+                approvedBy: 'example.com/user:google/bob')
+          ]);
+          fake.getReviewResponse = body('# Body');
+          await robot.load();
+          await robot.selectReview('r1');
+          expect(robot.exists('fleet.detail.skip'), isFalse);
+          expect(robot.buttonEnabled('fleet.detail.approve'), isFalse);
+          expect(robot.textShown('skipped by example.com/user:google/bob'),
+              isTrue);
+          await robot.settle();
+
+        case 'boundary_posted_draft_has_no_skip':
+          fake.listReviewsResponse =
+              reviews([summary(id: 'r1', status: 'posted')]);
+          fake.getReviewResponse = body('# Body');
+          await robot.load();
+          await robot.selectReview('r1');
+          expect(robot.exists('fleet.detail.skip'), isFalse);
+          await robot.settle();
+
+        case 'negative_skip_lost_race_to_post':
+          fake.listReviewsResponse = reviews([summary(id: 'r1', pr: 7)]);
+          fake.getReviewResponse = body('# Body');
+          fake.skipReviewResponse = SkipReviewReply()..status = 'already_posted';
+          await robot.load();
+          await robot.selectReview('r1');
+          await robot.openSkip();
+          await robot.confirmSkip();
+          await robot.pumpUntil(() => robot.textShown('Already posted'),
+              reason: 'already-posted snack');
+          expect(robot.textShown('Skipped PR #7'), isFalse);
+          await robot.settle();
+
+        case 'negative_skip_error_snack':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.getReviewResponse = body('# Body');
+          fake.failNext(
+              'SkipReview', const GrpcError.permissionDenied('no approve'));
+          await robot.load();
+          await robot.selectReview('r1');
+          await robot.openSkip();
+          await robot.confirmSkip();
+          await robot.pumpUntil(() => robot.textShown('Skip failed'),
+              reason: 'error snack');
+          expect(robot.isListLoaded, isTrue);
+          await robot.settle();
+
+        case 'adversarial_double_click_one_skip':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.getReviewResponse = body('# Body');
+          fake.skipReviewResponse = SkipReviewReply()..status = 'skipped';
+          await robot.load();
+          await robot.selectReview('r1');
+          fake.responseDelay = const Duration(milliseconds: 200);
+          await robot.openSkip();
+          await robot.doubleConfirmSkip();
+          expect(robot.log.countOf(skipRpc), 1);
+          fake.responseDelay = Duration.zero;
+          await robot.unmountAndSettle();
+
+        case 'adversarial_review_viewer_sees_no_skip':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.getReviewResponse = body('# Body');
+          await robot.loadWith(
+              Capabilities.of(const ['read:review', 'read:fleet']));
+          await robot.selectReview('r1');
+          expect(robot.detailLoaded, isTrue);
+          expect(robot.exists('fleet.detail.skip'), isFalse);
+          expect(robot.log.fired(skipRpc), isFalse);
           await robot.settle();
 
         // ── session editor (forge-auth F5d2) ──────────────────────────────────
