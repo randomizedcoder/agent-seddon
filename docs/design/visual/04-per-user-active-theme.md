@@ -68,3 +68,7 @@ The portal renders before `GetActive` returns. It keeps the last resolved theme 
 in `localStorage` (a cache, not the source of truth) and paints with it, then replaces it
 when the server answers. With an empty cache it paints `prototype`. The cache is keyed by
 the signed-in subject, so a shared browser does not show one user's theme to the next.
+
+> **As built (3b):** the cache key is a hash of tenant and subject; the sign-in page
+> paints the browser's last *built-in* choice, never a user theme; cached and served
+> documents are validated again. See [STATUS](STATUS.md#3b--the-portal-follows-the-signed-in-user).

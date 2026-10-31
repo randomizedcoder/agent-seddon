@@ -16,6 +16,7 @@ import '../testkit/fakes/provider_registry_service.dart';
 import '../testkit/fakes/review_fleet_service.dart';
 import '../testkit/fakes/role_service.dart';
 import '../testkit/fakes/session_registry_service.dart';
+import '../testkit/fakes/theme_service.dart';
 import '../testkit/recording.dart';
 import 'registry.dart';
 
@@ -53,6 +54,7 @@ void main() {
       FakeRoleService(log),
       FakeForgeRegistryService(log),
       FakeGithubInstallRegistryService(log),
+      FakeThemeService(log),
     ])
       s.$name: s,
   };

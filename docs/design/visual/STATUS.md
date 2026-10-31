@@ -12,7 +12,7 @@ One PR per increment. Every increment that changes the UI gets the Playwright re
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **merged** (#657) |
 | 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | **merged** (#658; 2b #659, landed on main by #660) |
-| 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | **3a open** (#661, service); 3b (portal) next |
+| 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | 3a **merged** (#661, service); **3b open** (#662, portal) |
 | 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | — | — | ✅ | editor widget tables | ✅ | planned |
 
 ## As built
@@ -137,6 +137,44 @@ Playwright review).
   - **A stored theme that no longer validates is treated as gone** (skipped by `List`,
     `NOT_FOUND` for `Get`, dropped through by `GetActive`), so tightening a rule never
     renders an unchecked theme.
+
+### 3b — the portal follows the signed-in user
+
+- `ThemeController.attach(server, tenant, subject)` runs when sign-in settles (or with
+  sign-in off, as the host's `local` user); `detach()` on sign-out. It paints the
+  user's cached theme at once, then calls `GetActive` and `List` (in parallel) and
+  paints the server's answer. A pick or mode change applies locally, is cached and is
+  sent with `SetActive`. `ThemeServer` is the seam (`GrpcThemeServer` over the
+  generated client), so the controller is tested without a channel.
+- The picker shows the built-ins, then the user's themes from `List`, each card saying
+  **Private** or **Shared** (also in its screen-reader label).
+- Tests: `test/unit/theme/active_test.dart` (attach table: 15 rows over cache × server
+  answer, including hostile caches and served themes; wire-mode and cache-key tables;
+  races, user switch, sign-out, refused `SetActive`, failed `List`); six new rows in
+  `theme_spec.dart` driven over the loopback wire against `FakeThemeService`, which is
+  also in the contract test.
+- Visual review: this branch's gateway with a file theme store and two seeded user
+  themes, behind its own Envoy, portal on :8098 with sign-in off. Checked: `List` and
+  `GetActive` fire at start; the user themes get cards; picking Ocean and Dark sends two
+  `SetActive`s; with browser storage cleared a reload restores Ocean dark from the
+  server; with `ThemeService` blocked a reload paints Ocean dark from the cache; the
+  rail menu lists the user themes.
+- Differences from the design:
+  - **The browser keeps a separate built-in choice for the sign-in page.**
+    `agent_portal.theme.v1` holds the last settled built-in (never a user theme), so the
+    sign-in page and the first frame before `WhoAmI` returns do not flash. A user theme
+    paints only once the user is known.
+  - **The cache key is `sha256(tenant, subject)`**, not the subject, so storage holds no
+    identifier and two tenants' `alice` never share a slot.
+  - **The served theme is checked again.** A built-in is taken from the bundle, never
+    the wire; a user theme is validated, and one that fails (or claims a built-in's id)
+    paints `prototype`. A cached document gets the same checks.
+  - **A pick wins over an in-flight `GetActive`**, and a reply for a previous user is
+    dropped. A failed `SetActive` keeps the local choice and is logged; there is no
+    banner yet.
+  - **An agent without `ThemeService` keeps working**: `UNIMPLEMENTED` leaves the cached
+    (or `prototype`) theme painted and picks are local. A user's increment-2 browser
+    choice is not migrated to the server; they pick once more.
 
 ## Open questions
 

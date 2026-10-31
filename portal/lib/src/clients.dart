@@ -13,6 +13,7 @@ import 'gen/agent/v1/prompt.pbgrpc.dart';
 import 'gen/agent/v1/review_fleet.pbgrpc.dart';
 import 'gen/agent/v1/role.pbgrpc.dart';
 import 'gen/agent/v1/session_registry.pbgrpc.dart';
+import 'gen/agent/v1/theme.pbgrpc.dart';
 import 'gen/agent/v1/upstream.pbgrpc.dart';
 import 'transport/channel_factory.dart';
 
@@ -65,6 +66,10 @@ class PortalClients {
       ForgeRegistryServiceClient(gatewayChannel, interceptors: interceptors);
   late final GithubInstallRegistryServiceClient githubInstalls =
       GithubInstallRegistryServiceClient(gatewayChannel, interceptors: interceptors);
+  // The signed-in user's active theme and the themes they may pick
+  // (docs/design/visual/04-per-user-active-theme.md).
+  late final ThemeServiceClient themes =
+      ThemeServiceClient(gatewayChannel, interceptors: interceptors);
 
   late final AgentSessionServiceClient session =
       AgentSessionServiceClient(sessionsChannel, interceptors: interceptors);
