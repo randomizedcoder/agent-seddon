@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:fixnum/fixnum.dart';
 
 import 'gen/agent/v1/common.pb.dart';
@@ -165,4 +167,22 @@ CognitionGraph graphFromJson(Map<String, dynamic> j) {
     }
   }
   return g;
+}
+
+/// [graph] as one canonical string, for "same graph?" checks. Object keys are
+/// sorted at every depth and whole numbers lose their `.0`, so two copies of one
+/// graph compare equal however their `params` maps were ordered — the server
+/// sends map fields in no fixed order, so [graphToJson] alone is not stable
+/// across fetches.
+String canonicalGraphJson(CognitionGraph graph) =>
+    jsonEncode(_canonical(graphToJson(graph)));
+
+dynamic _canonical(dynamic v) {
+  if (v is Map) {
+    final keys = v.keys.map((k) => '$k').toList()..sort();
+    return {for (final k in keys) k: _canonical(v[k])};
+  }
+  if (v is List) return v.map(_canonical).toList();
+  if (v is double && v.isFinite && v == v.truncateToDouble()) return v.toInt();
+  return v;
 }

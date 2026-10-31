@@ -46,6 +46,20 @@ const graphSpec = PageSpec('graph', [
     description: 'Retry re-runs DescribeNodeTypes and clears the banner',
     expectedRpc: 'agent.v1.GraphService/DescribeNodeTypes',
   ),
+  SpecRow(
+    elementId: 'graph.library.item',
+    caseClass: CaseClass.corner,
+    name: 'active_graph_not_readded',
+    description: 'the active graph already in the library is not added again when its params arrive in another key order',
+    expectedRpc: 'agent.v1.GraphService/Get',
+  ),
+  SpecRow(
+    elementId: 'graph.library.item',
+    caseClass: CaseClass.adversarial,
+    name: 'stored_duplicate_names_collapse',
+    description: 'a stored library repeating one name (older portals re-added the active graph on every visit) loads with identical copies dropped and the rest renamed, so tile keys stay unique',
+    expectedRpc: 'agent.v1.GraphService/DescribeNodeTypes',
+  ),
 
   // ── library actions ─────────────────────────────────────────────────────────
   SpecRow(

@@ -44,10 +44,38 @@ class GraphLibrary {
           ));
         }
       }
-      return GraphLibrary(out);
+      return GraphLibrary(_deduplicated(out));
     } catch (_) {
       return GraphLibrary([]);
     }
+  }
+
+  /// The name the server's active graph is added under.
+  static const activeName = 'active (server)';
+
+  /// Add the server's active [graph] unless an entry already holds the same
+  /// graph. Returns the entry added, or null when it was already there.
+  GraphLibraryEntry? addActive(CognitionGraph graph) {
+    final want = canonicalGraphJson(graph);
+    if (entries.any((e) => canonicalGraphJson(e.graph) == want)) return null;
+    final entry = GraphLibraryEntry(uniqueName(activeName), graph);
+    entries.add(entry);
+    return entry;
+  }
+
+  /// Names are the list's widget keys, so they must be unique. A stored library
+  /// can break that (it is untrusted, and older portals added the active graph
+  /// again on every visit): drop entries that repeat an earlier entry's name and
+  /// graph, and rename the rest.
+  static List<GraphLibraryEntry> _deduplicated(List<GraphLibraryEntry> all) {
+    final out = GraphLibrary([]);
+    final seen = <String, Set<String>>{};
+    for (final e in all) {
+      final graphs = seen.putIfAbsent(e.name, () => {});
+      if (!graphs.add(canonicalGraphJson(e.graph))) continue;
+      out.entries.add(GraphLibraryEntry(out.uniqueName(e.name), e.graph));
+    }
+    return out.entries;
   }
 
   /// Persist the library (best effort).

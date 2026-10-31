@@ -1,4 +1,5 @@
 import 'package:agent_portal/src/gen/agent/v1/graph.pb.dart';
+import 'package:agent_portal/src/graph_json.dart';
 import 'package:agent_portal/src/graph_library.dart';
 import 'package:agent_portal/src/io/graph_platform.dart' as platform;
 import 'package:flutter_test/flutter_test.dart';
@@ -79,6 +80,57 @@ void main() {
       final loaded = GraphLibrary.load();
       expect(loaded.entries.map((e) => e.name), ['ok']);
       expect(loaded.entries.single.graph.version, 5);
+    });
+  });
+
+  group('addActive and repeated names', () {
+    CognitionGraph g(List<String> keys, {int version = 1}) =>
+        CognitionGraph(version: version, nodes: [
+          MapEntry(
+              'n',
+              GraphNode(
+                  type: 't',
+                  params: dartToJsonValue({for (final k in keys) k: 1}))),
+        ]);
+    const active = GraphLibrary.activeName;
+
+    test('positive_add_active_once', () {
+      // A new active graph is added under the active name, and only once.
+      final lib = GraphLibrary([GraphLibraryEntry('alpha', graph(1))]);
+      expect(lib.addActive(g(['a']))?.name, active);
+      expect(lib.addActive(g(['a'])), isNull);
+      expect(lib.entries, hasLength(2));
+    });
+    test('corner_reordered_params_match', () {
+      // The same graph with its params in another key order is not re-added.
+      final lib = GraphLibrary([GraphLibraryEntry('mine', g(['a', 'b']))]);
+      expect(lib.addActive(g(['b', 'a'])), isNull);
+      expect(lib.entries, hasLength(1));
+    });
+    test('boundary_changed_active_gets_a_free_name', () {
+      // A different active graph is added beside the old one, not over it.
+      final lib = GraphLibrary([GraphLibraryEntry(active, g(['a']))]);
+      expect(lib.addActive(g(['a'], version: 2))?.name, '$active 2');
+    });
+    test('negative_same_graph_under_other_names_kept', () {
+      // Only a repeated name with the same graph is dropped on load.
+      GraphLibrary([
+        GraphLibraryEntry('one', graph(1)),
+        GraphLibraryEntry('two', graph(1)),
+      ]).save();
+      expect(GraphLibrary.load().entries.map((e) => e.name), ['one', 'two']);
+    });
+    test('adversarial_repeated_names_collapse_on_load', () {
+      // 27 copies of one graph and one other graph, all under one name, as an
+      // older portal left them: one copy stays, the other graph is renamed.
+      GraphLibrary([
+        for (var i = 0; i < 27; i++)
+          GraphLibraryEntry(active, g(i.isEven ? ['a', 'b'] : ['b', 'a'])),
+        GraphLibraryEntry(active, g(['a'], version: 2)),
+        GraphLibraryEntry('alpha', graph(1)),
+      ]).save();
+      expect(GraphLibrary.load().entries.map((e) => e.name),
+          [active, '$active 2', 'alpha']);
     });
   });
 }

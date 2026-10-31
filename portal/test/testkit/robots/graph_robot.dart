@@ -77,6 +77,11 @@ class GraphRobot extends Robot {
   /// init. Call BEFORE [load]. Skips the asset-seed path (empty library only).
   void seed(List<GraphLibraryEntry> entries) => GraphLibrary(entries).save();
 
+  /// Store [blob] as the library verbatim, as an older portal (or a hand edit)
+  /// may have left it.
+  void seedRaw(String blob) =>
+      platform.saveRaw('agent_portal.graph_library.v1', blob);
+
   /// A small, fully-populated graph: two nodes (a `critic_gate` with the default
   /// simple schema → form editor; a schema-less `generate` → raw editor) and one
   /// edge, so node/edge tiles, remove buttons, and both param editors render.
