@@ -125,6 +125,13 @@ Playwright review).
     tenant to every store call itself, so isolation does not depend on how the backend
     was wrapped. `[tenancy] per_tenant` off puts every caller in `local`; subjects still
     keep their private themes and picks apart.
+  - **Private ids are per person, and caps are split** (from the security review of
+    #661). 03 made ids unique per tenant, so `Put` of an id held privately by someone
+    else had to refuse, which told the caller that theme existed; and one person's
+    private themes counted against the tenant's 200. Now private themes live under
+    `<owner hash>.<id>` in their own collection: the tenant shares at most 200 themes,
+    each person keeps at most 20 private ones, and a private theme with the same id as
+    a shared one hides it from its owner only.
   - **`owner` is returned only to the owner**, so a shared theme does not reveal who
     stored it beyond its `author`.
   - **A stored theme that no longer validates is treated as gone** (skipped by `List`,

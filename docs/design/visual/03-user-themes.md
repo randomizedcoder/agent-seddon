@@ -61,7 +61,8 @@ bounded.
 
 > **As built (3a):** built-in overrides are not implemented yet (built-in ids are
 > refused), `publish:theme` is `(approve, theme)`, the active-theme route is
-> `/v1/active-theme`, and the backends are `file` and `postgres`. See
+> `/v1/active-theme`, the backends are `file` and `postgres`, and private theme ids
+> are per person (200 shared themes per tenant, 20 private per person). See
 > [STATUS](STATUS.md#3a--themeservice-store-rbac).
 
 Themes are cards in `agent-config-store`, collection `themes`, keyed by

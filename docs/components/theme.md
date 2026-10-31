@@ -26,10 +26,15 @@ progress is in its [STATUS](../design/visual/STATUS.md).
 `ThemeBook` over the shared config store; `[themes] default_theme` (default `prototype`)
 is what a user sees before picking. The NixOS `agent-stack` module sets `postgres`.
 
-- Collections `themes` (one `Theme` card per id) and `user_prefs` (one `UserPrefs` card
-  per user, id = the first 16 bytes of `sha256(subject)` in hex). Both are keyed by the
-  verified caller's tenant, which the book passes to the store explicitly; with
-  `[tenancy] per_tenant` off every caller is in `local`.
+- Collections `themes` (tenant-shared themes, keyed by id), `private_themes` (keyed by
+  `<owner hash>.<id>`) and `user_prefs` (one `UserPrefs` card per user; the owner hash is
+  the first 16 bytes of `sha256(subject)` in hex). All are keyed by the verified caller's
+  tenant, which the book passes to the store explicitly; with `[tenancy] per_tenant` off
+  every caller is in `local`.
+- **Private ids are per person.** Two people can each keep a private `blue`, and no
+  answer to any request reveals that someone else holds a private theme by some id. If
+  the caller has a private theme and the tenant shares one with the same id, the
+  caller sees their own.
 - **Who sees what.** Built-ins: everyone. `VISIBILITY_TENANT`: the tenant. Private: the
   owner. A theme the caller cannot see is `NOT_FOUND` for every RPC.
 - **Who changes what.** Built-in ids are refused (built-ins change in `config/themes/`).
@@ -37,7 +42,10 @@ is what a user sees before picking. The NixOS `agent-stack` module sets `postgre
   `(approve, theme)`. `owner` comes from the caller and is returned only to the owner.
 - **Versions.** Create at `version` 0; update at the stored version; anything else is
   `ABORTED`. The write is a compare-and-swap, so two racing creates cannot both win.
-- **Caps.** 200 stored themes per tenant (`RESOURCE_EXHAUSTED`), 64 KiB per theme.
+- **Caps.** 200 shared themes per tenant and 20 private themes per person
+  (`RESOURCE_EXHAUSTED`), 64 KiB per theme, so nobody can use up another person's
+  room. The private count is an index on the owner's `UserPrefs` card, written in the
+  same batch as the theme.
 - **Validation on `Put`.** `validate` plus `validate_user`: a seeded palette that colours
   text (`error`, `success`, `warning`, `info`, `muted`) must write `surface` and the roles
   paired with it, and a name or id whose skeleton matches a built-in's (`w1ndows`,
@@ -99,5 +107,5 @@ and the contrast and tap-target guidelines for each theme and brightness).
 | `tests/portal_assets_parity.rs` | the JSON assets equal their textprotos; no stray assets |
 | `src/color.rs` | contrast maths against known WCAG values |
 | `src/user.rs` | `skeleton` and `validate_user` tables |
-| `tests/book_table.rs` | the `ThemeService` and fallback-chain tables over an in-memory store: visibility, ownership, versions, the cap, tenants, hostile ids and fields |
+| `tests/book_table.rs` | the `ThemeService` and fallback-chain tables over an in-memory store: visibility, ownership, versions, both caps, per-person private ids, tenants, hostile ids and fields |
 | `agent-grpc` `server/theme.rs` | wire codes per role, tenant from the principal not the header, `per_tenant` |

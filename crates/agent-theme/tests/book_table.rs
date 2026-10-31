@@ -7,18 +7,19 @@ use std::sync::Arc;
 
 use agent_config_store::MemoryBackend;
 use agent_proto::pb;
-use agent_theme::book::{prefs_id, MAX_THEMES_PER_TENANT};
+use agent_theme::book::{prefs_id, MAX_PRIVATE_THEMES_PER_OWNER, MAX_THEMES_PER_TENANT};
 use agent_theme::{builtins, BookError, Caller, ThemeBook, ThemeErrorKind, FALLBACK_THEME};
 use rstest::rstest;
 
-/// The people in the tables. Alice, Bob and Admin share the `acme` tenant; only
-/// Admin holds `(approve, theme)`. `AliceElsewhere` has Alice's subject in another
+/// The people in the tables. Alice, Bob, Admin and Admin2 share the `acme` tenant;
+/// only the admins hold `(approve, theme)`. `AliceElsewhere` has Alice's subject in another
 /// tenant, so a row can show the tenant, not the subject, is the boundary.
 #[derive(Clone, Copy, Debug)]
 enum Who {
     Alice,
     Bob,
     Admin,
+    Admin2,
     AliceElsewhere,
 }
 
@@ -27,6 +28,7 @@ fn caller(who: Who) -> Caller {
         Who::Alice => ("acme", "alice", false),
         Who::Bob => ("acme", "bob", false),
         Who::Admin => ("acme", "admin", true),
+        Who::Admin2 => ("acme", "admin2", true),
         Who::AliceElsewhere => ("globex", "alice", false),
     };
     Caller {
@@ -46,8 +48,8 @@ enum Step {
     SetActive(Who, &'static str, pb::ThemeMode),
     /// `SetActive` with a raw mode number, for out-of-range modes.
     SetActiveRaw(Who, &'static str, i32),
-    /// Put `n` private themes `fill-000`… for `who`.
-    Fill(Who, usize),
+    /// Put `n` themes `fill-000`… for `who`: shared when the flag is set, else private.
+    Fill(Who, usize, bool),
 }
 
 /// What an action must come to.
@@ -68,7 +70,7 @@ fn outcome<T>(r: Result<T, BookError>) -> Expect {
         Err(BookError::Denied(_)) => Expect::Denied,
         Err(BookError::Conflict(_)) => Expect::Conflict,
         Err(BookError::Invalid(e)) => Expect::Invalid(e.kind()),
-        Err(BookError::Full) => Expect::Full,
+        Err(BookError::Full(_)) => Expect::Full,
         Err(BookError::Store(e)) => panic!("the memory store failed: {e}"),
     }
 }
@@ -98,12 +100,13 @@ async fn run(book: &ThemeBook, step: Step) -> Expect {
             outcome(book.set_active(&caller(who), id, mode as i32).await)
         }
         Step::SetActiveRaw(who, id, mode) => outcome(book.set_active(&caller(who), id, mode).await),
-        Step::Fill(who, n) => {
+        Step::Fill(who, n, shared_fill) => {
             for i in 0..n {
-                let got = outcome(
-                    book.put(&caller(who), user_theme(&format!("fill-{i:03}")))
-                        .await,
-                );
+                let mut t = user_theme(&format!("fill-{i:03}"));
+                if shared_fill {
+                    shared(&mut t);
+                }
+                let got = outcome(book.put(&caller(who), t).await);
                 if got != Expect::Ok {
                     return got;
                 }
@@ -187,12 +190,16 @@ use Who::*;
 #[case::negative_invalid_theme(Case { description: "the validator runs on Put", setup: &[], action: Put(Alice, "blue", radius_33), expected: Expect::Invalid(ThemeErrorKind::OutOfRange) })]
 #[case::negative_pick_missing(Case { description: "picking a theme nobody stored is missing", setup: &[], action: SetActive(Alice, "nope", pb::ThemeMode::System), expected: Expect::NotFound })]
 #[case::negative_bad_mode(Case { description: "a mode outside ThemeMode is refused", setup: &[], action: SetActiveRaw(Alice, "prototype", 99), expected: Expect::Invalid(ThemeErrorKind::OutOfRange) })]
-// boundary: the per-tenant cap
-#[case::boundary_last_slot(Case { description: "the 200th theme fits", setup: &[Fill(Alice, MAX_THEMES_PER_TENANT - 1)], action: Put(Alice, "one-more", same), expected: Expect::Ok })]
-#[case::boundary_full(Case { description: "the 201st theme is refused", setup: &[Fill(Alice, MAX_THEMES_PER_TENANT)], action: Put(Alice, "one-more", same), expected: Expect::Full })]
-#[case::boundary_full_counts_the_tenant(Case { description: "the cap is per tenant, not per user", setup: &[Fill(Alice, MAX_THEMES_PER_TENANT)], action: Put(Bob, "bobs", same), expected: Expect::Full })]
-#[case::boundary_update_when_full(Case { description: "updating a stored theme needs no free slot", setup: &[Fill(Alice, MAX_THEMES_PER_TENANT)], action: Put(Alice, "fill-000", v1), expected: Expect::Ok })]
-#[case::boundary_cap_is_per_tenant(Case { description: "a full tenant does not fill another", setup: &[Fill(Alice, MAX_THEMES_PER_TENANT)], action: Put(AliceElsewhere, "one-more", same), expected: Expect::Ok })]
+// boundary: the caps (shared per tenant, private per owner)
+#[case::boundary_private_last_slot(Case { description: "the 20th private theme fits", setup: &[Fill(Alice, MAX_PRIVATE_THEMES_PER_OWNER - 1, false)], action: Put(Alice, "one-more", same), expected: Expect::Ok })]
+#[case::boundary_private_full(Case { description: "the 21st private theme is refused", setup: &[Fill(Alice, MAX_PRIVATE_THEMES_PER_OWNER, false)], action: Put(Alice, "one-more", same), expected: Expect::Full })]
+#[case::boundary_private_cap_is_per_owner(Case { description: "one person's full quota leaves room for the next person", setup: &[Fill(Alice, MAX_PRIVATE_THEMES_PER_OWNER, false)], action: Put(Bob, "bobs", same), expected: Expect::Ok })]
+#[case::boundary_update_when_full(Case { description: "updating a stored theme needs no free slot", setup: &[Fill(Alice, MAX_PRIVATE_THEMES_PER_OWNER, false)], action: Put(Alice, "fill-000", v1), expected: Expect::Ok })]
+#[case::boundary_delete_frees_a_slot(Case { description: "deleting a private theme frees its slot", setup: &[Fill(Alice, MAX_PRIVATE_THEMES_PER_OWNER, false), Delete(Alice, "fill-000")], action: Put(Alice, "one-more", same), expected: Expect::Ok })]
+#[case::boundary_shared_last_slot(Case { description: "the 200th shared theme fits", setup: &[Fill(Admin, MAX_THEMES_PER_TENANT - 1, true)], action: Put(Admin2, "one-more", shared), expected: Expect::Ok })]
+#[case::boundary_shared_full(Case { description: "the 201st shared theme is refused", setup: &[Fill(Admin, MAX_THEMES_PER_TENANT, true)], action: Put(Admin2, "one-more", shared), expected: Expect::Full })]
+#[case::boundary_shared_full_leaves_private_room(Case { description: "a full shared shelf does not stop private themes", setup: &[Fill(Admin, MAX_THEMES_PER_TENANT, true)], action: Put(Alice, "mine", same), expected: Expect::Ok })]
+#[case::boundary_private_cap_is_per_tenant(Case { description: "a full quota in one tenant does not fill another", setup: &[Fill(Alice, MAX_PRIVATE_THEMES_PER_OWNER, false)], action: Put(AliceElsewhere, "one-more", same), expected: Expect::Ok })]
 #[case::boundary_bad_mode_negative(Case { description: "a negative mode is refused", setup: &[], action: SetActiveRaw(Alice, "prototype", -1), expected: Expect::Invalid(ThemeErrorKind::OutOfRange) })]
 #[case::boundary_last_mode(Case { description: "the highest ThemeMode is accepted", setup: &[], action: SetActiveRaw(Alice, "prototype", pb::ThemeMode::Dark as i32), expected: Expect::Ok })]
 // corner
@@ -201,12 +208,17 @@ use Who::*;
 #[case::corner_publisher_unshares(Case { description: "a publisher may take a shared theme private again", setup: &[Put(Admin, "team", shared)], action: Put(Admin, "team", v1), expected: Expect::Ok })]
 #[case::corner_unshared_hidden(Case { description: "a theme taken private is hidden from the tenant again", setup: &[Put(Admin, "team", shared), Put(Admin, "team", v1)], action: Get(Bob, "team"), expected: Expect::NotFound })]
 #[case::corner_pick_unspecified_mode(Case { description: "mode 0 (unspecified) is accepted and means system", setup: &[], action: SetActiveRaw(Alice, "macos", 0), expected: Expect::Ok })]
+#[case::corner_share_own_private(Case { description: "a publisher shares their own private theme", setup: &[Put(Admin, "mine", same)], action: Put(Admin, "mine", shared_v1), expected: Expect::Ok })]
+#[case::negative_share_onto_taken_shared_id(Case { description: "sharing a private theme onto an id the tenant already shares is refused", setup: &[Put(Admin, "x", same), Put(Admin2, "x", shared)], action: Put(Admin, "x", shared_v1), expected: Expect::Denied })]
 #[case::corner_same_id_two_tenants(Case { description: "two tenants may use the same id", setup: &[Put(Alice, "blue", same)], action: Put(AliceElsewhere, "blue", same), expected: Expect::Ok })]
 // adversarial: another user, another tenant, hostile ids and fields
 #[case::adversarial_read_private(Case { description: "another user's private theme is missing, not forbidden", setup: &[Put(Alice, "blue", same)], action: Get(Bob, "blue"), expected: Expect::NotFound })]
 #[case::adversarial_delete_private(Case { description: "deleting another user's private theme is missing", setup: &[Put(Alice, "blue", same)], action: Delete(Bob, "blue"), expected: Expect::NotFound })]
-#[case::adversarial_overwrite_private(Case { description: "overwriting another user's private theme is refused", setup: &[Put(Alice, "blue", same)], action: Put(Bob, "blue", v1), expected: Expect::Denied })]
-#[case::adversarial_publisher_overwrite_private(Case { description: "a publisher may not overwrite someone's private theme either", setup: &[Put(Alice, "blue", same)], action: Put(Admin, "blue", shared_v1), expected: Expect::Denied })]
+#[case::adversarial_overwrite_private(Case { description: "updating another user's private theme looks like updating nothing", setup: &[Put(Alice, "blue", same)], action: Put(Bob, "blue", v1), expected: Expect::Conflict })]
+#[case::adversarial_same_id_reveals_nothing(Case { description: "another user's private id is free for me: no refusal reveals it", setup: &[Put(Alice, "blue", same)], action: Put(Bob, "blue", same), expected: Expect::Ok })]
+#[case::adversarial_publisher_overwrite_private(Case { description: "a publisher cannot reach someone's private theme either", setup: &[Put(Alice, "blue", same)], action: Put(Admin, "blue", shared_v1), expected: Expect::Conflict })]
+#[case::adversarial_publisher_shares_same_id(Case { description: "sharing an id someone holds privately neither fails nor touches theirs", setup: &[Put(Alice, "blue", same)], action: Put(Admin, "blue", shared), expected: Expect::Ok })]
+#[case::adversarial_overlong_id_get(Case { description: "an id past the cap is missing, not a store error", setup: &[], action: Get(Alice, "a123456789a123456789a123456789a123456789a123456789a123456789a123456789"), expected: Expect::NotFound })]
 #[case::adversarial_pick_private(Case { description: "picking another user's private theme is missing", setup: &[Put(Alice, "blue", same)], action: SetActive(Bob, "blue", pb::ThemeMode::System), expected: Expect::NotFound })]
 #[case::adversarial_other_tenant_shared(Case { description: "another tenant's shared theme is missing", setup: &[Put(Admin, "team", shared)], action: Get(AliceElsewhere, "team"), expected: Expect::NotFound })]
 #[case::adversarial_same_subject_other_tenant(Case { description: "the same subject in another tenant does not see the private theme", setup: &[Put(Alice, "blue", same)], action: Get(AliceElsewhere, "blue"), expected: Expect::NotFound })]
@@ -363,5 +375,42 @@ fn prefs_id_is_a_safe_segment(#[case] c: PrefsCase) {
         prefs_id(&format!("{}x", c.subject)),
         "{}",
         c.description
+    );
+}
+
+#[tokio::test]
+async fn corner_private_shadows_shared_for_its_owner_only() {
+    // Alice keeps a private `blue`; Admin then shares a `blue` of their own.
+    let b = book(FALLBACK_THEME);
+    let mut mine = user_theme("blue");
+    mine.description = "alice's".into();
+    b.put(&caller(Alice), mine).await.unwrap();
+    let mut team = user_theme("blue");
+    team.description = "the team's".into();
+    shared(&mut team);
+    b.put(&caller(Admin), team).await.unwrap();
+    let desc = |t: pb::Theme| t.description;
+    assert_eq!(
+        desc(b.get(&caller(Alice), "blue").await.unwrap()),
+        "alice's"
+    );
+    assert_eq!(
+        desc(b.get(&caller(Bob), "blue").await.unwrap()),
+        "the team's"
+    );
+    let alice_blues: Vec<_> = b
+        .list(&caller(Alice))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.id == "blue")
+        .map(desc)
+        .collect();
+    assert_eq!(alice_blues, ["alice's"], "listed once, her own");
+    // Deleting hers uncovers the shared one rather than touching it.
+    b.delete(&caller(Alice), "blue").await.unwrap();
+    assert_eq!(
+        desc(b.get(&caller(Alice), "blue").await.unwrap()),
+        "the team's"
     );
 }

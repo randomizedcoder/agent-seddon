@@ -202,4 +202,7 @@ message UserPrefs {
   string id = 1;
   string theme_id = 2;
   ThemeMode mode = 3;
+  // Server-maintained: the ids of the user's private themes, updated in the same
+  // write as each private theme, so the per-owner cap needs no scan.
+  repeated string private_theme_ids = 4;
 }

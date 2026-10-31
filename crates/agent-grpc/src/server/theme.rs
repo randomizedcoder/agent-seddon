@@ -80,7 +80,7 @@ fn status(e: BookError) -> Status {
         }
         BookError::Conflict(m) => Status::aborted(m),
         BookError::Invalid(e) => Status::invalid_argument(e.to_string()),
-        e @ BookError::Full => Status::resource_exhausted(e.to_string()),
+        BookError::Full(m) => Status::resource_exhausted(m),
         BookError::Store(e) => {
             tracing::warn!(error = %e, "theme store failed");
             Status::internal("theme store failed")
@@ -405,7 +405,7 @@ mod tests {
     #[case::corner_conflict("a stale version asks the client to reload", BookError::Conflict("stale".into()), Code::Aborted)]
     #[case::boundary_full(
         "the per-tenant cap is RESOURCE_EXHAUSTED",
-        BookError::Full,
+        BookError::Full("full".into()),
         Code::ResourceExhausted
     )]
     #[case::adversarial_store_detail_hidden("a store error does not echo its path", BookError::Store(agent_core::Error::Config("/var/lib/secret.db: locked".into())), Code::Internal)]

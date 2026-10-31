@@ -496,10 +496,12 @@ const UserPrefs$json = {
       '6': '.agent.v1.ThemeMode',
       '10': 'mode'
     },
+    {'1': 'private_theme_ids', '3': 4, '4': 3, '5': 9, '10': 'privateThemeIds'},
   ],
 };
 
 /// Descriptor for `UserPrefs`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List userPrefsDescriptor = $convert.base64Decode(
     'CglVc2VyUHJlZnMSDgoCaWQYASABKAlSAmlkEhkKCHRoZW1lX2lkGAIgASgJUgd0aGVtZUlkEi'
-    'cKBG1vZGUYAyABKA4yEy5hZ2VudC52MS5UaGVtZU1vZGVSBG1vZGU=');
+    'cKBG1vZGUYAyABKA4yEy5hZ2VudC52MS5UaGVtZU1vZGVSBG1vZGUSKgoRcHJpdmF0ZV90aGVt'
+    'ZV9pZHMYBCADKAlSD3ByaXZhdGVUaGVtZUlkcw==');

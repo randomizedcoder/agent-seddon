@@ -1366,11 +1366,13 @@ class UserPrefs extends $pb.GeneratedMessage {
     $core.String? id,
     $core.String? themeId,
     ThemeMode? mode,
+    $core.Iterable<$core.String>? privateThemeIds,
   }) {
     final result = create();
     if (id != null) result.id = id;
     if (themeId != null) result.themeId = themeId;
     if (mode != null) result.mode = mode;
+    if (privateThemeIds != null) result.privateThemeIds.addAll(privateThemeIds);
     return result;
   }
 
@@ -1391,6 +1393,7 @@ class UserPrefs extends $pb.GeneratedMessage {
     ..aOS(2, _omitFieldNames ? '' : 'themeId')
     ..aE<ThemeMode>(3, _omitFieldNames ? '' : 'mode',
         enumValues: ThemeMode.values)
+    ..pPS(4, _omitFieldNames ? '' : 'privateThemeIds')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1437,6 +1440,11 @@ class UserPrefs extends $pb.GeneratedMessage {
   $core.bool hasMode() => $_has(2);
   @$pb.TagNumber(3)
   void clearMode() => $_clearField(3);
+
+  /// Server-maintained: the ids of the user's private themes, updated in the same
+  /// write as each private theme, so the per-owner cap needs no scan.
+  @$pb.TagNumber(4)
+  $pb.PbList<$core.String> get privateThemeIds => $_getList(3);
 }
 
 const $core.bool _omitFieldNames =

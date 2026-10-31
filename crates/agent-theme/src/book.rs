@@ -6,13 +6,22 @@
 //! module decides what that caller may see and change. Everything is keyed by the
 //! caller's tenant, so one tenant's themes are never read from another's.
 //!
-//! - **Visibility.** Built-ins are seen by everyone; a `VISIBILITY_TENANT` theme by
-//!   the whole tenant; a private one by its owner only. A theme the caller cannot
-//!   see is reported as missing.
+//! - **Two namespaces.** Tenant-shared themes live in [`THEMES`] under their id.
+//!   Private themes live in [`PRIVATE_THEMES`] under `<owner hash>.<id>`, so two
+//!   people may each keep a private `blue`, and nothing anyone does with an id ever
+//!   reveals that someone else holds a private theme by that name. When the caller
+//!   has a private theme and the tenant a shared one with the same id, the caller's
+//!   own wins.
+//! - **Visibility.** Built-ins are seen by everyone, a shared theme by the tenant,
+//!   a private one by its owner. A theme the caller cannot see is reported missing.
 //! - **Writes.** Built-in ids are refused (built-ins change in `config/themes/`). A
-//!   private theme is changed by its owner; a tenant theme, or making a theme a
-//!   tenant theme, needs [`Caller::may_publish`]. `version` is compare-and-swapped:
-//!   a stale one is a [`BookError::Conflict`].
+//!   private theme is changed by its owner; sharing one, or changing a shared one,
+//!   needs [`Caller::may_publish`]. `version` is compare-and-swapped: a stale one is
+//!   a [`BookError::Conflict`].
+//! - **Caps.** [`MAX_THEMES_PER_TENANT`] shared themes, and
+//!   [`MAX_PRIVATE_THEMES_PER_OWNER`] private themes per person, so nobody can use
+//!   up anyone else's room. The private count is an index on the owner's
+//!   [`pb::UserPrefs`] card, written in the same batch as the theme.
 //! - **Owner.** Set from the caller, never from the request, and returned only to
 //!   the owner, so a shared theme does not reveal who wrote it beyond `author`.
 
@@ -24,14 +33,18 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::user::validate_user;
-use crate::{builtins, validate, ThemeError, ThemeErrorKind, FALLBACK_THEME};
+use crate::{builtins, validate, ThemeError, ThemeErrorKind, FALLBACK_THEME, MAX_NAME_CHARS};
 
-/// The collection user themes live in.
+/// The collection tenant-shared themes live in, keyed by id.
 pub const THEMES: &str = "themes";
+/// The collection private themes live in, keyed by `<owner hash>.<id>`.
+pub const PRIVATE_THEMES: &str = "private_themes";
 /// The collection each user's [`pb::UserPrefs`] lives in.
 pub const USER_PREFS: &str = "user_prefs";
-/// The most stored themes a tenant may hold (03: keeps `List` bounded).
+/// The most shared themes a tenant may hold (03: keeps `List` bounded).
 pub const MAX_THEMES_PER_TENANT: usize = 200;
+/// The most private themes one person may hold.
+pub const MAX_PRIVATE_THEMES_PER_OWNER: usize = 20;
 
 /// Who is asking, from the verified identity (never from a request field).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,8 +68,8 @@ pub enum BookError {
     Conflict(String),
     /// The theme or request breaks a rule.
     Invalid(ThemeError),
-    /// The tenant holds [`MAX_THEMES_PER_TENANT`] themes.
-    Full,
+    /// A cap is reached: the tenant's shared themes, or the caller's private ones.
+    Full(String),
     /// The store failed.
     Store(agent_core::Error),
 }
@@ -64,12 +77,10 @@ pub enum BookError {
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::Denied(m) | Self::Conflict(m) => f.write_str(m),
+            Self::NotFound(m) | Self::Denied(m) | Self::Conflict(m) | Self::Full(m) => {
+                f.write_str(m)
+            }
             Self::Invalid(e) => write!(f, "{e}"),
-            Self::Full => write!(
-                f,
-                "this tenant already has {MAX_THEMES_PER_TENANT} themes; delete one first"
-            ),
             Self::Store(e) => write!(f, "{e}"),
         }
     }
@@ -90,6 +101,46 @@ impl From<ThemeError> for BookError {
 }
 
 type Result<T> = std::result::Result<T, BookError>;
+
+/// Where a stored theme card lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Slot {
+    collection: &'static str,
+    key: String,
+}
+
+impl Slot {
+    fn shared(id: &str) -> Self {
+        Self {
+            collection: THEMES,
+            key: id.to_string(),
+        }
+    }
+
+    fn private(owner: &str, id: &str) -> Self {
+        Self {
+            collection: PRIVATE_THEMES,
+            key: format!("{}.{id}", prefs_id(owner)),
+        }
+    }
+
+    fn is_shared(&self) -> bool {
+        self.collection == THEMES
+    }
+}
+
+/// A stored theme card: where it is, its bytes (for compare-and-swap) and its value.
+struct Stored {
+    slot: Slot,
+    bytes: Vec<u8>,
+    theme: pb::Theme,
+}
+
+/// A user's preferences card: its bytes (for compare-and-swap) and its value.
+struct Prefs {
+    bytes: Option<Vec<u8>>,
+    value: pb::UserPrefs,
+}
 
 /// The themes service's state: the store, the built-ins, and the server default.
 pub struct ThemeBook {
@@ -112,16 +163,31 @@ impl ThemeBook {
         })
     }
 
-    /// Every theme `caller` may see: built-ins first, then stored themes by id.
+    /// Every theme `caller` may see: built-ins first, then the tenant's shared
+    /// themes and the caller's private ones by id (a private theme hides a shared
+    /// one with the same id).
     pub async fn list(&self, caller: &Caller) -> Result<Vec<pb::Theme>> {
-        let mut stored: Vec<pb::Theme> = self
-            .stored(&caller.tenant)
+        let mut seen: std::collections::BTreeMap<String, pb::Theme> = self
+            .backend
+            .list(THEMES, &caller.tenant)
             .await?
-            .into_iter()
-            .filter(|t| visible(t, caller))
-            .map(|t| for_caller(t, caller))
+            .iter()
+            .filter_map(|b| pb::Theme::decode(b.as_slice()).ok())
+            .filter(|t| t.visibility == pb::Visibility::Tenant as i32 && validate(t).is_ok())
+            .map(|t| (t.id.clone(), t))
             .collect();
-        stored.sort_by(|a, b| a.id.cmp(&b.id));
+        let prefs = self.prefs(&caller.tenant, &caller.subject).await?;
+        for id in &prefs.value.private_theme_ids {
+            if let Some(s) = self
+                .read(caller, &Slot::private(&caller.subject, id))
+                .await?
+            {
+                if validate(&s.theme).is_ok() {
+                    seen.insert(s.theme.id.clone(), s.theme);
+                }
+            }
+        }
+        let stored = seen.into_values().map(|t| for_caller(t, caller));
         Ok(self.builtins.iter().cloned().chain(stored).collect())
     }
 
@@ -148,22 +214,21 @@ impl ThemeBook {
                 "sharing a theme with the tenant needs (approve, theme)".into(),
             ));
         }
-        let current = self.backend.get(THEMES, &caller.tenant, &theme.id).await?;
-        let (owner, version) = match current.as_deref().map(decode).transpose()? {
-            Some(old) => {
-                if !may_change(&old, caller) {
-                    return Err(BookError::Denied(format!(
-                        "theme id `{}` is taken; pick another id",
-                        theme.id
-                    )));
+        let old = self.find(caller, &theme.id).await?;
+        let (owner, version) = match &old {
+            Some(s) => {
+                if s.slot.is_shared() && !caller.may_publish {
+                    return Err(BookError::Denied(
+                        "changing a shared theme needs (approve, theme)".into(),
+                    ));
                 }
-                if theme.version != old.version {
+                if theme.version != s.theme.version {
                     return Err(BookError::Conflict(format!(
                         "theme `{}` is at version {}, not {}; reload it and edit again",
-                        theme.id, old.version, theme.version
+                        theme.id, s.theme.version, theme.version
                     )));
                 }
-                (old.owner, old.version + 1)
+                (s.theme.owner.clone(), s.theme.version + 1)
             }
             None => {
                 if theme.version != 0 {
@@ -172,26 +237,73 @@ impl ThemeBook {
                         theme.id
                     )));
                 }
-                if self.backend.count(THEMES, &caller.tenant).await? >= MAX_THEMES_PER_TENANT {
-                    return Err(BookError::Full);
-                }
                 (caller.subject.clone(), 1)
             }
         };
         theme.owner = owner;
         theme.version = version;
-        let batch = [
-            Write::EnsureTenant {
-                tenant: caller.tenant.clone(),
-            },
-            Write::CompareAndSwap {
-                collection: THEMES,
-                tenant: caller.tenant.clone(),
-                id: theme.id.clone(),
-                expected: current,
-                blob: theme.encode_to_vec(),
-            },
-        ];
+        let target = if shared {
+            Slot::shared(&theme.id)
+        } else {
+            Slot::private(&theme.owner, &theme.id)
+        };
+        let mut batch = vec![Write::EnsureTenant {
+            tenant: caller.tenant.clone(),
+        }];
+        match &old {
+            Some(s) if s.slot == target => batch.push(cas(caller, &target, Some(&s.bytes), &theme)),
+            _ => {
+                // A new card in the target's namespace: a create, a share or an unshare.
+                if self
+                    .backend
+                    .get(target.collection, &caller.tenant, &target.key)
+                    .await?
+                    .is_some()
+                {
+                    return Err(if shared {
+                        BookError::Denied(format!(
+                            "a shared theme already uses id `{}`; pick another id",
+                            theme.id
+                        ))
+                    } else {
+                        BookError::Conflict(format!(
+                            "theme `{}` cannot be made private under this id; save it under another id",
+                            theme.id
+                        ))
+                    });
+                }
+                if shared
+                    && self.backend.count(THEMES, &caller.tenant).await? >= MAX_THEMES_PER_TENANT
+                {
+                    return Err(BookError::Full(format!(
+                        "this tenant already shares {MAX_THEMES_PER_TENANT} themes; delete one first"
+                    )));
+                }
+                batch.push(cas(caller, &target, None, &theme));
+                if let Some(s) = &old {
+                    batch.extend(remove(caller, s));
+                }
+            }
+        }
+        // Keep the owner's private-theme index in step when the theme enters or
+        // leaves their private namespace.
+        let was_private = old.as_ref().is_some_and(|s| !s.slot.is_shared());
+        let enters = !shared && !was_private;
+        let leaves = shared && was_private;
+        if enters || leaves {
+            let prefs = self.prefs(&caller.tenant, &theme.owner).await?;
+            let mut next = prefs.value.clone();
+            next.private_theme_ids.retain(|id| *id != theme.id);
+            if enters {
+                if next.private_theme_ids.len() >= MAX_PRIVATE_THEMES_PER_OWNER {
+                    return Err(BookError::Full(format!(
+                        "there are already {MAX_PRIVATE_THEMES_PER_OWNER} private themes; delete one first"
+                    )));
+                }
+                next.private_theme_ids.push(theme.id.clone());
+            }
+            batch.push(prefs_write(caller, &prefs, &next));
+        }
         self.apply(&batch, &theme.id).await?;
         Ok(for_caller(theme, caller))
     }
@@ -203,57 +315,41 @@ impl ThemeBook {
                 "`{id}` is a built-in theme and cannot be deleted"
             )));
         }
-        if !agent_core::safe_segment(id) {
-            return Err(not_found(id));
-        }
-        let current = self.backend.get(THEMES, &caller.tenant, id).await?;
-        let Some(bytes) = current else {
+        let Some(s) = self.find(caller, id).await? else {
             return Err(not_found(id));
         };
-        let old = decode(&bytes)?;
-        if !visible(&old, caller) {
-            return Err(not_found(id));
-        }
-        if !may_change(&old, caller) {
+        if s.slot.is_shared() && !caller.may_publish {
             return Err(BookError::Denied(
                 "deleting a shared theme needs (approve, theme)".into(),
             ));
         }
-        let batch = [
-            Write::CompareAndSwap {
-                collection: THEMES,
-                tenant: caller.tenant.clone(),
-                id: id.to_string(),
-                expected: Some(bytes.clone()),
-                blob: bytes,
-            },
-            Write::Delete {
-                collection: THEMES,
-                tenant: caller.tenant.clone(),
-                id: id.to_string(),
-            },
-        ];
+        let mut batch: Vec<Write> = remove(caller, &s).into();
+        if !s.slot.is_shared() {
+            let prefs = self.prefs(&caller.tenant, &caller.subject).await?;
+            let mut next = prefs.value.clone();
+            next.private_theme_ids.retain(|i| i != id);
+            batch.push(prefs_write(caller, &prefs, &next));
+        }
         self.apply(&batch, id).await
     }
 
     /// The caller's theme, walking the chain in 04: their pick, the server
     /// default, then [`FALLBACK_THEME`].
     pub async fn get_active(&self, caller: &Caller) -> Result<pb::ActiveTheme> {
-        let prefs = self.prefs(caller).await?;
-        if let Some(p) = &prefs {
-            if let Some(theme) = self.resolve(caller, &p.theme_id).await? {
-                return Ok(active(theme, p.mode, pb::ActiveSource::User));
+        let prefs = self.prefs(&caller.tenant, &caller.subject).await?.value;
+        if !prefs.theme_id.is_empty() {
+            if let Some(theme) = self.resolve(caller, &prefs.theme_id).await? {
+                return Ok(active(theme, prefs.mode, pb::ActiveSource::User));
             }
         }
-        let mode = prefs.map_or(0, |p| p.mode);
         if let Some(theme) = self.resolve(caller, &self.default_theme).await? {
-            return Ok(active(theme, mode, pb::ActiveSource::ServerDefault));
+            return Ok(active(theme, prefs.mode, pb::ActiveSource::ServerDefault));
         }
         let fallback = self
             .builtin(FALLBACK_THEME)
             .cloned()
             .ok_or_else(|| not_found(FALLBACK_THEME))?;
-        Ok(active(fallback, mode, pb::ActiveSource::Builtin))
+        Ok(active(fallback, prefs.mode, pb::ActiveSource::Builtin))
     }
 
     /// Store the caller's pick. The theme must be one they can see.
@@ -272,23 +368,19 @@ impl ThemeBook {
         if self.resolve(caller, theme_id).await?.is_none() {
             return Err(not_found(theme_id));
         }
-        let prefs = pb::UserPrefs {
-            id: prefs_id(&caller.subject),
+        let prefs = self.prefs(&caller.tenant, &caller.subject).await?;
+        let next = pb::UserPrefs {
             theme_id: theme_id.to_string(),
             mode,
+            ..prefs.value.clone()
         };
         let batch = [
             Write::EnsureTenant {
                 tenant: caller.tenant.clone(),
             },
-            Write::Put {
-                collection: USER_PREFS,
-                tenant: caller.tenant.clone(),
-                id: prefs.id.clone(),
-                blob: prefs.encode_to_vec(),
-            },
+            prefs_write(caller, &prefs, &next),
         ];
-        self.apply(&batch, &prefs.id).await?;
+        self.apply(&batch, theme_id).await?;
         self.get_active(caller).await
     }
 
@@ -301,40 +393,70 @@ impl ThemeBook {
         if let Some(b) = self.builtin(id) {
             return Ok(Some(b.clone()));
         }
-        if !agent_core::safe_segment(id) {
-            return Ok(None);
-        }
-        let Some(bytes) = self.backend.get(THEMES, &caller.tenant, id).await? else {
-            return Ok(None);
-        };
         // A stored theme that no longer validates (the rules tightened since it
         // was written) is treated as gone rather than rendered.
-        let theme = match decode(&bytes) {
-            Ok(t) if validate(&t).is_ok() => t,
-            _ => return Ok(None),
-        };
-        Ok(visible(&theme, caller).then(|| for_caller(theme, caller)))
-    }
-
-    /// Every stored theme in `tenant` that still decodes and validates.
-    async fn stored(&self, tenant: &str) -> Result<Vec<pb::Theme>> {
         Ok(self
-            .backend
-            .list(THEMES, tenant)
+            .find(caller, id)
             .await?
-            .iter()
-            .filter_map(|b| decode(b).ok())
+            .map(|s| s.theme)
             .filter(|t| validate(t).is_ok())
-            .collect())
+            .map(|t| for_caller(t, caller)))
     }
 
-    async fn prefs(&self, caller: &Caller) -> Result<Option<pb::UserPrefs>> {
-        let id = prefs_id(&caller.subject);
-        Ok(self
+    /// The stored theme `id` as `caller` sees it: their own private one, else the
+    /// tenant's shared one.
+    async fn find(&self, caller: &Caller, id: &str) -> Result<Option<Stored>> {
+        // A theme id is at most MAX_NAME_CHARS, which also keeps the private key
+        // (`<32 hex>.<id>`) inside the store's segment limit.
+        if id.len() > MAX_NAME_CHARS || !agent_core::safe_segment(id) {
+            return Ok(None);
+        }
+        for slot in [Slot::private(&caller.subject, id), Slot::shared(id)] {
+            if let Some(s) = self.read(caller, &slot).await? {
+                return Ok(Some(s));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The card at `slot`, if it decodes and agrees with where it is stored (a
+    /// shared card is shared; a private card is the caller's own).
+    async fn read(&self, caller: &Caller, slot: &Slot) -> Result<Option<Stored>> {
+        let Some(bytes) = self
             .backend
-            .get(USER_PREFS, &caller.tenant, &id)
+            .get(slot.collection, &caller.tenant, &slot.key)
             .await?
-            .and_then(|b| pb::UserPrefs::decode(b.as_slice()).ok()))
+        else {
+            return Ok(None);
+        };
+        let Ok(theme) = pb::Theme::decode(bytes.as_slice()) else {
+            return Ok(None);
+        };
+        let agrees = if slot.is_shared() {
+            theme.visibility == pb::Visibility::Tenant as i32 && slot.key == theme.id
+        } else {
+            theme.visibility != pb::Visibility::Tenant as i32
+                && theme.owner == caller.subject
+                && *slot == Slot::private(&theme.owner, &theme.id)
+        };
+        Ok(agrees.then_some(Stored {
+            slot: slot.clone(),
+            bytes,
+            theme,
+        }))
+    }
+
+    async fn prefs(&self, tenant: &str, subject: &str) -> Result<Prefs> {
+        let id = prefs_id(subject);
+        let bytes = self.backend.get(USER_PREFS, tenant, &id).await?;
+        let value = bytes
+            .as_deref()
+            .and_then(|b| pb::UserPrefs::decode(b).ok())
+            .unwrap_or_default();
+        Ok(Prefs {
+            bytes,
+            value: pb::UserPrefs { id, ..value },
+        })
     }
 
     async fn apply(&self, batch: &[Write], id: &str) -> Result<()> {
@@ -348,32 +470,51 @@ impl ThemeBook {
     }
 }
 
-/// The card id of `subject`'s preferences: a hash, since a subject (an OIDC `sub`,
-/// an email) need not be a safe path segment and should not be stored in the clear.
+/// The card id of `subject`'s preferences, and the prefix of their private themes:
+/// a hash, since a subject (an OIDC `sub`, an email) need not be a safe path segment
+/// and should not be stored in the clear.
 pub fn prefs_id(subject: &str) -> String {
     let digest = Sha256::digest(subject.as_bytes());
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn decode(bytes: &[u8]) -> Result<pb::Theme> {
-    pb::Theme::decode(bytes).map_err(|e| {
-        BookError::Store(agent_core::Error::Config(format!(
-            "stored theme does not decode: {e}"
-        )))
-    })
+/// Write `theme` at `slot` if the card there is still `expected`.
+fn cas(caller: &Caller, slot: &Slot, expected: Option<&Vec<u8>>, theme: &pb::Theme) -> Write {
+    Write::CompareAndSwap {
+        collection: slot.collection,
+        tenant: caller.tenant.clone(),
+        id: slot.key.clone(),
+        expected: expected.cloned(),
+        blob: theme.encode_to_vec(),
+    }
 }
 
-fn visible(t: &pb::Theme, caller: &Caller) -> bool {
-    t.builtin || t.visibility == pb::Visibility::Tenant as i32 || t.owner == caller.subject
+/// Delete `s`, but only if nobody changed it since it was read.
+fn remove(caller: &Caller, s: &Stored) -> [Write; 2] {
+    [
+        Write::CompareAndSwap {
+            collection: s.slot.collection,
+            tenant: caller.tenant.clone(),
+            id: s.slot.key.clone(),
+            expected: Some(s.bytes.clone()),
+            blob: s.bytes.clone(),
+        },
+        Write::Delete {
+            collection: s.slot.collection,
+            tenant: caller.tenant.clone(),
+            id: s.slot.key.clone(),
+        },
+    ]
 }
 
-/// Whether `caller` may overwrite or delete `t`: its owner while it is private;
-/// a publisher while it is shared.
-fn may_change(t: &pb::Theme, caller: &Caller) -> bool {
-    if t.visibility == pb::Visibility::Tenant as i32 {
-        caller.may_publish
-    } else {
-        t.owner == caller.subject
+/// Replace `prefs` with `next`, failing if another write changed it first.
+fn prefs_write(caller: &Caller, prefs: &Prefs, next: &pb::UserPrefs) -> Write {
+    Write::CompareAndSwap {
+        collection: USER_PREFS,
+        tenant: caller.tenant.clone(),
+        id: next.id.clone(),
+        expected: prefs.bytes.clone(),
+        blob: next.encode_to_vec(),
     }
 }
 
