@@ -8,6 +8,7 @@ import '../pages/login_spec.dart';
 import '../pages/prompts_spec.dart';
 import '../pages/router_spec.dart';
 import '../pages/settings_spec.dart';
+import '../pages/theme_spec.dart';
 import '../testkit/spec.dart';
 
 /// Every page whose spec has been tabled. The completeness critic
@@ -28,4 +29,5 @@ const allSpecs = <PageSpec>[
   loginSpec,
   accessSpec,
   forgesSpec,
+  themeSpec,
 ];

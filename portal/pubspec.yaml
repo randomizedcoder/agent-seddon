@@ -39,7 +39,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # Source Serif 4 (SIL OFL 1.1) bundled as a tracked asset — the hermetic build
+  # Fonts (OFL / Apache / BSD) bundled as a tracked asset — the hermetic build
   # cannot fetch fonts at runtime, so we do not use google_fonts. See fonts/README.md.
   fonts:
     - family: SourceSerif4
@@ -48,8 +48,38 @@ flutter:
           weight: 400
         - asset: fonts/SourceSerif4-Semibold.ttf
           weight: 600
+    # Theme fonts (docs/design/visual): names match the theme validator's allowlist.
+    - family: IBM3270
+      fonts:
+        - asset: fonts/IBM3270-Regular.ttf
+    - family: OpenSans
+      fonts:
+        - asset: fonts/OpenSans-Regular.ttf
+          weight: 400
+        - asset: fonts/OpenSans-Semibold.ttf
+          weight: 600
+    - family: Inter
+      fonts:
+        - asset: fonts/InterVariable.ttf
+    - family: AtkinsonHyperlegibleNext
+      fonts:
+        - asset: fonts/AtkinsonHyperlegibleNext-Regular.ttf
+          weight: 400
+        - asset: fonts/AtkinsonHyperlegibleNext-SemiBold.ttf
+          weight: 600
+        - asset: fonts/AtkinsonHyperlegibleNext-Bold.ttf
+          weight: 700
+    - family: JetBrainsMono
+      fonts:
+        - asset: fonts/JetBrainsMono-Regular.ttf
+          weight: 400
+        - asset: fonts/JetBrainsMono-SemiBold.ttf
+          weight: 600
   # The shipped cognition graphs (config/cognition/*.textproto), converted to the
   # portal's clean JSON shape and bundled so the Graph tab can seed its library on
   # first load. Kept in sync with the textproto by a parity test in agent-graph.
   assets:
     - assets/graphs/
+    # The built-in themes (config/themes/*.textproto) as proto3 JSON, kept in sync
+    # by agent-theme's portal_assets_parity test.
+    - assets/themes/

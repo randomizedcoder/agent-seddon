@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../pages/login_page.dart';
+import '../theme/seddon_colors.dart';
 import 'auth_state.dart';
 import 'capabilities.dart';
 
@@ -55,8 +56,10 @@ class AccountStrip extends StatelessWidget {
         children: [
           Tooltip(
             message: '$who\n${p?.tenant ?? ''}',
-            child: const Icon(Icons.account_circle,
-                key: Key('login.account'), color: Color(0xFF8A9199)),
+            child: Icon(Icons.account_circle,
+                key: const Key('login.account'),
+                color: SeddonColors.of(context).nav(
+                    'settings', Theme.of(context).colorScheme.onSurfaceVariant)),
           ),
           IconButton(
             key: const Key('login.signout'),
