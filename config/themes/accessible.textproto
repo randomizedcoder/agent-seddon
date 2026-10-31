@@ -1,0 +1,37 @@
+# proto-file: crates/agent-proto/proto/agent/v1/theme.proto
+# proto-message: agent.v1.Theme
+#
+# Built-in portal theme `accessible` (docs/design/visual/02-builtin-themes.md).
+# The portal bundles it as portal/assets/themes/accessible.json; keep both in step
+# (crates/agent-theme/tests/portal_assets_parity.rs).
+
+id: "accessible"
+name: "Accessible (high contrast)"
+description: "WCAG AAA contrast, Atkinson Hyperlegible at 1.25x, 48px targets, no motion."
+author: "agent-seddon"
+light {
+  background: "#FFFFFF"   surface: "#FFFFFF"   surface_variant: "#FFFFFF"
+  on_surface: "#000000"   on_surface_variant: "#000000"
+  primary: "#0B3D91"      on_primary: "#FFFFFF"
+  secondary: "#000000"    on_secondary: "#FFFFFF"
+  outline: "#000000"      focus: "#0B3D91"
+  error: "#9E0000"        on_error: "#FFFFFF"
+  semantic { success: "#006400" warning: "#7A4A00" info: "#0B3D91" muted: "#000000"
+             code_background: "#FFFFFF" code_foreground: "#000000" }
+}
+dark {
+  background: "#000000"   surface: "#000000"   surface_variant: "#000000"
+  on_surface: "#FFFFFF"   on_surface_variant: "#FFFFFF"
+  primary: "#FFD400"      on_primary: "#000000"
+  secondary: "#FFFFFF"    on_secondary: "#000000"
+  outline: "#FFFFFF"      focus: "#FFD400"
+  error: "#FF8080"        on_error: "#000000"
+  semantic { success: "#7CFC7C" warning: "#FFB000" info: "#FFD400" muted: "#FFFFFF"
+             code_background: "#000000" code_foreground: "#FFFFFF" }
+}
+typography { body_family: "AtkinsonHyperlegibleNext" mono_family: "JetBrainsMono"
+             scale: 1.25 body_weight: 400 heading_weight: 700 letter_spacing: 0.2 }
+shape { corner_radius: 6 border_width: 2 elevation: false }
+density: DENSITY_COMFORTABLE
+accessibility { contrast: CONTRAST_LEVEL_AAA focus_ring_width: 3 min_target_size: 48
+                reduce_motion: true status_icons: true }

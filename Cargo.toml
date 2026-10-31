@@ -14,6 +14,7 @@ members = [
     "crates/agent-prompt",
     "crates/agent-digest",
     "crates/agent-graph",
+    "crates/agent-theme",
     "crates/agent-registry",
     "crates/agent-role",
     "crates/agent-config-store",
@@ -278,6 +279,7 @@ agent-context = { path = "crates/agent-context", default-features = false }
 agent-prompt = { path = "crates/agent-prompt" }
 agent-digest = { path = "crates/agent-digest" }
 agent-graph = { path = "crates/agent-graph" }
+agent-theme = { path = "crates/agent-theme" }
 agent-registry = { path = "crates/agent-registry" }
 agent-role = { path = "crates/agent-role" }
 agent-config-store = { path = "crates/agent-config-store" }

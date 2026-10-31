@@ -1,0 +1,51 @@
+# proto-file: crates/agent-proto/proto/agent/v1/theme.proto
+# proto-message: agent.v1.Theme
+#
+# Built-in portal theme `prototype` (docs/design/visual/02-builtin-themes.md).
+# The portal bundles it as portal/assets/themes/prototype.json; keep both in step
+# (crates/agent-theme/tests/portal_assets_parity.rs).
+
+id: "prototype"
+name: "Prototype"
+description: "The original portal look: Material 3 from an indigo seed, serif body."
+author: "agent-seddon"
+light {
+  seed: "#3F51B5"
+  semantic {
+    # Today's hardcoded portal colours, kept so `prototype` looks exactly as before.
+    success: "#4CAF50" warning: "#FF9800" info: "#2196F3" muted: "#9E9E9E"
+    nav_tint { key: "launch" value: "#5B7BA6" }
+    nav_tint { key: "prompts" value: "#BF9B4F" }
+    nav_tint { key: "graph" value: "#8A72B5" }
+    nav_tint { key: "agent" value: "#5E9C6B" }
+    nav_tint { key: "router" value: "#4E9AA0" }
+    nav_tint { key: "fleet" value: "#C07A85" }
+    nav_tint { key: "forges" value: "#6F7FA8" }
+    nav_tint { key: "access" value: "#9C8566" }
+    nav_tint { key: "settings" value: "#8A9199" }
+    graph_edge { key: "main" value: "#2196F3" }
+    graph_edge { key: "background" value: "#FF9800" }
+    graph_edge { key: "capability" value: "#9C27B0" }
+  }
+}
+dark {
+  seed: "#3F51B5"
+  semantic {
+    # Today's hardcoded portal colours, kept so `prototype` looks exactly as before.
+    success: "#4CAF50" warning: "#FF9800" info: "#2196F3" muted: "#9E9E9E"
+    nav_tint { key: "launch" value: "#5B7BA6" }
+    nav_tint { key: "prompts" value: "#BF9B4F" }
+    nav_tint { key: "graph" value: "#8A72B5" }
+    nav_tint { key: "agent" value: "#5E9C6B" }
+    nav_tint { key: "router" value: "#4E9AA0" }
+    nav_tint { key: "fleet" value: "#C07A85" }
+    nav_tint { key: "forges" value: "#6F7FA8" }
+    nav_tint { key: "access" value: "#9C8566" }
+    nav_tint { key: "settings" value: "#8A9199" }
+    graph_edge { key: "main" value: "#2196F3" }
+    graph_edge { key: "background" value: "#FF9800" }
+    graph_edge { key: "capability" value: "#9C27B0" }
+  }
+}
+typography { body_family: "SourceSerif4" mono_family: "monospace" scale: 1.0 }
+# No shape or density: Material 3's defaults, exactly as before themes.

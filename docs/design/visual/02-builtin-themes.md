@@ -39,8 +39,7 @@ author: "agent-seddon"
 light { seed: "#3F51B5" }
 dark  { seed: "#3F51B5" }
 typography { body_family: "SourceSerif4" mono_family: "monospace" scale: 1.0 }
-shape { corner_radius: 12 elevation: true }
-density: DENSITY_STANDARD
+# No shape or density: Material 3's defaults, exactly as before themes.
 ```
 
 `mono_family: "monospace"` keeps today's browser default. It is the only family not

@@ -1,0 +1,39 @@
+{
+  "_comment": "Shared by crates/agent-theme/tests/shared_cases.rs and the portal's theme tests, so the Rust validator and the Dart mapper apply the same rules (docs/design/visual/07-testing.md). expected: {\"ok\": \"0xAARRGGBB\"} or {\"err\": \"<ThemeErrorKind>\"}. An input may be built as prefix + repeat*count to keep huge cases small here.",
+  "parse_color": [
+    {"name": "positive_rgb", "description": "6-digit hex is accepted as opaque", "input": "#00FF00", "expected": {"ok": "0xFF00FF00"}},
+    {"name": "positive_rgba", "description": "8-digit hex keeps its alpha", "input": "#00FF0080", "expected": {"ok": "0x8000FF00"}},
+    {"name": "corner_lowercase", "description": "hex digits are case-insensitive", "input": "#a1b2c3", "expected": {"ok": "0xFFA1B2C3"}},
+    {"name": "corner_mixed_case", "description": "mixed case is the same colour", "input": "#A1b2C3", "expected": {"ok": "0xFFA1B2C3"}},
+    {"name": "boundary_black", "description": "lowest value", "input": "#000000", "expected": {"ok": "0xFF000000"}},
+    {"name": "boundary_white", "description": "highest value", "input": "#FFFFFF", "expected": {"ok": "0xFFFFFFFF"}},
+    {"name": "boundary_fully_transparent", "description": "alpha 00 parses; contrast is checked after compositing", "input": "#00000000", "expected": {"ok": "0x00000000"}},
+    {"name": "boundary_9_chars", "description": "the longest valid string", "input": "#FFFFFFFF", "expected": {"ok": "0xFFFFFFFF"}},
+    {"name": "boundary_10_chars", "description": "one character over the longest valid string", "input": "#FFFFFFFFF", "expected": {"err": "BadColor"}},
+    {"name": "negative_short", "description": "3-digit shorthand is not allowed", "input": "#0F0", "expected": {"err": "BadColor"}},
+    {"name": "negative_7_digits", "description": "an odd length between the two forms", "input": "#0F0F0F0", "expected": {"err": "BadColor"}},
+    {"name": "negative_no_hash", "description": "the # is required", "input": "00FF00", "expected": {"err": "BadColor"}},
+    {"name": "negative_named", "description": "CSS colour names are not accepted", "input": "red", "expected": {"err": "BadColor"}},
+    {"name": "negative_rgb_function", "description": "CSS functions are not accepted", "input": "rgb(0,255,0)", "expected": {"err": "BadColor"}},
+    {"name": "negative_non_hex", "description": "G is not a hex digit", "input": "#GG0000", "expected": {"err": "BadColor"}},
+    {"name": "negative_hash_only", "description": "a lone #", "input": "#", "expected": {"err": "BadColor"}},
+    {"name": "negative_empty_required", "description": "an empty colour is missing, not malformed", "input": "", "expected": {"err": "Missing"}},
+    {"name": "corner_whitespace", "description": "surrounding spaces are not trimmed", "input": " #00FF00", "expected": {"err": "BadColor"}},
+    {"name": "corner_0x_prefix", "description": "a 0x prefix is not a colour", "input": "0xFF00FF", "expected": {"err": "BadColor"}},
+    {"name": "adversarial_css_injection", "description": "a CSS declaration smuggled in a colour", "input": "red; background:url(x)", "expected": {"err": "BadColor"}},
+    {"name": "adversarial_huge", "description": "a 1 MB string is rejected on length before parsing", "prefix": "#", "repeat": "F", "count": 1000000, "expected": {"err": "BadColor"}},
+    {"name": "adversarial_nul", "description": "an embedded NUL", "input": "#00FF00\u0000", "expected": {"err": "BadColor"}},
+    {"name": "adversarial_sign", "description": "a sign inside the digits", "input": "#+0FF00", "expected": {"err": "BadColor"}},
+    {"name": "adversarial_fullwidth_digits", "description": "Unicode digits that look like hex", "input": "#００ＦＦ００", "expected": {"err": "BadColor"}}
+  ],
+  "font_family": [
+    {"name": "positive_bundled", "description": "a bundled family", "input": "Inter", "expected": {"ok": "Inter"}},
+    {"name": "positive_generic", "description": "a generic browser family", "input": "monospace", "expected": {"ok": "monospace"}},
+    {"name": "corner_empty_is_default", "description": "an empty family means the theme default", "input": "", "expected": {"ok": ""}},
+    {"name": "negative_not_bundled", "description": "a family the portal does not ship", "input": "Comic Sans MS", "expected": {"err": "UnknownFont"}},
+    {"name": "boundary_case_sensitive", "description": "matching is exact, not case-insensitive", "input": "inter", "expected": {"err": "UnknownFont"}},
+    {"name": "adversarial_url", "description": "a URL would make the browser fetch a font", "input": "https://evil.example/x.woff2", "expected": {"err": "UnknownFont"}},
+    {"name": "adversarial_css_list", "description": "a CSS font list smuggling a second family", "input": "Inter, url(x)", "expected": {"err": "UnknownFont"}},
+    {"name": "adversarial_path", "description": "a relative path", "input": "../fonts/Inter", "expected": {"err": "UnknownFont"}}
+  ]
+}

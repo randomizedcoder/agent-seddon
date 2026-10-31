@@ -124,6 +124,7 @@ per component. The column below identifies the service flag or configuration blo
 | Config management | `--serve-config`, `[grpc.config]` | [`config.md`](components/config.md) |
 | Metrics proxy (PromQL over gRPC) | `--serve-metrics-proxy`, `[metrics_proxy]` | [`metrics-proxy.md`](components/metrics-proxy.md) |
 | Live agent-session feed | `--serve-session-stream`, `[grpc.session_stream]` | [`agent-session.md`](components/agent-session.md) |
+| Portal themes (validator + built-ins; service in increment 3) | `config/themes/` | [`theme.md`](components/theme.md) |
 
 ### Cross-cutting
 

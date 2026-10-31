@@ -23,7 +23,7 @@ rule table ([`07`](07-testing.md)), so both sides agree.
 |---|---|---|
 | whole document | ≤ 64 KiB serialised | `TooLarge` |
 | `id` | `agent_core::safe_segment`: ASCII letters, digits, `-`, `_`, `.` only; not `.`, `..` or a leading `-`; ≤ 64 chars | `BadId` |
-| `name`, `author` | 1–64 chars; printable; no control or bidi-override characters (U+202A–U+202E, U+2066–U+2069) | `BadName` |
+| `name`, `author` | 1–64 chars; printable; no control, format or separator characters (Unicode Cc, Cf, Zl, Zp: bidi controls, zero-width characters, BOM, soft hyphen, tags) | `BadName` |
 | `description` | ≤ 512 chars, same character rules | `BadName` |
 | every colour | exactly `#RRGGBB` or `#RRGGBBAA`, hex digits only, ≤ 9 chars | `BadColor` |
 | palettes | at least one of `light` / `dark`; without `seed`, every role is required | `Missing` |
@@ -58,6 +58,14 @@ their background first.
 | `primary` / `surface` (links, icons) | 3 | 4.5 |
 | `focus` / `background` | 3 | 3 |
 | `outline` / `background` | — | 3 |
+
+A pair is checked when both colours are written down. In a seeded palette the core
+pairs (the `on_*` roles with their role, `code_foreground` / `code_background`, `focus` /
+`background`) must be written in full or not at all; one hand-picked half against a
+seed-derived half is refused with `Missing`, since nobody checked it. Semantic text
+colours (`success`, `warning`, …) on a seed-derived `surface` cannot be checked without the
+Material 3 tonal palette, so `ThemeService.Put` (increment 3) derives the palette from the
+seed and checks those pairs against it before a user theme is stored.
 
 The error names the failing pair and both ratios, e.g.
 `contrast: on_primary #FFFFFF on primary #007AFF is 4.02:1, needs 4.5:1 (AA)`, so an
