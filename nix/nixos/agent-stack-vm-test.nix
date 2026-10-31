@@ -32,6 +32,7 @@ pkgs.testers.runNixOSTest {
       };
       services.agentSeddon = {
         enable = true;
+        extraOrigins = [ "http://alias.test:8092" ];
         credentials."llm.token" = pkgs.writeText "dummy-llm-token" "not-a-real-key";
         settings.provider = {
           base_url = "http://127.0.0.1:9/v1";
@@ -122,6 +123,17 @@ pkgs.testers.runNixOSTest {
             machine.wait_for_open_port(port)
         machine.succeed("curl -fsS http://127.0.0.1:8092/ | grep -q '<title>Agent Seddon</title>'")
         machine.succeed("curl -fsS -o /dev/null http://127.0.0.1:8092/main.dart.js")
+        # CORS: the publicHost origin and an extraOrigins alias are allowed; others are not.
+        preflight = (
+            "curl -fsS -o /dev/null -D - -X OPTIONS http://127.0.0.1:8093/ "
+            "-H 'Access-Control-Request-Method: POST' "
+            "-H 'Access-Control-Request-Headers: content-type,x-grpc-web' -H 'Origin: {}'"
+        )
+        for origin in ["http://127.0.0.1:8092", "http://alias.test:8092"]:
+            headers = machine.succeed(preflight.format(origin))
+            assert f"access-control-allow-origin: {origin}" in headers.lower(), headers
+        headers = machine.succeed(preflight.format("http://evil.test:8092"))
+        assert "access-control-allow-origin" not in headers.lower(), headers
 
     with subtest("units stay up"):
         machine.sleep(10)

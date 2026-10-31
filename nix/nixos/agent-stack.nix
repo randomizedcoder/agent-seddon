@@ -203,7 +203,8 @@ let
     origins = [
       (urlFor ports.portalWeb)
     ]
-    ++ lib.optional lan "http://localhost:${toString ports.portalWeb}";
+    ++ lib.optional lan "http://localhost:${toString ports.portalWeb}"
+    ++ cfg.extraOrigins;
   };
 
   webBundle = seddon.mkWebBundle {
@@ -346,6 +347,17 @@ in
       '';
     };
 
+    extraOrigins = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "http://l2:8092" ];
+      description = ''
+        More exact origins the bridge allows by CORS, for other names browsers open the
+        portal under (a short hostname, a DNS name). Each is `http(s)://host[:port]`, no
+        wildcard or path. The bundle still dials `publicHost`, so it must resolve too.
+      '';
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -466,6 +478,12 @@ in
               builtins.attrNames cfg.credentials
             );
             message = "services.agentSeddon.credentials: names must match [A-Za-z0-9_.-]+ (they become paths under /run/credentials).";
+          }
+          {
+            assertion = builtins.all (
+              o: builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?" o != null
+            ) cfg.extraOrigins;
+            message = "services.agentSeddon.extraOrigins: each must be an exact origin `http(s)://host[:port]` (no wildcard, path or trailing slash).";
           }
         ];
 

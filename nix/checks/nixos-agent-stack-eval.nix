@@ -56,6 +56,11 @@ let
   # A host that also imports agent-postgres itself (the module is imported once).
   both = evalWith { imports = [ ../nixos/agent-postgres.nix ]; };
   noPg = evalWith { services.agentSeddon.postgres.enable = false; };
+  originsOk =
+    o:
+    failedAssertions (evalWith {
+      services.agentSeddon.extraOrigins = [ o ];
+    }) == [ ];
 
   svc = c: name: c.systemd.services.${name};
   execOf = c: name: toString (svc c name).serviceConfig.ExecStart;
@@ -107,6 +112,23 @@ let
     postgresOptional =
       !noPg.services.postgresql.enable
       && !(builtins.elem "postgresql-setup.service" (svc noPg "agent-seddon-fleet").requires);
+    # Extra CORS origins are exact: a wildcard, path or junk is refused at eval.
+    extraOriginsAccepted = lib.all originsOk [
+      "http://l2:8092"
+      "https://agent.example.org"
+      "http://10.0.0.5:8092"
+    ];
+    extraOriginsRejected = lib.all (o: !originsOk o) [
+      "*"
+      "null"
+      "http://*.example.org"
+      "http://l2:8092/"
+      "http://l2:8092/../x"
+      "l2:8092"
+      "javascript://x"
+      "http://l2:8092, http://evil"
+      ""
+    ];
     grpcWebUnit = lo.systemd.services ? agent-seddon-grpc-web;
     portalUnit = lib.hasInfix "--port 8092" (execOf lo "agent-seddon-portal");
     # Loopback default ⇒ nothing opened.
