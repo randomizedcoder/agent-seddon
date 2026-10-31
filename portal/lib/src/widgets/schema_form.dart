@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../theme/seddon_colors.dart';
+
 /// A form driven by a JSON-Schema (draft-07, as emitted by the backend
 /// `ConfigService.GetSchema`). Generalises the graph page's `_ParamsEditor` to
 /// the whole-config shape: it resolves `$ref`/`allOf` into `definitions`, renders
@@ -317,7 +319,7 @@ class _RawJsonFieldState extends State<_RawJsonField> {
         TextField(
           controller: _c,
           maxLines: null,
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          style: SeddonColors.of(context).mono.copyWith(fontSize: SeddonColors.of(context).sp(13)),
           decoration: InputDecoration(
             labelText: '${widget.label} (JSON)',
             helperText: widget.help,

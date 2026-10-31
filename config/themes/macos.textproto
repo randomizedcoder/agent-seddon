@@ -17,7 +17,10 @@ light {
   outline: "#D2D2D7"      focus: "#0066CC"
   error: "#D70015"        on_error: "#FFFFFF"
   semantic { success: "#1E7B34" warning: "#B25000" info: "#0066CC" muted: "#6E6E73"
-             code_background: "#F5F5F7" code_foreground: "#1D1D1F" }
+             code_background: "#F5F5F7" code_foreground: "#1D1D1F"
+             graph_edge { key: "main" value: "#0066CC" }
+             graph_edge { key: "background" value: "#B25000" }
+             graph_edge { key: "capability" value: "#8944AB" } }
 }
 dark {
   background: "#1E1E1E"   surface: "#2C2C2E"   surface_variant: "#1E1E1E"
@@ -27,7 +30,10 @@ dark {
   outline: "#3A3A3C"      focus: "#409CFF"
   error: "#FF6961"        on_error: "#000000"
   semantic { success: "#30D158" warning: "#FF9F0A" info: "#409CFF" muted: "#98989D"
-             code_background: "#1C1C1E" code_foreground: "#F5F5F7" }
+             code_background: "#1C1C1E" code_foreground: "#F5F5F7"
+             graph_edge { key: "main" value: "#409CFF" }
+             graph_edge { key: "background" value: "#FF9F0A" }
+             graph_edge { key: "capability" value: "#DA8FFF" } }
 }
 typography { body_family: "Inter" mono_family: "JetBrainsMono" scale: 1.0 letter_spacing: -0.2 }
 shape { corner_radius: 10 border_width: 0 elevation: true }

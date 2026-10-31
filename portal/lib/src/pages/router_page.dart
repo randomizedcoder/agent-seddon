@@ -4,6 +4,7 @@ import '../clients.dart';
 import '../gen/agent/v1/common.pb.dart';
 import '../gen/agent/v1/upstream.pb.dart';
 import '../auth/capabilities.dart';
+import '../theme/seddon_colors.dart';
 
 /// The **Router** tab: a live CRUD editor over the model-router / provider
 /// registry (`ProviderRegistryService`, `:50084`, hosted by the `--serve-all`
@@ -297,7 +298,8 @@ class _RouterPageState extends State<RouterPage> {
   Widget _tierChip(PoolTier tier) {
     final label = _enumLabel(tier.name, 'POOL_TIER_');
     return Chip(
-      label: Text(label, style: const TextStyle(fontSize: 11)),
+      label: Text(label,
+          style: TextStyle(fontSize: SeddonColors.of(context).sp(11))),
       visualDensity: VisualDensity.compact,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
@@ -764,7 +766,8 @@ class _RouteTesterState extends State<_RouteTester> {
             children: [
               Row(
                 children: [
-                  const Icon(Icons.check_circle, color: Colors.green),
+                  Icon(Icons.check_circle,
+                      color: SeddonColors.of(context).success),
                   const SizedBox(width: 8),
                   Text('chosen: ${d.chosen.isEmpty ? "(none)" : d.chosen}',
                       style: const TextStyle(fontWeight: FontWeight.bold)),

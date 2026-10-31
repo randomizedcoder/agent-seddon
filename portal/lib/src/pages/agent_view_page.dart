@@ -8,6 +8,7 @@ import '../gen/agent/v1/agent_session.pb.dart';
 import '../gen/agent/v1/llm_pool.pb.dart';
 import '../gen/agent/v1/metrics_proxy.pb.dart';
 import '../gen/agent/v1/session_registry.pb.dart';
+import '../theme/seddon_colors.dart';
 
 /// The Agent View: a live transcript of the running loop (from `AgentSessionService`)
 /// over a status bar — mode + context from the same stream, GPU pool from
@@ -310,7 +311,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
         itemBuilder: (_, i) => Text(
           key: Key('agent.transcript.$i'),
           _log[i],
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          style: SeddonColors.of(context).mono.copyWith(fontSize: SeddonColors.of(context).sp(13)),
         ),
       ),
     );
