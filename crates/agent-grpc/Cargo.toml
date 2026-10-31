@@ -45,6 +45,9 @@ serde_json = { workspace = true }
 # Auth sessions (security-hardening S6) are cards in the shared config store, so the
 # file tier serves dev and Postgres production. Small: agent-core + serde only.
 agent-config-store = { workspace = true }
+# The themes service (docs/design/visual/03): the store rules live in agent-theme;
+# this crate only gates, scopes and maps them. Small: agent-proto + the store.
+agent-theme = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

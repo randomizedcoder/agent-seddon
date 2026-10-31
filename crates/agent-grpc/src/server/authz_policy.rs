@@ -156,6 +156,12 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         ) => Require(Read, Prompt),
         ("PromptService", "Put" | "SetActivePersonality") => Require(Write, Prompt),
         ("PromptService", "Delete") => Require(Delete, Prompt),
+        // Themes (docs/design/visual/03): picking your own theme is a read-level
+        // right, so a viewer can pick; sharing with the tenant, or changing a
+        // shared theme, is the handler's extra `(approve, theme)` check.
+        ("ThemeService", "List" | "Get" | "GetActive" | "SetActive") => Require(Read, Theme),
+        ("ThemeService", "Put") => FieldChecked(Write, Theme),
+        ("ThemeService", "Delete") => FieldChecked(Delete, Theme),
         ("GraphService", "Get" | "Validate" | "DescribeNodeTypes") => Require(Read, Graph),
         ("GraphService", "Put") => Require(Write, Graph),
         ("SchedulerService", "List" | "History") => Require(Read, Scheduler),

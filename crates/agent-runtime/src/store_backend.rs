@@ -43,7 +43,8 @@ use agent_config_store::Backend;
     feature = "prompt-postgres",
     feature = "scheduler-postgres",
     feature = "forge-registry-postgres",
-    feature = "transport-registry-postgres"
+    feature = "transport-registry-postgres",
+    feature = "theme-postgres"
 ))]
 pub(crate) fn pg_backend(
     cfg: &crate::config::ConfigStoreCfg,

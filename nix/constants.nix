@@ -325,6 +325,16 @@
       metrics_port = 9640;
     };
 
+    # Portal themes (docs/design/visual/03, 04): the `ThemeService` seam — user
+    # themes (protobuf `Theme` cards, validated on Put) and each signed-in user's
+    # active theme, keyed by the verified (tenant, subject). Carries colours and
+    # bundled-font names only, never URLs or code. (`agent --serve-theme`.)
+    theme = {
+      port = 50091;
+      socket = "/tmp/agent-seddon/theme.sock";
+      metrics_port = 9641;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

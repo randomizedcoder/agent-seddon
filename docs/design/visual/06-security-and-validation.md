@@ -67,6 +67,11 @@ colours (`success`, `warning`, …) on a seed-derived `surface` cannot be checke
 Material 3 tonal palette, so `ThemeService.Put` (increment 3) derives the palette from the
 seed and checks those pairs against it before a user theme is stored.
 
+> **As built (3a):** instead of deriving the palette, `Put` requires a user theme that
+> colours text on a seeded palette to write `surface` (and the roles paired with it),
+> so every text pair is explicit and checked. `Put` also refuses a name or id that looks
+> like a built-in's. See [STATUS](STATUS.md#3a--themeservice-store-rbac).
+
 The error names the failing pair and both ratios, e.g.
 `contrast: on_primary #FFFFFF on primary #007AFF is 4.02:1, needs 4.5:1 (AA)`, so an
 author knows what to change.

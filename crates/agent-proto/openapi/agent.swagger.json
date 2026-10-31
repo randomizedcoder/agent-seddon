@@ -112,6 +112,9 @@
       "name": "SessionRegistryService"
     },
     {
+      "name": "ThemeService"
+    },
+    {
       "name": "TokenizerService"
     },
     {
@@ -5304,6 +5307,178 @@
         ]
       }
     },
+    "/v1/themes": {
+      "get": {
+        "summary": "Built-ins, the tenant's shared themes and the caller's own private ones.",
+        "operationId": "ThemeService_List",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ListThemesResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "tags": [
+          "ThemeService"
+        ]
+      }
+    },
+    "/v1/themes/{id}": {
+      "get": {
+        "operationId": "ThemeService_Get",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.Theme"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ThemeService"
+        ]
+      },
+      "delete": {
+        "operationId": "ThemeService_Delete",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.DeleteThemeResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ThemeService"
+        ]
+      },
+      "put": {
+        "summary": "Create or update a user theme; returns it as stored. `version` must equal the\nstored version (0 to create), else ABORTED. Built-in ids are refused.",
+        "operationId": "ThemeService_Put",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.Theme"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "description": "safe_segment, ≤ 64 chars; the card key",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ThemeService.PutBody"
+            }
+          }
+        ],
+        "tags": [
+          "ThemeService"
+        ]
+      }
+    },
+    "/v1/active-theme": {
+      "get": {
+        "summary": "The caller's theme, resolved: their pick, else the server default, else\n`prototype`.",
+        "operationId": "ThemeService_GetActive",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ActiveTheme"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "tags": [
+          "ThemeService"
+        ]
+      },
+      "put": {
+        "operationId": "ThemeService_SetActive",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ActiveTheme"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.SetActiveThemeRequest"
+            }
+          }
+        ],
+        "tags": [
+          "ThemeService"
+        ]
+      }
+    },
     "/v1/tokenizer/count": {
       "get": {
         "summary": "REST mappings (docs/design/rest-openapi/), under /v1/tokenizer/. Count takes a\nscalar (text + model) → GET; CountMessages carries a repeated nested `Message`\n→ POST body:*. Both are side-effect-free.",
@@ -6003,6 +6178,33 @@
     }
   },
   "definitions": {
+    "agent.v1.Accessibility": {
+      "type": "object",
+      "properties": {
+        "contrast": {
+          "$ref": "#/definitions/agent.v1.ContrastLevel"
+        },
+        "focusRingWidth": {
+          "type": "integer",
+          "format": "int64",
+          "title": "1–6 px; 0 = 2"
+        },
+        "minTargetSize": {
+          "type": "integer",
+          "format": "int64",
+          "title": "40–64 px; 0 = 40"
+        },
+        "reduceMotion": {
+          "type": "boolean",
+          "title": "no page transitions or animations"
+        },
+        "statusIcons": {
+          "type": "boolean",
+          "title": "always pair status colours with an icon + label"
+        }
+      },
+      "description": "What the theme promises for accessibility; the validator enforces `contrast`."
+    },
     "agent.v1.ActivePersonality": {
       "type": "object",
       "properties": {
@@ -6011,6 +6213,32 @@
         }
       },
       "description": "The active **personality** — which named base the loop currently runs *as*\n(docs/design/prompts/10-portal-selector.md). `id` is one of\n`agent_core::ALL_PERSONALITIES` (agent-seddon|pi|hermes|opencode|codex), or `\"\"`\nfor the default base. The closed set means a hostile id simply fails validation."
+    },
+    "agent.v1.ActiveSource": {
+      "type": "string",
+      "enum": [
+        "ACTIVE_SOURCE_UNSPECIFIED",
+        "ACTIVE_SOURCE_USER",
+        "ACTIVE_SOURCE_SERVER_DEFAULT",
+        "ACTIVE_SOURCE_BUILTIN"
+      ],
+      "default": "ACTIVE_SOURCE_UNSPECIFIED",
+      "description": "Which step of the fallback chain answered GetActive.\n\n - ACTIVE_SOURCE_USER: the caller's own pick\n - ACTIVE_SOURCE_SERVER_DEFAULT: no pick, or the picked theme is gone\n - ACTIVE_SOURCE_BUILTIN: the server default is missing too: `prototype`"
+    },
+    "agent.v1.ActiveTheme": {
+      "type": "object",
+      "properties": {
+        "theme": {
+          "$ref": "#/definitions/agent.v1.Theme",
+          "title": "the resolved document, so the portal needs one round trip"
+        },
+        "mode": {
+          "$ref": "#/definitions/agent.v1.ThemeMode"
+        },
+        "source": {
+          "$ref": "#/definitions/agent.v1.ActiveSource"
+        }
+      }
     },
     "agent.v1.AppendResponse": {
       "type": "object"
@@ -6816,6 +7044,16 @@
         }
       }
     },
+    "agent.v1.ContrastLevel": {
+      "type": "string",
+      "enum": [
+        "CONTRAST_LEVEL_UNSPECIFIED",
+        "CONTRAST_LEVEL_AA",
+        "CONTRAST_LEVEL_AAA"
+      ],
+      "default": "CONTRAST_LEVEL_UNSPECIFIED",
+      "description": "The WCAG 2.2 contrast level text pairs must meet.\n\n - CONTRAST_LEVEL_UNSPECIFIED: = AA\n - CONTRAST_LEVEL_AA: 4.5:1 text, 3:1 UI\n - CONTRAST_LEVEL_AAA: 7:1 text, 4.5:1 UI"
+    },
     "agent.v1.Decision": {
       "type": "object",
       "properties": {
@@ -6849,6 +7087,26 @@
           "title": "false when there was no override file to remove (not an error)"
         }
       }
+    },
+    "agent.v1.DeleteThemeResponse": {
+      "type": "object",
+      "properties": {
+        "restoredBuiltin": {
+          "type": "boolean",
+          "description": "Always false until operators can override a built-in."
+        }
+      }
+    },
+    "agent.v1.Density": {
+      "type": "string",
+      "enum": [
+        "DENSITY_UNSPECIFIED",
+        "DENSITY_COMPACT",
+        "DENSITY_STANDARD",
+        "DENSITY_COMFORTABLE"
+      ],
+      "default": "DENSITY_UNSPECIFIED",
+      "description": "Spacing between and inside controls.\n\n - DENSITY_UNSPECIFIED: the platform's Material default"
     },
     "agent.v1.DependencyPathResponse": {
       "type": "object",
@@ -7957,6 +8215,18 @@
         }
       }
     },
+    "agent.v1.ListThemesResponse": {
+      "type": "object",
+      "properties": {
+        "themes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/agent.v1.Theme"
+          }
+        }
+      }
+    },
     "agent.v1.ListTreeResponse": {
       "type": "object",
       "properties": {
@@ -8448,6 +8718,63 @@
           "type": "string"
         }
       }
+    },
+    "agent.v1.Palette": {
+      "type": "object",
+      "properties": {
+        "seed": {
+          "type": "string"
+        },
+        "primary": {
+          "type": "string"
+        },
+        "onPrimary": {
+          "type": "string"
+        },
+        "secondary": {
+          "type": "string"
+        },
+        "onSecondary": {
+          "type": "string"
+        },
+        "surface": {
+          "type": "string",
+          "title": "cards, panes"
+        },
+        "onSurface": {
+          "type": "string",
+          "title": "body text"
+        },
+        "background": {
+          "type": "string",
+          "title": "scaffold"
+        },
+        "surfaceVariant": {
+          "type": "string",
+          "title": "nav rail, headers"
+        },
+        "onSurfaceVariant": {
+          "type": "string"
+        },
+        "outline": {
+          "type": "string",
+          "title": "borders, dividers"
+        },
+        "error": {
+          "type": "string"
+        },
+        "onError": {
+          "type": "string"
+        },
+        "focus": {
+          "type": "string",
+          "title": "focus ring"
+        },
+        "semantic": {
+          "$ref": "#/definitions/agent.v1.SemanticColors"
+        }
+      },
+      "description": "Colours are \"#RRGGBB\" or \"#RRGGBBAA\". Unset roles derive from `seed` (Material 3\ntonal palette); with no seed every role is required."
     },
     "agent.v1.PoolCompleteRequest": {
       "type": "object",
@@ -10765,6 +11092,44 @@
         }
       }
     },
+    "agent.v1.SemanticColors": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "string"
+        },
+        "warning": {
+          "type": "string"
+        },
+        "info": {
+          "type": "string"
+        },
+        "muted": {
+          "type": "string"
+        },
+        "codeBackground": {
+          "type": "string"
+        },
+        "codeForeground": {
+          "type": "string"
+        },
+        "navTint": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "key: nav tab id; allowlisted"
+        },
+        "graphEdge": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "key: edge kind; allowlisted"
+        }
+      },
+      "description": "The colours the portal used to hardcode, named by meaning."
+    },
     "agent.v1.SemanticDistillRequest": {
       "type": "object",
       "properties": {
@@ -10972,6 +11337,37 @@
           "title": "also write [agent] personality via ConfigService (new run default)"
         }
       }
+    },
+    "agent.v1.SetActiveThemeRequest": {
+      "type": "object",
+      "properties": {
+        "themeId": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/definitions/agent.v1.ThemeMode"
+        }
+      }
+    },
+    "agent.v1.Shape": {
+      "type": "object",
+      "properties": {
+        "cornerRadius": {
+          "type": "integer",
+          "format": "int64",
+          "title": "0–32"
+        },
+        "borderWidth": {
+          "type": "integer",
+          "format": "int64",
+          "title": "0–4"
+        },
+        "elevation": {
+          "type": "boolean",
+          "title": "shadows on cards and menus"
+        }
+      },
+      "description": "Corners, borders, shadows."
     },
     "agent.v1.StatusResponse": {
       "type": "object",
@@ -11192,6 +11588,129 @@
         }
       }
     },
+    "agent.v1.Theme": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "title": "safe_segment, ≤ 64 chars; the card key"
+        },
+        "name": {
+          "type": "string",
+          "title": "display name, ≤ 64 chars, printable"
+        },
+        "description": {
+          "type": "string",
+          "title": "≤ 512 chars"
+        },
+        "author": {
+          "type": "string",
+          "title": "credit, ≤ 64 chars"
+        },
+        "builtin": {
+          "type": "boolean",
+          "title": "server-set: compiled in, no stored override"
+        },
+        "version": {
+          "type": "string",
+          "format": "uint64",
+          "title": "server-set: monotonic per (tenant, id)"
+        },
+        "light": {
+          "$ref": "#/definitions/agent.v1.Palette",
+          "title": "at least one of light/dark is required"
+        },
+        "dark": {
+          "$ref": "#/definitions/agent.v1.Palette"
+        },
+        "typography": {
+          "$ref": "#/definitions/agent.v1.Typography"
+        },
+        "shape": {
+          "$ref": "#/definitions/agent.v1.Shape"
+        },
+        "density": {
+          "$ref": "#/definitions/agent.v1.Density"
+        },
+        "accessibility": {
+          "$ref": "#/definitions/agent.v1.Accessibility"
+        },
+        "visibility": {
+          "$ref": "#/definitions/agent.v1.Visibility",
+          "title": "user themes only"
+        },
+        "owner": {
+          "type": "string",
+          "title": "server-set from the caller; never trusted from the client"
+        }
+      },
+      "description": "One portal look. Built-ins ship as `config/themes/<id>.textproto`."
+    },
+    "agent.v1.ThemeMode": {
+      "type": "string",
+      "enum": [
+        "THEME_MODE_UNSPECIFIED",
+        "THEME_MODE_SYSTEM",
+        "THEME_MODE_LIGHT",
+        "THEME_MODE_DARK"
+      ],
+      "default": "THEME_MODE_UNSPECIFIED",
+      "description": "Light, dark or follow the browser.\n\n - THEME_MODE_UNSPECIFIED: = SYSTEM"
+    },
+    "agent.v1.ThemeService.PutBody": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "title": "display name, ≤ 64 chars, printable"
+        },
+        "description": {
+          "type": "string",
+          "title": "≤ 512 chars"
+        },
+        "author": {
+          "type": "string",
+          "title": "credit, ≤ 64 chars"
+        },
+        "builtin": {
+          "type": "boolean",
+          "title": "server-set: compiled in, no stored override"
+        },
+        "version": {
+          "type": "string",
+          "format": "uint64",
+          "title": "server-set: monotonic per (tenant, id)"
+        },
+        "light": {
+          "$ref": "#/definitions/agent.v1.Palette",
+          "title": "at least one of light/dark is required"
+        },
+        "dark": {
+          "$ref": "#/definitions/agent.v1.Palette"
+        },
+        "typography": {
+          "$ref": "#/definitions/agent.v1.Typography"
+        },
+        "shape": {
+          "$ref": "#/definitions/agent.v1.Shape"
+        },
+        "density": {
+          "$ref": "#/definitions/agent.v1.Density"
+        },
+        "accessibility": {
+          "$ref": "#/definitions/agent.v1.Accessibility"
+        },
+        "visibility": {
+          "$ref": "#/definitions/agent.v1.Visibility",
+          "title": "user themes only"
+        },
+        "owner": {
+          "type": "string",
+          "title": "server-set from the caller; never trusted from the client"
+        }
+      },
+      "description": "One portal look. Built-ins ship as `config/themes/<id>.textproto`."
+    },
     "agent.v1.TokCount": {
       "type": "object",
       "properties": {
@@ -11407,6 +11926,43 @@
         }
       }
     },
+    "agent.v1.Typography": {
+      "type": "object",
+      "properties": {
+        "bodyFamily": {
+          "type": "string"
+        },
+        "headingFamily": {
+          "type": "string",
+          "title": "default: body_family"
+        },
+        "monoFamily": {
+          "type": "string",
+          "title": "code, diffs, logs"
+        },
+        "scale": {
+          "type": "number",
+          "format": "double",
+          "title": "0.75–1.5; 0 = 1.0"
+        },
+        "bodyWeight": {
+          "type": "integer",
+          "format": "int64",
+          "title": "100–900, step 100; 0 = 400"
+        },
+        "headingWeight": {
+          "type": "integer",
+          "format": "int64",
+          "title": "0 = 600"
+        },
+        "letterSpacing": {
+          "type": "number",
+          "format": "double",
+          "title": "-1.0–2.0 logical px"
+        }
+      },
+      "description": "Font families must be bundled with the portal (no remote fonts)."
+    },
     "agent.v1.UpdateReviewReply": {
       "type": "object",
       "properties": {
@@ -11620,6 +12176,16 @@
         }
       },
       "description": "Typed findings; empty = valid. A broken document is a list of issues, not an\nRPC error (the editor shows them inline while dragging)."
+    },
+    "agent.v1.Visibility": {
+      "type": "string",
+      "enum": [
+        "VISIBILITY_UNSPECIFIED",
+        "VISIBILITY_PRIVATE",
+        "VISIBILITY_TENANT"
+      ],
+      "default": "VISIBILITY_UNSPECIFIED",
+      "description": "Who sees a user theme.\n\n - VISIBILITY_UNSPECIFIED: = PRIVATE\n - VISIBILITY_PRIVATE: the owner only\n - VISIBILITY_TENANT: everyone in the tenant (needs approve:theme)"
     },
     "agent.v1.WebCacheState": {
       "type": "string",

@@ -131,11 +131,12 @@ pub enum ResourceType {
     Review,
     Binding,
     Telemetry,
+    Theme,
 }
 
 impl ResourceType {
     /// Every resource type, in declaration order (see [`Action::ALL`]).
-    pub const ALL: [ResourceType; 14] = [
+    pub const ALL: [ResourceType; 15] = [
         ResourceType::Config,
         ResourceType::Registry,
         ResourceType::Fleet,
@@ -150,6 +151,7 @@ impl ResourceType {
         ResourceType::Review,
         ResourceType::Binding,
         ResourceType::Telemetry,
+        ResourceType::Theme,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -168,6 +170,7 @@ impl ResourceType {
             ResourceType::Review => "review",
             ResourceType::Binding => "binding",
             ResourceType::Telemetry => "telemetry",
+            ResourceType::Theme => "theme",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -186,6 +189,7 @@ impl ResourceType {
             "review" => ResourceType::Review,
             "binding" => ResourceType::Binding,
             "telemetry" => ResourceType::Telemetry,
+            "theme" => ResourceType::Theme,
             _ => return None,
         })
     }
@@ -213,7 +217,8 @@ impl ResourceType {
             | ResourceType::Exec
             | ResourceType::Review
             | ResourceType::Binding
-            | ResourceType::Telemetry => false,
+            | ResourceType::Telemetry
+            | ResourceType::Theme => false,
         }
     }
 }
@@ -390,8 +395,17 @@ impl RoleCatalog {
                     .map(|r| (Read, r)),
             )
         };
-        const AGENT_USER: [(Action, ResourceType); 4] =
-            [(Use, Agent), (Read, Prompt), (Read, Review), (Read, Graph)];
+        // Every person keeps their own themes (docs/design/visual/03); sharing one
+        // with the tenant is `(approve, theme)`, an admin's call.
+        const AGENT_USER: [(Action, ResourceType); 7] = [
+            (Use, Agent),
+            (Read, Prompt),
+            (Read, Review),
+            (Read, Graph),
+            (Read, Theme),
+            (Write, Theme),
+            (Delete, Theme),
+        ];
         const REVIEWER: [(Action, ResourceType); 4] = [
             (Write, Review),
             (Approve, Review),
@@ -415,7 +429,10 @@ impl RoleCatalog {
             (ROLE_ORG_ADMIN, RoleDef::admin(false)),
             (ROLE_VIEWER, viewer()),
             (ROLE_READER, viewer()),
-            (ROLE_REVIEW_VIEWER, RoleDef::pairs(false, [(Read, Review)])),
+            (
+                ROLE_REVIEW_VIEWER,
+                RoleDef::pairs(false, [(Read, Review), (Read, Theme)]),
+            ),
             (ROLE_AGENT_USER, RoleDef::pairs(false, AGENT_USER)),
             (
                 ROLE_REVIEWER,
@@ -439,6 +456,7 @@ impl RoleCatalog {
                         (Read, Binding),
                         (Write, Binding),
                         (Delete, Binding),
+                        (Read, Theme),
                     ],
                 ),
             ),
@@ -875,21 +893,21 @@ mod tests {
 
     #[rstest]
     // desc: reader gets read on every resource type except the operator-global config.
-    #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 13)]
+    #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 14)]
     // desc: org_admin: every action on every tenant resource, still not config.
-    #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 8 * 13)]
+    #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 8 * 14)]
     // desc: operator: the whole matrix, config included.
-    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 14)]
-    // desc: agent_user is exactly its four grants.
-    #[case::positive_agent_user_four(&[ROLE_AGENT_USER], 4)]
+    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 15)]
+    // desc: agent_user is exactly its seven grants (four + its own themes).
+    #[case::positive_agent_user_seven(&[ROLE_AGENT_USER], 7)]
     // desc: no roles ⇒ nothing.
     #[case::negative_no_roles(&[], 0)]
     // desc: an unknown role grants nothing.
     #[case::negative_unknown_role(&["superuser"], 0)]
     // desc: overlapping roles are not double-counted.
-    #[case::corner_overlap_dedup(&[ROLE_READER, ROLE_ORG_ADMIN], 8 * 13)]
+    #[case::corner_overlap_dedup(&[ROLE_READER, ROLE_ORG_ADMIN], 8 * 14)]
     // desc: reviewer ⊃ agent_user: the union is not double-counted.
-    #[case::corner_nested_personas_dedup(&[ROLE_AGENT_USER, ROLE_REVIEWER], 8)]
+    #[case::corner_nested_personas_dedup(&[ROLE_AGENT_USER, ROLE_REVIEWER], 11)]
     fn effective_permissions_cases(#[case] roles: &[&str], #[case] expected: usize) {
         let perms = effective_permissions(&RoleCatalog::builtin(), &principal("acme", roles));
         assert_eq!(perms.len(), expected, "{perms:?}");
@@ -1508,7 +1526,7 @@ mod tests {
     // desc: org_admin granting operator exceeds by the config surface (tenant-local view).
     #[case::corner_operator_exceeds_org_admin_by_config(&[ROLE_ORG_ADMIN], &[ROLE_OPERATOR], 8)]
     // desc: access_admin cannot hand out exec.
-    #[case::adversarial_access_admin_exec(&[ROLE_ACCESS_ADMIN], &[ROLE_ORG_ADMIN], 8 * 13 - 6)]
+    #[case::adversarial_access_admin_exec(&[ROLE_ACCESS_ADMIN], &[ROLE_ORG_ADMIN], 8 * 14 - 7)]
     fn exceeding_permissions_cases(
         #[case] granter: &[&str],
         #[case] granted: &[&str],

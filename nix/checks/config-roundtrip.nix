@@ -309,6 +309,8 @@ pkgs.runCommand "agent-config-roundtrip"
     store = "postgres"
     [github_install_registry]
     store = "postgres"
+    [themes]
+    store = "postgres"
     [campaign]
     store = "postgres"
     [role]

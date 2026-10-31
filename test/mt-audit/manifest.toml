@@ -136,6 +136,10 @@ note = "session-id-addressed RPCs key by full id; bare-capability-id RPCs (resto
 [services.TaskService]
 class = "stateless"
 
+[services.ThemeService]
+class = "scoped"
+note = "every RPC scopes via identity_key + run_scoped; ThemeBook keys every read and write by the verified caller tenant (no PerTenant wrap)"
+
 [services.TokenizerService]
 class = "stateless"
 

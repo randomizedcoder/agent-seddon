@@ -14,9 +14,17 @@ agent-core.workspace = true
 prost.workspace = true
 prost-reflect.workspace = true
 serde_json.workspace = true
+# User themes and preferences are cards (`ThemeBook`), on whichever backend
+# `[themes] store` picks.
+agent-config-store.workspace = true
+# The preference card id is a hash of the subject.
+sha2.workspace = true
+# NFKD for the lookalike-name check (`skeleton`).
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

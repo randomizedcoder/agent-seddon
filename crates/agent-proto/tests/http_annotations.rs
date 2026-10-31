@@ -113,6 +113,20 @@ enum Expect {
     "ConfigService.GetSchema",
     Expect::Routes(&[("GET", "/v1/config/schema")])
 )]
+// --- themes (docs/design/visual/03) -------------------------------------------
+// positive — a theme Put is a PUT on the id with the whole Theme as the body.
+#[case::positive_theme_put_maps_to_put_with_id(
+    "ThemeService.Put -> PUT /v1/themes/{id} (body: *)",
+    "ThemeService.Put",
+    Expect::Routes(&[("PUT", "/v1/themes/{id}")])
+)]
+// corner — the caller's active theme is a singleton beside the collection, not a
+// `:active` verb on it, so it cannot collide with a theme whose id is `active`.
+#[case::corner_active_theme_is_a_sibling_singleton(
+    "ThemeService.SetActive -> PUT /v1/active-theme",
+    "ThemeService.SetActive",
+    Expect::Routes(&[("PUT", "/v1/active-theme")])
+)]
 // --- 03c: registries (forge / transport / provider-router) ------------------
 // positive — ForgeRegistryService is a third CRUD mirror in a distinct proto group.
 #[case::positive_forge_get_maps_to_get_with_id(

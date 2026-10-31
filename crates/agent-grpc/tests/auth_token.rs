@@ -282,13 +282,17 @@ async fn positive_exchange_then_who_am_i_then_seam() {
     let principal = resp.principal.expect("principal");
     assert_eq!(principal.tenant, "example.com");
     assert_eq!(principal.subject, "user:kc/alice");
-    // `agent_user` uses the agent and reads prompts, reviews and graphs; nothing more.
+    // `agent_user` uses the agent and reads prompts, reviews and graphs; its only
+    // write is its own themes (docs/design/visual/03).
     assert!(principal.permissions.contains(&"use:agent".to_string()));
     assert!(principal.permissions.contains(&"read:prompt".to_string()));
-    assert!(!principal
+    let writes: Vec<&str> = principal
         .permissions
         .iter()
-        .any(|p| p.starts_with("write:")));
+        .map(String::as_str)
+        .filter(|p| p.starts_with("write:"))
+        .collect();
+    assert_eq!(writes, ["write:theme"]);
 
     let me = h
         .who_am_i(Some(&resp.access_token))

@@ -272,6 +272,7 @@ dependencies = [
  "agent-session",
  "agent-tasks",
  "agent-testkit",
+ "agent-theme",
  "agent-tokenizer",
  "agent-tools",
  "arc-swap",
@@ -621,6 +622,7 @@ dependencies = [
  "agent-metrics-proxy",
  "agent-mode",
  "agent-prompt",
+ "agent-proto",
  "agent-providers",
  "agent-pty",
  "agent-reference",
@@ -638,6 +640,7 @@ dependencies = [
  "agent-tasks",
  "agent-telemetry",
  "agent-testkit",
+ "agent-theme",
  "agent-tokenizer",
  "agent-tools",
  "agent-validate",
@@ -819,12 +822,16 @@ dependencies = [
 name = "agent-theme"
 version = "0.1.0"
 dependencies = [
+ "agent-config-store",
  "agent-core",
  "agent-proto",
  "prost",
  "prost-reflect",
  "rstest",
  "serde_json",
+ "sha2",
+ "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]
