@@ -13,7 +13,7 @@ One PR per increment. Every increment that changes the UI gets the Playwright re
 | 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **merged** (#657) |
 | 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | **merged** (#658; 2b #659, landed on main by #660) |
 | 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | **merged** (#661 service, #662 portal) |
-| 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | ✅ | ✅ | ✅ | import/export + editor widget tables | ✅ | **4a in review** (Import/Export RPCs); 4b portal editor next |
+| 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | ✅ | ✅ | ✅ | import/export + editor widget tables | ✅ | 4a in review (Import/Export RPCs); **4b in review** (portal editor) |
 
 ## As built
 
@@ -197,6 +197,37 @@ Playwright review).
 - Both are `(read, theme)`: they parse and print, and storing is still `Put`. Both refuse
   text or a draft over the 64 KiB cap before parsing or printing. REST:
   `POST /v1/theme-import`, `POST /v1/theme-export`.
+
+### 4b — the portal editor
+
+- **Edit a copy** (or **Edit**, on your own theme) under Settings → Appearance opens the
+  editor on a draft: a built-in or someone else's theme is copied (`cloneForEdit`: a free
+  `<id>-copy` id, private, no owner, version 0); your own stored theme is edited in place,
+  and its `version` makes a concurrent save `ABORTED`.
+- The form covers every token: id, name, author, description, visibility, light and dark
+  palettes (14 palette and 6 semantic colours each, with an add/remove for the second
+  side), the three font families from the bundled list, scale, radius and density.
+- Every colour pair the server checks has a **contrast badge** (`ratio:1 AA` or `AAA`),
+  from the same pair table as the validator (`paletteContrast`), so a badge passes iff
+  `Put` would. Ratios are truncated, never rounded up, so 4.499 shows as 4.49 and fails.
+- The **live preview** renders sample widgets (buttons, a card, chips, code, the status
+  colours) under the draft's own `ThemeData`; a draft that does not map shows a message,
+  not a crash.
+- **Save and use** is disabled until the draft validates client-side, and offline. It
+  calls `Put`, then makes the saved theme active. The server's answer is final: a
+  refusal shows its message in the problem banner.
+- **Import** pastes textproto (refused over 64 KiB before it is sent) and loads the
+  server's parse, showing its `problem`; **Export** shows the printed textproto with a
+  copy button. **Delete** (own stored themes only) asks first, and falls back to the
+  default theme if the deleted one was active.
+- Differs from [`03`](03-user-themes.md#authoring): colours are `#RRGGBB` text fields
+  with a swatch, not a picker, and the preview is a sample panel rather than the
+  Launch and Fleet pages. Import is paste only (no file upload) and textproto only.
+- Tests: `test/unit/theme/editor_test.dart` (freeId, cloneForEdit, colour fields,
+  contrast badges) and the `theme_editor` page spec (26 rows, all five classes).
+  Layer B (`nix run .#portal-e2e`) drives the editor over the real wire: Export, then
+  Save and use, proven by metrics deltas and read back with `Get` and `GetActive`
+  ([portal-gui-testing/04](../portal-gui-testing/04-layer-b-e2e.md)).
 
 ## Open questions
 

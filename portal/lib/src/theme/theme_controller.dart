@@ -53,6 +53,18 @@ abstract class ThemeServer {
 
   /// Built-ins, the tenant's shared themes and the caller's private ones.
   Future<List<pb.Theme>> list();
+
+  /// Store a user theme; answers the stored copy (with its new `version`).
+  Future<pb.Theme> put(pb.Theme theme);
+
+  Future<void> delete(String id);
+
+  /// Parse textproto on the server: the draft, and why `Put` would refuse it
+  /// (empty when it would not). Stores nothing.
+  Future<(pb.Theme, String)> importText(String text);
+
+  /// [theme] as textproto. Stores nothing.
+  Future<String> exportText(pb.Theme theme);
 }
 
 /// [ThemeServer] over the generated `ThemeService` client.
@@ -70,6 +82,22 @@ class GrpcThemeServer implements ThemeServer {
   @override
   Future<List<pb.Theme>> list() async =>
       (await client.list(pb.ListThemesRequest())).themes;
+
+  @override
+  Future<pb.Theme> put(pb.Theme theme) => client.put(theme);
+
+  @override
+  Future<void> delete(String id) => client.delete(pb.DeleteThemeRequest(id: id));
+
+  @override
+  Future<(pb.Theme, String)> importText(String text) async {
+    final r = await client.import(pb.ImportThemeRequest(text: text));
+    return (r.theme, r.problem);
+  }
+
+  @override
+  Future<String> exportText(pb.Theme theme) async =>
+      (await client.export(pb.ExportThemeRequest(theme: theme))).text;
 }
 
 ThemeMode _modeFromName(String? name) => switch (name) {
@@ -141,6 +169,9 @@ class ThemeController extends ChangeNotifier {
 
   /// Whether a server holds this user's choice (signed in, or sign-in off).
   bool get attached => _server != null;
+
+  /// The server the theme editor saves to; null until a user is known.
+  ThemeServer? get server => _server;
 
   /// For the OS "increase contrast" setting: the `accessible` theme, but only
   /// while the user has not picked a theme themselves (08-accessibility.md).
@@ -224,6 +255,36 @@ class ThemeController extends ChangeNotifier {
     _hasSavedTheme = true;
     _changed();
     _push();
+  }
+
+  /// The editor stored [theme]: offer it, and make it the active theme. A
+  /// theme that fails validation here (the server should never return one) is
+  /// not offered, and the result is false.
+  bool saved(pb.Theme theme) {
+    final t = _checked(theme.deepCopy());
+    if (t == null) return false;
+    _userThemes = [
+      for (final u in _userThemes)
+        if (u.id != t.id) u,
+      t,
+    ];
+    select(t.id);
+    return true;
+  }
+
+  /// The editor deleted the user theme [id]: stop offering it, and fall back
+  /// to the default built-in if it was active.
+  void removed(String id) {
+    if (_find(_userThemes, id) == null) return;
+    _userThemes = [
+      for (final u in _userThemes)
+        if (u.id != id) u,
+    ];
+    if (_active.id == id) {
+      select(fallbackThemeId);
+    } else {
+      _changed(rebuild: false, device: false);
+    }
   }
 
   void setMode(ThemeMode mode) {

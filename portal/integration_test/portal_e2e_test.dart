@@ -227,6 +227,72 @@ void main() {
           'Prompts personality selector not available'));
     }
 
+    // ---- Curated actions 4-6: Settings — the theme editor (visual themes 4).
+    // Copy the active theme under a unique per-run id, Export it (a read: the
+    // printed textproto), then Save and use (Put, then SetActive). The harness
+    // reads the theme back with Get, then deletes it and restores the user's
+    // previous active theme.
+    final themeId = 'portal-e2e-$_runId';
+    const svc = '/agent.v1.ThemeService';
+    if (await goTo('Settings') && await waitFor('theme_editor.open')) {
+      final t0 = DateTime.now();
+      try {
+        await tapKey('theme_editor.open');
+        if (!await waitFor('theme_editor.id')) {
+          throw StateError('the editor did not open');
+        }
+        await tester.enterText(
+            find.descendant(
+                of: find.byKey(const Key('theme_editor.id')),
+                matching: find.byType(EditableText)),
+            themeId);
+        await _settle(tester);
+
+        // Export: the dialog shows the server's text.
+        final tx = DateTime.now();
+        await tapKey('theme_editor.export');
+        final exported = await waitFor('theme_editor.export.text');
+        records.add(exported
+            ? _ActionRecord(
+                page: 'settings',
+                element: 'theme_editor.export',
+                rpc: '$svc/Export',
+                value: themeId,
+                outcome: 'ok',
+                ms: DateTime.now().difference(tx).inMilliseconds)
+            : _fail('settings', 'theme_editor.export', '$svc/Export', themeId,
+                'no export dialog'));
+        if (exported) {
+          await tester.tap(find.text('Close'));
+          await _settle(tester);
+        }
+
+        // Save and use: Put, then SetActive.
+        final ts = DateTime.now();
+        await tapKey('theme_editor.save');
+        // A stored theme offers Delete; a refused save leaves the draft unsaved.
+        final saved = await waitFor('theme_editor.delete');
+        final ms = DateTime.now().difference(ts).inMilliseconds;
+        if (saved) {
+          records.add(_ActionRecord(
+              page: 'settings', element: 'theme_editor.save', rpc: '$svc/Put',
+              value: themeId, outcome: 'ok', ms: ms));
+          records.add(_ActionRecord(
+              page: 'settings', element: 'theme_editor.save', rpc: '$svc/SetActive',
+              value: themeId, outcome: 'ok', ms: ms));
+        } else {
+          records.add(_fail('settings', 'theme_editor.save', '$svc/Put', themeId,
+              'not saved: no Delete offered after Save'));
+        }
+      } catch (e) {
+        records.add(_fail('settings', 'theme_editor.save', '$svc/Put', themeId,
+            'theme editor: $e (${DateTime.now().difference(t0).inMilliseconds} ms)'));
+      }
+    } else {
+      records.add(_skip('settings', 'theme_editor.save', '$svc/Put', themeId,
+          'Settings theme editor not available'));
+    }
+
     // Hand the whole run back to the driver → the shell harness.
     binding.reportData = <String, Object?>{
       'run_id': _runId,
