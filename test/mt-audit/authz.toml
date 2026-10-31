@@ -146,6 +146,7 @@
 "ReviewFleetService.Put" = "write:fleet"
 "ReviewFleetService.ReviewNow" = "trigger:fleet"
 "ReviewFleetService.SetEnabled" = "write:fleet"
+"ReviewFleetService.SkipReview" = "approve:review"
 "ReviewFleetService.UpdateReview" = "write:review"
 "RoleService.Delete" = "delete:role"
 "RoleService.Get" = "read:role"

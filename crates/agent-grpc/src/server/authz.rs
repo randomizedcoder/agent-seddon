@@ -373,6 +373,11 @@ mod tests {
         "/agent.v1.ReviewFleetService/Approve",
         false
     )]
+    #[case::negative_review_viewer_cannot_skip(
+        ROLE_REVIEW_VIEWER,
+        "/agent.v1.ReviewFleetService/SkipReview",
+        false
+    )]
     #[case::negative_agent_user_cannot_read_roster(
         ROLE_AGENT_USER,
         "/agent.v1.ReviewFleetService/List",
@@ -399,6 +404,11 @@ mod tests {
         ROLE_REVIEWER,
         "/agent.v1.ReviewFleetService/Delete",
         false
+    )]
+    #[case::boundary_reviewer_skips_draft(
+        ROLE_REVIEWER,
+        "/agent.v1.ReviewFleetService/SkipReview",
+        true
     )]
     #[case::boundary_reviewer_edits_draft(
         ROLE_REVIEWER,

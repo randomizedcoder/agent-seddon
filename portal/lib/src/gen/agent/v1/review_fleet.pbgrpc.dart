@@ -126,6 +126,16 @@ class ReviewFleetServiceClient extends $grpc.Client {
     return $createUnaryCall(_$updateReview, request, options: options);
   }
 
+  /// Skip a draft so it is never posted (needs approve:review, like Approve). Opt-in:
+  /// served only by the `--serve-fleet` process with persisted history; else
+  /// UNIMPLEMENTED.
+  $grpc.ResponseFuture<$0.SkipReviewReply> skipReview(
+    $0.SkipReviewRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$skipReview, request, options: options);
+  }
+
   /// Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the
   /// full `--serve-fleet` process (which has the config to build the probes); the
   /// bare control-plane endpoint returns UNIMPLEMENTED.
@@ -186,6 +196,11 @@ class ReviewFleetServiceClient extends $grpc.Client {
           '/agent.v1.ReviewFleetService/UpdateReview',
           ($0.UpdateReviewRequest value) => value.writeToBuffer(),
           $0.UpdateReviewReply.fromBuffer);
+  static final _$skipReview =
+      $grpc.ClientMethod<$0.SkipReviewRequest, $0.SkipReviewReply>(
+          '/agent.v1.ReviewFleetService/SkipReview',
+          ($0.SkipReviewRequest value) => value.writeToBuffer(),
+          $0.SkipReviewReply.fromBuffer);
   static final _$preflight =
       $grpc.ClientMethod<$0.PreflightRequest, $0.PreflightReply>(
           '/agent.v1.ReviewFleetService/Preflight',
@@ -272,6 +287,13 @@ abstract class ReviewFleetServiceBase extends $grpc.Service {
             ($core.List<$core.int> value) =>
                 $0.UpdateReviewRequest.fromBuffer(value),
             ($0.UpdateReviewReply value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.SkipReviewRequest, $0.SkipReviewReply>(
+        'SkipReview',
+        skipReview_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.SkipReviewRequest.fromBuffer(value),
+        ($0.SkipReviewReply value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.PreflightRequest, $0.PreflightReply>(
         'Preflight',
         preflight_Pre,
@@ -360,6 +382,14 @@ abstract class ReviewFleetServiceBase extends $grpc.Service {
 
   $async.Future<$0.UpdateReviewReply> updateReview(
       $grpc.ServiceCall call, $0.UpdateReviewRequest request);
+
+  $async.Future<$0.SkipReviewReply> skipReview_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.SkipReviewRequest> $request) async {
+    return skipReview($call, await $request);
+  }
+
+  $async.Future<$0.SkipReviewReply> skipReview(
+      $grpc.ServiceCall call, $0.SkipReviewRequest request);
 
   $async.Future<$0.PreflightReply> preflight_Pre($grpc.ServiceCall $call,
       $async.Future<$0.PreflightRequest> $request) async {

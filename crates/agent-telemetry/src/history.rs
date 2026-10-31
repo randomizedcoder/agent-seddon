@@ -150,6 +150,7 @@ fn newest_by_key<R, T: Ord>(
 fn finalize_drafts(
     rows: Vec<ReviewDraftRow>,
     status: Option<&str>,
+    exclude: &[String],
     limit: usize,
 ) -> Vec<ReviewDraftRecord> {
     // Newest-wins per review_id (a supersede/post is a fresh row, so the max-`ts` row is each
@@ -161,6 +162,7 @@ fn finalize_drafts(
         newest_by_key(rows, |r| &r.review_id, |r| r.ts.1, |r| &r.status)
             .into_iter()
             .filter(|r| status.is_none_or(|s| r.status == s))
+            .filter(|r| !exclude.contains(&r.status))
             .collect();
     kept.sort_by(|a, b| {
         b.ts.1
@@ -383,6 +385,7 @@ impl FleetHistory for ClickHouseHistory {
         Ok(finalize_drafts(
             rows,
             filter.status.as_deref(),
+            &filter.exclude_status,
             filter.limit,
         ))
     }
@@ -536,7 +539,85 @@ mod tests {
             .into_iter()
             .map(|(id, st, ts)| row(id, st, ts))
             .collect();
-        let got: Vec<String> = finalize_drafts(rows, status, limit)
+        let got: Vec<String> = finalize_drafts(rows, status, &[], limit)
+            .into_iter()
+            .map(|r| r.review_id)
+            .collect();
+        assert_eq!(got, expected, "{desc}");
+    }
+
+    /// desc: `exclude_status` drops drafts by their CURRENT status, after the
+    /// newest-per-review_id dedup, so only a review whose latest state is excluded hides.
+    #[rstest]
+    #[case::positive_hides_skipped(
+        "a skipped draft leaves the list; the drafted one stays",
+        vec![("a", "drafted", 1), ("b", "skipped", 2)],
+        None,
+        vec!["skipped"],
+        vec!["a"]
+    )]
+    #[case::positive_skip_after_draft_hides_the_review(
+        "a review skipped after drafting is hidden: its current state is skipped",
+        vec![("a", "drafted", 1), ("a", "skipped", 5)],
+        None,
+        vec!["skipped"],
+        Vec::<&str>::new()
+    )]
+    #[case::negative_stale_state_not_excluded(
+        "an old `skipped` row under a newer state does not hide the review",
+        vec![("a", "skipped", 1), ("a", "posted", 5)],
+        None,
+        vec!["skipped"],
+        vec!["a"]
+    )]
+    #[case::corner_same_millisecond_skip_wins(
+        "a skip landing in the same millisecond as the draft wins the tie",
+        vec![("a", "skipped", 3), ("a", "drafted", 3)],
+        None,
+        vec!["skipped"],
+        Vec::<&str>::new()
+    )]
+    #[case::corner_status_and_exclude_together(
+        "status=skipped with skipped excluded matches nothing",
+        vec![("a", "skipped", 1)],
+        Some("skipped"),
+        vec!["skipped"],
+        Vec::<&str>::new()
+    )]
+    #[case::boundary_empty_exclude_keeps_all(
+        "no exclusions keeps every status",
+        vec![("a", "skipped", 1), ("b", "superseded", 2)],
+        None,
+        Vec::<&str>::new(),
+        vec!["b", "a"]
+    )]
+    #[case::boundary_several_excluded(
+        "skipped and superseded both excluded",
+        vec![("a", "skipped", 1), ("b", "superseded", 2), ("c", "posted", 3)],
+        None,
+        vec!["skipped", "superseded"],
+        vec!["c"]
+    )]
+    #[case::adversarial_unknown_exclusion_is_inert(
+        "an exclusion naming no status (or SQL) removes nothing",
+        vec![("a", "drafted", 1)],
+        None,
+        vec!["' OR 1=1 --"],
+        vec!["a"]
+    )]
+    fn finalize_drafts_excludes(
+        #[case] desc: &str,
+        #[case] rows: Vec<(&str, &str, u64)>,
+        #[case] status: Option<&str>,
+        #[case] exclude: Vec<&str>,
+        #[case] expected: Vec<&str>,
+    ) {
+        let rows: Vec<ReviewDraftRow> = rows
+            .into_iter()
+            .map(|(id, st, ts)| row(id, st, ts))
+            .collect();
+        let exclude: Vec<String> = exclude.into_iter().map(String::from).collect();
+        let got: Vec<String> = finalize_drafts(rows, status, &exclude, 0)
             .into_iter()
             .map(|r| r.review_id)
             .collect();
@@ -556,7 +637,7 @@ mod tests {
         let rows: Vec<ReviewDraftRow> = (0..n)
             .map(|i| row(&format!("r{i:04}"), "drafted", i as u64))
             .collect();
-        let got = finalize_drafts(rows, None, limit);
+        let got = finalize_drafts(rows, None, &[], limit);
         assert_eq!(
             got.len(),
             MAX_DRAFT_ROWS,

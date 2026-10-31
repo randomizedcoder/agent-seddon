@@ -6263,13 +6263,15 @@ impl ReviewRecord {
 /// The lifecycle status of a fleet review draft (review-fleet C14), stored as a string
 /// column in `agent_review_drafts`. A review is `drafted` when the `.md` + row are
 /// persisted, `superseded` when a newer head starts a fresh round (C16), `approved` the
-/// instant a human approves, and `posted` once the FSM has posted it (the idempotency
-/// key — a second post attempt for a `posted` review is a no-op).
+/// instant a human approves, `posted` once the FSM has posted it (the idempotency
+/// key — a second post attempt for a `posted` review is a no-op), and `skipped` when a
+/// human decides it will never be posted (terminal, like `posted`).
 pub mod draft_status {
     pub const DRAFTED: &str = "drafted";
     pub const APPROVED: &str = "approved";
     pub const POSTED: &str = "posted";
     pub const SUPERSEDED: &str = "superseded";
+    pub const SKIPPED: &str = "skipped";
 }
 
 /// The fleet's **operational** review record (review-fleet C14) — per-PR draft state,
@@ -6665,6 +6667,8 @@ pub struct ReviewDraftFilter {
     pub session_id: Option<String>,
     /// One of [`draft_status`].
     pub status: Option<String>,
+    /// Current statuses to leave out (e.g. `skipped`), applied with `status`.
+    pub exclude_status: Vec<String>,
     /// Requested max rows (0 ⇒ the store cap); the impl clamps to its cap.
     pub limit: usize,
 }
@@ -6732,6 +6736,45 @@ pub enum ApproveOutcome {
     AlreadyPosted,
     /// No persisted draft for this `review_id`.
     NotFound,
+    /// The draft was skipped: it is never posted.
+    Skipped,
+}
+
+/// The outcome of a [`FleetApprover::skip`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipOutcome {
+    /// The draft is now `skipped` and can no longer be posted.
+    Skipped,
+    /// Idempotent no-op: the draft was already skipped.
+    AlreadySkipped,
+    /// The draft was posted (or a post is in flight), so there is nothing to skip.
+    AlreadyPosted,
+    /// No persisted draft for this `review_id`.
+    NotFound,
+}
+
+impl SkipOutcome {
+    /// The `SkipReviewReply.status` string.
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            Self::Skipped => "skipped",
+            Self::AlreadySkipped => "already_skipped",
+            Self::AlreadyPosted => "already_posted",
+            Self::NotFound => "not_found",
+        }
+    }
+
+    /// Parse a `SkipReviewReply.status` (exact match; anything else is `None`).
+    pub fn from_wire(s: &str) -> Option<Self> {
+        [
+            Self::Skipped,
+            Self::AlreadySkipped,
+            Self::AlreadyPosted,
+            Self::NotFound,
+        ]
+        .into_iter()
+        .find(|o| o.as_wire() == s)
+    }
 }
 
 /// Approves a persisted review draft and posts it to its forge (review-fleet C17, the
@@ -6749,6 +6792,14 @@ pub trait FleetApprover: Send + Sync {
     /// `approved_by` is the caller's [`requester_label`] (S19), or `None` on an
     /// unauthenticated server; it is stored on the `posted` row.
     async fn approve(&self, review_id: &str, approved_by: Option<&str>) -> Result<ApproveOutcome>;
+
+    /// Skip the draft named by `review_id`: it is never posted, and leaves the default
+    /// review list. Claims the same [`FleetPostLease`] as `approve`, so a skip and an
+    /// approve can't both win, and a later approve stands down. `skipped_by` is stored
+    /// like `approved_by`. Default: unsupported, for approvers that can't persist it.
+    async fn skip(&self, _review_id: &str, _skipped_by: Option<&str>) -> Result<SkipOutcome> {
+        Err(Error::Fleet("this fleet cannot skip review drafts".into()))
+    }
 }
 
 /// The outcome of a durable, atomic attempt to claim the exclusive right to POST a
@@ -6803,6 +6854,36 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use rstest::rstest;
+
+    /// `SkipReviewReply.status` parsing: name, description, wire text, expected outcome.
+    #[rstest]
+    #[case::positive_skipped("the skip happened", "skipped", Some(SkipOutcome::Skipped))]
+    #[case::positive_already_skipped(
+        "a repeat skip",
+        "already_skipped",
+        Some(SkipOutcome::AlreadySkipped)
+    )]
+    #[case::positive_already_posted(
+        "posted first",
+        "already_posted",
+        Some(SkipOutcome::AlreadyPosted)
+    )]
+    #[case::positive_not_found("no such draft", "not_found", Some(SkipOutcome::NotFound))]
+    #[case::negative_unknown("a status this client doesn't know", "deleted", None)]
+    #[case::boundary_empty("an empty status", "", None)]
+    #[case::corner_case_differs("matching is exact, not case-folded", "Skipped", None)]
+    #[case::adversarial_padded("a padded status is not trusted", "skipped\n", None)]
+    fn skip_outcome_from_wire(
+        #[case] description: &str,
+        #[case] wire: &str,
+        #[case] expected: Option<SkipOutcome>,
+    ) {
+        let got = SkipOutcome::from_wire(wire);
+        assert_eq!(got, expected, "{description}");
+        if let Some(o) = got {
+            assert_eq!(o.as_wire(), wire, "{description}: round-trips");
+        }
+    }
 
     /// A provider whose `complete` returns a fixed response, exercising the
     /// default `stream` adapter.

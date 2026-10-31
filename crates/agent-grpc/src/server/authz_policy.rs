@@ -119,7 +119,7 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         // Reviews: the drafts, and the roster that produces them.
         ("ReviewFleetService", "ListReviews" | "GetReview") => Require(Read, Review),
         ("ReviewFleetService", "UpdateReview") => Require(Write, Review),
-        ("ReviewFleetService", "Approve") => Require(Approve, Review),
+        ("ReviewFleetService", "Approve" | "SkipReview") => Require(Approve, Review),
         ("ReviewFleetService", "ReviewNow") => Require(Trigger, Fleet),
         ("ReviewFleetService", "List" | "Get" | "Preflight") => Require(Read, Fleet),
         ("ReviewFleetService", "Put" | "SetEnabled") => Require(Write, Fleet),
@@ -237,6 +237,10 @@ mod tests {
         "/agent.v1.ReviewFleetService/Approve",
         Some(Gate::Require(Action::Approve, ResourceType::Review))
     )]
+    #[case::positive_skip_is_approve(
+        "/agent.v1.ReviewFleetService/SkipReview",
+        Some(Gate::Require(Action::Approve, ResourceType::Review))
+    )]
     #[case::positive_roster_read(
         "/agent.v1.ReviewFleetService/List",
         Some(Gate::Require(Action::Read, ResourceType::Fleet))
@@ -297,6 +301,7 @@ mod tests {
 
     #[rstest]
     #[case::positive_approve("/agent.v1.ReviewFleetService/Approve", true)]
+    #[case::positive_skip_review("/agent.v1.ReviewFleetService/SkipReview", true)]
     #[case::positive_exec("/agent.v1.SandboxService/Exec", true)]
     #[case::positive_role_write("/agent.v1.RoleService/Put", true)]
     #[case::positive_role_delete("/agent.v1.RoleService/Delete", true)]

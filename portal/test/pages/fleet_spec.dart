@@ -56,7 +56,30 @@ const fleetSpec = PageSpec('fleet', [
     elementId: 'fleet.filter.repo',
     caseClass: CaseClass.positive,
     name: 'filter_by_repo',
-    description: 'submitting the repo field re-lists with {repo} in the request',
+    description: 'choosing a repo from the menu re-lists with {repo} in the request',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.repo',
+    caseClass: CaseClass.corner,
+    name: 'repo_menu_from_roster_and_drafts',
+    description: 'the repo menu lists each repo once, from the roster and the '
+        'drafts, as owner/name, after "all repos"',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.repo',
+    caseClass: CaseClass.boundary,
+    name: 'all_repos_clears_filter',
+    description: 'choosing "all repos" again re-lists with an empty repo',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.repo',
+    caseClass: CaseClass.adversarial,
+    name: 'hostile_repo_name_is_text',
+    description: 'a draft whose repo is markup/control text is listed as plain '
+        'text in the menu and sent back verbatim, never parsed',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
@@ -64,6 +87,27 @@ const fleetSpec = PageSpec('fleet', [
     caseClass: CaseClass.positive,
     name: 'filter_by_status',
     description: 'choosing a status re-lists with {status} in the request',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.status',
+    caseClass: CaseClass.boundary,
+    name: 'default_hides_skipped',
+    description: 'the first list asks for every status except skipped',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.status',
+    caseClass: CaseClass.positive,
+    name: 'show_skipped',
+    description: 'choosing "skipped" lists only skipped drafts, excluding nothing',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.status',
+    caseClass: CaseClass.corner,
+    name: 'all_includes_skipped',
+    description: 'choosing "all" sends no status and no exclusion',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
@@ -475,6 +519,72 @@ const fleetSpec = PageSpec('fleet', [
     description: 'a user holding only read permissions (security-hardening '
         'S13b) gets no Approve button, no Review now, a disabled enable switch '
         'and no editor; the agent still refuses a forged Approve',
+    expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
+  ),
+  // ── skip ──────────────────────────────────────────────────────────────────
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.positive,
+    name: 'skip_marks_skipped',
+    description: 'Skip → confirm fires SkipReview {reviewId}, snacks, re-lists',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.skip.confirm',
+    caseClass: CaseClass.positive,
+    name: 'confirm_fires_skip',
+    description: 'the confirm button is what dispatches SkipReview',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.skip.cancel',
+    caseClass: CaseClass.positive,
+    name: 'skip_cancel_no_rpc',
+    description: 'Cancel dismisses the skip dialog and fires no SkipReview',
+    expectedRpc: 'local',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.corner,
+    name: 'skipped_draft_is_final',
+    description: 'a skipped draft has no Skip button, a disabled "Skipped" '
+        'approve button and "skipped by" attribution',
+    expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.boundary,
+    name: 'posted_draft_has_no_skip',
+    description: 'a posted draft cannot be skipped: no Skip button',
+    expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.negative,
+    name: 'skip_lost_race_to_post',
+    description: 'the server answering already_posted says so; nothing claims '
+        'the draft was skipped',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.negative,
+    name: 'skip_error_snack',
+    description: 'a failed SkipReview surfaces "Skip failed" and keeps the page',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.adversarial,
+    name: 'double_click_one_skip',
+    description: 'a rapid double-click on confirm fires exactly one SkipReview',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.detail.skip',
+    caseClass: CaseClass.adversarial,
+    name: 'review_viewer_sees_no_skip',
+    description: 'a user with only read permissions gets no Skip button',
     expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
   ),
 ]);
