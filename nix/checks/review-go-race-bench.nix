@@ -9,9 +9,12 @@
 #
 # Offline + deterministic: the module imports only the stdlib (`testing`, `sync`),
 # so `go test` needs no module download (GOPROXY=off) and runs in the hermetic
-# `nix flake check` sandbox. The bench finding is deterministic and asserted; the
-# race *detection* is best-effort (not asserted — the detector is probabilistic),
-# but the `-race` run itself is asserted to have executed.
+# `nix flake check` sandbox. Both results are asserted, not just that the runs were
+# attempted: each run is recorded whatever its outcome, so grepping for the command
+# name could never fail (the #665 review). The race detector works on happens-before,
+# not timing, so four sibling goroutines writing `x` with no synchronisation is
+# reported on every run, even on one CPU. A `-race` run that could not build (no C
+# compiler for cgo) is recorded as `failed`, so `ok` with a finding proves it ran.
 {
   pkgs,
   agent,
@@ -104,10 +107,10 @@ import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   asserts = ''
     echo "$ctx" | grep -q "Grounded review facts"     || fail "no grounded facts block"
     echo "$ctx" | grep -q "Go race & benchmarks:"     || fail "no go-checks section"
-    echo "$ctx" | grep -q "go test -race"             || fail "the -race run was not recorded"
-    echo "$ctx" | grep -q "go test -bench"            || fail "the -bench run was not recorded"
+    echo "$ctx" | grep -qE "go test -race: ok \([1-9][0-9]* finding"  || fail "the -race run did not build and report the data race"
+    echo "$ctx" | grep -qE "go test -bench: ok \([1-9][0-9]* finding" || fail "the -bench run did not build and report a benchmark"
     echo "$ctx" | grep -q "ns/op"                     || fail "the benchmark result was not surfaced"
     echo "$ctx" | grep -q "BenchmarkSum"              || fail "the benchmark name was not surfaced"
   '';
-  okMsg = "OK: go test -race + -bench results folded into the grounded review context";
+  okMsg = "OK: go test -race found the data race and -bench reported ns/op in the grounded review context";
 }

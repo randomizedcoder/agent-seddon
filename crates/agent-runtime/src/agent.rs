@@ -1072,9 +1072,11 @@ impl agent_core::FleetDraftEditor for EngineDraftEditor {
         if !Path::new(&record.draft_path).starts_with(&self.fleet_root) {
             return Ok(agent_core::UpdateOutcome::NotFound);
         }
-        // A posted/approved draft is locked — an edit would diverge from what was posted.
+        // A posted/approved draft is locked — an edit would diverge from what was posted. A
+        // skipped draft is final too (it is never posted), as the portal's editor already treats it.
         if record.status == agent_core::draft_status::POSTED
             || record.status == agent_core::draft_status::APPROVED
+            || record.status == agent_core::draft_status::SKIPPED
         {
             return Ok(agent_core::UpdateOutcome::Locked {
                 status: record.status,
@@ -4154,6 +4156,12 @@ mod tests {
     #[case::negative_approved_is_locked(
         "an `approved` draft is locked → Locked, file unchanged",
         "approved",
+        "locked",
+        false
+    )]
+    #[case::negative_skipped_is_locked(
+        "a `skipped` draft is final (never posted) → Locked, file unchanged",
+        "skipped",
         "locked",
         false
     )]

@@ -21,6 +21,8 @@ use std::time::Instant;
 
 const MAX_FINDINGS: usize = 200;
 const MAX_MSG: usize = 400;
+/// Cap on a run's failure reason (it comes from the reviewed code's build output).
+const MAX_REASON: usize = 160;
 
 pub(crate) struct GoChecksCollector {
     pub timeout_secs: u64,
@@ -80,41 +82,29 @@ impl FactCollector for GoChecksCollector {
         if self.race_bench {
             // `go test -race`: data races. `-count=1` disables the test cache so it runs.
             let race_cmd = format!("go test -race -count=1 -run . -vet=off {scope}");
-            match run_go(&sandbox, &ctx.repo_root, &race_cmd, self.timeout_secs).await {
-                GoRun::Output { stdout, stderr } => {
-                    let combined = format!("{stdout}\n{stderr}");
-                    let mut races = parse_races(&combined, &ctx.repo_root);
-                    let n = races.len();
-                    findings.append(&mut races);
-                    let mut r = run("go test -race", "ok", "", Instant::now());
-                    r.finding_count = n.min(u32::MAX as usize) as u32;
-                    runs.push(r);
-                }
-                GoRun::Skipped(reason) => {
-                    runs.push(run("go test -race", "skipped", &reason, now()));
-                }
-                GoRun::Timeout => runs.push(run("go test -race", "timeout", "", now())),
-                GoRun::Failed(reason) => runs.push(run("go test -race", "failed", &reason, now())),
-            }
+            let started = now();
+            let out = run_go(&sandbox, &ctx.repo_root, &race_cmd, self.timeout_secs).await;
+            record(
+                "go test -race",
+                out,
+                started,
+                &mut runs,
+                &mut findings,
+                |o| parse_races(o, &ctx.repo_root),
+            );
 
             // `go test -bench`: run benchmarks (no unit tests: `-run=^$`), surface ns/op.
             let bench_cmd = format!("go test -bench=. -benchmem -run=^$ -count=1 -vet=off {scope}");
-            match run_go(&sandbox, &ctx.repo_root, &bench_cmd, self.timeout_secs).await {
-                GoRun::Output { stdout, stderr } => {
-                    let combined = format!("{stdout}\n{stderr}");
-                    let mut benches = parse_benches(&combined);
-                    let n = benches.len();
-                    findings.append(&mut benches);
-                    let mut r = run("go test -bench", "ok", "", now());
-                    r.finding_count = n.min(u32::MAX as usize) as u32;
-                    runs.push(r);
-                }
-                GoRun::Skipped(reason) => {
-                    runs.push(run("go test -bench", "skipped", &reason, now()));
-                }
-                GoRun::Timeout => runs.push(run("go test -bench", "timeout", "", now())),
-                GoRun::Failed(reason) => runs.push(run("go test -bench", "failed", &reason, now())),
-            }
+            let started = now();
+            let out = run_go(&sandbox, &ctx.repo_root, &bench_cmd, self.timeout_secs).await;
+            record(
+                "go test -bench",
+                out,
+                started,
+                &mut runs,
+                &mut findings,
+                parse_benches,
+            );
         }
 
         if self.coverage {
@@ -123,22 +113,16 @@ impl FactCollector for GoChecksCollector {
             // runs the tests; `-vet=off` keeps it to coverage, not vet diagnostics.
             let module = module_path(&ctx.repo_root);
             let cover_cmd = format!("go test -cover -run . -count=1 -vet=off {scope}");
-            match run_go(&sandbox, &ctx.repo_root, &cover_cmd, self.timeout_secs).await {
-                GoRun::Output { stdout, stderr } => {
-                    let combined = format!("{stdout}\n{stderr}");
-                    let mut cov = parse_coverage(&combined, &module, &changed, self.coverage_min);
-                    let n = cov.len();
-                    findings.append(&mut cov);
-                    let mut r = run("go test -cover", "ok", "", now());
-                    r.finding_count = n.min(u32::MAX as usize) as u32;
-                    runs.push(r);
-                }
-                GoRun::Skipped(reason) => {
-                    runs.push(run("go test -cover", "skipped", &reason, now()));
-                }
-                GoRun::Timeout => runs.push(run("go test -cover", "timeout", "", now())),
-                GoRun::Failed(reason) => runs.push(run("go test -cover", "failed", &reason, now())),
-            }
+            let started = now();
+            let out = run_go(&sandbox, &ctx.repo_root, &cover_cmd, self.timeout_secs).await;
+            record(
+                "go test -cover",
+                out,
+                started,
+                &mut runs,
+                &mut findings,
+                |o| parse_coverage(o, &module, &changed, self.coverage_min),
+            );
         }
 
         if findings.len() > MAX_FINDINGS {
@@ -182,12 +166,63 @@ async fn run_go(
     if out.exit_code == 127 {
         return GoRun::Skipped("go toolchain not found on PATH".into());
     }
-    // A non-zero exit is normal here (a data race / failing test makes `go test` exit 1);
-    // the findings come from the output, so always parse it.
+    // A non-zero exit is normal here; `record` parses the output and spots a build failure.
     GoRun::Output {
         stdout: out.stdout,
         stderr: out.stderr,
     }
+}
+
+/// Fold one `go test` sub-run into the report: parse its findings, and record its status.
+/// A non-zero exit is normal (a data race or failing test makes `go test` exit 1), so the
+/// output is always parsed; but a run whose packages never built (no C compiler for
+/// `-race`'s cgo, a module that can't resolve offline) ran nothing, so it is `failed`
+/// with the cause, never a silent `ok` with zero findings.
+fn record(
+    tool: &str,
+    out: GoRun,
+    started: Instant,
+    runs: &mut Vec<AnalyzerRun>,
+    findings: &mut Vec<AnalysisFinding>,
+    parse: impl FnOnce(&str) -> Vec<AnalysisFinding>,
+) {
+    match out {
+        GoRun::Output { stdout, stderr } => {
+            let combined = format!("{stdout}\n{stderr}");
+            let mut found = parse(&combined);
+            let mut r = match build_failure(&combined) {
+                Some(cause) => run(tool, "failed", &cause, started),
+                None => run(tool, "ok", "", started),
+            };
+            r.finding_count = found.len().min(u32::MAX as usize) as u32;
+            findings.append(&mut found);
+            runs.push(r);
+        }
+        GoRun::Skipped(reason) => runs.push(run(tool, "skipped", &reason, started)),
+        GoRun::Timeout => runs.push(run(tool, "timeout", "", started)),
+        GoRun::Failed(reason) => runs.push(run(tool, "failed", &reason, started)),
+    }
+}
+
+/// Why a `go test` run built nothing, if it didn't: the root cause (`-race requires cgo`,
+/// `C compiler "gcc" not found`) when the output names one, else the first
+/// `[build failed]` / `[setup failed]` package line. The output comes from the reviewed
+/// code, so the line is stripped of control characters and bounded.
+fn build_failure(out: &str) -> Option<String> {
+    const CAUSES: [&str; 2] = ["requires cgo", "C compiler"];
+    const SUMMARIES: [&str; 2] = ["[build failed]", "[setup failed]"];
+    let pick = |needles: &[&str]| {
+        out.lines()
+            .find(|l| needles.iter().any(|n| l.contains(n)))
+            .map(|l| {
+                let clean: String = l
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\t')
+                    .collect();
+                bound(clean.trim(), MAX_REASON)
+            })
+    };
+    pick(&CAUSES).or_else(|| pick(&SUMMARIES))
 }
 
 /// Parse `go test -race` output: one finding per `WARNING: DATA RACE` block, with the first
@@ -703,5 +738,158 @@ PASS";
             ("pkg/foo/foo.go".to_string(), true)
         );
         assert_eq!(pkg_file(&changed, "pkg/none"), (String::new(), false));
+    }
+
+    // --- build failures are `failed`, not a silent `ok` (#665 review) -----------
+
+    struct BuildCase {
+        description: &'static str,
+        output: &'static str,
+        /// `None` = the run built; `Some(substr)` = failed, with a reason containing it.
+        expected: Option<&'static str>,
+    }
+
+    #[rstest::rstest]
+    #[case::positive_clean_run(BuildCase {
+        description: "a run that built and passed is not a build failure",
+        output: "ok  \texample.com/review\t1.2s\n",
+        expected: None,
+    })]
+    #[case::positive_race_found_is_not_a_build_failure(BuildCase {
+        description: "a data race makes go test exit 1, but the package built",
+        output: "WARNING: DATA RACE\n--- FAIL: TestDataRace\nFAIL\texample.com/review\t0.1s\n",
+        expected: None,
+    })]
+    #[case::negative_no_c_compiler(BuildCase {
+        description: "-race needs cgo; no gcc on PATH means nothing ran (the l2 failure)",
+        output: "# runtime/cgo\ncgo: C compiler \"gcc\" not found: exec: \"gcc\": executable file not found in $PATH\nFAIL\texample.com/review [build failed]\n",
+        expected: Some("C compiler \"gcc\" not found"),
+    })]
+    #[case::negative_cgo_disabled(BuildCase {
+        description: "-race with CGO_ENABLED=0 is refused before building",
+        output: "go: -race requires cgo; enable cgo by setting CGO_ENABLED=1\n",
+        expected: Some("-race requires cgo"),
+    })]
+    #[case::negative_compile_error(BuildCase {
+        description: "a compile error in the reviewed code is a build failure",
+        output: "# example.com/review\n./add.go:3:1: syntax error\nFAIL\texample.com/review [build failed]\n",
+        expected: Some("[build failed]"),
+    })]
+    #[case::negative_offline_module(BuildCase {
+        description: "a dependency that can't resolve offline fails setup",
+        output: "FAIL\texample.com/review [setup failed]\n",
+        expected: Some("[setup failed]"),
+    })]
+    #[case::corner_cause_beats_summary(BuildCase {
+        description: "the root cause is reported, not the per-package summary line before it",
+        output: "FAIL\texample.com/a [build failed]\ngo: -race requires cgo\n",
+        expected: Some("requires cgo"),
+    })]
+    #[case::boundary_empty_output(BuildCase {
+        description: "no output at all is not a build failure",
+        output: "",
+        expected: None,
+    })]
+    #[case::adversarial_control_chars_stripped(BuildCase {
+        description: "reviewed code can print escapes; they never reach the reason",
+        output: "\x1b[2Jcgo: C compiler \u{7}not found\r\n",
+        expected: Some("cgo: C compiler not found"),
+    })]
+    fn build_failure_table(#[case] c: BuildCase) {
+        let got = build_failure(c.output);
+        match c.expected {
+            None => assert!(got.is_none(), "{}: got {got:?}", c.description),
+            Some(want) => {
+                let got = got.unwrap_or_else(|| panic!("{}: no failure found", c.description));
+                assert!(
+                    got.contains(want),
+                    "{}: {got:?} lacks {want:?}",
+                    c.description
+                );
+                assert!(
+                    !got.chars().any(|ch| ch.is_control() && ch != '\t'),
+                    "{}",
+                    c.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adversarial_build_failure_reason_is_bounded() {
+        let huge = format!("go: -race requires cgo {}", "x".repeat(100_000));
+        let got = build_failure(&huge).expect("a failure");
+        assert!(
+            got.chars().count() <= MAX_REASON + " …[truncated]".chars().count(),
+            "bounded, got {} chars",
+            got.len()
+        );
+    }
+
+    struct RecordCase {
+        description: &'static str,
+        out: fn() -> GoRun,
+        expected_status: &'static str,
+        expected_findings: u32,
+    }
+
+    fn race_output() -> GoRun {
+        GoRun::Output {
+            stdout: "WARNING: DATA RACE\n  x/a.go:3 +0x0\nFAIL\tx\t0.1s\n".into(),
+            stderr: String::new(),
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::positive_race_is_ok_with_a_finding(RecordCase {
+        description: "a run that found a race is ok, with the race as a finding",
+        out: race_output,
+        expected_status: "ok",
+        expected_findings: 1,
+    })]
+    #[case::negative_build_failure_is_failed(RecordCase {
+        description: "a run that never built is failed, never ok with 0 findings",
+        out: || GoRun::Output {
+            stdout: String::new(),
+            stderr: "cgo: C compiler \"gcc\" not found\nFAIL\tx [build failed]\n".into(),
+        },
+        expected_status: "failed",
+        expected_findings: 0,
+    })]
+    #[case::corner_skipped_passes_through(RecordCase {
+        description: "no go toolchain stays skipped",
+        out: || GoRun::Skipped("go toolchain not found on PATH".into()),
+        expected_status: "skipped",
+        expected_findings: 0,
+    })]
+    #[case::boundary_timeout_passes_through(RecordCase {
+        description: "a hard timeout stays timeout",
+        out: || GoRun::Timeout,
+        expected_status: "timeout",
+        expected_findings: 0,
+    })]
+    fn record_table(#[case] c: RecordCase) {
+        let (mut runs, mut findings) = (Vec::new(), Vec::new());
+        record(
+            "go test -race",
+            (c.out)(),
+            now(),
+            &mut runs,
+            &mut findings,
+            |o| parse_races(o, &root()),
+        );
+        assert_eq!(runs.len(), 1, "{}", c.description);
+        assert_eq!(runs[0].status, c.expected_status, "{}", c.description);
+        assert_eq!(
+            runs[0].finding_count, c.expected_findings,
+            "{}",
+            c.description
+        );
+        assert_eq!(
+            findings.len() as u32,
+            c.expected_findings,
+            "{}",
+            c.description
+        );
     }
 }

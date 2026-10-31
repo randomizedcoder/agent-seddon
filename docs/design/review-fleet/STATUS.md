@@ -96,6 +96,11 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   `(approve, review)`). `ListReviews.exclude_status` lets the portal hide skipped drafts by
   default. The Fleet tab's repo filter is now a menu of known repos (shown as `owner/name`),
   and the status menu gains "not skipped" (default), "skipped" and "all".
+- **2026-10-31** — **Review follow-ups (#665, #667 fleet drafts).** A `go test` run whose
+  packages never built (no C compiler for `-race`, an offline module) is now recorded `failed`
+  with the cause, not `ok` with no findings; the race-bench check asserts the race was found and
+  the bench ran, not just that each command was attempted; the runtime-PATH check's builder-only
+  row uses a real binary and proves the builder sees it; `update_draft` locks skipped drafts.
 
 ## Decisions of record
 
