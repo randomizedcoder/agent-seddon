@@ -82,6 +82,11 @@ the portal are kept. Without Postgres the JSON file is reinstalled instead, so a
 edit lasts only until the next restart. Leave `fleet.roster` null to manage the roster
 only at runtime.
 
+The module sets `[review] backend = "local"` with `[review_fleet] root`, so each roster
+row gets its own mirror and worktree under `fleet/workspaces/<user>/<id>/`. A fleet config
+with a root but no local review backend is refused at start: it would review the working
+directory's repo instead of the row's.
+
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
 
