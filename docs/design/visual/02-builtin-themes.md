@@ -66,6 +66,12 @@ dark {
   semantic {
     success: "#33FF33" warning: "#FFFF00" info: "#7890F0" muted: "#7890F0"
     code_background: "#000000" code_foreground: "#FFFFFF"
+    # The rail icons in the seven colours of a 3279 colour display.
+    nav_tint { key: "launch" value: "#33FF33" }    nav_tint { key: "prompts" value: "#40E0D0" }
+    nav_tint { key: "graph" value: "#FF55FF" }     nav_tint { key: "agent" value: "#FFFF00" }
+    nav_tint { key: "router" value: "#7890F0" }    nav_tint { key: "fleet" value: "#FF5555" }
+    nav_tint { key: "forges" value: "#FFFFFF" }    nav_tint { key: "access" value: "#40E0D0" }
+    nav_tint { key: "settings" value: "#33FF33" }
   }
 }
 typography { body_family: "IBM3270" heading_family: "IBM3270" mono_family: "IBM3270" scale: 1.05 }
@@ -80,11 +86,14 @@ accessibility { focus_ring_width: 2 }
 | turquoise labels on black | 12.8:1 |
 | blue (info, muted) on black | 7.1:1 |
 | red errors on black | 6.7:1 |
+| pink (Graph rail icon) on black | 8.0:1 |
 | black on green (primary buttons) | 15.5:1 |
 
 The 3270 colours carry meaning: turquoise for labels (protected fields), green for
 values and input (unprotected), white for emphasis (intensified), red for errors, yellow
-for the focused field. Headings are white (intensified), so the mapper colours
+for the focused field. The nav rail uses all seven colours of an IBM 3279 colour
+display (green, turquoise, pink, yellow, blue, red, white), one per tab, so the rail
+reads like a 3279 menu screen. Headings are white (intensified), so the mapper colours
 `headlineSmall` and larger styles with `code_foreground`, which this theme sets to white.
 
 ## windows

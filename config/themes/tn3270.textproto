@@ -19,6 +19,16 @@ dark {
   semantic {
     success: "#33FF33" warning: "#FFFF00" info: "#7890F0" muted: "#7890F0"
     code_background: "#000000" code_foreground: "#FFFFFF"
+    # The rail icons in the seven colours of a 3279 colour display.
+    nav_tint { key: "launch" value: "#33FF33" }    # green
+    nav_tint { key: "prompts" value: "#40E0D0" }   # turquoise
+    nav_tint { key: "graph" value: "#FF55FF" }     # pink
+    nav_tint { key: "agent" value: "#FFFF00" }     # yellow
+    nav_tint { key: "router" value: "#7890F0" }    # blue
+    nav_tint { key: "fleet" value: "#FF5555" }     # red
+    nav_tint { key: "forges" value: "#FFFFFF" }    # white
+    nav_tint { key: "access" value: "#40E0D0" }    # turquoise
+    nav_tint { key: "settings" value: "#33FF33" }  # green
   }
 }
 typography { body_family: "IBM3270" heading_family: "IBM3270" mono_family: "IBM3270" scale: 1.05 }
