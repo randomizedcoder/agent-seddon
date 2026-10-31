@@ -71,7 +71,10 @@ and `portal.enable`, `postgres.enable`.
 
 The portal's endpoints are `--dart-define` compile-time constants, so they are
 derived from `publicHost`. Changing it rebuilds the bundle, and Envoy's CORS origin
-follows it.
+follows it. Envoy allows only exact origins: a browser that opens the portal under
+another name (`http://l2:8092` when `publicHost` is the IP) is refused, and every
+Fleet/Agent call fails with "potential CORS issue". List those names in
+`extraOrigins = [ "http://l2:8092" ];`.
 
 The roster is declarative. With Postgres, `fleet.roster` is upserted into the roster on
 every fleet start (`[review_fleet] seed_file`): declared rows win, and rows added from
@@ -86,7 +89,7 @@ in the host flake, then `nixos-rebuild switch`.
 
 - **`nixos-agent-stack-eval`** (in `nix flake check`) is eval-only. It evaluates the
   module in a loopback config and a LAN config, then asserts the units and their
-  flags, the user, the credential wiring, ClickHouse and Postgres ordering, and the firewall:
+  flags, the user, the credential wiring, ClickHouse and Postgres ordering, and extra CORS origins (a wildcard, path or junk is refused), and the firewall:
   closed by default, and the LAN config opens only the public ports, never 8094,
   9000, 8123 or 5432.
 - **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
@@ -98,6 +101,7 @@ in the host flake, then `nixos-rebuild switch`.
   - all three agents are listening, with their stores in Postgres and ClickHouse;
   - the declared roster is seeded into Postgres, and a fleet restart does not
     duplicate it;
-  - Envoy and the portal are serving the branded bundle.
+  - Envoy and the portal are serving the branded bundle, and Envoy's CORS allows
+    the `publicHost` origin and an `extraOrigins` alias but not an unknown origin.
 
   Run it after touching the module.
