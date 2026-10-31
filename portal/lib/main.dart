@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 import 'src/auth/auth_gate.dart';
 import 'src/auth/auth_interceptor.dart';
@@ -16,9 +17,16 @@ import 'src/pages/launcher_page.dart';
 import 'src/pages/prompts_page.dart';
 import 'src/pages/router_page.dart';
 import 'src/pages/settings_page.dart';
+import 'src/theme/seddon_colors.dart';
+import 'src/theme/theme_controller.dart';
+import 'src/theme/theme_picker.dart';
 
-void main() {
-  runApp(const AgentPortalApp());
+Future<void> main() async {
+  // Build the accessibility tree from the start, not after the user finds
+  // Flutter's hidden "Enable accessibility" button (visual/08-accessibility.md).
+  WidgetsFlutterBinding.ensureInitialized().ensureSemantics();
+  final themes = await ThemeController.load(rootBundle);
+  runApp(AgentPortalApp(themes: themes));
 }
 
 /// The Agent Portal — a gRPC-only client for agent-seddon (docs/design/portal).
@@ -27,7 +35,10 @@ void main() {
 /// browser sign-in, [AuthGate] shows the sign-in page first and every call then
 /// carries the user's agent token (security-hardening S13b).
 class AgentPortalApp extends StatefulWidget {
-  const AgentPortalApp({super.key});
+  const AgentPortalApp({super.key, required this.themes});
+
+  /// The active theme and mode (docs/design/visual).
+  final ThemeController themes;
 
   @override
   State<AgentPortalApp> createState() => _AgentPortalAppState();
@@ -64,78 +75,78 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
   }
 
   /// Nav-rail items in display order (index-aligned with the pages in [build]).
-  /// Each carries a muted, dull-primary tint so the rail reads at a glance —
-  /// following conventions users know (Settings = grey), never bright/saturated.
+  /// Each is tinted by the theme's `nav_tint[id]` (prototype keeps the original
+  /// muted tints; a theme without one uses its primary colour).
   /// `needs` is the `action:resource` a destination requires; one the signed-in
   /// user lacks is hidden (presentation only: the server enforces every call).
   static const _navItems = <({
     String label,
     IconData icon,
     IconData selected,
-    Color color,
+    String id,
     String? needs,
   })>[
     (
       label: 'Launch',
+      id: 'launch',
       icon: Icons.dashboard_outlined,
       selected: Icons.dashboard,
-      color: Color(0xFF5B7BA6), // slate blue
       needs: null,
     ),
     (
       label: 'Prompts',
+      id: 'prompts',
       icon: Icons.edit_note_outlined,
       selected: Icons.edit_note,
-      color: Color(0xFFBF9B4F), // muted amber
       needs: null,
     ),
     (
       label: 'Graph',
+      id: 'graph',
       icon: Icons.account_tree_outlined,
       selected: Icons.account_tree,
-      color: Color(0xFF8A72B5), // muted violet
       needs: null,
     ),
     (
       label: 'Agent',
+      id: 'agent',
       icon: Icons.terminal_outlined,
       selected: Icons.terminal,
-      color: Color(0xFF5E9C6B), // muted green
       needs: null,
     ),
     (
       label: 'Router',
+      id: 'router',
       icon: Icons.alt_route_outlined,
       selected: Icons.alt_route,
-      color: Color(0xFF4E9AA0), // muted teal
       needs: null,
     ),
     (
       label: 'Fleet',
+      id: 'fleet',
       icon: Icons.rate_review_outlined,
       selected: Icons.rate_review,
-      color: Color(0xFFC07A85), // muted rose
       needs: null,
     ),
     (
       label: 'Forges',
+      id: 'forges',
       icon: Icons.cloud_outlined,
       selected: Icons.cloud,
-      color: Color(0xFF6F7FA8), // muted periwinkle
       needs: 'read:forge_registry',
     ),
     (
       label: 'Access',
+      id: 'access',
       icon: Icons.admin_panel_settings_outlined,
       selected: Icons.admin_panel_settings,
-      color: Color(0xFF9C8566), // muted bronze
       needs: 'read:binding',
     ),
     (
       label: 'Settings',
+      id: 'settings',
       icon: Icons.settings_outlined,
       selected: Icons.settings,
-      color: Color(0xFF8A9199), // neutral grey (the familiar Settings cue)
       needs: null,
     ),
   ];
@@ -160,21 +171,20 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       AccessPage(clients: _clients),
       SettingsPage(clients: _clients),
     ];
-    return MaterialApp(
+    final themes = widget.themes;
+    return ThemeScope(
+      controller: themes,
+      child: ListenableBuilder(
+      listenable: themes,
+      builder: (context, _) => MaterialApp(
       // Also the browser-tab title once Flutter boots (it overwrites index.html's
       // <title>), so keep it in sync with the tab branding.
       title: 'Agent Seddon',
-      theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        useMaterial3: true,
-        fontFamily: 'SourceSerif4',
-      ),
-      darkTheme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        brightness: Brightness.dark,
-        useMaterial3: true,
-        fontFamily: 'SourceSerif4',
-      ),
+      theme: themes.light,
+      darkTheme: themes.dark,
+      highContrastTheme: themes.highContrastLight,
+      highContrastDarkTheme: themes.highContrastDark,
+      themeMode: themes.mode,
       home: AuthGate(
         auth: _auth,
         builder: (context, account) => Builder(builder: (context) {
@@ -191,30 +201,49 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
           if (at >= 0) _index = at;
         }
         final index = _index.clamp(0, shown.length - 1);
+        final scheme = Theme.of(context).colorScheme;
+        final seddon = SeddonColors.of(context);
         return Scaffold(
         body: Row(
           children: [
-            NavigationRail(
+            // Its own traversal group, so Tab walks every tab before the page:
+            // without it reading order interleaves rail items with page
+            // buttons that share a row.
+            FocusTraversalGroup(
+             child: NavigationRail(
               selectedIndex: index,
               onDestinationSelected: (i) => setState(() => _index = i),
               labelType: NavigationRailLabelType.all,
-              leading: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Icon(Icons.hub, color: Color(0xFF8A9199)),
+              leading: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Icon(Icons.hub,
+                    color: seddon.nav('settings', scheme.onSurfaceVariant)),
               ),
-              trailing: account == null
-                  ? null
-                  : Expanded(
-                      child: Align(
-                          alignment: Alignment.bottomCenter, child: account)),
+              trailing: Expanded(
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const ThemeMenuButton(),
+                      ...[account].nonNulls,
+                    ],
+                  ),
+                ),
+              ),
               destinations: [
                 for (final it in [for (final i in shown) _navItems[i]])
                   NavigationRailDestination(
-                    icon: Icon(it.icon, color: it.color.withValues(alpha: 0.85)),
-                    selectedIcon: Icon(it.selected, color: it.color),
+                    icon: Icon(it.icon,
+                        color: seddon
+                            .nav(it.id, scheme.primary)
+                            .withValues(alpha: 0.85)),
+                    selectedIcon:
+                        Icon(it.selected, color: seddon.nav(it.id, scheme.primary)),
                     label: Text(it.label),
                   ),
               ],
+             ),
             ),
             const VerticalDivider(width: 1),
             Expanded(
@@ -225,6 +254,8 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
         ),
       );
       }),
+      ),
+      ),
       ),
     );
   }

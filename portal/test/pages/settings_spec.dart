@@ -8,7 +8,8 @@ import '../testkit/spec.dart';
 ///
 /// Key stems covered (family stems cover their dotted extensions):
 ///   settings.section.item · settings.form.field · settings.validate ·
-///   settings.save · settings.revert · settings.retry
+///   settings.save · settings.revert · settings.retry ·
+///   settings.appearance · settings.theme_mode
 const settingsSpec = PageSpec('settings', [
   // ── page load: the four async states ──────────────────────────────────────
   SpecRow(
@@ -45,6 +46,19 @@ const settingsSpec = PageSpec('settings', [
     name: 'retry_recovers',
     description: 'tapping Retry re-loads and shows the editor',
     expectedRpc: 'agent.v1.ConfigService/GetSchema',
+  ),
+  // ── appearance (visual themes) ───────────────────────────────────────────
+  SpecRow(
+    elementId: 'settings.appearance',
+    caseClass: CaseClass.positive,
+    name: 'appearance_picks_theme',
+    description: 'Appearance sits above the config editor; a card switches the theme',
+  ),
+  SpecRow(
+    elementId: 'settings.theme_mode',
+    caseClass: CaseClass.positive,
+    name: 'theme_mode_dark',
+    description: 'the Dark segment forces dark mode and is saved',
   ),
   // ── schema form ───────────────────────────────────────────────────────────
   SpecRow(

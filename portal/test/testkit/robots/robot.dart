@@ -1,3 +1,4 @@
+import 'package:agent_portal/src/theme/theme_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,6 +30,14 @@ abstract class Robot {
 
   final WidgetTester tester;
 
+  /// The `ThemeData` pages are pumped under; null = Flutter's default. Set it
+  /// before `load()` to render a page in a portal theme (testkit/themes.dart).
+  ThemeData? theme;
+
+  /// A [ThemeController] to provide above the page (the picker's state), in
+  /// place of [theme]. See `testkit/themes.dart` `memoryThemes`.
+  ThemeController? themes;
+
   Finder byKey(String key) => find.byKey(Key(key));
 
   bool exists(String key) => byKey(key).evaluate().isNotEmpty;
@@ -38,8 +47,23 @@ abstract class Robot {
   /// initState-triggered gRPC futures live on the **real** event loop (else they
   /// never resolve under the test's fake clock); [pumpUntil] then settles them.
   Future<void> pumpPage(Widget child) async {
+    final themes = this.themes;
+    final page = Scaffold(body: child);
     await tester.runAsync(() async {
-      await tester.pumpWidget(MaterialApp(home: Scaffold(body: child)));
+      await tester.pumpWidget(themes == null
+          ? MaterialApp(theme: theme, home: page)
+          // As main.dart does: picking a theme re-themes the app.
+          : ThemeScope(
+              controller: themes,
+              child: ListenableBuilder(
+                listenable: themes,
+                builder: (context, _) => MaterialApp(
+                    theme: themes.light,
+                    darkTheme: themes.dark,
+                    themeMode: themes.mode,
+                    home: page),
+              ),
+            ));
     });
     await tester.pump();
   }

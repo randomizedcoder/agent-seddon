@@ -49,6 +49,12 @@ const graphSpec = PageSpec('graph', [
 
   // ── library actions ─────────────────────────────────────────────────────────
   SpecRow(
+    elementId: 'graph.legend',
+    caseClass: CaseClass.positive,
+    name: 'legend_names_edge_kinds',
+    description: 'the preview has a legend naming each edge kind, so colour is not the only cue',
+  ),
+  SpecRow(
     elementId: 'graph.new',
     caseClass: CaseClass.positive,
     name: 'new_adds_entry',

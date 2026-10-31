@@ -15,6 +15,11 @@
     "semantic": {
       "codeBackground": "#1C1C1E",
       "codeForeground": "#F5F5F7",
+      "graphEdge": {
+        "background": "#FF9F0A",
+        "capability": "#DA8FFF",
+        "main": "#409CFF"
+      },
       "info": "#409CFF",
       "muted": "#98989D",
       "success": "#30D158",
@@ -41,6 +46,11 @@
     "semantic": {
       "codeBackground": "#F5F5F7",
       "codeForeground": "#1D1D1F",
+      "graphEdge": {
+        "background": "#B25000",
+        "capability": "#8944AB",
+        "main": "#0066CC"
+      },
       "info": "#0066CC",
       "muted": "#6E6E73",
       "success": "#1E7B34",

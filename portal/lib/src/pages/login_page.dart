@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../auth/auth_state.dart';
+import '../theme/seddon_colors.dart';
 
 /// The sign-in page (security-hardening S13b): one button per login issuer the
 /// agent offers for browser sign-in, the reason the last attempt failed, and a
@@ -27,7 +28,10 @@ class LoginPage extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Icon(Icons.hub, size: 40, color: Color(0xFF8A9199)),
+                Icon(Icons.hub,
+                    size: 40,
+                    color: SeddonColors.of(context).nav(
+                        'settings', Theme.of(context).colorScheme.onSurfaceVariant)),
                 const SizedBox(height: 12),
                 Text('Sign in to Agent Seddon',
                     textAlign: TextAlign.center,

@@ -1,9 +1,12 @@
 import 'package:agent_portal/src/gen/agent/v1/config.pb.dart';
 import 'package:agent_portal/src/graph_json.dart' show dartToJsonValue;
+import 'package:agent_portal/src/theme/theme_controller.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:grpc/grpc.dart';
 
 import '../testkit/robots/settings_robot.dart';
+import '../testkit/themes.dart';
 import 'settings_spec.dart';
 
 /// Layer-A widget tests for the Settings page — iterates [settingsSpec]; each row
@@ -206,6 +209,26 @@ void main() {
           await robot.tapRevert();
           expect(robot.saveEnabled, isFalse,
               reason: 'Revert clears the staged edit');
+        case 'positive_appearance_picks_theme':
+          final themes = robot.themes = memoryThemes();
+          arrangeLoaded(robot);
+          await robot.load();
+          expect(robot.exists('settings.appearance'), isTrue);
+          expect(robot.isLoaded, isTrue, reason: 'the config editor is still below');
+          await tester.tap(robot.byKey('theme.card.windows'));
+          await tester.pumpAndSettle();
+          expect(themes.active.id, 'windows');
+
+        case 'positive_theme_mode_dark':
+          final themes = robot.themes = memoryThemes();
+          arrangeLoaded(robot);
+          await robot.load();
+          await tester.tap(find.descendant(
+              of: robot.byKey('settings.theme_mode'), matching: find.text('Dark')));
+          await tester.pumpAndSettle();
+          expect(themes.mode, ThemeMode.dark);
+          expect(themes.store.read(ThemePrefsStore.modeKey), 'dark');
+
         default:
           fail('no test body for row ${row.label}');
       }

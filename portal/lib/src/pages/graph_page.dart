@@ -8,6 +8,7 @@ import '../graph_examples.dart';
 import '../graph_json.dart';
 import '../graph_library.dart';
 import '../io/graph_platform.dart' as platform;
+import '../theme/seddon_colors.dart';
 
 /// The reserved run-loop anchor endpoints an edge can attach to.
 const _anchors = ['anchor.response', 'anchor.delivery', 'anchor.compaction'];
@@ -224,9 +225,9 @@ class _GraphPageState extends State<GraphPage> {
                     children: [
                       for (final i in issues)
                         ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.error_outline,
-                              color: Colors.red),
+                          dense: SeddonColors.of(context).denseLists,
+                          leading: Icon(Icons.error_outline,
+                              color: Theme.of(context).colorScheme.error),
                           title: Text(i.code),
                           subtitle: Text([
                             if (i.node.isNotEmpty) 'node: ${i.node}',
@@ -373,16 +374,18 @@ class _GraphPageState extends State<GraphPage> {
                     for (final e in _library.entries)
                       ListTile(
                         key: Key('graph.library.item.${e.name}'),
-                        dense: true,
+                        dense: SeddonColors.of(context).denseLists,
                         selected: identical(e, _selected),
                         title: Text(e.name),
                         subtitle: Text(
                             '${e.graph.nodes.length} nodes · ${e.graph.edges.length} edges'),
                         trailing: _isActive(e)
-                            ? const Tooltip(
+                            ? Tooltip(
                                 message: 'the running agent\'s active graph',
                                 child: Icon(Icons.check_circle,
-                                    size: 18, color: Colors.green))
+                                    size: 18,
+                                    color: SeddonColors.of(context).success,
+                                    semanticLabel: 'active'))
                             : null,
                         onTap: () => setState(() => _selected = e),
                       ),
@@ -517,13 +520,14 @@ class _GraphPageState extends State<GraphPage> {
     final edge = e.graph.edges[i];
     return ListTile(
       key: Key('graph.edge.$i'),
-      dense: true,
+      dense: SeddonColors.of(context).denseLists,
       leading: _EdgeKindChip(kind: edge.kind),
       title: Text('${edge.from}  →  ${edge.to}'),
       trailing: IconButton(
         key: Key('graph.edge.remove.$i'),
         icon: const Icon(Icons.remove_circle_outline, size: 20),
         onPressed: () => _removeEdge(e, i),
+        tooltip: 'Remove edge ${edge.from} → ${edge.to}',
       ),
     );
   }
@@ -594,14 +598,10 @@ class _EdgeKindChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final label = edgeKindLabel(kind);
-    final color = switch (kind) {
-      GraphEdge_Kind.KIND_MAIN => Colors.blue,
-      GraphEdge_Kind.KIND_BACKGROUND => Colors.orange,
-      GraphEdge_Kind.KIND_CAPABILITY => Colors.purple,
-      _ => Colors.grey,
-    };
+    final color = edgeColor(context, kind);
     return Chip(
-      label: Text(label, style: const TextStyle(fontSize: 11)),
+      label: Text(label,
+          style: TextStyle(fontSize: SeddonColors.of(context).sp(11))),
       backgroundColor: color.withValues(alpha: 0.15),
       side: BorderSide(color: color.withValues(alpha: 0.4)),
       visualDensity: VisualDensity.compact,
@@ -785,7 +785,7 @@ class _ParamsEditorState extends State<_ParamsEditor> {
           controller: _raw,
           maxLines: null,
           minLines: 3,
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          style: SeddonColors.of(context).mono.copyWith(fontSize: SeddonColors.of(context).sp(13)),
           decoration: InputDecoration(
             border: const OutlineInputBorder(),
             labelText: 'params (JSON)',
@@ -1062,18 +1062,49 @@ class _PreviewCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: SizedBox(
-        height: 220,
-        width: double.infinity,
-        child: graph.nodes.isEmpty
-            ? const Center(child: Text('Empty graph'))
-            : CustomPaint(
-                painter: _GraphPainter(
-                  graph: graph,
-                  color: Theme.of(context).colorScheme.primary,
-                  textColor: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            height: 220,
+            width: double.infinity,
+            child: graph.nodes.isEmpty
+                ? const Center(child: Text('Empty graph'))
+                : CustomPaint(
+                    painter: _GraphPainter(
+                      graph: graph,
+                      color: Theme.of(context).colorScheme.primary,
+                      textColor: Theme.of(context).colorScheme.onSurface,
+                      fillColor: Theme.of(context).colorScheme.surface,
+                      labelSize: SeddonColors.of(context).sp(11),
+                      edgeColor: (k) => edgeColor(context, k),
+                    ),
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Wrap(
+              key: const Key('graph.legend'),
+              spacing: 16,
+              children: [
+                for (final k in const [
+                  GraphEdge_Kind.KIND_MAIN,
+                  GraphEdge_Kind.KIND_BACKGROUND,
+                  GraphEdge_Kind.KIND_CAPABILITY,
+                ])
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    CustomPaint(
+                      size: const Size(28, 12),
+                      painter: _LegendLine(edgeColor(context, k), edgeDash(k)),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(edgeKindLabel(k),
+                        style: Theme.of(context).textTheme.bodySmall),
+                  ]),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1084,11 +1115,21 @@ class _GraphPainter extends CustomPainter {
     required this.graph,
     required this.color,
     required this.textColor,
+    required this.fillColor,
+    this.labelSize = 11,
+    required this.edgeColor,
   });
 
   final CognitionGraph graph;
   final Color color;
   final Color textColor;
+  // Opaque, under the tint, so an edge passing behind a box does not strike
+  // through its label.
+  final Color fillColor;
+
+  /// Node label size: 11px at the theme's text scale.
+  final double labelSize;
+  final Color Function(GraphEdge_Kind) edgeColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1135,13 +1176,10 @@ class _GraphPainter extends CustomPainter {
       if (a == null || b == null) continue; // anchor/capability endpoints
       final paint = Paint()
         ..strokeWidth = 1.5
-        ..color = switch (e.kind) {
-          GraphEdge_Kind.KIND_MAIN => Colors.blue,
-          GraphEdge_Kind.KIND_BACKGROUND => Colors.orange,
-          GraphEdge_Kind.KIND_CAPABILITY => Colors.purple,
-          _ => Colors.grey,
-        };
-      canvas.drawLine(a, b, paint);
+        ..color = edgeColor(e.kind);
+      // The kind is also in the line style, not colour alone
+      // (visual/08-accessibility.md): solid, dashed, dotted.
+      _drawEdge(canvas, a, b, paint, edgeDash(e.kind));
     }
 
     // Boxes + labels.
@@ -1149,6 +1187,7 @@ class _GraphPainter extends CustomPainter {
       final c = centers[id]!;
       final rect = Rect.fromCenter(center: c, width: boxW, height: boxH);
       final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(6));
+      canvas.drawRRect(rrect, Paint()..color = fillColor);
       canvas.drawRRect(rrect, Paint()..color = color.withValues(alpha: 0.12));
       canvas.drawRRect(
           rrect,
@@ -1159,7 +1198,7 @@ class _GraphPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: id,
-          style: TextStyle(color: textColor, fontSize: 11),
+          style: TextStyle(color: textColor, fontSize: labelSize),
         ),
         textAlign: TextAlign.center,
         textDirection: TextDirection.ltr,
@@ -1172,4 +1211,60 @@ class _GraphPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _GraphPainter old) => true;
+
+  /// A straight line, broken into [dash] (on, off) segments when given.
+  static void _drawEdge(
+      Canvas canvas, Offset a, Offset b, Paint paint, (double, double)? dash) {
+    if (dash == null) {
+      canvas.drawLine(a, b, paint);
+      return;
+    }
+    final total = (b - a).distance;
+    if (total == 0) return;
+    final dir = (b - a) / total;
+    for (var t = 0.0; t < total; t += dash.$1 + dash.$2) {
+      final end = (t + dash.$1).clamp(0.0, total);
+      canvas.drawLine(a + dir * t, a + dir * end, paint);
+    }
+  }
 }
+
+/// One sample of an edge's colour and line style, for the legend.
+class _LegendLine extends CustomPainter {
+  _LegendLine(this.color, this.dash);
+  final Color color;
+  final (double, double)? dash;
+
+  @override
+  void paint(Canvas canvas, Size size) => _GraphPainter._drawEdge(
+      canvas,
+      Offset(0, size.height / 2),
+      Offset(size.width, size.height / 2),
+      Paint()
+        ..strokeWidth = 2
+        ..color = color,
+      dash);
+
+  @override
+  bool shouldRepaint(covariant _LegendLine old) =>
+      old.color != color || old.dash != dash;
+}
+
+/// The theme's colour for an edge kind (`graph_edge[kind]`, else muted).
+Color edgeColor(BuildContext context, GraphEdge_Kind kind) {
+  final c = SeddonColors.of(context);
+  return switch (kind) {
+    GraphEdge_Kind.KIND_MAIN ||
+    GraphEdge_Kind.KIND_BACKGROUND ||
+    GraphEdge_Kind.KIND_CAPABILITY =>
+      c.edge(edgeKindLabel(kind), c.muted),
+    _ => c.muted,
+  };
+}
+
+/// The line style of an edge kind: null = solid, else (dash, gap) lengths.
+(double, double)? edgeDash(GraphEdge_Kind kind) => switch (kind) {
+      GraphEdge_Kind.KIND_BACKGROUND => (6, 4),
+      GraphEdge_Kind.KIND_CAPABILITY => (2, 3),
+      _ => null,
+    };

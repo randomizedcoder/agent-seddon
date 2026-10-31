@@ -104,7 +104,10 @@ light {
   outline: "#E0E0E0"      focus: "#1B1B1B"
   error: "#C42B1C"        on_error: "#FFFFFF"
   semantic { success: "#0F7B0F" warning: "#9D5D00" info: "#0067C0" muted: "#5C5C5C"
-             code_background: "#F3F3F3" code_foreground: "#1B1B1B" }
+             code_background: "#F3F3F3" code_foreground: "#1B1B1B"
+             graph_edge { key: "main" value: "#0067C0" }
+             graph_edge { key: "background" value: "#9D5D00" }
+             graph_edge { key: "capability" value: "#8764B8" } }
 }
 dark {
   background: "#202020"   surface: "#2C2C2C"   surface_variant: "#202020"
@@ -114,7 +117,10 @@ dark {
   outline: "#3D3D3D"      focus: "#FFFFFF"
   error: "#FF99A4"        on_error: "#000000"
   semantic { success: "#6CCB5F" warning: "#FCE100" info: "#4CC2FF" muted: "#9D9D9D"
-             code_background: "#1B1B1B" code_foreground: "#FFFFFF" }
+             code_background: "#1B1B1B" code_foreground: "#FFFFFF"
+             graph_edge { key: "main" value: "#4CC2FF" }
+             graph_edge { key: "background" value: "#FCE100" }
+             graph_edge { key: "capability" value: "#B4A0FF" } }
 }
 typography { body_family: "OpenSans" mono_family: "JetBrainsMono" scale: 1.0 }
 shape { corner_radius: 4 border_width: 1 elevation: false }
@@ -148,7 +154,10 @@ light {
   outline: "#D2D2D7"      focus: "#0066CC"
   error: "#D70015"        on_error: "#FFFFFF"
   semantic { success: "#1E7B34" warning: "#B25000" info: "#0066CC" muted: "#6E6E73"
-             code_background: "#F5F5F7" code_foreground: "#1D1D1F" }
+             code_background: "#F5F5F7" code_foreground: "#1D1D1F"
+             graph_edge { key: "main" value: "#0066CC" }
+             graph_edge { key: "background" value: "#B25000" }
+             graph_edge { key: "capability" value: "#8944AB" } }
 }
 dark {
   background: "#1E1E1E"   surface: "#2C2C2E"   surface_variant: "#1E1E1E"
@@ -158,7 +167,10 @@ dark {
   outline: "#3A3A3C"      focus: "#409CFF"
   error: "#FF6961"        on_error: "#000000"
   semantic { success: "#30D158" warning: "#FF9F0A" info: "#409CFF" muted: "#98989D"
-             code_background: "#1C1C1E" code_foreground: "#F5F5F7" }
+             code_background: "#1C1C1E" code_foreground: "#F5F5F7"
+             graph_edge { key: "main" value: "#409CFF" }
+             graph_edge { key: "background" value: "#FF9F0A" }
+             graph_edge { key: "capability" value: "#DA8FFF" } }
 }
 typography { body_family: "Inter" mono_family: "JetBrainsMono" scale: 1.0 letter_spacing: -0.2 }
 shape { corner_radius: 10 border_width: 0 elevation: true }
