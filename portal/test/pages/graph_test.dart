@@ -1,4 +1,6 @@
 import 'package:agent_portal/src/gen/agent/v1/graph.pb.dart';
+import 'package:agent_portal/src/graph_json.dart';
+import 'package:agent_portal/src/graph_library.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:grpc/grpc.dart';
 
@@ -58,6 +60,33 @@ void main() {
           expect(
               robot.log.countOf('agent.v1.GraphService/DescribeNodeTypes'),
               greaterThanOrEqualTo(2));
+
+        case 'corner_active_graph_not_readded':
+          robot.seed([
+            GraphLibraryEntry(GraphLibrary.activeName, _withParams(['a', 'b'])),
+          ]);
+          fake.getResponse = GetGraphResponse(graph: _withParams(['b', 'a']));
+          await robot.load();
+          expect(robot.log.fired('agent.v1.GraphService/Get'), isTrue);
+          expect(robot.libraryItemCount, 1);
+          expect(GraphLibrary.load().entries, hasLength(1));
+
+        case 'adversarial_stored_duplicate_names_collapse':
+          // The raw blob an older portal left: one graph three times (params in
+          // different orders) and a different graph, all under one name.
+          String entry(List<String> keys, int version) {
+            final params = keys.map((k) => '"$k":1').join(',');
+            return '{"name":"active (server)","graph":{"version":$version,'
+                '"nodes":{"n":{"type":"t","typeVersion":1,'
+                '"params":{$params}}},"edges":[]}}';
+          }
+          robot.seedRaw('[${entry(['a', 'b'], 1)},${entry(['b', 'a'], 1)},'
+              '${entry(['a', 'b'], 1)},${entry(['a', 'b'], 2)}]');
+          await robot.load();
+          expect(tester.takeException(), isNull);
+          expect(robot.libraryItemCount, 2);
+          expect(robot.exists('graph.library.item.active (server)'), isTrue);
+          expect(robot.exists('graph.library.item.active (server) 2'), isTrue);
 
         case 'positive_legend_names_edge_kinds':
           robot.seed([GraphRobot.sampleEntry('alpha')]);
@@ -363,3 +392,13 @@ void main() {
     });
   }
 }
+
+/// One node whose params object has [keys] (each = 1), in that order.
+CognitionGraph _withParams(List<String> keys) => CognitionGraph(version: 1, nodes: [
+      MapEntry(
+          'n',
+          GraphNode(
+              type: 't',
+              typeVersion: 1,
+              params: dartToJsonValue({for (final k in keys) k: 1}))),
+    ]);

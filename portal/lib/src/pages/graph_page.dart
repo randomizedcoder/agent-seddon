@@ -86,15 +86,11 @@ class _GraphPageState extends State<GraphPage> {
     // that means "nothing active", not an offline gateway. Leave the badge off.
     try {
       final active = await widget.clients.graph.get(GetGraphRequest());
-      _activeJson = jsonEncode(graphToJson(active.graph));
+      _activeJson = canonicalGraphJson(active.graph);
       // Surface the server's active document as a library entry, but only if no
-      // entry (e.g. a seeded example) already has that exact content — otherwise
-      // it just duplicates one of the examples the user is already looking at.
-      if (seedActive &&
-          !_library.entries
-              .any((e) => jsonEncode(graphToJson(e.graph)) == _activeJson)) {
-        _library.entries
-            .add(GraphLibraryEntry('active (server)', active.graph));
+      // entry (e.g. a seeded example) already has that content — otherwise it
+      // just duplicates one the user is already looking at.
+      if (seedActive && _library.addActive(active.graph) != null) {
         _library.save();
       }
     } catch (_) {
@@ -109,7 +105,7 @@ class _GraphPageState extends State<GraphPage> {
   }
 
   bool _isActive(GraphLibraryEntry e) =>
-      _activeJson != null && jsonEncode(graphToJson(e.graph)) == _activeJson;
+      _activeJson != null && canonicalGraphJson(e.graph) == _activeJson;
 
   // ---- library actions -----------------------------------------------------
 

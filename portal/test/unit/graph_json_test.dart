@@ -136,6 +136,38 @@ void main() {
       expect(g.edges.single.kind, GraphEdge_Kind.KIND_MAIN);
     });
   });
+
+  group('canonicalGraphJson: same graph, same string', () {
+    CognitionGraph g(Map<String, dynamic> params, {int version = 1}) =>
+        CognitionGraph(version: version, nodes: [
+          MapEntry('n', GraphNode(type: 't', params: dartToJsonValue(params))),
+        ]);
+    // (name, description, a, b, same string?)
+    final cases = <(String, String, CognitionGraph, CognitionGraph, bool)>[
+      ('positive_identical', 'one graph twice', g({'a': 1}), g({'a': 1}), true),
+      ('positive_key_order', 'params keys in another order, as the server sends',
+          g({'a': 1, 'b': 2}), g({'b': 2, 'a': 1}), true),
+      ('corner_nested_key_order', 'nested objects are sorted too',
+          g({'o': {'x': 1, 'y': 2}}), g({'o': {'y': 2, 'x': 1}}), true),
+      ('corner_whole_double', '2.0 and 2 are the same number',
+          g({'n': 2.0}), g({'n': 2}), true),
+      ('negative_different_value', 'a changed value is a different graph',
+          g({'a': 1}), g({'a': 2}), false),
+      ('negative_different_version', 'the version is part of the graph',
+          g({}, version: 1), g({}, version: 2), false),
+      ('negative_list_order_kept', 'list order means something and is kept',
+          g({'l': [1, 2]}), g({'l': [2, 1]}), false),
+      ('boundary_empty_graphs', 'two empty graphs are equal',
+          CognitionGraph(), CognitionGraph(), true),
+      ('adversarial_case_lookalike_key', 'keys differing only in case differ',
+          g({'a': 1}), g({'A': 1}), false),
+    ];
+    for (final (name, description, a, b, same) in cases) {
+      test('$name: $description', () {
+        expect(canonicalGraphJson(a) == canonicalGraphJson(b), same);
+      });
+    }
+  });
 }
 
 Map<String, dynamic> _deep(int depth) {
