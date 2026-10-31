@@ -8,15 +8,13 @@
 # `CriticalSilo` (load-bearing AND single-owner) — the highest-risk class.
 #
 # Exercises the post-fan-out synthesis (call graph × churn). Offline + hermetic:
-# the prebuilt `agent-go-ast` helper + `git` on PATH; no Go toolchain, no network.
+# the prebuilt `agent-go-ast` helper + `git` on the wrapped agent's PATH; no Go toolchain, no network.
 {
   pkgs,
   agent,
-  go-ast,
 }:
 import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   name = "salience";
-  extraInputs = [ go-ast ];
   reviewConfig = ''
     analyze = false
     signatures = false

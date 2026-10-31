@@ -18,7 +18,9 @@
 {
   # Check name → derivation `agent-review-<name>` (+ the section it exercises).
   name,
-  # Extra `nativeBuildInputs` beyond `agent`/`git`/`coreutils` (e.g. go-ast, a linter).
+  # Extra `nativeBuildInputs` for the check's own setup/asserts (e.g. jq). Not seen by
+  # the agent: it runs on its wrapper's PATH alone, so a review tool goes on
+  # `agentRuntimePath` (nix/default.nix), not here.
   extraInputs ? [ ],
   # Extra lines under `[memory] backend = "file"` (e.g. `episodic_path = "$epi"`).
   memoryExtra ? "",
@@ -68,6 +70,12 @@ pkgs.runCommand "agent-review-${name}"
     members = []
     TOML
 
+    # The agent runs with ONLY the wrapper's runtime PATH (an empty inherited PATH),
+    # as a systemd service runs it: a helper the review needs (bash, agent-go-ast,
+    # golangci-lint, shellcheck, …) must come from `agentRuntimePath`, never from this
+    # builder's PATH, which always has bash and whatever `extraInputs` adds.
+    agent() { PATH="" ${agent}/bin/agent "$@"; }
+
     wd="$(mktemp -d)"
     cd "$wd"
     git init -q -b main
@@ -77,6 +85,12 @@ pkgs.runCommand "agent-review-${name}"
     ${setup}
 
     fail() { echo "FAIL: $1" >&2; exit 1; }
+    # Shared: no collector may report its tool missing from the agent's PATH (each
+    # one fails soft with "… not found on PATH", which a section assert can miss).
+    if printf '%s' "''${ctx:-}" | grep -q "not found on PATH"; then
+      printf '%s\n' "''${ctx:-}" | grep "not found on PATH" >&2
+      fail "a review tool is missing from the wrapped agent's runtime PATH"
+    fi
     ${asserts}
 
     echo ${pkgs.lib.escapeShellArg okMsg} > "$out"

@@ -223,20 +223,20 @@ in
   # (unlike the real-repo Rust sweep in `nix run .#review-eval`).
   review-go = agentCheck ./review-go.nix { inherit reviewGoCorpus; };
   # Static-analysis coverage for the review flow: a self-contained, stdlib-only Go
-  # module with a deliberate lint hit + the pinned `go`/`golangci-lint` on PATH;
+  # module with a deliberate lint hit + the pinned `go`/`golangci-lint` on the agent's PATH;
   # assert `agent --review` surfaces the finding. Offline (no module download), so
   # it runs in the hermetic sandbox. clippy is covered live (dev shell + eval).
-  review-analyze = agentCheck ./review-analyze.nix { inherit versions; };
+  review-analyze = agentCheck ./review-analyze.nix { };
   # Shellcheck coverage (review-fleet C12): a change adding a shell script with an
   # unquoted variable (SC2086) + an inline disable directive; assert the
   # `Shell scripts (shellcheck):` section surfaces the finding and flags the
-  # directive under the no-ignores rule. `shellcheck` on PATH; offline/hermetic.
+  # directive under the no-ignores rule. `shellcheck` on the agent's PATH; offline/hermetic.
   review-shellcheck = agentCheck ./review-shellcheck.nix { };
   # Go race+bench coverage (review-fleet C12): a stdlib-only Go module with a
   # benchmark + a data-race test; assert `go test -race`/`-bench` run under the
   # sandbox (network off) and the `Go race & benchmarks:` section shows the bench
-  # result. `go`/`gcc` on PATH; offline/hermetic (bench asserted, race best-effort).
-  review-go-race-bench = agentCheck ./review-go-race-bench.nix { inherit versions; };
+  # result. `go`/`gcc` on the agent's PATH; offline/hermetic (bench asserted, race best-effort).
+  review-go-race-bench = agentCheck ./review-go-race-bench.nix { };
   # Nearby-similar wiring coverage (review-fleet C12): a change introducing a new
   # declaration; assert the read-only collector runs and folds a
   # `Nearby similar code:` section into the context. The correlation logic is
@@ -254,12 +254,12 @@ in
   review-signatures = agentCheck ./review-signatures.nix { };
   # Call-graph coverage: a two-commit Go history where one function calls another
   # and the callee changes; assert the `Call graph` blast-radius section shows the
-  # caller. Uses the flake-built `agent-go-ast` helper on PATH; offline.
-  review-callgraph = agentCheck ./review-callgraph.nix { inherit go-ast; };
-  # The same call graph from the wrapped agent under `env -i` (only its own PATH),
-  # as a systemd service runs it: catches a runtime tool (e.g. `bash`) missing
-  # from the wrapper.
-  review-runtime-path = agentCheck ./review-runtime-path.nix { };
+  # caller. Uses the flake-built `agent-go-ast` helper on the agent's PATH; offline.
+  review-callgraph = agentCheck ./review-callgraph.nix { };
+  # Every program the agent runs resolves on the wrapped agent's own PATH, as a
+  # systemd service sees it (no inherited PATH). The review-* checks run the agent
+  # the same way (nix/lib/mk-review-check.nix).
+  agent-runtime-path = agentCheck ./agent-runtime-path.nix { };
   # Reproducibility contract (review-analysis-depth Inc 1): the nix-provisioned
   # static-analysis toolbox (golangci-lint/gosec/go/gofmt) is bundled and on the
   # packaged agent's runtime PATH, so the fleet finds the linters with no ambient
@@ -299,12 +299,12 @@ in
   # by three) + single-owner function changes; assert the post-fan-out synthesis
   # (call-graph centrality × churn ownership) yields a `CriticalSilo` verdict. Uses
   # the prebuilt `agent-go-ast` helper; offline.
-  review-salience = agentCheck ./review-salience.nix { inherit go-ast; };
+  review-salience = agentCheck ./review-salience.nix { };
   # Risk + gate coverage (Homer design input): a change that stacks CriticalSilo +
   # missing-partner + api-change ≥ the 0.70 threshold; assert the `Risk` section
   # renders GATE FAIL and `--review --gate` exits non-zero. Uses the `agent-go-ast`
   # helper; offline (no linter — the score is reached without static findings).
-  review-gate = agentCheck ./review-gate.nix { inherit go-ast; };
+  review-gate = agentCheck ./review-gate.nix { };
   # Recording coverage: `agent --review` must persist a ReviewRecord to
   # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
   review-recording = agentCheck ./review-recording.nix { };

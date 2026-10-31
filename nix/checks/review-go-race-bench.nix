@@ -14,15 +14,10 @@
 # but the `-race` run itself is asserted to have executed.
 {
   pkgs,
-  versions,
   agent,
 }:
 import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   name = "go-race-bench";
-  extraInputs = [
-    versions.go
-    pkgs.gcc # `go test -race` needs cgo + a C compiler
-  ];
   # Isolate the collector under test: only go_checks on.
   reviewConfig = ''
     analyze = false

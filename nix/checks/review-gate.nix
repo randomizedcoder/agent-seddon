@@ -14,11 +14,9 @@
 {
   pkgs,
   agent,
-  go-ast,
 }:
 import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   name = "gate";
-  extraInputs = [ go-ast ];
   reviewConfig = ''
     analyze = false
     style = false

@@ -154,6 +154,9 @@ let
     # service (whose PATH has no bash) fails each one with exit 127, which the
     # collectors report as their helper "not found on PATH".
     versions.bash
+  ]
+  ++ versions.shellUtils
+  ++ [
     go-ast
     go-graph
     versions.scip-go

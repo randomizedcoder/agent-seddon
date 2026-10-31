@@ -238,6 +238,18 @@ in
   # review collectors, the AST engines, structural_search, the `bash` tool), so the
   # wrapped agent carries its own. A systemd service's PATH has none.
   bash = pkgs.bash;
+  # The rest of a POSIX build environment (stdenv's own initial PATH, less what is
+  # listed elsewhere): what the model's `bash` tool expects to find, and what a
+  # systemd service's PATH (coreutils, findutils, grep, sed) lacks — awk, diff,
+  # patch, tar, gzip, make, file.
+  shellUtils = pkgs.stdenv.initialPath;
+  # `shellcheck`: the review's shell-script collector (`[review] shellcheck`).
+  shellcheck = pkgs.shellcheck;
+  # A C compiler: `go test -race` needs cgo (`[review] go_checks`). Without one
+  # the race run fails to build.
+  gcc = pkgs.gcc;
+  # `cargo`: cargo-deny shells out to `cargo metadata`.
+  cargo = pkgs.cargo;
 
   # `grpc-health-probe`: the k8s health probe for the strict-mTLS role listeners
   # (docs/design/k8s/04). The kubelet's native `grpc:` prober dials plaintext with
