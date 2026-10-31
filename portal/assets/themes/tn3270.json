@@ -1,0 +1,42 @@
+{
+  "accessibility": {
+    "focusRingWidth": 2
+  },
+  "author": "agent-seddon",
+  "dark": {
+    "background": "#000000",
+    "error": "#FF5555",
+    "focus": "#FFFF00",
+    "onError": "#000000",
+    "onPrimary": "#000000",
+    "onSecondary": "#000000",
+    "onSurface": "#33FF33",
+    "onSurfaceVariant": "#40E0D0",
+    "outline": "#33FF33",
+    "primary": "#33FF33",
+    "secondary": "#40E0D0",
+    "semantic": {
+      "codeBackground": "#000000",
+      "codeForeground": "#FFFFFF",
+      "info": "#7890F0",
+      "muted": "#7890F0",
+      "success": "#33FF33",
+      "warning": "#FFFF00"
+    },
+    "surface": "#0A0A0A",
+    "surfaceVariant": "#000000"
+  },
+  "density": "DENSITY_COMPACT",
+  "description": "IBM 3270 green screen. Black, green, turquoise, white, red. Monospace everywhere.",
+  "id": "tn3270",
+  "name": "TN3270",
+  "shape": {
+    "borderWidth": 1
+  },
+  "typography": {
+    "bodyFamily": "IBM3270",
+    "headingFamily": "IBM3270",
+    "monoFamily": "IBM3270",
+    "scale": 1.05
+  }
+}

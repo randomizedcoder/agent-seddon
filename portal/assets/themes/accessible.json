@@ -1,0 +1,72 @@
+{
+  "accessibility": {
+    "contrast": "CONTRAST_LEVEL_AAA",
+    "focusRingWidth": 3,
+    "minTargetSize": 48,
+    "reduceMotion": true,
+    "statusIcons": true
+  },
+  "author": "agent-seddon",
+  "dark": {
+    "background": "#000000",
+    "error": "#FF8080",
+    "focus": "#FFD400",
+    "onError": "#000000",
+    "onPrimary": "#000000",
+    "onSecondary": "#000000",
+    "onSurface": "#FFFFFF",
+    "onSurfaceVariant": "#FFFFFF",
+    "outline": "#FFFFFF",
+    "primary": "#FFD400",
+    "secondary": "#FFFFFF",
+    "semantic": {
+      "codeBackground": "#000000",
+      "codeForeground": "#FFFFFF",
+      "info": "#FFD400",
+      "muted": "#FFFFFF",
+      "success": "#7CFC7C",
+      "warning": "#FFB000"
+    },
+    "surface": "#000000",
+    "surfaceVariant": "#000000"
+  },
+  "density": "DENSITY_COMFORTABLE",
+  "description": "WCAG AAA contrast, Atkinson Hyperlegible at 1.25x, 48px targets, no motion.",
+  "id": "accessible",
+  "light": {
+    "background": "#FFFFFF",
+    "error": "#9E0000",
+    "focus": "#0B3D91",
+    "onError": "#FFFFFF",
+    "onPrimary": "#FFFFFF",
+    "onSecondary": "#FFFFFF",
+    "onSurface": "#000000",
+    "onSurfaceVariant": "#000000",
+    "outline": "#000000",
+    "primary": "#0B3D91",
+    "secondary": "#000000",
+    "semantic": {
+      "codeBackground": "#FFFFFF",
+      "codeForeground": "#000000",
+      "info": "#0B3D91",
+      "muted": "#000000",
+      "success": "#006400",
+      "warning": "#7A4A00"
+    },
+    "surface": "#FFFFFF",
+    "surfaceVariant": "#FFFFFF"
+  },
+  "name": "Accessible (high contrast)",
+  "shape": {
+    "borderWidth": 2,
+    "cornerRadius": 6
+  },
+  "typography": {
+    "bodyFamily": "AtkinsonHyperlegibleNext",
+    "bodyWeight": 400,
+    "headingWeight": 700,
+    "letterSpacing": 0.2,
+    "monoFamily": "JetBrainsMono",
+    "scale": 1.25
+  }
+}

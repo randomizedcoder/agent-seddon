@@ -1,0 +1,61 @@
+{
+  "author": "agent-seddon",
+  "dark": {
+    "seed": "#3F51B5",
+    "semantic": {
+      "graphEdge": {
+        "background": "#FF9800",
+        "capability": "#9C27B0",
+        "main": "#2196F3"
+      },
+      "info": "#2196F3",
+      "muted": "#9E9E9E",
+      "navTint": {
+        "access": "#9C8566",
+        "agent": "#5E9C6B",
+        "fleet": "#C07A85",
+        "forges": "#6F7FA8",
+        "graph": "#8A72B5",
+        "launch": "#5B7BA6",
+        "prompts": "#BF9B4F",
+        "router": "#4E9AA0",
+        "settings": "#8A9199"
+      },
+      "success": "#4CAF50",
+      "warning": "#FF9800"
+    }
+  },
+  "description": "The original portal look: Material 3 from an indigo seed, serif body.",
+  "id": "prototype",
+  "light": {
+    "seed": "#3F51B5",
+    "semantic": {
+      "graphEdge": {
+        "background": "#FF9800",
+        "capability": "#9C27B0",
+        "main": "#2196F3"
+      },
+      "info": "#2196F3",
+      "muted": "#9E9E9E",
+      "navTint": {
+        "access": "#9C8566",
+        "agent": "#5E9C6B",
+        "fleet": "#C07A85",
+        "forges": "#6F7FA8",
+        "graph": "#8A72B5",
+        "launch": "#5B7BA6",
+        "prompts": "#BF9B4F",
+        "router": "#4E9AA0",
+        "settings": "#8A9199"
+      },
+      "success": "#4CAF50",
+      "warning": "#FF9800"
+    }
+  },
+  "name": "Prototype",
+  "typography": {
+    "bodyFamily": "SourceSerif4",
+    "monoFamily": "monospace",
+    "scale": 1.0
+  }
+}

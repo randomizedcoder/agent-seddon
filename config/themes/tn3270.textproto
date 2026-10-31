@@ -1,0 +1,27 @@
+# proto-file: crates/agent-proto/proto/agent/v1/theme.proto
+# proto-message: agent.v1.Theme
+#
+# Built-in portal theme `tn3270` (docs/design/visual/02-builtin-themes.md).
+# The portal bundles it as portal/assets/themes/tn3270.json; keep both in step
+# (crates/agent-theme/tests/portal_assets_parity.rs).
+
+id: "tn3270"
+name: "TN3270"
+description: "IBM 3270 green screen. Black, green, turquoise, white, red. Monospace everywhere."
+author: "agent-seddon"
+dark {
+  background: "#000000"   surface: "#0A0A0A"       surface_variant: "#000000"
+  on_surface: "#33FF33"   on_surface_variant: "#40E0D0"
+  primary: "#33FF33"      on_primary: "#000000"
+  secondary: "#40E0D0"    on_secondary: "#000000"
+  outline: "#33FF33"      focus: "#FFFF00"
+  error: "#FF5555"        on_error: "#000000"
+  semantic {
+    success: "#33FF33" warning: "#FFFF00" info: "#7890F0" muted: "#7890F0"
+    code_background: "#000000" code_foreground: "#FFFFFF"
+  }
+}
+typography { body_family: "IBM3270" heading_family: "IBM3270" mono_family: "IBM3270" scale: 1.05 }
+shape { corner_radius: 0 border_width: 1 elevation: false }
+density: DENSITY_COMPACT
+accessibility { focus_ring_width: 2 }

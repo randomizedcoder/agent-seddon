@@ -10,15 +10,36 @@ One PR per increment. Every increment that changes the UI gets the Playwright re
 
 | # | Increment | Proto | Rust | Portal | Tests | Visual review | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **in review** (#657) |
-| 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | planned |
+| 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **merged** (#657) |
+| 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | **2a in review**; 2b next |
 | 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | planned |
 | 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | — | — | ✅ | editor widget tables | ✅ | planned |
 
 ## As built
 
-Nothing yet. Each increment's PR adds its row here: PR number, what changed from the
-design, and the contact-sheet link.
+Increment 2 is split in two PRs so each stays reviewable: **2a** (proto, validator,
+built-ins, assets) and **2b** (the portal: fonts, mapper, picker, accessibility, visual
+review).
+
+### 2a — model, validator, built-ins
+
+- `theme.proto` (messages only), crate `agent-theme` ([component doc](../../components/theme.md)),
+  `config/themes/*.textproto`, `portal/assets/themes/*.json` with the parity test, and the
+  shared case table `test/themes/validation_cases.json`.
+- Differences from the design:
+  - **Unknown textproto fields are a parse error**, not ignored (`07` row
+    `corner_unknown_field`). The textproto parser is strict, and a typo in a field name
+    is better reported than silently dropped. Proto3 binary still skips unknown fields.
+  - **`author` may be empty** (06 said 1–64). Only `name` is required.
+  - **Seed-derived colours are not contrast-checked in Rust.** Rust does not implement
+    the Material 3 tonal palette, so a pair is checked only when both colours are written
+    down. The Dart mapper can compute the derived scheme and check those pairs in 2b.
+  - **A translucent background is judged on its worst backdrop** (composited over both
+    white and black), so a theme cannot pass by leaning on what is behind it.
+  - Contrast messages truncate the ratio (4.017 prints as 4.01), so a failing pair
+    never prints as passing.
+  - `prototype` carries today's hardcoded nav tints, status and edge colours in
+    `semantic`, so 2b can remove the literals without changing its look.
 
 ## Open questions
 

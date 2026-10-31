@@ -1,0 +1,34 @@
+# proto-file: crates/agent-proto/proto/agent/v1/theme.proto
+# proto-message: agent.v1.Theme
+#
+# Built-in portal theme `windows` (docs/design/visual/02-builtin-themes.md).
+# The portal bundles it as portal/assets/themes/windows.json; keep both in step
+# (crates/agent-theme/tests/portal_assets_parity.rs).
+
+id: "windows"
+name: "Windows"
+description: "White background, Fluent-style blue accent, small corners."
+author: "agent-seddon"
+light {
+  background: "#FFFFFF"   surface: "#FFFFFF"   surface_variant: "#F3F3F3"
+  on_surface: "#1B1B1B"   on_surface_variant: "#5C5C5C"
+  primary: "#0067C0"      on_primary: "#FFFFFF"
+  secondary: "#5C5C5C"    on_secondary: "#FFFFFF"
+  outline: "#E0E0E0"      focus: "#1B1B1B"
+  error: "#C42B1C"        on_error: "#FFFFFF"
+  semantic { success: "#0F7B0F" warning: "#9D5D00" info: "#0067C0" muted: "#5C5C5C"
+             code_background: "#F3F3F3" code_foreground: "#1B1B1B" }
+}
+dark {
+  background: "#202020"   surface: "#2C2C2C"   surface_variant: "#202020"
+  on_surface: "#FFFFFF"   on_surface_variant: "#CFCFCF"
+  primary: "#4CC2FF"      on_primary: "#000000"
+  secondary: "#CFCFCF"    on_secondary: "#000000"
+  outline: "#3D3D3D"      focus: "#FFFFFF"
+  error: "#FF99A4"        on_error: "#000000"
+  semantic { success: "#6CCB5F" warning: "#FCE100" info: "#4CC2FF" muted: "#9D9D9D"
+             code_background: "#1B1B1B" code_foreground: "#FFFFFF" }
+}
+typography { body_family: "OpenSans" mono_family: "JetBrainsMono" scale: 1.0 }
+shape { corner_radius: 4 border_width: 1 elevation: false }
+density: DENSITY_STANDARD

@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/github_install_registry.proto",
         "proto/agent/v1/transport_registry.proto",
         "proto/agent/v1/auth.proto",
+        "proto/agent/v1/theme.proto",
     ];
     // Vendored third-party protos resolved as imports (not compiled to Rust, so not
     // in `protos`): `google/api/*` supplies the `(google.api.http)` extension for the

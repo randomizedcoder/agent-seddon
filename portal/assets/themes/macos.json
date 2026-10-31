@@ -1,0 +1,63 @@
+{
+  "author": "agent-seddon",
+  "dark": {
+    "background": "#1E1E1E",
+    "error": "#FF6961",
+    "focus": "#409CFF",
+    "onError": "#000000",
+    "onPrimary": "#000000",
+    "onSecondary": "#000000",
+    "onSurface": "#F5F5F7",
+    "onSurfaceVariant": "#AEAEB2",
+    "outline": "#3A3A3C",
+    "primary": "#409CFF",
+    "secondary": "#AEAEB2",
+    "semantic": {
+      "codeBackground": "#1C1C1E",
+      "codeForeground": "#F5F5F7",
+      "info": "#409CFF",
+      "muted": "#98989D",
+      "success": "#30D158",
+      "warning": "#FF9F0A"
+    },
+    "surface": "#2C2C2E",
+    "surfaceVariant": "#1E1E1E"
+  },
+  "density": "DENSITY_COMFORTABLE",
+  "description": "macOS-style light and dark, system blue, rounded corners.",
+  "id": "macos",
+  "light": {
+    "background": "#FFFFFF",
+    "error": "#D70015",
+    "focus": "#0066CC",
+    "onError": "#FFFFFF",
+    "onPrimary": "#FFFFFF",
+    "onSecondary": "#FFFFFF",
+    "onSurface": "#1D1D1F",
+    "onSurfaceVariant": "#6E6E73",
+    "outline": "#D2D2D7",
+    "primary": "#0066CC",
+    "secondary": "#6E6E73",
+    "semantic": {
+      "codeBackground": "#F5F5F7",
+      "codeForeground": "#1D1D1F",
+      "info": "#0066CC",
+      "muted": "#6E6E73",
+      "success": "#1E7B34",
+      "warning": "#B25000"
+    },
+    "surface": "#FFFFFF",
+    "surfaceVariant": "#F5F5F7"
+  },
+  "name": "macOS",
+  "shape": {
+    "cornerRadius": 10,
+    "elevation": true
+  },
+  "typography": {
+    "bodyFamily": "Inter",
+    "letterSpacing": -0.2,
+    "monoFamily": "JetBrainsMono",
+    "scale": 1.0
+  }
+}

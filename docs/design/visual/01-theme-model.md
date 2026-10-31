@@ -79,7 +79,7 @@ message Shape {
 }
 
 enum Density {
-  DENSITY_UNSPECIFIED = 0;     // = STANDARD
+  DENSITY_UNSPECIFIED = 0;     // the platform's Material default
   DENSITY_COMPACT = 1;
   DENSITY_STANDARD = 2;
   DENSITY_COMFORTABLE = 3;
@@ -128,7 +128,11 @@ The portal turns a `Theme` plus a brightness into a `ThemeData`
 | `reduce_motion` | `pageTransitionsTheme` with no-op builders; `MediaQuery.disableAnimations` honoured too |
 | `status_icons` | read by the Fleet, Router and Graph pages to show an icon + label next to a status colour |
 
-`prototype` is just `seed: "#3F51B5"` with Source Serif 4, which reproduces today's
+A token the theme leaves unset keeps Material 3's default: no `shape` block means
+Material's own corner radii and elevation, `DENSITY_UNSPECIFIED` the platform's density,
+no `accessibility` block Material's focus and target sizes.
+
+`prototype` is just `seed: "#3F51B5"` with Source Serif 4 and no shape or density, which reproduces today's
 `ThemeData(colorSchemeSeed: Colors.indigo, fontFamily: 'SourceSerif4')` exactly; a test
 asserts that ([`07`](07-testing.md)).
 

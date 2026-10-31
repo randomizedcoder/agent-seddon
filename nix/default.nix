@@ -66,6 +66,11 @@ let
         # so the hermetic test/package builds need them in the filtered source too.
         # (Scoped to that dir so unrelated portal JSON can't sweep in and rebuild deps.)
         || (lib.hasInfix "/portal/assets/graphs/" path)
+        # Portal themes: `agent-theme/tests/portal_assets_parity.rs` reads the bundled
+        # JSON twins of `config/themes/*.textproto`, and `tests/shared_cases.rs` the
+        # case table shared with the portal's Dart tests.
+        || (lib.hasInfix "/portal/assets/themes/" path)
+        || (lib.hasSuffix "/test/themes/validation_cases.json" path)
         # `agent-config-store`'s postgres tier embeds its schema DDL via
         # `include_str!("../migrations/*.sql")` (config C41 / A2), so the SQL must
         # survive the filter or the crate won't compile under `--all-features`.
