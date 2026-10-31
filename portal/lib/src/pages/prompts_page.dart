@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../clients.dart';
 import '../gen/agent/v1/prompt.pb.dart';
+import '../theme/seddon_colors.dart';
 
 /// The Prompts editor: see + CRUD every prompt (system · context.d pre/post-pends ·
 /// per-mode compaction lenses) over `PromptService`, plus a per-mode "preview
@@ -322,7 +323,7 @@ class _PromptsPageState extends State<PromptsPage> {
             (_selected != null && e.kind == _selected!.kind && e.id == _selected!.id);
         items.add(ListTile(
           key: Key('prompts.list.item.${e.kind.name}.${e.id}'),
-          dense: true,
+          dense: SeddonColors.of(context).denseLists,
           selected: selected,
           title: Text(e.id.isEmpty ? '(system prompt)' : e.id),
           trailing: e.builtin

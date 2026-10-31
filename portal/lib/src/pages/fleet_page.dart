@@ -7,6 +7,7 @@ import '../auth/capabilities.dart';
 import '../clients.dart';
 import '../gen/agent/v1/forge_registry.pb.dart';
 import '../gen/agent/v1/review_fleet.pb.dart';
+import '../theme/seddon_colors.dart';
 import 'fleet_session_dialog.dart';
 
 /// The **Fleet** tab: view, trigger, and act on the review-fleet's PR review
@@ -403,7 +404,7 @@ class _FleetPageState extends State<FleetPage> {
                     return ListTile(
                       key: Key('fleet.review.item.${r.reviewId}'),
                       selected: _selected?.reviewId == r.reviewId,
-                      dense: true,
+                      dense: SeddonColors.of(context).denseLists,
                       title: Text('PR #${r.prNumber} · ${r.repo}',
                           maxLines: 1, overflow: TextOverflow.ellipsis),
                       subtitle: Text(
@@ -447,13 +448,13 @@ class _FleetPageState extends State<FleetPage> {
             ),
           ),
         if (_sessions.isEmpty)
-          const ListTile(
-            dense: true,
-            title: Text('No roster sessions.'),
+          ListTile(
+            dense: SeddonColors.of(context).denseLists,
+            title: const Text('No roster sessions.'),
           ),
         ..._sessions.map((s) => ListTile(
                     key: Key('fleet.session.item.${s.id}'),
-                    dense: true,
+                    dense: SeddonColors.of(context).denseLists,
                     title: Text(s.id,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: Text(
@@ -501,16 +502,27 @@ class _FleetPageState extends State<FleetPage> {
     );
   }
 
+  /// A review's status as a distinct icon shape (never colour alone,
+  /// visual/08-accessibility.md), plus its name as text when the theme asks
+  /// for `status_icons`.
   Widget _statusChip(String status) {
-    final color = switch (status) {
-      'posted' => Colors.green,
-      'approved' => Colors.blue,
-      'superseded' => Colors.grey,
-      _ => Colors.orange, // drafted
+    final c = SeddonColors.of(context);
+    final (icon, color) = switch (status) {
+      'posted' => (Icons.upload, c.success),
+      'approved' => (Icons.check_circle_outline, c.info),
+      'superseded' => (Icons.remove_circle_outline, c.muted),
+      _ => (Icons.edit_note, c.warning), // drafted
     };
+    final glyph = Icon(icon, size: 18, color: color, semanticLabel: status);
     return Tooltip(
       message: status,
-      child: Icon(Icons.circle, size: 12, color: color),
+      child: c.statusIcons
+          ? Row(mainAxisSize: MainAxisSize.min, children: [
+              glyph,
+              const SizedBox(width: 4),
+              ExcludeSemantics(child: Text(status, style: TextStyle(color: color))),
+            ])
+          : glyph,
     );
   }
 }
@@ -806,7 +818,7 @@ class _DraftDetailState extends State<_DraftDetail> {
             expands: true,
             textAlignVertical: TextAlignVertical.top,
             keyboardType: TextInputType.multiline,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+            style: SeddonColors.of(context).mono.copyWith(fontSize: SeddonColors.of(context).sp(13)),
             decoration: const InputDecoration(
               border: OutlineInputBorder(),
               alignLabelWithHint: true,

@@ -4,6 +4,8 @@ import '../clients.dart';
 import '../config_diff.dart';
 import '../gen/agent/v1/config.pb.dart';
 import '../graph_json.dart';
+import '../theme/seddon_colors.dart';
+import '../theme/theme_picker.dart';
 import '../widgets/schema_form.dart';
 
 /// The **Settings** tab: a schema-driven editor over the *entire* agent config
@@ -161,7 +163,7 @@ class _SettingsPageState extends State<SettingsPage> {
             children: [
               for (final i in issues)
                 ListTile(
-                  dense: true,
+                  dense: SeddonColors.of(context).denseLists,
                   leading: const Icon(Icons.error_outline),
                   title: Text(i.path.isEmpty ? '(document)' : i.path),
                   subtitle: Text('${i.code}: ${i.detail}'),
@@ -181,6 +183,28 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Appearance first, and reachable even when the config server is down: it
+    // is how a user gets to the accessible theme. Capped at half the height so
+    // the config editor below always keeps room.
+    return LayoutBuilder(
+      builder: (context, box) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: box.maxHeight / 2),
+            child: const SingleChildScrollView(
+              padding: EdgeInsets.all(16),
+              child: AppearanceSection(),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(child: _config(context)),
+        ],
+      ),
+    );
+  }
+
+  Widget _config(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_serverError != null) {
       return _OfflineRetry(message: _serverError!, onRetry: _reload);
@@ -202,11 +226,14 @@ class _SettingsPageState extends State<SettingsPage> {
                     for (final s in sections)
                       ListTile(
                         key: Key('settings.section.item.$s'),
-                        dense: true,
+                        dense: SeddonColors.of(context).denseLists,
                         selected: _selected == s,
                         title: Text(s),
                         trailing: _sectionDirty(s)
-                            ? const Icon(Icons.circle, size: 10, color: Colors.orange)
+                            ? Icon(Icons.circle,
+                                size: 10,
+                                color: SeddonColors.of(context).warning,
+                                semanticLabel: 'unsaved changes')
                             : null,
                         onTap: () => setState(() => _selected = s),
                       ),

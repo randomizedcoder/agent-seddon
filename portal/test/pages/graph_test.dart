@@ -59,6 +59,18 @@ void main() {
               robot.log.countOf('agent.v1.GraphService/DescribeNodeTypes'),
               greaterThanOrEqualTo(2));
 
+        case 'positive_legend_names_edge_kinds':
+          robot.seed([GraphRobot.sampleEntry('alpha')]);
+          await robot.load();
+          expect(robot.exists('graph.legend'), isTrue);
+          for (final k in ['main', 'background', 'capability']) {
+            expect(
+                find.descendant(
+                    of: robot.byKey('graph.legend'), matching: find.text(k)),
+                findsOneWidget,
+                reason: k);
+          }
+
         // ── library actions ───────────────────────────────────────────────────
         case 'positive_new_adds_entry':
           robot.seed([GraphRobot.sampleEntry('alpha')]);

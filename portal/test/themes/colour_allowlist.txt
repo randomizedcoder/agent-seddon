@@ -1,0 +1,5 @@
+# Colour literals allowed under lib/src/pages/ and lib/src/widgets/
+# (visual/07-testing.md "Lint: no new hardcoded colours"). One entry per line:
+# <path relative to portal/>:<the literal>, e.g.
+#   lib/src/pages/graph_page.dart:Colors.transparent
+# Every other `Colors.` or `Color(0x` there must come from the theme.

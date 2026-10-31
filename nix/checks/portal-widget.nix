@@ -59,6 +59,8 @@ in
       # real event loop (`tester.runAsync`), so different ones time out on each run.
       # The native TLS tests (security-hardening S24) make a throwaway PKI with openssl.
       export PORTAL_TEST_OPENSSL=${pkgs.openssl}/bin/openssl
+      # The colour/font tables shared with Rust live outside portal/ (visual/07).
+      export THEME_CASES=${../../test/themes/validation_cases.json}
       flutter test --no-pub --concurrency=4 --machine | tee "$TMPDIR/report/widget.jsonl"
       runHook postBuild
     '';

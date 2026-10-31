@@ -123,7 +123,7 @@ The portal turns a `Theme` plus a brightness into a `ThemeData`
 | `Typography` families and weights | `ThemeData.fontFamily`, `textTheme` with heading styles on `display*`/`headline*`/`title*`; `SeddonColors.mono` text style for code |
 | `scale` | `textTheme.apply(fontSizeFactor: scale)`; the OS text scale still applies on top |
 | `Shape.corner_radius`, `border_width`, `elevation` | `cardTheme`, `filledButtonTheme`, `outlinedButtonTheme`, `inputDecorationTheme`, `dialogTheme`, `chipTheme` shapes; elevation 0 when off |
-| `Density` | `VisualDensity.compact` / `standard` / `comfortable` |
+| `Density` | `VisualDensity.compact` / `standard` / `(1, 1)` — roomier than standard; Flutter's `VisualDensity.comfortable` is (-1, -1), tighter, so it is not used |
 | `min_target_size` | `materialTapTargetSize: padded` plus `minimumSize` on button themes |
 | `reduce_motion` | `pageTransitionsTheme` with no-op builders; `MediaQuery.disableAnimations` honoured too |
 | `status_icons` | read by the Fleet, Router and Graph pages to show an icon + label next to a status colour |
