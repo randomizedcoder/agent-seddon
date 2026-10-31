@@ -7,16 +7,14 @@
 # `Call graph` section — surfacing `Caller` as a caller of the changed `Target`.
 #
 # Fully offline + hermetic: the helper is a prebuilt stdlib-only Go binary (no Go
-# toolchain or network needed at run time), so this needs only `agent` + `go-ast` +
-# `git` on PATH.
+# toolchain or network needed at run time). The agent runs on its wrapper's PATH
+# alone (nix/lib/mk-review-check.nix), so the helper must come from there.
 {
   pkgs,
   agent,
-  go-ast,
 }:
 import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   name = "callgraph";
-  extraInputs = [ go-ast ];
   reviewConfig = ''
     # Isolate the call-graph collector.
     analyze = false

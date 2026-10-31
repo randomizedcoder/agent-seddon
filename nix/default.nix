@@ -150,6 +150,13 @@ let
   # `git`/`rg` — all with `EnvPolicy::Inherit`, so the child inherits the agent
   # process's `PATH`. This mirrors the dev shell's tool set exactly.
   agentRuntimePath = [
+    # The Sandbox runs every shell command as `bash -c`; without it here a systemd
+    # service (whose PATH has no bash) fails each one with exit 127, which the
+    # collectors report as their helper "not found on PATH".
+    versions.bash
+  ]
+  ++ versions.shellUtils
+  ++ [
     go-ast
     go-graph
     versions.scip-go

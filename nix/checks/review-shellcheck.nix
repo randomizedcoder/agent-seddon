@@ -16,7 +16,6 @@
 }:
 import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   name = "shellcheck";
-  extraInputs = [ pkgs.shellcheck ];
   # Isolate the collector under test: only shellcheck on, the rest off so the
   # section is unambiguous and the run is fast.
   reviewConfig = ''

@@ -12,15 +12,10 @@
 # reproducing it here would need the whole vendored Rust build tree.
 {
   pkgs,
-  versions,
   agent,
 }:
 import ../lib/mk-review-check.nix { inherit pkgs agent; } {
   name = "analyze";
-  extraInputs = [
-    versions.go
-    versions.golangci-lint
-  ];
   reviewConfig = ''
     analyze = true
     analyze_timeout_secs = 120
