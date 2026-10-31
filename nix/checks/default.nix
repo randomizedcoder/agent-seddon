@@ -256,6 +256,10 @@ in
   # and the callee changes; assert the `Call graph` blast-radius section shows the
   # caller. Uses the flake-built `agent-go-ast` helper on PATH; offline.
   review-callgraph = agentCheck ./review-callgraph.nix { inherit go-ast; };
+  # The same call graph from the wrapped agent under `env -i` (only its own PATH),
+  # as a systemd service runs it: catches a runtime tool (e.g. `bash`) missing
+  # from the wrapper.
+  review-runtime-path = agentCheck ./review-runtime-path.nix { };
   # Reproducibility contract (review-analysis-depth Inc 1): the nix-provisioned
   # static-analysis toolbox (golangci-lint/gosec/go/gofmt) is bundled and on the
   # packaged agent's runtime PATH, so the fleet finds the linters with no ambient

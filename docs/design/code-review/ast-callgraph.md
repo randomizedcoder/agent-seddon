@@ -36,7 +36,10 @@ the changed functions* (blast radius) — via a **stdlib-only Go helper**, chose
   round-trip tested; no baseline bump). **Metrics:** `agent_review_callgraph_nodes`
   / `agent_review_callgraph_edges` histograms via `ReviewEvent::CallGraph`. **Gate:**
   hermetic `nix/checks/review-callgraph.nix` (a two-commit Go history where `Caller`
-  calls a changed `Target`; the prebuilt helper on PATH; offline) + `adversarial_`
+  calls a changed `Target`; the prebuilt helper on PATH; offline) +
+  `nix/checks/review-runtime-path.nix` (the same history, the wrapped agent under
+  `env -i`: the helper and `bash` must come from the wrapper's own PATH, as under
+  systemd) + `adversarial_`
   parser tests (escaping-path node dropped with its edges, hostile strings bounded,
   garbage rejected, dangling edges dropped).
 

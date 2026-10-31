@@ -234,6 +234,11 @@ in
   # bwrap tests skip there).
   bubblewrap = pkgs.bubblewrap;
 
+  # `bash`: every Sandbox backend runs an `ExecSpec::sh` command as `bash -c` (the
+  # review collectors, the AST engines, structural_search, the `bash` tool), so the
+  # wrapped agent carries its own. A systemd service's PATH has none.
+  bash = pkgs.bash;
+
   # `grpc-health-probe`: the k8s health probe for the strict-mTLS role listeners
   # (docs/design/k8s/04). The kubelet's native `grpc:` prober dials plaintext with
   # no client certificate, so it can never complete the agent's mTLS handshake; an
