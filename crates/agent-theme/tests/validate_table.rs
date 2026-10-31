@@ -67,8 +67,8 @@ fn grey_at_least(target: f64) -> String {
 // ---- corner ---------------------------------------------------------------
 #[case::corner_seed_and_roles(Case { description: "explicit roles alongside a seed are checked", base: "windows",
     mutate: |t| light(t).seed = "#3F51B5".into(), expected: Ok(()) })]
-#[case::corner_seed_without_on_surface(Case { description: "with a seed a missing role derives instead of failing", base: "windows",
-    mutate: |t| { let p = light(t); p.seed = "#3F51B5".into(); p.on_surface.clear(); }, expected: Ok(()) })]
+#[case::corner_seed_without_primary_pair(Case { description: "with a seed a missing pair derives instead of failing", base: "windows",
+    mutate: |t| { let p = light(t); p.seed = "#3F51B5".into(); p.primary.clear(); p.on_primary.clear(); }, expected: Ok(()) })]
 #[case::corner_server_fields_ignored(Case { description: "server-set fields do not affect validity", base: "windows",
     mutate: |t| { t.builtin = true; t.version = 9; t.owner = "anyone".into(); }, expected: Ok(()) })]
 // ---- boundary -------------------------------------------------------------
@@ -99,6 +99,10 @@ fn grey_at_least(target: f64) -> String {
     mutate: |t| light(t).on_surface = grey_at_least(4.5), expected: Ok(()) })]
 #[case::boundary_aaa_exactly(Case { description: "body text at the AAA floor passes an AAA theme", base: "accessible",
     mutate: |t| light(t).on_surface = grey_at_least(7.0), expected: Ok(()) })]
+#[case::corner_full_pair_on_seed(Case { description: "a seeded palette may write a pair down in full, and it is checked", base: "prototype",
+    mutate: |t| { let p = light(t); p.on_primary = "#FFFFFF".into(); p.primary = "#3F51B5".into(); }, expected: Ok(()) })]
+#[case::corner_unicode_name(Case { description: "letters from any script are fine", base: "windows",
+    mutate: |t| t.name = "Thème 東京 — ночь".into(), expected: Ok(()) })]
 // ---- negative -------------------------------------------------------------
 #[case::negative_no_palette(Case { description: "neither light nor dark", base: "windows", mutate: |t| { t.light = None; t.dark = None; }, expected: Err(ThemeErrorKind::Missing) })]
 #[case::negative_missing_role(Case { description: "no seed and no on_surface", base: "windows", mutate: |t| light(t).on_surface.clear(), expected: Err(ThemeErrorKind::Missing) })]
@@ -147,6 +151,22 @@ fn grey_at_least(target: f64) -> String {
     mutate: |t| t.description = "x\u{2066}y".into(), expected: Err(ThemeErrorKind::BadName) })]
 #[case::adversarial_newline_name(Case { description: "a newline that could forge a log line", base: "windows",
     mutate: |t| t.name = "a\nERROR x".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_zero_width_name(Case { description: "a zero-width space hides in a lookalike name", base: "windows",
+    mutate: |t| t.name = "Win\u{200B}dows".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_bom_name(Case { description: "a byte-order mark in the name", base: "windows",
+    mutate: |t| t.name = "\u{FEFF}Windows".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_arabic_letter_mark(Case { description: "U+061C reorders text like a bidi control", base: "windows",
+    mutate: |t| t.name = "abc\u{061C}def".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_line_separator(Case { description: "U+2028 breaks a line without a newline", base: "windows",
+    mutate: |t| t.description = "a\u{2028}ERROR x".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_soft_hyphen(Case { description: "an invisible soft hyphen in the name", base: "windows",
+    mutate: |t| t.name = "Mac\u{00AD}OS".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_tag_characters(Case { description: "invisible tag characters can smuggle text", base: "windows",
+    mutate: |t| t.name = "abc\u{E0041}\u{E0042}".into(), expected: Err(ThemeErrorKind::BadName) })]
+#[case::adversarial_half_pair_on_seed(Case { description: "hand-picked text on a seed-derived surface is a pair nobody checked", base: "prototype",
+    mutate: |t| light(t).on_surface = "#FFFFFF".into(), expected: Err(ThemeErrorKind::Missing) })]
+#[case::adversarial_half_pair_background(Case { description: "a hand-picked surface under seed-derived text is refused too", base: "prototype",
+    mutate: |t| light(t).primary = "#FFFFFF".into(), expected: Err(ThemeErrorKind::Missing) })]
 #[case::adversarial_17_nav_tints(Case { description: "too many map entries", base: "windows",
     mutate: |t| { for i in 0..17 { sem(t).nav_tint.insert(format!("k{i}"), "#000000".into()); } }, expected: Err(ThemeErrorKind::UnknownKey) })]
 #[case::adversarial_invisible_text(Case { description: "text the same colour as its background", base: "windows",

@@ -33,7 +33,13 @@ review).
   - **`author` may be empty** (06 said 1–64). Only `name` is required.
   - **Seed-derived colours are not contrast-checked in Rust.** Rust does not implement
     the Material 3 tonal palette, so a pair is checked only when both colours are written
-    down. The Dart mapper can compute the derived scheme and check those pairs in 2b.
+    down, and a core pair may not be half written (a security-review finding on #658).
+    Semantic text on a seed-derived surface is left to increment 3: `Put` must derive the
+    palette and check it before any user theme is stored. Built-ins are covered by the
+    portal's rendered-contrast tests.
+  - **Names refuse every invisible character** (Unicode Cc, Cf, Zl, Zp), not just the bidi
+    overrides 06 listed (a security-review finding on #658). Increment 3's `Put` also needs
+    to refuse a user theme whose name is confusable with a built-in's.
   - **A translucent background is judged on its worst backdrop** (composited over both
     white and black), so a theme cannot pass by leaning on what is behind it.
   - Contrast messages truncate the ratio (4.017 prints as 4.01), so a failing pair

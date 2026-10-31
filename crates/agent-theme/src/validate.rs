@@ -190,8 +190,20 @@ fn check_palette(p: &pb::Palette, level: Level) -> Result<(), ThemeError> {
     check_map("semantic.nav_tint", &sem.nav_tint, NAV_TABS)?;
     check_map("semantic.graph_edge", &sem.graph_edge, EDGE_KINDS)?;
 
-    // Seed-derived roles are Material 3 tonal pairs that meet AA by construction;
-    // only pairs where both colours are written down are checked here.
+    // Seed-derived roles are Material 3 tonal pairs that meet AA by construction,
+    // so a pair is checked when both colours are written down. A core pair may not
+    // be half written: a hand-picked foreground on a seed-derived background (or
+    // the reverse) is a pair nobody checked. Semantic colours on a seed-derived
+    // surface are checked against the derived palette on Put (visual/06).
+    for (fg, bg) in CORE_PAIRS {
+        if c.contains_key(fg) != c.contains_key(bg) {
+            let (set, unset) = if c.contains_key(fg) { (fg, bg) } else { (bg, fg) };
+            return Err(ThemeError::new(
+                ThemeErrorKind::Missing,
+                format!("{set} is set without {unset}: set both or neither, so their contrast can be checked"),
+            ));
+        }
+    }
     let mut pairs: Vec<(&str, &str, f64)> = vec![
         ("on_surface", "surface", level.text),
         ("on_surface", "background", level.text),
@@ -232,6 +244,18 @@ fn check_palette(p: &pb::Palette, level: Level) -> Result<(), ThemeError> {
     }
     Ok(())
 }
+
+/// Pairs that must be written in full or not at all (see `check_palette`).
+const CORE_PAIRS: [(&str, &str); 8] = [
+    ("on_surface", "surface"),
+    ("on_surface", "background"),
+    ("on_surface_variant", "surface_variant"),
+    ("on_primary", "primary"),
+    ("on_secondary", "secondary"),
+    ("on_error", "error"),
+    ("code_foreground", "code_background"),
+    ("focus", "background"),
+];
 
 fn check_map(
     field: &str,
@@ -315,19 +339,42 @@ fn check_text(field: &str, s: &str, min: usize, max: usize) -> Result<(), ThemeE
             format!("{field} is {n} chars, allowed {min}-{max}"),
         ));
     }
-    if let Some(c) = s.chars().find(|&c| c.is_control() || is_bidi_control(c)) {
+    if let Some(c) = s.chars().find(|&c| c.is_control() || is_invisible(c)) {
         return Err(ThemeError::new(
             ThemeErrorKind::BadName,
-            format!("{field} contains control character U+{:04X}", u32::from(c)),
+            format!("{field} contains control or invisible character U+{:04X}", u32::from(c)),
         ));
     }
     Ok(())
 }
 
-/// Bidi embedding/override/isolate controls, which can make displayed text read
-/// differently from what it is (Trojan Source).
-fn is_bidi_control(c: char) -> bool {
-    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+/// Format (Cf) and separator (Zl, Zp) characters: bidi controls, zero-width
+/// characters, the BOM, soft hyphen, tags. Each can make displayed text read
+/// differently from what it is (Trojan Source) or hide in a lookalike name.
+/// Together with `char::is_control` (Cc) this is every Cc/Cf/Zl/Zp code point.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'
+        | '\u{0600}'..='\u{0605}'
+        | '\u{061C}'
+        | '\u{06DD}'
+        | '\u{070F}'
+        | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}'
+        | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{2028}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}'
+        | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}'
+        | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}'
+        | '\u{E0020}'..='\u{E007F}')
 }
 
 fn range(field: &str, v: u32, min: u32, max: u32) -> Result<(), ThemeError> {
