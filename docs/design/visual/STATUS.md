@@ -224,10 +224,14 @@ Playwright review).
   with a swatch, not a picker, and the preview is a sample panel rather than the
   Launch and Fleet pages. Import is paste only (no file upload) and textproto only.
 - Tests: `test/unit/theme/editor_test.dart` (freeId, cloneForEdit, colour fields,
-  contrast badges) and the `theme_editor` page spec (26 rows, all five classes).
+  contrast badges) and the `theme_editor` page spec (27 rows, all five classes).
   Layer B (`nix run .#portal-e2e`) drives the editor over the real wire: Export, then
   Save and use, proven by metrics deltas and read back with `Get` and `GetActive`
   ([portal-gui-testing/04](../portal-gui-testing/04-layer-b-e2e.md)).
+- Playwright review (local stack, never l2's live ports): fixed an imported font family
+  that isn't bundled (e.g. a URL) showing as a blank dropdown; the field now says "Not
+  a bundled font". Nothing is fetched from it, and the validator still blocks Save.
+  Left as is: at phone width the editor title truncates beside its four actions.
 
 ## Open questions
 

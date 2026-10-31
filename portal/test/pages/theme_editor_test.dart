@@ -281,6 +281,22 @@ void main() {
           expect(robot.problem, problem);
           expect(robot.enabled('theme_editor.save'), isFalse);
 
+        case 'adversarial_imported_font_url_flagged':
+          await openCopyOf('windows', arrange: (s) {
+            s.importResponse = pb.ImportThemeResponse(
+                theme: builtinTheme('windows')
+                  ..clearBuiltin()
+                  ..id = 'evil'
+                  ..typography.bodyFamily = 'https://evil.example/x.woff');
+          });
+          await robot.press('theme_editor.import');
+          await tester.pumpAndSettle();
+          await robot.type('theme_editor.import.text', 'id: "evil"');
+          await robot.press('theme_editor.import.ok', until: () => robot.snack('Imported'));
+          expect(find.text('Not a bundled font'), findsOneWidget);
+          expect(robot.problem, contains('body_family'));
+          expect(robot.enabled('theme_editor.save'), isFalse);
+
         case 'adversarial_invalid_stored_theme_not_applied':
           await openCopyOf('windows', arrange: (s) {
             s.putAnswer = (r) => _stored(r)..light.primary = 'url(x)';

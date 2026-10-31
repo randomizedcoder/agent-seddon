@@ -564,7 +564,11 @@ class _ThemeEditorPageState extends State<ThemeEditorPage> {
           key: Key('theme_editor.font.$which'),
           initialValue: known ? value : null,
           isExpanded: true,
-          decoration: InputDecoration(labelText: '${which[0].toUpperCase()}${which.substring(1)} font'),
+          decoration: InputDecoration(
+            labelText: '${which[0].toUpperCase()}${which.substring(1)} font',
+            // An imported family that isn't bundled has no menu entry; say so here.
+            errorText: known ? null : 'Not a bundled font',
+          ),
           items: [
             const DropdownMenuItem(value: '', child: Text('(default)')),
             for (final f in fontFamilies)

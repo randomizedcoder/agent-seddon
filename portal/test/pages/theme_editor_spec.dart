@@ -171,4 +171,11 @@ const themeEditorSpec = PageSpec('theme_editor', [
     name: 'css_injection_colour_rejected',
     description: 'a colour like `red; background:url(x)` is cut at 9 characters, flagged, and Save stays off',
   ),
+  SpecRow(
+    elementId: 'theme_editor.font',
+    caseClass: CaseClass.adversarial,
+    name: 'imported_font_url_flagged',
+    description: 'an imported body font that is a URL is flagged on its field and Save stays off',
+    expectedRpc: 'agent.v1.ThemeService/Import',
+  ),
 ]);
