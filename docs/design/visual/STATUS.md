@@ -12,7 +12,7 @@ One PR per increment. Every increment that changes the UI gets the Playwright re
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **merged** (#657) |
 | 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | **merged** (#658; 2b #659, landed on main by #660) |
-| 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | 3a **merged** (#661, service); **3b open** (#662, portal) |
+| 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | **merged** (#661 service, #662 portal) |
 | 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | — | — | ✅ | editor widget tables | ✅ | planned |
 
 ## As built
@@ -175,6 +175,13 @@ Playwright review).
   - **An agent without `ThemeService` keeps working**: `UNIMPLEMENTED` leaves the cached
     (or `prototype`) theme painted and picks are local. A user's increment-2 browser
     choice is not migrated to the server; they pick once more.
+
+### After 3b — TN3270 rail colours
+
+- The TN3270 rail icons take the seven colours of an IBM 3279 display through
+  `semantic.nav_tint` (green, turquoise, pink, yellow, blue, red, white); data only, no
+  code. Every colour is at least 6.7:1 on the black rail. Checked on l2 by serving the
+  regenerated `tn3270.json` to the deployed portal.
 
 ## Open questions
 

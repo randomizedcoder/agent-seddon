@@ -20,6 +20,17 @@
       "codeForeground": "#FFFFFF",
       "info": "#7890F0",
       "muted": "#7890F0",
+      "navTint": {
+        "access": "#40E0D0",
+        "agent": "#FFFF00",
+        "fleet": "#FF5555",
+        "forges": "#FFFFFF",
+        "graph": "#FF55FF",
+        "launch": "#33FF33",
+        "prompts": "#40E0D0",
+        "router": "#7890F0",
+        "settings": "#33FF33"
+      },
       "success": "#33FF33",
       "warning": "#FFFF00"
     },
