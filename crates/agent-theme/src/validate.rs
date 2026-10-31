@@ -197,7 +197,11 @@ fn check_palette(p: &pb::Palette, level: Level) -> Result<(), ThemeError> {
     // surface are checked against the derived palette on Put (visual/06).
     for (fg, bg) in CORE_PAIRS {
         if c.contains_key(fg) != c.contains_key(bg) {
-            let (set, unset) = if c.contains_key(fg) { (fg, bg) } else { (bg, fg) };
+            let (set, unset) = if c.contains_key(fg) {
+                (fg, bg)
+            } else {
+                (bg, fg)
+            };
             return Err(ThemeError::new(
                 ThemeErrorKind::Missing,
                 format!("{set} is set without {unset}: set both or neither, so their contrast can be checked"),
@@ -342,7 +346,10 @@ fn check_text(field: &str, s: &str, min: usize, max: usize) -> Result<(), ThemeE
     if let Some(c) = s.chars().find(|&c| c.is_control() || is_invisible(c)) {
         return Err(ThemeError::new(
             ThemeErrorKind::BadName,
-            format!("{field} contains control or invisible character U+{:04X}", u32::from(c)),
+            format!(
+                "{field} contains control or invisible character U+{:04X}",
+                u32::from(c)
+            ),
         ));
     }
     Ok(())
