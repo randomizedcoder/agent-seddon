@@ -1,0 +1,88 @@
+Flutter crash report.
+Please report a bug at https://github.com/flutter/flutter/issues.
+
+## command
+
+flutter drive --driver=test_driver/integration_test.dart --target=integration_test/smoke_test.dart -d web-server --browser-name=chrome --web-browser-flag=--headless=new --web-browser-flag=--no-sandbox --web-browser-flag=--disable-gpu --web-browser-flag=--disable-dev-shm-usage --dart-define=PORTAL_GRPC_WEB_URL=http://127.0.0.1:8090 --dart-define=PORTAL_SESSIONS_GRPC_WEB_URL=http://127.0.0.1:8091 --dart-define=PORTAL_FLEET_GRPC_WEB_URL=http://127.0.0.1:8093
+
+## exception
+
+SessionNotCreatedException: SessionNotCreatedException (500): session not created
+from unknown error: cannot find Chrome binary
+
+```
+#0      parseW3cResponse (package:webdriver/src/handler/w3c/utils.dart:81:9)
+#1      W3cSessionHandler.parseCreateResponse (package:webdriver/src/handler/w3c/session.dart:19:21)
+#2      InferSessionHandler.parseCreateResponse (package:webdriver/src/handler/infer_handler.dart:106:34)
+#3      AsyncRequestClient.send (package:webdriver/src/common/request_client.dart:96:32)
+<asynchronous suspension>
+#4      createDriver (package:webdriver/async_core.dart:62:19)
+<asynchronous suspension>
+#5      WebDriverService.startTest (package:flutter_tools/src/drive/web_driver_service.dart:199:19)
+<asynchronous suspension>
+#6      DriveCommand.runCommand (package:flutter_tools/src/commands/drive.dart:387:30)
+<asynchronous suspension>
+#7      FlutterCommand.run.<anonymous closure> (package:flutter_tools/src/runner/flutter_command.dart:1630:27)
+<asynchronous suspension>
+#8      AppContext.run.<anonymous closure> (package:flutter_tools/src/base/context.dart:154:19)
+<asynchronous suspension>
+#9      CommandRunner.runCommand (package:args/command_runner.dart:212:13)
+<asynchronous suspension>
+#10     FlutterCommandRunner.runCommand.<anonymous closure> (package:flutter_tools/src/runner/flutter_command_runner.dart:491:9)
+<asynchronous suspension>
+#11     AppContext.run.<anonymous closure> (package:flutter_tools/src/base/context.dart:154:19)
+<asynchronous suspension>
+#12     FlutterCommandRunner.runCommand (package:flutter_tools/src/runner/flutter_command_runner.dart:431:5)
+<asynchronous suspension>
+#13     FlutterCommandRunner.run.<anonymous closure> (package:flutter_tools/src/runner/flutter_command_runner.dart:307:33)
+<asynchronous suspension>
+#14     run.<anonymous closure>.<anonymous closure> (package:flutter_tools/runner.dart:104:11)
+<asynchronous suspension>
+#15     AppContext.run.<anonymous closure> (package:flutter_tools/src/base/context.dart:154:19)
+<asynchronous suspension>
+#16     main (package:flutter_tools/executable.dart:103:3)
+<asynchronous suspension>
+```
+
+## flutter doctor
+
+```
+[✓] Flutter (Channel stable, 3.44.4, on NixOS 26.11 (Zokor) 7.2.2, locale en_US.UTF-8) [53ms]
+    • Flutter version 3.44.4 on channel stable at /nix/store/lhn53l4cvljh182xyapbhisvifsjd0qc-flutter-wrapped-3.44.4-sdk-links
+    • Upstream repository https://github.com/flutter/flutter.git
+    • Framework revision nixpkgs000 (), 1970-01-01 00:00:00
+    • Engine revision a10d8ac38d
+    • Dart version 3.12.2
+    • DevTools version 2.57.0
+    • Feature flags: enable-web, enable-linux-desktop, enable-macos-desktop, enable-windows-desktop, enable-android, enable-ios, cli-animations, enable-native-assets, enable-swift-package-manager, omit-legacy-version-file, enable-lldb-debugging, enable-uiscene-migration
+
+[✗] Android toolchain - develop for Android devices [13ms]
+    ✗ Unable to locate Android SDK.
+      Install Android Studio from: https://developer.android.com/studio/index.html
+      On first launch it will assist you in installing the Android SDK components.
+      (or visit https://flutter.dev/to/linux-android-setup for detailed instructions).
+      If the Android SDK has been installed to a custom location, please use
+      `flutter config --android-sdk` to update to that location.
+
+
+[✓] Chrome - develop for the web [6ms]
+    • CHROME_EXECUTABLE = /nix/store/3qgx41z8882ff85y9prdc5zgbb2id6y8-chromium-152.0.7977.64/bin/chromium
+
+[✓] Linux toolchain - develop for Linux desktop [243ms]
+    • clang version 21.1.8
+    • cmake version 4.1.2
+    • ninja version 1.13.2
+    • pkg-config version 0.29.2
+    ! Unable to access driver information using 'eglinfo'.
+      It is likely available from your distribution (e.g.: apt install mesa-utils)
+
+[✓] Connected device (3 available) [171ms]
+    • Linux (desktop)  • linux      • linux-x64      • NixOS 26.11 (Zokor) 7.2.2
+    • Web Server (web) • web-server • web-javascript • Flutter Tools
+    • Chrome (web)     • chrome     • web-javascript • Chromium 152.0.7977.64
+
+[✓] Network resources [191ms]
+    • All expected network resources are available.
+
+! Doctor found issues in 1 category.
+```

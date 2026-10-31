@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 
@@ -60,6 +62,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
     redirectUriOverride: _config.redirectUri,
     cliLogin: createCliLogin(_config),
   );
+  late final ThemeServer _themeServer = GrpcThemeServer(_clients.themes);
   int _index = 0;
 
   /// A GitHub App install return is waiting: open on the Forges tab, which
@@ -70,6 +73,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
   @override
   void initState() {
     super.initState();
+    _auth.addListener(_followUser);
     _auth.start();
     _openForges = _auth.hasInstallCallback;
   }
@@ -151,8 +155,26 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
     ),
   ];
 
+  /// The theme follows whoever is signed in: their choice is on the server
+  /// (visual/04). With sign-in off every visitor is the host's `local` user.
+  void _followUser() {
+    final themes = widget.themes;
+    switch (_auth.phase) {
+      case AuthPhase.signedIn:
+        final p = _auth.session!.principal;
+        unawaited(themes.attach(_themeServer, tenant: p.tenant, subject: p.subject));
+      case AuthPhase.off:
+        unawaited(themes.attach(_themeServer, tenant: 'local', subject: 'local'));
+      case AuthPhase.signedOut:
+        themes.detach();
+      case AuthPhase.checking || AuthPhase.redirecting || AuthPhase.exchanging:
+        break;
+    }
+  }
+
   @override
   void dispose() {
+    _auth.removeListener(_followUser);
     _auth.dispose();
     _clients.shutdown();
     super.dispose();

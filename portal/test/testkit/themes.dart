@@ -4,6 +4,7 @@ import 'package:agent_portal/src/gen/agent/v1/theme.pb.dart' as pb;
 import 'package:agent_portal/src/theme/builtin_themes.dart';
 import 'package:agent_portal/src/theme/theme_controller.dart';
 import 'package:agent_portal/src/theme/theme_mapper.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 
 /// The built-in themes read straight from `assets/themes/` (the test's cwd is
@@ -37,3 +38,16 @@ ThemeController memoryThemes([Map<String, String>? saved]) {
     log: (_) {},
   );
 }
+
+/// A user theme: a renamed copy of the Windows built-in, as `ThemeService.List`
+/// would return it.
+pb.Theme userTheme(String id,
+        {String name = 'Ocean',
+        pb.Visibility visibility = pb.Visibility.VISIBILITY_PRIVATE}) =>
+    builtinTheme('windows').deepCopy()
+      ..id = id
+      ..name = name
+      ..builtin = false
+      ..owner = 'alice'
+      ..version = Int64(1)
+      ..visibility = visibility;

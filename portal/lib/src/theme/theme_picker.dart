@@ -105,10 +105,15 @@ class _ThemeCard extends StatelessWidget {
         if (hex.isNotEmpty) Color(parseColor(hex)),
     ];
     final family = theme.typography.bodyFamily;
+    final whose = theme.builtin
+        ? null
+        : theme.visibility == pb.Visibility.VISIBILITY_TENANT
+            ? 'Shared'
+            : 'Private';
     return Semantics(
       button: true,
       selected: selected,
-      label: '${theme.name} theme',
+      label: whose == null ? '${theme.name} theme' : '${theme.name} theme, ${whose.toLowerCase()}',
       onTap: onTap,
       excludeSemantics: true,
       child: SizedBox(
@@ -155,6 +160,10 @@ class _ThemeCard extends StatelessWidget {
                     style: TextStyle(
                         fontFamily: family.isEmpty ? null : family),
                   ),
+                  // Whose theme this is: everything but a built-in is
+                  // someone's in this tenant.
+                  if (whose != null)
+                    Text(whose, style: Theme.of(context).textTheme.labelSmall),
                   if (theme.description.isNotEmpty)
                     Text(theme.description,
                         maxLines: 2,
