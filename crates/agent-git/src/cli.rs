@@ -56,14 +56,16 @@ pub struct CliBackend {
     /// PR number; empty ⇒ `fetch_pr` errs. Operator-owned and forge-agnostic, so
     /// the forge kind is never inferred from the ref.
     pr_ref_template: String,
-    /// Optional clone/fetch credential as a complete `Authorization: Basic <b64>`
-    /// header value (forge-auth F2b; set by [`CliBackend::with_github_token`]). It is
-    /// injected into remote `git` invocations as a command-scoped `http.extraHeader`
-    /// through [`ExecSpec::env_set`] — so the token never enters `argv` (and so cannot
-    /// appear in the `args.join(" ")` error strings [`git_bytes`](Self::git_bytes)
-    /// builds) and is never persisted to the mirror's `.git/config`. `None` ⇒ an
-    /// unauthenticated (public) clone, exactly as before.
-    auth_header: Option<agent_core::Secret>,
+    /// Optional clone/fetch credential (forge-auth F2b; set by
+    /// [`CliBackend::with_github_token`] or [`CliBackend::with_github_token_source`]).
+    /// It is resolved at each `git` invocation — a cached backend outlives an App
+    /// installation token's hour — and injected as a complete `Authorization: Basic
+    /// <b64>` header through a command-scoped `http.extraHeader` in
+    /// [`ExecSpec::env_set`], so the token never enters `argv` (and so cannot appear in
+    /// the `args.join(" ")` error strings [`git_bytes`](Self::git_bytes) builds) and is
+    /// never persisted to the mirror's `.git/config`. `None` ⇒ an unauthenticated
+    /// (public) clone, exactly as before.
+    auth: Option<std::sync::Arc<dyn agent_core::TokenSource>>,
 }
 
 impl CliBackend {
@@ -83,7 +85,7 @@ impl CliBackend {
             cache,
             sandbox: Arc::new(agent_sandbox::LocalSandbox),
             pr_ref_template: String::new(),
-            auth_header: None,
+            auth: None,
         }
     }
 
@@ -112,22 +114,28 @@ impl CliBackend {
     /// command-scoped `http.extraHeader` injected through [`ExecSpec::env_set`] — so it
     /// never touches `argv`, the mirror's `.git/config`, or any error string.
     ///
-    /// An **empty** token is a no-op (`auth_header` stays `None`), so a public clone is
+    /// An **empty** token is a no-op (`auth` stays `None`), so a public clone is
     /// byte-for-byte unchanged. base64-encoding also makes the header value pure base64
     /// (`[A-Za-z0-9+/=]+`), so a token carrying CR/LF/NUL cannot inject a second header
     /// and cannot trip `env_set`'s NUL refusal — header injection is structurally
     /// impossible.
     #[must_use]
-    pub fn with_github_token(mut self, token: &agent_core::Secret) -> Self {
-        if token.is_empty() {
-            return self;
+    pub fn with_github_token(self, token: &agent_core::Secret) -> Self {
+        self.with_github_token_source(std::sync::Arc::new(token.clone()))
+    }
+
+    /// [`with_github_token`](Self::with_github_token) from a source read at each `git`
+    /// invocation, so a long-lived backend follows a minted App installation token
+    /// across its hourly expiry instead of fetching with a dead one. An unconfigured
+    /// source (the empty constant) is a no-op.
+    #[must_use]
+    pub fn with_github_token_source(
+        mut self,
+        source: std::sync::Arc<dyn agent_core::TokenSource>,
+    ) -> Self {
+        if source.is_configured() {
+            self.auth = Some(source);
         }
-        use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD
-            .encode(format!("x-access-token:{}", token.expose()));
-        self.auth_header = Some(agent_core::Secret::new(format!(
-            "Authorization: Basic {b64}"
-        )));
         self
     }
 
@@ -168,22 +176,33 @@ impl CliBackend {
     /// otherwise it falls back to an unscoped `http.extraHeader`, still fail-safe since
     /// our invocations only talk to that remote. Routing this through `env_set` (rather
     /// than `-c`) keeps the credential out of `argv` entirely.
-    fn auth_env(&self) -> Vec<(String, String)> {
-        let Some(header) = &self.auth_header else {
-            return Vec::new();
+    /// The token is resolved now (fail-closed: an unresolvable credential fails the
+    /// invocation rather than running it unauthenticated) and an empty one sends no
+    /// header.
+    async fn auth_env(&self) -> Result<Vec<(String, String)>> {
+        let Some(source) = &self.auth else {
+            return Ok(Vec::new());
         };
+        let token = source.token().await?;
+        if token.is_empty() {
+            return Ok(Vec::new());
+        }
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(format!("x-access-token:{}", token.expose()));
+        let header = agent_core::Secret::new(format!("Authorization: Basic {b64}"));
         let key = match scope_prefix(&self.remote) {
             Some(prefix) => format!("http.{prefix}.extraHeader"),
             None => "http.extraHeader".to_string(),
         };
-        vec![
+        Ok(vec![
             ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
             ("GIT_CONFIG_KEY_0".to_string(), key),
             (
                 "GIT_CONFIG_VALUE_0".to_string(),
                 header.expose().to_string(),
             ),
-        ]
+        ])
     }
 
     /// The upstream URL for the mirror: the configured `remote`, else the working
@@ -265,7 +284,7 @@ impl CliBackend {
         // the child env — never as an arg, so the error paths below (which `args.join`)
         // cannot echo it. Inert for local object reads; applied to remote ops (clone,
         // fetch) that actually need it.
-        for (k, v) in self.auth_env() {
+        for (k, v) in self.auth_env().await? {
             spec = spec.env_set(k, v);
         }
         let out = self
@@ -1638,6 +1657,87 @@ mod tests {
             format!("x-access-token:{hostile}").into_bytes(),
             "round-trips the exact token bytes"
         );
+    }
+
+    /// A source standing in for the App-token minter: each read hands out the next
+    /// token, or fails when `fail` is set.
+    struct RotatingSource {
+        reads: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl agent_core::TokenSource for RotatingSource {
+        async fn token(&self) -> agent_core::Result<agent_core::Secret> {
+            let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(agent_core::Error::Repo("minting failed".into()));
+            }
+            Ok(agent_core::Secret::new(format!("ghs_{n}")))
+        }
+    }
+
+    fn decoded_token(spec: &ExecSpec) -> String {
+        let val = env_map(spec)
+            .remove("GIT_CONFIG_VALUE_0")
+            .expect("auth header");
+        let payload = val.strip_prefix("Authorization: Basic ").unwrap();
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// A token source is read at each git call, not once at build: a backend kept
+    /// past an installation token's hour sends the refreshed token. Before, the
+    /// token minted at build rode every later fetch, and an hour on GitHub refused
+    /// it (`could not read Username`).
+    #[tokio::test]
+    async fn positive_token_source_is_read_per_call() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let src = Arc::new(RotatingSource {
+            reads: Default::default(),
+            fail: false,
+        });
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_github_token_source(src.clone());
+
+        b.ensure_mirror().await.unwrap();
+        let first = rec.last.lock().unwrap().clone().unwrap();
+        // The mirror is still absent (the sandbox only records), so this clones again.
+        b.ensure_mirror().await.unwrap();
+        let second = rec.last.lock().unwrap().clone().unwrap();
+
+        assert_eq!(decoded_token(&first), "x-access-token:ghs_0");
+        assert_eq!(
+            decoded_token(&second),
+            "x-access-token:ghs_1",
+            "the second call carries the source's newer token"
+        );
+    }
+
+    /// A source that cannot produce a token fails the git call before anything is
+    /// spawned — never an unauthenticated run in its place.
+    #[tokio::test]
+    async fn adversarial_unresolvable_source_fails_closed() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_github_token_source(Arc::new(RotatingSource {
+                reads: Default::default(),
+                fail: true,
+            }));
+
+        let err = b.ensure_mirror().await.unwrap_err().to_string();
+        assert!(
+            err.contains("minting failed"),
+            "the cause is reported: {err}"
+        );
+        assert!(rec.all_argvs().is_empty(), "no git was spawned");
     }
 
     /// A NUL in the token would be refused by `env_set` if it reached the value raw;

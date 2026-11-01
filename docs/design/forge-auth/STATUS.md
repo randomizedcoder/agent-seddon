@@ -73,6 +73,17 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   clone is unchanged. Not behind `forge-ghapp` (a general `agent-git` capability). Tables: A (agent-git
   `CliBackend` auth, RecordingSandbox, 11 incl. `adversarial_` CRLF/NUL/no-leak), B (fleet_review wiring, 4).
 
+- **Token refresh fix (after F6):** the fleet's cached review context held the `ghapp:` token minted when it
+  was built, in both its clone backend and its forge API client. An installation token lives an hour, so from an
+  hour after the fleet started every fetch went out with a dead token and failed with `could not read Username`,
+  and no review ran (seen on l2 2026-10-31: no drafts for #668's second commit, #669 or #670). Both now hold an
+  `agent_core::TokenSource` read at each use: `registry::tenant_token_source` gives a `ghapp:` ref a source that
+  re-mints through `mint_or_resolve_tenant_token` (IDOR gate each time; minter cache ~55 min), and every other ref
+  the token resolved at build, as before. `ForgeHttp` and `CliBackend::with_github_token_source` resolve per
+  request/invocation and fail closed if the source errs. Tables: core (`Secret` as source, 2), forge (`ForgeHttp`
+  per-request read, unresolvable sends nothing, `require_token` 3), git (per-call read, unresolvable spawns
+  nothing), runtime (source re-mints, fails closed after uninstall, non-ghapp constant, bad id at build).
+
 - **F3 (PR #629):** the webhook credential. Added `webhook_secret_ref` to the bootstrap `[github_app]` config
   (`GithubAppCfg`, `crates/agent-runtime/src/config.rs`) — **optional**, `env:`/`file:` only (a `ghapp:` mint or an
   inline raw secret is rejected; the error never echoes the value, reusing `ApiKeyRef::parse`), so the

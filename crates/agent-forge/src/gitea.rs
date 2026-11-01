@@ -33,7 +33,7 @@ impl GiteaForge {
         base: String,
         owner: String,
         repo: String,
-        token: agent_core::Secret,
+        token: impl Into<std::sync::Arc<dyn agent_core::TokenSource>>,
         timeout_secs: u64,
         max_retries: u32,
     ) -> Result<Self> {

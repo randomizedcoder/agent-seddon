@@ -152,7 +152,7 @@ pub use progress::{progress_channels, TransportProgressFeed};
 pub use registry::{
     build_session_forge, build_session_forge_async, build_session_forge_from_card,
     build_session_forge_from_card_async, check_session_forge, mint_or_resolve_tenant_token,
-    resolve_session_forge, resolve_tenant_token_ref, resolve_token_ref,
+    resolve_session_forge, resolve_tenant_token_ref, resolve_token_ref, tenant_token_source,
 };
 pub use registry::{register_builtins, Registry};
 pub use session_events::{SessionEvents, SessionEventsRegistry};

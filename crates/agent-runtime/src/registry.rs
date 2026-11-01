@@ -1447,7 +1447,7 @@ pub async fn build_session_forge_async(
     }
     #[cfg(feature = "forge")]
     {
-        let token = mint_or_resolve_tenant_token(&row.user, &row.token_ref).await?;
+        let token = tenant_token_source(&row.user, &row.token_ref).await?;
         build_inline_forge_with_token(row, token)
     }
     #[cfg(not(feature = "forge"))]
@@ -1468,7 +1468,7 @@ pub async fn build_session_forge_async(
 #[cfg(all(feature = "fleet", feature = "forge"))]
 fn build_inline_forge_with_token(
     row: &agent_core::FleetSession,
-    token: agent_core::Secret,
+    token: impl Into<Arc<dyn agent_core::TokenSource>>,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
     use anyhow::Context;
     let card = agent_core::ForgeCard {
@@ -1538,7 +1538,7 @@ pub async fn build_session_forge_from_card_async(
     }
     #[cfg(feature = "forge")]
     {
-        let token = mint_or_resolve_tenant_token(&row.user, &card.token_ref).await?;
+        let token = tenant_token_source(&row.user, &card.token_ref).await?;
         build_card_forge_with_token(row, card, token)
     }
     #[cfg(not(feature = "forge"))]
@@ -1558,7 +1558,7 @@ pub async fn build_session_forge_from_card_async(
 fn build_card_forge_with_token(
     row: &agent_core::FleetSession,
     card: &agent_core::ForgeCard,
-    token: agent_core::Secret,
+    token: impl Into<Arc<dyn agent_core::TokenSource>>,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
     use anyhow::Context;
     let forge = agent_forge::build_forge_from_card(card, &row.repo, token).with_context(|| {
@@ -1612,6 +1612,45 @@ pub async fn mint_or_resolve_tenant_token(
         }
     }
     resolve_tenant_token_ref(tenant, token_ref)
+}
+
+/// A tenant's `token_ref` as a [`agent_core::TokenSource`] for a client that outlives
+/// one request — the fleet's cached forge and clone backend. It resolves once here, so
+/// an unresolvable credential still fails the build. A `ghapp:` installation token
+/// lives an hour, so that source re-mints through [`mint_or_resolve_tenant_token`] at
+/// each read (the minter caches ~55 min, so a read is free, and the per-tenant mint
+/// gate runs every time); every other ref is the token resolved here, as before.
+#[cfg(feature = "fleet")]
+pub async fn tenant_token_source(
+    tenant: &str,
+    token_ref: &str,
+) -> anyhow::Result<Arc<dyn agent_core::TokenSource>> {
+    let token = mint_or_resolve_tenant_token(tenant, token_ref).await?;
+    if let Ok(agent_core::ApiKeyRef::GitHubApp(_)) = agent_core::ApiKeyRef::parse(token_ref) {
+        return Ok(Arc::new(MintedToken {
+            tenant: tenant.to_string(),
+            token_ref: token_ref.to_string(),
+        }));
+    }
+    Ok(token.into())
+}
+
+/// A `ghapp:` credential, minted afresh at each read (see [`tenant_token_source`]).
+#[cfg(feature = "fleet")]
+struct MintedToken {
+    tenant: String,
+    token_ref: String,
+}
+
+#[cfg(feature = "fleet")]
+#[async_trait::async_trait]
+impl agent_core::TokenSource for MintedToken {
+    async fn token(&self) -> agent_core::Result<agent_core::Secret> {
+        // The mint error names the tenant, never a token.
+        mint_or_resolve_tenant_token(&self.tenant, &self.token_ref)
+            .await
+            .map_err(|e| agent_core::Error::Repo(format!("{e:#}")))
+    }
 }
 
 /// The **sync** reconcile pre-check (review-fleet C5; forge-auth F2): can this row's
@@ -2136,7 +2175,7 @@ mod tests {
     // --- forge-auth F2: the mint-aware tenant-token resolver -------------------
     #[cfg(feature = "fleet")]
     mod ghapp_wiring {
-        use super::super::mint_or_resolve_tenant_token;
+        use super::super::{mint_or_resolve_tenant_token, tenant_token_source};
         use rstest::rstest;
 
         /// Non-`ghapp` references (and a malformed `ghapp:` id, which fails to parse)
@@ -2217,7 +2256,38 @@ mod tests {
             // boundary_ghapp_id_at_cap_resolves: the 20-digit max id reaches HTTP + resolves.
             let big = format!("ghapp:{}", "9".repeat(agent_core::MAX_INSTALLATION_ID_LEN));
             assert!(mint_or_resolve_tenant_token("acme", &big).await.is_ok());
+
+            // positive_ghapp_source_mints_at_each_read: the fleet's cached clients hold
+            // a source, not the token, so each read goes back to the minter.
+            let src = tenant_token_source("acme", "ghapp:12345678")
+                .await
+                .expect("resolves at build");
+            assert_eq!(src.token().await.unwrap().expose(), "ghs_runtime_tok");
             crate::secrets::uninstall_github_app();
+
+            // negative_ghapp_source_fails_closed_after_uninstall: with the minter gone the
+            // same source errs rather than replaying the token it handed out before.
+            let err = src.token().await.expect_err("no minter -> fail closed");
+            assert!(err.to_string().contains("github_app"), "{err}");
+        }
+
+        /// A non-`ghapp` source is the token resolved at build, unchanged afterwards.
+        #[tokio::test]
+        async fn positive_non_ghapp_source_is_the_resolved_token() {
+            std::env::set_var("AGENT_GHAPP_SOURCE_TEST", "tok-src");
+            let src = tenant_token_source("acme", "env:AGENT_GHAPP_SOURCE_TEST")
+                .await
+                .unwrap();
+            std::env::set_var("AGENT_GHAPP_SOURCE_TEST", "tok-changed");
+            assert_eq!(src.token().await.unwrap().expose(), "tok-src");
+            assert!(src.is_configured());
+        }
+
+        /// An unresolvable reference fails when the source is built, as the forge build
+        /// did before, so a broken row never reaches a clone.
+        #[tokio::test]
+        async fn adversarial_bad_ghapp_id_fails_at_build() {
+            assert!(tenant_token_source("acme", "ghapp:../x").await.is_err());
         }
 
         /// A loopback endpoint that answers every POST with a `201` installation token.
