@@ -72,8 +72,9 @@ randomness — instruction counts must be reproducible): `write_tree`,
 `message_history`, `fact_corpus`.
 
 The `hard_limits` value is the bench's **absolute ceiling**: exceeding it makes
-`cargo bench` exit non-zero. Run it once (`nix run .#bench`) to read the observed
-`Instructions:` count, then set the ceiling ~40% above it. When a legitimate change
+`cargo bench` exit non-zero. Start with a placeholder and run it once
+(`nix run .#bench -- -p <crate>`); a run over the placeholder fails but still prints the
+observed `Instructions:` count. Set the ceiling ~40% above that count. When a legitimate change
 moves the count, bump the ceiling in the same PR — the diff is the record of the perf
 change.
 
@@ -117,8 +118,11 @@ fn hot_path_does_not_leak() {
 
 Add the crate to the `runs` table in `nix/checks/leak.nix`
 (`agent-foo = [ "--features dhat-heap --test leak" ];`); it becomes its own
-`leak-<crate>` check on the crate's slice, and `leak` builds them all. The `dhat-heap` feature keeps the global allocator
-out of every normal build.
+`leak-<crate>` check on the crate's slice, and `leak` builds them all. The
+`dhat-heap` feature keeps the global allocator out of every normal build.
+
+The `leak-bench-sync` check fails while a `tests/*leak*.rs` or `benches/*.rs` file
+has no row in its table.
 
 ## Observability assertions
 

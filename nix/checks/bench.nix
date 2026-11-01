@@ -83,4 +83,10 @@ let
       }
     );
 in
-lib.mapAttrs' (crate: args: lib.nameValuePair "bench-${crate}" (benchCheck crate args)) runs
+{
+  # The table itself, for the `leak-bench-sync` check.
+  inherit runs;
+  checks = lib.mapAttrs' (
+    crate: args: lib.nameValuePair "bench-${crate}" (benchCheck crate args)
+  ) runs;
+}
