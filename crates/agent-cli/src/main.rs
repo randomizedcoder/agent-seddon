@@ -86,6 +86,17 @@ async fn main() -> Result<()> {
         }
     }
 
+    // `agent fleet` / `agent fleet --help`: usage needs no config, so print it
+    // before one is required (here, not in the arg parser, which tests run in-process).
+    if let Mode::Fleet(args) = &mode {
+        if matches!(
+            agent_runtime::fleet_cli::parse(args),
+            Ok(agent_runtime::fleet_cli::FleetCmd::Help)
+        ) {
+            println!("{}", agent_runtime::fleet_cli::USAGE);
+            return Ok(());
+        }
+    }
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
     // Parse with the ignored-key list in hand rather than letting `parse_config`
@@ -1364,13 +1375,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             }
             // `agent fleet <verb> …`: everything after the word is the verb's.
             "fleet" => {
-                let parsed: Vec<String> = args.collect();
-                // Usage needs no config: print it before one is read.
-                if parsed.is_empty() || matches!(parsed[0].as_str(), "--help" | "-h" | "help") {
-                    println!("{}", agent_runtime::fleet_cli::USAGE);
-                    std::process::exit(0);
-                }
-                fleet_args = Some(parsed);
+                fleet_args = Some(args.collect());
                 break;
             }
             "campaign" => {
@@ -1808,10 +1813,13 @@ mod tests {
     }
 
     // desc: `agent fleet …` hands every later word to the fleet verb parser
-    // (agent_runtime::fleet_cli), like `repo`; after `--` it is a goal word.
+    // (agent_runtime::fleet_cli), like `repo`; after `--` it is a goal word. A bare
+    // `fleet` and `fleet --help` parse too: usage is printed by `main`, never by an
+    // exit inside the parser (which would kill this test binary).
     #[rstest::rstest]
     #[case::positive_skip(&["fleet", "skip", "--dry-run"], Some(vec!["skip", "--dry-run"]))]
     #[case::corner_bare_word(&["fleet"], Some(vec![]))]
+    #[case::corner_help_is_parsed_not_exited(&["fleet", "--help"], Some(vec!["--help"]))]
     #[case::boundary_flags_not_swallowed(&["fleet", "skip", "--repo", "a/b"], Some(vec!["skip", "--repo", "a/b"]))]
     #[case::adversarial_after_double_dash_is_a_goal(&["--", "fleet", "skip"], None)]
     fn fleet_word_parses(#[case] argv: &[&str], #[case] want: Option<Vec<&str>>) {

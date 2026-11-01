@@ -6800,6 +6800,8 @@ pub const MAX_DRAFT_ROWS: usize = 500;
 pub const MAX_SKIP_BATCH: usize = 500;
 // A whole listing fits in one `SkipReviews` call, so "skip what was listed" is one call.
 const _: () = assert!(MAX_DRAFT_ROWS <= MAX_SKIP_BATCH);
+/// How many chars of an untrusted id or status an error message echoes.
+pub const MAX_ECHO_CHARS: usize = 40;
 /// Longest review id `SkipReviews` accepts (ids are UUIDs, 36 chars).
 pub const MAX_REVIEW_ID_LEN: usize = 128;
 
@@ -6831,7 +6833,7 @@ pub fn skip_batch(ids: &[String]) -> std::result::Result<Vec<String>, String> {
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         if !valid_review_id(id) {
-            let cut: String = id.chars().take(40).collect();
+            let cut: String = id.chars().take(MAX_ECHO_CHARS).collect();
             return Err(format!("not a review id: {cut:?}"));
         }
         if seen.insert(id.as_str()) {

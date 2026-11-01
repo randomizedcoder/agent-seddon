@@ -87,8 +87,7 @@ impl GrpcFleet {
 
     /// Skip several drafts in one call (at most [`agent_core::MAX_SKIP_BATCH`] ids; the
     /// server rejects more). Returns each distinct id with its outcome, in request order.
-    /// An unrecognized wire status, or a result for an id that wasn't asked for, is a
-    /// protocol fault (`Err`).
+    /// The reply must answer each distinct id exactly once ([`check_skip_results`]).
     pub async fn skip_reviews(
         &self,
         review_ids: &[String],
@@ -100,26 +99,7 @@ impl GrpcFleet {
             .map_err(status_to_err)?
             .into_inner()
             .results;
-        let asked: std::collections::HashSet<&str> =
-            review_ids.iter().map(String::as_str).collect();
-        results
-            .into_iter()
-            .map(|r| {
-                if !asked.contains(r.review_id.as_str()) {
-                    return Err(Error::Fleet(format!(
-                        "skip: a result for {:?}, which was not asked for",
-                        r.review_id.chars().take(40).collect::<String>()
-                    )));
-                }
-                let outcome = agent_core::SkipOutcome::from_wire(&r.status).ok_or_else(|| {
-                    Error::Fleet(format!(
-                        "skip: unrecognized status {:?} from server",
-                        r.status.chars().take(40).collect::<String>()
-                    ))
-                })?;
-                Ok((r.review_id, outcome))
-            })
-            .collect()
+        check_skip_results(review_ids, results)
     }
 
     /// Operational self-diagnosis of a running fleet (docs/design/doctor/): run the
@@ -297,5 +277,144 @@ fn status_to_err(s: tonic::Status) -> Error {
         ))
     } else {
         Error::Fleet(m.to_string())
+    }
+}
+
+/// Check a `SkipReviews` reply against the ids asked for, in reply order. The server is
+/// untrusted: a result for an id not asked for, a second result for one id, an id left
+/// unanswered, or an unrecognized status is a protocol fault (`Err`), so a tally built
+/// from the reply can't over- or under-count.
+fn check_skip_results(
+    asked: &[String],
+    results: Vec<pb::SkipResult>,
+) -> Result<Vec<(String, agent_core::SkipOutcome)>> {
+    use std::collections::HashSet;
+    let cut = |s: &str| {
+        s.chars()
+            .take(agent_core::MAX_ECHO_CHARS)
+            .collect::<String>()
+    };
+    let mut open: HashSet<&str> = asked.iter().map(String::as_str).collect();
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        if !open.remove(r.review_id.as_str()) {
+            let why = if asked.contains(&r.review_id) {
+                "a second result"
+            } else {
+                "a result for an id not asked for"
+            };
+            return Err(Error::Fleet(format!(
+                "skip: {why}: {:?}",
+                cut(&r.review_id)
+            )));
+        }
+        let outcome = agent_core::SkipOutcome::from_wire(&r.status).ok_or_else(|| {
+            Error::Fleet(format!(
+                "skip: unrecognized status {:?} from server",
+                cut(&r.status)
+            ))
+        })?;
+        out.push((r.review_id, outcome));
+    }
+    if let Some(missing) = open.iter().min() {
+        return Err(Error::Fleet(format!(
+            "skip: no result for {:?} ({} unanswered)",
+            cut(missing),
+            open.len()
+        )));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::SkipOutcome;
+    use rstest::rstest;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
+    fn res(v: &[(&str, &str)]) -> Vec<pb::SkipResult> {
+        v.iter()
+            .map(|(id, status)| pb::SkipResult {
+                review_id: (*id).into(),
+                status: (*status).into(),
+            })
+            .collect()
+    }
+
+    /// A `SkipReviews` reply checked against the request: description, asked ids, reply,
+    /// expected outcomes in reply order or an error fragment.
+    #[rstest]
+    #[case::positive_every_id_answered(
+        "each asked id answered once",
+        ids(&["a", "b"]),
+        res(&[("a", "skipped"), ("b", "already_posted")]),
+        Ok(vec![("a", SkipOutcome::Skipped), ("b", SkipOutcome::AlreadyPosted)])
+    )]
+    #[case::corner_duplicate_asks_one_answer(
+        "an id asked twice is answered once (the server dedups)",
+        ids(&["a", "a"]),
+        res(&[("a", "skipped")]),
+        Ok(vec![("a", SkipOutcome::Skipped)])
+    )]
+    #[case::corner_reply_order_kept(
+        "outcomes follow the reply's order",
+        ids(&["a", "b"]),
+        res(&[("b", "not_found"), ("a", "already_skipped")]),
+        Ok(vec![("b", SkipOutcome::NotFound), ("a", SkipOutcome::AlreadySkipped)])
+    )]
+    #[case::boundary_empty_both("nothing asked, nothing answered", ids(&[]), res(&[]), Ok(vec![]))]
+    #[case::negative_missing_result(
+        "an asked id with no result is a fault, not a short tally",
+        ids(&["a", "b"]),
+        res(&[("a", "skipped")]),
+        Err("no result for \"b\"")
+    )]
+    #[case::negative_unknown_status(
+        "an unrecognized status is a fault",
+        ids(&["a"]),
+        res(&[("a", "obliterated")]),
+        Err("unrecognized status")
+    )]
+    #[case::adversarial_unasked_id(
+        "a result for an id never asked for",
+        ids(&["a"]),
+        res(&[("a", "skipped"), ("zzz", "skipped")]),
+        Err("not asked for")
+    )]
+    #[case::adversarial_repeated_result(
+        "one id answered twice would double-count",
+        ids(&["a", "b"]),
+        res(&[("a", "skipped"), ("a", "skipped"), ("b", "skipped")]),
+        Err("a second result")
+    )]
+    #[case::adversarial_huge_status_cut(
+        "a huge hostile status is cut before it is echoed",
+        ids(&["a"]),
+        vec![pb::SkipResult { review_id: "a".into(), status: "x".repeat(10_000) }],
+        Err("unrecognized status")
+    )]
+    fn check_skip_results_cases(
+        #[case] description: &str,
+        #[case] asked: Vec<String>,
+        #[case] reply: Vec<pb::SkipResult>,
+        #[case] expected: std::result::Result<Vec<(&str, SkipOutcome)>, &str>,
+    ) {
+        let got = check_skip_results(&asked, reply);
+        match expected {
+            Ok(want) => {
+                let want: Vec<(String, SkipOutcome)> =
+                    want.into_iter().map(|(i, o)| (i.to_string(), o)).collect();
+                assert_eq!(got.expect(description), want, "{description}");
+            }
+            Err(frag) => {
+                let msg = got.expect_err(description).to_string();
+                assert!(msg.contains(frag), "{description}: {msg}");
+                assert!(msg.len() < 200, "{description}: echo is cut: {}", msg.len());
+            }
+        }
     }
 }

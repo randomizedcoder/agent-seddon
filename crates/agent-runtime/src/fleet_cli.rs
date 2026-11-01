@@ -53,7 +53,7 @@ const SKIPPABLE: [&str; 3] = [
 ];
 
 /// How many chars of a user token an error may echo.
-const ECHO_CHARS: usize = 40;
+const ECHO_CHARS: usize = agent_core::MAX_ECHO_CHARS;
 
 fn echo(s: &str) -> String {
     clean(&s.chars().take(ECHO_CHARS).collect::<String>())
@@ -134,7 +134,7 @@ pub fn skip_filter(a: &SkipArgs) -> ReviewDraftFilter {
             draft_status::POSTED.to_string(),
             draft_status::SKIPPED.to_string(),
         ],
-        limit: agent_core::MAX_SKIP_BATCH,
+        limit: agent_core::MAX_DRAFT_ROWS,
     }
 }
 
@@ -371,7 +371,7 @@ mod tests {
             vec!["posted", "skipped"],
             "{description}: never lists finished drafts"
         );
-        assert_eq!(f.limit, agent_core::MAX_SKIP_BATCH, "{description}");
+        assert_eq!(f.limit, agent_core::MAX_DRAFT_ROWS, "{description}");
     }
 
     fn row(id: &str, status: &str) -> ReviewDraftRecord {
