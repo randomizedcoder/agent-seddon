@@ -319,6 +319,22 @@ impl Drop for ReviewTask {
 /// still completes well within it.
 const PREP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Ceiling on the grounding timeout, whatever the engine reports: an operator's
+/// `[review] deadline_secs` typo can't park the serial drain loop for days. Above the
+/// largest budget the engine's own clamps allow (an hour's build plus the lints).
+const MAX_GROUNDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
+
+/// The grounding step's timeout: [`PREP_TIMEOUT`] for its forge round-trips, plus the
+/// time the engine's collectors may legitimately take (`engine_budget`, the grounder's
+/// [`agent_core::ReviewGrounder::time_budget`]), capped at [`MAX_GROUNDING_TIMEOUT`].
+/// Without the stretch, a cold clippy build the analyzer allows ~12 minutes would trip
+/// the 5-minute prep timeout and lose every fact, not just clippy's.
+fn grounding_timeout(engine_budget: Option<std::time::Duration>) -> std::time::Duration {
+    PREP_TIMEOUT
+        .saturating_add(engine_budget.unwrap_or_default())
+        .min(MAX_GROUNDING_TIMEOUT)
+}
+
 /// Bound one forge-touching prep future by `budget`, mapping an elapsed timeout to a fleet
 /// error that names the step (so the drain loop logs *what* hung). `budget` is a parameter
 /// (production passes [`PREP_TIMEOUT`]) so the timeout path is testable with real time.
@@ -778,7 +794,7 @@ impl FleetOrchestrator {
         let (goal, facts) = match &grounder {
             Some(grounder) => match with_prep_timeout(
                 "review grounding",
-                PREP_TIMEOUT,
+                grounding_timeout(grounder.time_budget()),
                 // Ground against the checked-out worktree, not the bare mirror, so the
                 // file-reading collectors see real files (fleet-grounding track).
                 grounder.ground(&worktree.path, ReviewTarget::Pr(pr)),
@@ -3750,6 +3766,36 @@ mod tests {
             }
             other => panic!("a hung prep must time out to a Fleet error, got {other:?}"),
         }
+    }
+
+    // ---- grounding_timeout (the engine's collectors get their full deadline) ---------
+
+    #[rstest]
+    #[case::positive_analyzer_budget(
+        "the default analyzer's 705s rides on top of the prep timeout",
+        Some(705),
+        1_005
+    )]
+    #[case::negative_no_budget("a grounder without a budget keeps the prep timeout", None, 300)]
+    #[case::boundary_zero_budget("a zero budget is the prep timeout exactly", Some(0), 300)]
+    #[case::boundary_at_cap("a budget landing exactly on the cap is kept", Some(2 * 3600 - 300), 2 * 3600)]
+    #[case::boundary_over_cap("one second over the cap is clamped", Some(2 * 3600 - 299), 2 * 3600)]
+    #[case::corner_build_cap(
+        "the analyzer's largest budget (an hour's build) fits under the cap",
+        Some(3_705),
+        4_005
+    )]
+    #[case::adversarial_huge_budget("a u64::MAX budget saturates, then caps", Some(u64::MAX), 2 * 3600)]
+    fn grounding_timeout_cases(
+        #[case] description: &str,
+        #[case] budget_secs: Option<u64>,
+        #[case] want_secs: u64,
+    ) {
+        assert_eq!(
+            grounding_timeout(budget_secs.map(std::time::Duration::from_secs)),
+            std::time::Duration::from_secs(want_secs),
+            "{description}"
+        );
     }
 
     // ---- review_worktree_id (R2: per-(session,pr) worktree, no cross-delete) ----------

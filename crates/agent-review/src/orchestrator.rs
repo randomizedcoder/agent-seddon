@@ -181,6 +181,18 @@ impl ReviewOrchestrator {
         self
     }
 
+    /// The longest the collector fan-out may legitimately run: the collectors run
+    /// concurrently, each under its own deadline, so this is the largest of those (never
+    /// below the fan-out default). A caller that bounds a whole `collect` (the fleet's
+    /// grounding step) must allow at least this, or it cuts a collector this
+    /// orchestrator would have let finish.
+    pub fn collect_deadline(&self) -> Duration {
+        self.collectors
+            .iter()
+            .map(|c| c.deadline(self.deadline))
+            .fold(self.deadline, Duration::max)
+    }
+
     /// Enable the static-analysis collector (`[review] analyze = true`). It needs a
     /// [`Sandbox`] to shell out to the linters; without one it is a no-op. The
     /// `tool_provider` resolves each linter's program (review-analysis-depth Inc 1);
@@ -395,6 +407,10 @@ impl ReviewOrchestrator {
 impl ReviewCollector for ReviewOrchestrator {
     fn name(&self) -> &str {
         "orchestrator"
+    }
+
+    fn time_budget(&self) -> Option<Duration> {
+        Some(self.collect_deadline())
     }
 
     async fn collect(&self, target: &ReviewTarget) -> Result<ReviewFacts> {
@@ -990,6 +1006,46 @@ mod tests {
         assert_eq!(
             analyzer.deadline(Duration::ZERO),
             Duration::from_secs(want_deadline_secs),
+            "{description}"
+        );
+    }
+
+    /// `collect_deadline` is the slowest collector's deadline, never under the default.
+    #[rstest::rstest]
+    #[case::positive_analyzer_stretches(
+        "the analyzer's 705s outlasts a 60s default",
+        60,
+        true,
+        705
+    )]
+    #[case::positive_no_stretch("without the analyzer the default is the bound", 60, false, 60)]
+    #[case::corner_default_wins("a default above the analyzer's deadline is kept", 900, true, 900)]
+    #[case::boundary_zero_default(
+        "a zero default still allows the analyzer its time",
+        0,
+        true,
+        705
+    )]
+    #[case::adversarial_huge_default(
+        "a huge default is returned, not overflowed",
+        u64::MAX,
+        true,
+        u64::MAX
+    )]
+    fn collect_deadline_cases(
+        #[case] description: &str,
+        #[case] default_secs: u64,
+        #[case] analyzer: bool,
+        #[case] want_secs: u64,
+    ) {
+        let mut o = orchestrator(Arc::new(PrFakeRepo::new(true)))
+            .with_deadline(Duration::from_secs(default_secs));
+        if analyzer {
+            o = o.with_analyzer(None, 45, 600, 4, String::new(), None);
+        }
+        assert_eq!(
+            o.collect_deadline(),
+            Duration::from_secs(want_secs),
             "{description}"
         );
     }

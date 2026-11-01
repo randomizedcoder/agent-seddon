@@ -159,6 +159,79 @@ impl FactCollector for AnalyzerCollector {
             return CollectorOutput::skipped("no analyzable (.go/.rs) changes");
         }
 
+        let (mut runs, tasks) = self.plan(&ctx.repo_root, &changed, has_go, has_rust).await;
+        let parallelism = self.parallelism.max(1);
+
+        // Fan the resolved tools out concurrently under the parallelism budget: each
+        // returns its own `(run, findings)`, so the collector's wall-clock is the slowest
+        // single tool, not the serial sum. Every tool is fail-soft inside `run_tool`.
+        let repo_root = ctx.repo_root.clone();
+        let ran: Vec<(AnalyzerRun, Vec<AnalysisFinding>)> = futures_util::stream::iter(tasks)
+            .map(|t| {
+                let sandbox = sandbox.clone();
+                let repo_root = repo_root.clone();
+                let changed_set = &changed_set;
+                async move {
+                    run_tool(
+                        &sandbox,
+                        &repo_root,
+                        t.tool,
+                        &t.cmd,
+                        self.task_timeout(t.builds),
+                        changed_set,
+                        t.parser,
+                        t.parse_stderr,
+                        t.network,
+                    )
+                    .await
+                }
+            })
+            .buffer_unordered(parallelism)
+            .collect()
+            .await;
+
+        let mut findings = Vec::new();
+        for (r, mut f) in ran {
+            runs.push(r);
+            findings.append(&mut f);
+        }
+        // Order runs deterministically (fan-out completes out of order).
+        runs.sort_by(|a, b| a.tool.cmp(&b.tool));
+
+        // Union-dedupe identical findings surfaced by more than one tool.
+        dedupe_findings(&mut findings);
+        // Cap the total finding count (drop-with-count), changed-file findings first.
+        findings.sort_by_key(|f| !f.in_change);
+        if findings.len() > MAX_FINDINGS {
+            findings.truncate(MAX_FINDINGS);
+        }
+        let language = match (has_go, has_rust) {
+            (true, true) => "mixed",
+            (true, false) => "go",
+            _ => "rust",
+        };
+
+        CollectorOutput::ok(FactFragment::Analysis {
+            report: AnalysisReport {
+                language: language.into(),
+                runs,
+                findings,
+            },
+        })
+    }
+}
+
+impl AnalyzerCollector {
+    /// The tools to run for a change: the resolved invocations (`tasks`, fanned out by
+    /// `collect`) and the fail-soft records of those that couldn't be planned (`runs`:
+    /// an unresolved program, no owning crate).
+    async fn plan(
+        &self,
+        repo_root: &std::path::Path,
+        changed: &[PathBuf],
+        has_go: bool,
+        has_rust: bool,
+    ) -> (Vec<AnalyzerRun>, Vec<ToolTask>) {
         // `runs` accrues fail-soft records for tools we couldn't even plan (unresolved
         // program, no owning crate); `tasks` are the resolved invocations that fan out.
         let mut runs = Vec::new();
@@ -177,7 +250,7 @@ impl FactCollector for AnalyzerCollector {
             // Scope dirs derive from attacker-controlled diff paths: `go_scope` drops any
             // with an unsafe component, and each survivor is single-quoted before it reaches
             // `bash -c` (defense in depth) — a dir can never break out into shell interpretation.
-            let dirs = go_scope(&changed);
+            let dirs = go_scope(changed);
             let dir_args = dirs
                 .iter()
                 .map(|d| shell_quote(d))
@@ -247,7 +320,7 @@ impl FactCollector for AnalyzerCollector {
             }
         }
         if has_rust {
-            let crates = rust_scope(&ctx.repo_root, &changed);
+            let crates = rust_scope(repo_root, changed);
             if crates.is_empty() {
                 runs.push(skipped_run(
                     "clippy",
@@ -311,67 +384,9 @@ impl FactCollector for AnalyzerCollector {
             )
             .await;
         }
-
-        // Fan the resolved tools out concurrently under the parallelism budget: each
-        // returns its own `(run, findings)`, so the collector's wall-clock is the slowest
-        // single tool, not the serial sum. Every tool is fail-soft inside `run_tool`.
-        let repo_root = ctx.repo_root.clone();
-        let ran: Vec<(AnalyzerRun, Vec<AnalysisFinding>)> = futures_util::stream::iter(tasks)
-            .map(|t| {
-                let sandbox = sandbox.clone();
-                let repo_root = repo_root.clone();
-                let changed_set = &changed_set;
-                async move {
-                    run_tool(
-                        &sandbox,
-                        &repo_root,
-                        t.tool,
-                        &t.cmd,
-                        self.task_timeout(t.builds),
-                        changed_set,
-                        t.parser,
-                        t.parse_stderr,
-                        t.network,
-                    )
-                    .await
-                }
-            })
-            .buffer_unordered(parallelism)
-            .collect()
-            .await;
-
-        let mut findings = Vec::new();
-        for (r, mut f) in ran {
-            runs.push(r);
-            findings.append(&mut f);
-        }
-        // Order runs deterministically (fan-out completes out of order).
-        runs.sort_by(|a, b| a.tool.cmp(&b.tool));
-
-        // Union-dedupe identical findings surfaced by more than one tool.
-        dedupe_findings(&mut findings);
-        // Cap the total finding count (drop-with-count), changed-file findings first.
-        findings.sort_by_key(|f| !f.in_change);
-        if findings.len() > MAX_FINDINGS {
-            findings.truncate(MAX_FINDINGS);
-        }
-        let language = match (has_go, has_rust) {
-            (true, true) => "mixed",
-            (true, false) => "go",
-            _ => "rust",
-        };
-
-        CollectorOutput::ok(FactFragment::Analysis {
-            report: AnalysisReport {
-                language: language.into(),
-                runs,
-                findings,
-            },
-        })
+        (runs, tasks)
     }
-}
 
-impl AnalyzerCollector {
     /// The per-tool timeout: `build_timeout_secs` for a tool that compiles the code.
     fn task_timeout(&self, builds: bool) -> u64 {
         if builds {
@@ -1869,6 +1884,77 @@ mod tests {
             c.deadline(std::time::Duration::from_secs(default_secs)),
             std::time::Duration::from_secs(want_deadline),
             "{description}"
+        );
+    }
+
+    /// What `plan` schedules for a change. The `MAX_LINT_TOOLS` bound in `deadline` is
+    /// only right while no change plans more lint tools than it: the mixed row plans
+    /// every tool, so adding a seventh lint fails here until the constant moves with it.
+    /// Each row: the changed files, the crate name in the fixture's Cargo.toml, and the
+    /// (lint tasks, build tasks, skipped runs) expected.
+    #[rstest::rstest]
+    #[case::positive_mixed_plans_every_tool(
+        "a Go + Rust change plans all six lints and clippy",
+        &["cmd/x/x.go", "fx/src/lib.rs"],
+        "fx",
+        (6, 1, 0)
+    )]
+    #[case::positive_go_only("a Go change plans the four Go tools", &["cmd/x/x.go"], "fx", (4, 0, 0))]
+    #[case::positive_rust_only(
+        "a Rust change plans the supply-chain pair and clippy",
+        &["fx/src/lib.rs"],
+        "fx",
+        (2, 1, 0)
+    )]
+    #[case::negative_rust_without_crate(
+        "a .rs file no crate owns skips clippy",
+        &["loose/x.rs"],
+        "fx",
+        (2, 0, 1)
+    )]
+    #[case::corner_go_file_outside_package(
+        "a top-level .go file still plans gofmt",
+        &["main.go"],
+        "fx",
+        (4, 0, 0)
+    )]
+    #[case::adversarial_injected_crate_name(
+        "a crate name carrying a shell substitution is dropped, so clippy is skipped",
+        &["fx/src/lib.rs"],
+        "x$(id)",
+        (2, 0, 1)
+    )]
+    #[tokio::test]
+    async fn plan_cases(
+        #[case] description: &str,
+        #[case] changed: &[&str],
+        #[case] crate_name: &str,
+        #[case] (want_lints, want_builds, want_skipped): (usize, usize, usize),
+    ) {
+        let tmp = agent_testkit::tempdir();
+        std::fs::create_dir_all(tmp.as_path().join("fx/src")).unwrap();
+        std::fs::write(
+            tmp.as_path().join("fx/Cargo.toml"),
+            format!("[package]\nname = \"{crate_name}\"\n"),
+        )
+        .unwrap();
+        let changed: Vec<PathBuf> = changed.iter().map(PathBuf::from).collect();
+        let has_go = changed.iter().any(|p| ext(p) == "go");
+        let has_rust = changed.iter().any(|p| ext(p) == "rs");
+        let (runs, tasks) = collector("")
+            .plan(tmp.as_path(), &changed, has_go, has_rust)
+            .await;
+        let lints = tasks.iter().filter(|t| !t.builds).count();
+        let builds = tasks.iter().filter(|t| t.builds).count();
+        assert_eq!(
+            (lints, builds, runs.len()),
+            (want_lints, want_builds, want_skipped),
+            "{description}"
+        );
+        assert!(
+            lints as u64 <= MAX_LINT_TOOLS,
+            "{description}: {lints} lint tools planned, but the deadline assumes at most \
+             {MAX_LINT_TOOLS}; raise MAX_LINT_TOOLS with the new tool"
         );
     }
 }
