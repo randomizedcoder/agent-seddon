@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../gen/agent/v1/theme.pb.dart' as pb;
 import 'theme_controller.dart';
+import 'theme_editor.dart';
 import 'theme_validate.dart';
 
 /// A palette button that opens the theme list as a menu.
@@ -82,6 +83,8 @@ class AppearanceSection extends StatelessWidget {
           selected: {themes.mode},
           onSelectionChanged: (s) => themes.setMode(s.first),
         ),
+        const SizedBox(height: 12),
+        const ThemeEditorButton(),
       ],
     );
   }

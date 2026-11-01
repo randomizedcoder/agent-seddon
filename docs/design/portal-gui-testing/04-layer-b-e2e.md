@@ -89,10 +89,21 @@ own `--serve-fleet` — track a pidfile like `portal-redeploy` does). Opt-in; no
 
 - **Curated mutating subset shipped:** Router **Put** + **Enable**
   (`ProviderRegistryService`, fully self-contained — a unique per-run upstream id,
-  cleaned up afterwards) and Prompts **SetActivePersonality**. Each action whose
+  cleaned up afterwards), Prompts **SetActivePersonality**, and the Settings theme
+  editor (visual themes 4): **Export** of a copy of the active theme (a read, proven
+  by the metrics delta alone), then **Save and use**, which is `ThemeService.Put`
+  (read back with `Get`) and `SetActive` (read back with `GetActive`). The theme
+  carries a unique per-run id; the harness deletes it and restores the user's
+  previous active theme and mode. Each action whose
   page/backend/preconditions are absent is recorded `skip`, never `fail` (the
   backend-preflight philosophy). More mutating actions (Graph `Put`, Settings
-  `Put`, Fleet `UpdateReview`/`Approve`) slot into the same table.
+  `Put`, Fleet `UpdateReview`/`Approve`/`SkipReview`) slot into the same table.
+  Fleet actions stay out for now: the harness reuses a `--serve-fleet` that is already
+  running, and skipping or approving one of its drafts is a real write to someone's
+  review queue.
+- **Where it runs:** the harness reuses any seam already on its fixed ports, so it is
+  for a dev host or a VM, never a host serving a live stack (l2): there it would drive
+  the live gateway and recreate the live grpc-web bridge.
 - **The Dart suite is the driver only; the shell owns the assertions.** The Layer-A
   robots are coupled to the in-process fake gateway (its recording log), so Layer B
   reuses the **widget keys** (not the robots): it navigates by nav-rail label text,

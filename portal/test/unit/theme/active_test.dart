@@ -40,6 +40,18 @@ class MemoryServer implements ThemeServer {
 
   @override
   Future<List<pb.Theme>> list() async => listed;
+
+  @override
+  Future<pb.Theme> put(pb.Theme theme) async => theme;
+
+  @override
+  Future<void> delete(String id) async {}
+
+  @override
+  Future<(pb.Theme, String)> importText(String text) async => (pb.Theme(), '');
+
+  @override
+  Future<String> exportText(pb.Theme theme) async => '';
 }
 
 pb.ActiveTheme answer(pb.Theme t,
