@@ -29,6 +29,9 @@ extension points intact:
   clippy compiles the changed crates and their dependencies, so it runs under
   `analyze_build_timeout_secs` (default 600) instead, and the analyzer's fan-out
   deadline stretches to fit it (a cold run of four of our crates took ~52 s on l2).
+  The stretch covers any start order under `analyze_parallelism`: the longest tool
+  plus the six lint tools spread over the slots, `max(build, lint) + ⌈6/p⌉·lint`,
+  plus 15 s slack (705 s at the defaults, 885 s with `analyze_parallelism = 1`).
   A cold/slow/missing/erroring linter → a recorded `skipped`/`timeout`/`failed`
   `AnalyzerRun`, never a blocked bundle.
 - **Tool provisioning (operational):** with the default `[review] tool_provider =

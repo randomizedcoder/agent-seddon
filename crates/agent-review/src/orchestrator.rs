@@ -943,4 +943,54 @@ mod tests {
             ran.reason
         );
     }
+
+    /// `with_analyzer` clamps its knobs before the analyzer sees them; the resulting
+    /// deadline (from a zero fan-out default) shows what survived the clamp.
+    #[rstest::rstest]
+    #[case::positive_defaults(
+        "the shipped defaults: 45s lint, 600s build, 4 slots",
+        45,
+        600,
+        4,
+        705
+    )]
+    #[case::boundary_zeros_raise_to_one("zero timeouts and parallelism become 1", 0, 0, 0, 22)]
+    #[case::boundary_build_at_cap(
+        "a build timeout of exactly the cap is kept",
+        45,
+        3_600,
+        4,
+        3_705
+    )]
+    #[case::boundary_build_over_cap("one second over the cap is clamped", 45, 3_601, 4, 3_705)]
+    #[case::adversarial_huge_build_timeout(
+        "u64::MAX build timeout is capped at an hour",
+        45,
+        u64::MAX,
+        4,
+        3_705
+    )]
+    fn with_analyzer_clamp_cases(
+        #[case] description: &str,
+        #[case] timeout_secs: u64,
+        #[case] build_timeout_secs: u64,
+        #[case] parallelism: usize,
+        #[case] want_deadline_secs: u64,
+    ) {
+        let o = orchestrator(Arc::new(PrFakeRepo::new(true))).with_analyzer(
+            None,
+            timeout_secs,
+            build_timeout_secs,
+            parallelism,
+            String::new(),
+            None,
+        );
+        let analyzer = o.collectors.last().expect("analyzer pushed");
+        assert_eq!(analyzer.name(), "analyzer", "{description}");
+        assert_eq!(
+            analyzer.deadline(Duration::ZERO),
+            Duration::from_secs(want_deadline_secs),
+            "{description}"
+        );
+    }
 }

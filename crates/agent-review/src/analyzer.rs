@@ -75,6 +75,10 @@ fn embedded_golangci_config() -> Option<PathBuf> {
 /// Slack on the analyzer's fan-out deadline beyond its tools' own timeouts.
 const ANALYZER_DEADLINE_SLACK_SECS: u64 = 15;
 
+/// The most non-building tools one run can plan: golangci-lint, gosec, go vet,
+/// gofmt, cargo-audit and cargo-deny. Clippy is the one tool that builds.
+const MAX_LINT_TOOLS: u64 = 6;
+
 pub(crate) struct AnalyzerCollector {
     pub timeout_secs: u64,
     /// Per-tool timeout for the tools that compile the code (clippy): a cold worktree
@@ -112,13 +116,19 @@ impl FactCollector for AnalyzerCollector {
         "analyzer"
     }
 
-    /// Room for a build tool queued behind one other tool, plus slack, so the
-    /// fan-out deadline never cuts off a clippy run its own timeout allows (and with
-    /// it every other tool's findings).
+    /// Room for every planned tool to finish under `parallelism`, so the fan-out
+    /// deadline never cuts off a clippy run its own timeout allows (and with it every
+    /// other tool's findings). Graham's bound for any start order: the longest tool,
+    /// plus the lint tools spread over the slots, plus slack.
     fn deadline(&self, default: std::time::Duration) -> std::time::Duration {
+        let slots = (self.parallelism.max(1) as u64).min(MAX_LINT_TOOLS);
         let need = self
             .build_timeout_secs
-            .saturating_add(self.timeout_secs)
+            .max(self.timeout_secs)
+            .saturating_add(
+                self.timeout_secs
+                    .saturating_mul(MAX_LINT_TOOLS.div_ceil(slots)),
+            )
             .saturating_add(ANALYZER_DEADLINE_SLACK_SECS);
         default.max(std::time::Duration::from_secs(need))
     }
@@ -1735,67 +1745,122 @@ mod tests {
         );
     }
     /// The per-tool timeout and the analyzer's fan-out deadline. Each row: the tool's
-    /// kind, the collector's two timeouts, the fan-out default, and what each gives.
+    /// kind, the collector's two timeouts, its parallelism, the fan-out default, and
+    /// what each gives as (timeout, deadline). Deadline = max(default, max(build, lint) + ⌈6/p⌉·lint + 15).
     #[rstest::rstest]
     #[case::positive_build_tool_gets_build_timeout(
-        "clippy runs under the build timeout",
+        "clippy runs under the build timeout; default parallelism 4",
         true,
         45,
         600,
+        4,
         60,
-        600,
-        660
+        (600, 705)
     )]
     #[case::positive_lint_tool_keeps_short_timeout(
         "a linter keeps the short timeout",
         false,
         45,
         600,
+        4,
         60,
+        (45, 705)
+    )]
+    #[case::negative_parallelism_two_waits_for_three_waves(
+        "parallelism 2: clippy may start after two Go tools run their full 45s (t=90, ends 690)",
+        true,
         45,
-        660
+        600,
+        2,
+        60,
+        (600, 750)
+    )]
+    #[case::negative_parallelism_one_is_serial(
+        "parallelism 1: every tool runs in turn (clippy may end at 870)",
+        true,
+        45,
+        600,
+        1,
+        60,
+        (600, 885)
+    )]
+    #[case::corner_parallelism_zero_means_one(
+        "parallelism 0 is treated as 1",
+        true,
+        45,
+        600,
+        0,
+        60,
+        (600, 885)
+    )]
+    #[case::corner_build_shorter_than_lint(
+        "a build timeout under the lint timeout uses the lint timeout as the longest tool",
+        true,
+        45,
+        10,
+        6,
+        60,
+        (10, 105)
     )]
     #[case::corner_default_already_longer(
         "a longer fan-out default is kept",
         true,
         45,
         600,
+        4,
         3_000,
-        600,
-        3_000
+        (600, 3_000)
     )]
     #[case::boundary_one_second_timeouts(
-        "the smallest timeouts still leave the slack",
+        "the smallest timeouts, serial, still leave the slack",
         true,
         1,
         1,
-        0,
         1,
-        17
+        0,
+        (1, 22)
+    )]
+    #[case::boundary_more_slots_than_tools(
+        "slots beyond the tool count don't shrink the bound below one wave",
+        true,
+        45,
+        600,
+        64,
+        60,
+        (600, 660)
     )]
     #[case::adversarial_huge_timeouts_saturate(
         "huge timeouts saturate, never overflow",
         true,
         u64::MAX,
         u64::MAX,
+        1,
         60,
-        u64::MAX,
-        u64::MAX
+        (u64::MAX, u64::MAX)
+    )]
+    #[case::adversarial_huge_parallelism(
+        "usize::MAX parallelism neither overflows nor divides by zero",
+        true,
+        45,
+        600,
+        usize::MAX,
+        60,
+        (600, 660)
     )]
     fn timeout_and_deadline_cases(
         #[case] description: &str,
         #[case] builds: bool,
         #[case] timeout_secs: u64,
         #[case] build_timeout_secs: u64,
+        #[case] parallelism: usize,
         #[case] default_secs: u64,
-        #[case] want_timeout: u64,
-        #[case] want_deadline: u64,
+        #[case] (want_timeout, want_deadline): (u64, u64),
     ) {
         use crate::collector::FactCollector;
         let c = AnalyzerCollector {
             timeout_secs,
             build_timeout_secs,
-            parallelism: 1,
+            parallelism,
             golangci_config: String::new(),
             tool_provider: None,
         };
