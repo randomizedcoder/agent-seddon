@@ -241,6 +241,12 @@ void main() {
         if (!await waitFor('theme_editor.id')) {
           throw StateError('the editor did not open');
         }
+        // Delete appearing is the save proof below, so the run must start on an
+        // unsaved copy (a stored theme opens in place, with Delete and a fixed id).
+        if (has('theme_editor.delete')) {
+          throw StateError('the editor opened on a stored theme, not a copy; '
+              'is a previous run\'s theme still active?');
+        }
         await tester.enterText(
             find.descendant(
                 of: find.byKey(const Key('theme_editor.id')),

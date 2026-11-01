@@ -133,6 +133,12 @@ const themeEditorSpec = PageSpec('theme_editor', [
     description: 'on an active user theme the button says "Edit", the id is fixed, and Delete is offered',
   ),
   SpecRow(
+    elementId: 'theme_editor.open',
+    caseClass: CaseClass.corner,
+    name: 'shared_theme_edits_a_copy',
+    description: 'on someone else\'s shared theme the button says "Edit a copy", opens a private `<id>-copy`, and offers no Delete',
+  ),
+  SpecRow(
     elementId: 'theme_editor.save',
     caseClass: CaseClass.corner,
     name: 'stale_version_is_explained',
@@ -150,6 +156,12 @@ const themeEditorSpec = PageSpec('theme_editor', [
     caseClass: CaseClass.boundary,
     name: 'over_cap_text_not_sent',
     description: 'pasted text over 64 KiB is refused in the portal and never sent to Import',
+  ),
+  SpecRow(
+    elementId: 'theme_editor.import',
+    caseClass: CaseClass.boundary,
+    name: 'over_cap_bytes_not_sent',
+    description: 'the cap counts UTF-8 bytes: multibyte text under 64 Ki characters but over 64 KiB is refused',
   ),
   SpecRow(
     elementId: 'theme_editor.import',

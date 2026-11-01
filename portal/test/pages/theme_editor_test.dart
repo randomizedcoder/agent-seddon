@@ -245,6 +245,21 @@ void main() {
               reason: 'a stored theme keeps its id');
           expect(find.text('Theme editor — Ocean'), findsOneWidget);
 
+        case 'corner_shared_theme_edits_a_copy':
+          final reef = userTheme('reef', name: 'Reef', visibility: pb.Visibility.VISIBILITY_TENANT)
+            ..clearOwner();
+          await robot.load();
+          await robot.signIn(arrange: (s) {
+            s.listResponse = pb.ListThemesResponse(themes: [reef]);
+            s.active = pb.ActiveTheme(theme: reef, source: pb.ActiveSource.ACTIVE_SOURCE_USER);
+          });
+          await tester.pumpAndSettle();
+          expect(find.text('Edit a copy'), findsOneWidget);
+          await robot.open();
+          expect(robot.tester.widget<EditableText>(robot.field('theme_editor.id')).controller.text,
+              'reef-copy');
+          expect(robot.exists('theme_editor.delete'), isFalse, reason: 'not theirs to delete');
+
         case 'corner_stale_version_is_explained':
           await openCopyOf('windows', arrange: (s) {
             s.failing['Put'] = const GrpcError.aborted('version 3 is stale');
@@ -265,6 +280,15 @@ void main() {
           await robot.press('theme_editor.import');
           await tester.pumpAndSettle();
           await robot.type('theme_editor.import.text', 'x' * (maxThemeBytes + 1));
+          await robot.press('theme_editor.import.ok', until: () => robot.snack('over 64 KiB'));
+          expect(fired('Import'), isFalse);
+
+        case 'boundary_over_cap_bytes_not_sent':
+          await openCopyOf('windows');
+          await robot.press('theme_editor.import');
+          await tester.pumpAndSettle();
+          // 3 bytes per character: well under the cap in characters, over it in bytes.
+          await robot.type('theme_editor.import.text', '€' * (maxThemeBytes ~/ 3 + 1));
           await robot.press('theme_editor.import.ok', until: () => robot.snack('over 64 KiB'));
           expect(fired('Import'), isFalse);
 

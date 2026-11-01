@@ -4,6 +4,8 @@
 // shared with the tenant. The server parses and prints textproto
 // (`ThemeService` `Import`/`Export`) and decides who may share; this page only
 // edits a draft and shows what the validator will say about it.
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:grpc/grpc.dart' show GrpcError, StatusCode;
@@ -93,11 +95,16 @@ pb.Theme cloneForEdit(pb.Theme source, Iterable<String> taken) {
   return t;
 }
 
-/// The draft to open the editor on: the active theme itself when it is a user
-/// theme (edited in place, keeping its `version`), else a copy of it.
-pb.Theme draftFor(ThemeController themes) => themes.active.builtin
-    ? cloneForEdit(themes.active, themes.themes.map((t) => t.id))
-    : themes.active.deepCopy();
+/// Whether [t] is the caller's own theme. The server sends `owner` only to its
+/// owner (`local` with auth off), so a built-in or someone else's shared theme
+/// arrives without one.
+bool ownsTheme(pb.Theme t) => !t.builtin && t.owner.isNotEmpty;
+
+/// The draft to open the editor on: the active theme itself when it is the
+/// caller's own (edited in place, keeping its `version`), else a copy of it.
+pb.Theme draftFor(ThemeController themes) => ownsTheme(themes.active)
+    ? themes.active.deepCopy()
+    : cloneForEdit(themes.active, themes.themes.map((t) => t.id));
 
 /// The first rule [t] breaks, or null when `Put` would take it.
 String? draftProblem(pb.Theme t) {
@@ -129,7 +136,7 @@ class ThemeEditorButton extends StatelessWidget {
     return OutlinedButton.icon(
       key: const Key('theme_editor.open'),
       icon: const Icon(Icons.edit_outlined),
-      label: Text(themes.active.builtin ? 'Edit a copy' : 'Edit'),
+      label: Text(ownsTheme(themes.active) ? 'Edit' : 'Edit a copy'),
       onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => ThemeScope(
           controller: themes,
@@ -255,7 +262,7 @@ class _ThemeEditorPageState extends State<ThemeEditorPage> {
     );
     if (text == null || text.trim().isEmpty || !mounted) return;
     // The server refuses it too; this saves sending 64 KiB to be told so.
-    if (text.length > maxThemeBytes) {
+    if (utf8.encode(text).length > maxThemeBytes) {
       _say('Not imported: the text is over ${maxThemeBytes ~/ 1024} KiB');
       return;
     }

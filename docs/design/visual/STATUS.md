@@ -224,7 +224,7 @@ Playwright review).
   with a swatch, not a picker, and the preview is a sample panel rather than the
   Launch and Fleet pages. Import is paste only (no file upload) and textproto only.
 - Tests: `test/unit/theme/editor_test.dart` (freeId, cloneForEdit, colour fields,
-  contrast badges) and the `theme_editor` page spec (27 rows, all five classes).
+  contrast badges) and the `theme_editor` page spec (29 rows, all five classes).
   Layer B (`nix run .#portal-e2e`) drives the editor over the real wire: Export, then
   Save and use, proven by metrics deltas and read back with `Get` and `GetActive`
   ([portal-gui-testing/04](../portal-gui-testing/04-layer-b-e2e.md)).
@@ -232,6 +232,12 @@ Playwright review).
   that isn't bundled (e.g. a URL) showing as a blank dropdown; the field now says "Not
   a bundled font". Nothing is fetched from it, and the validator still blocks Save.
   Left as is: at phone width the editor title truncates beside its four actions.
+- From the fleet's draft review: "someone else's theme is copied" was documented but the
+  editor copied only built-ins, so a shared theme opened in place (Save denied for a
+  member, an in-place edit for a publisher). It now keys on ownership (`ownsTheme`: the
+  server sends `owner` only to its owner, `local` with auth off). The import cap counts
+  UTF-8 bytes, not characters. Layer B refuses to start on a stored theme, since Delete
+  appearing is its proof of a save.
 
 ## Open questions
 
