@@ -76,12 +76,13 @@ nix develop -c cargo test -p agent-metrics --features dhat-heap --test leak   # 
 ```
 
 - **Perf** — `benches/*.rs` use **iai-callgrind** (deterministic instruction
-  counts under `valgrind`). Each bench has an **absolute Ir ceiling** enforced in
-  `nix/checks/bench.nix` via `--callgrind-limits='ir=…'`; bump a ceiling there (the
-  diff records it) when a legitimate change moves a bench.
+  counts under `valgrind`). Each bench carries an **absolute Ir ceiling** in the
+  bench file (`hard_limits([(EventKind::Ir, …)])`); bump it there (the diff records
+  it) when a legitimate change moves a bench. `nix/checks/bench.nix` lists the
+  benches, one `bench-<crate>` check per crate.
 - **Leak** — `tests/leak.rs` use **dhat** behind a per-crate `dhat-heap` feature:
   assert a hot path frees everything it allocates and stays under an allocation
-  budget. `nix/checks/leak.nix` runs them.
+  budget. `nix/checks/leak.nix` runs them, one `leak-<crate>` check per crate.
 - **Versions** — `valgrind` and the matching `iai-callgrind-runner` are pinned in
   `nix/versions.nix`; the runner version **must equal** the `iai-callgrind` dev-dep
   in `Cargo.toml` (bump together).

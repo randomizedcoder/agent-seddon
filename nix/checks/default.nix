@@ -4,8 +4,8 @@
 #
 # All of these run by default. crane reuses the shared `cargoArtifacts`
 # dependency build, so the checks only recompile first-party crates; the
-# `test-<crate>` and `clippy-<crate>` slices start from the foundation builds
-# in workspace-slice.nix.
+# per-crate `test-`, `clippy-`, `leak-` and `bench-` slices start from the
+# foundation builds in workspace-slice.nix.
 #
 {
   pkgs,
@@ -71,9 +71,24 @@ let
       value = craneCheck ./clippy.nix { inherit workspaceSlice crate; };
     }) workspaceSlice.crateNames
   );
+
+  # One `leak-<crate>` / `bench-<crate>` check per crate with leak tests / benches
+  # (nix/checks/{leak,bench}.nix), each on that crate's slice.
+  leakChecks = craneCheck ./leak.nix { inherit lib workspaceSlice; };
+  benchChecks = craneCheck ./bench.nix { inherit lib workspaceSlice versions; };
+  aggregate =
+    name: checks:
+    pkgs.linkFarm name (
+      lib.mapAttrsToList (n: path: {
+        name = lib.removePrefix "${name}-" n;
+        inherit path;
+      }) checks
+    );
 in
 testChecks
 // clippyChecks
+// leakChecks
+// benchChecks
 // {
   # Every crate linted on its own slice, and `clippy` as the aggregate.
   clippy = pkgs.linkFarm "clippy" (
@@ -228,8 +243,8 @@ testChecks
   tokenizer-provider = craneCheck ./tokenizer-provider.nix { inherit workspaceSlice; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
-  bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };
-  leak = craneCheck ./leak.nix { inherit cargoArtifacts; };
+  bench = aggregate "bench" benchChecks;
+  leak = aggregate "leak" leakChecks;
   # Lean-feature build gate: `cargo check` over a small matrix of
   # `--no-default-features` / single-feature builds of agent-runtime + agent-cli, so
   # a `#[cfg(feature = …)]` that is too narrow on a definition (or missing on a
