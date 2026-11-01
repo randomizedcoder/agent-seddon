@@ -15,7 +15,8 @@
 # (RustSec advisories) and `cargo-deny` (banned/duplicate deps + sources) are the
 # Rust supply-chain half of the analyzer's suite (review-analysis-depth Inc 5a),
 # run offline against the pinned advisory-db (see nix/default.nix, AGENT_ADVISORY_DB).
-# `cargo` (cargo-deny's `cargo metadata`), `gcc` (cgo for `go test -race`) and
+# `cargo` (cargo-deny's `cargo metadata`), `gcc` (cgo for `go test -race`),
+# `clippy` + `rustc` + `protoc` (`cargo clippy` on the changed crates) and
 # `shellcheck` are here because each collector silently degrades without them;
 # nix/checks/agent-runtime-path.nix lists every program the agent runs.
 {
@@ -31,6 +32,9 @@ pkgs.symlinkJoin {
     versions.cargo-audit
     versions.cargo-deny
     versions.cargo # cargo-deny runs `cargo metadata`
+    versions.clippy # `cargo clippy` (cargo-clippy, clippy-driver)
+    versions.rustc # clippy compiles the changed crates and their deps
+    versions.protobuf # `protoc`, for prost/tonic build scripts
     versions.gcc # `go test -race` needs cgo
     versions.shellcheck # the shellcheck collector
   ];

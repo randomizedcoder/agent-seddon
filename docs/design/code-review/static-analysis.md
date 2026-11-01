@@ -26,6 +26,9 @@ extension points intact:
   deferred.
 - **Default-on, fail-soft:** `[review] analyze = true` (binaries are `/nix/store`-
   cached) + `analyze_timeout_secs` (default 45) + skip-if-tool-missing (exit 127).
+  clippy compiles the changed crates and their dependencies, so it runs under
+  `analyze_build_timeout_secs` (default 600) instead, and the analyzer's fan-out
+  deadline stretches to fit it (a cold run of four of our crates took ~52 s on l2).
   A cold/slow/missing/erroring linter → a recorded `skipped`/`timeout`/`failed`
   `AnalyzerRun`, never a blocked bundle.
 - **Tool provisioning (operational):** with the default `[review] tool_provider =

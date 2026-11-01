@@ -72,8 +72,14 @@ fn embedded_golangci_config() -> Option<PathBuf> {
     .clone()
 }
 
+/// Slack on the analyzer's fan-out deadline beyond its tools' own timeouts.
+const ANALYZER_DEADLINE_SLACK_SECS: u64 = 15;
+
 pub(crate) struct AnalyzerCollector {
     pub timeout_secs: u64,
+    /// Per-tool timeout for the tools that compile the code (clippy): a cold worktree
+    /// builds every dependency first, far past `timeout_secs`.
+    pub build_timeout_secs: u64,
     /// How many tools run concurrently (review-analysis-depth Inc 2). Clamped ≥ 1.
     pub parallelism: usize,
     /// golangci-lint config path (review-analysis-depth Inc 2-golangci). Empty ⇒ the
@@ -96,12 +102,25 @@ struct ToolTask {
     /// cold worktree); the Rust supply-chain tools (Inc 5a) run `Off` as defense-in-depth
     /// (they are already offline via `--db`/`-n`/`--offline`).
     network: NetworkPolicy,
+    /// Whether the tool compiles the code, and so runs under `build_timeout_secs`.
+    builds: bool,
 }
 
 #[async_trait::async_trait]
 impl FactCollector for AnalyzerCollector {
     fn name(&self) -> &'static str {
         "analyzer"
+    }
+
+    /// Room for a build tool queued behind one other tool, plus slack, so the
+    /// fan-out deadline never cuts off a clippy run its own timeout allows (and with
+    /// it every other tool's findings).
+    fn deadline(&self, default: std::time::Duration) -> std::time::Duration {
+        let need = self
+            .build_timeout_secs
+            .saturating_add(self.timeout_secs)
+            .saturating_add(ANALYZER_DEADLINE_SLACK_SECS);
+        default.max(std::time::Duration::from_secs(need))
     }
 
     async fn collect(&self, ctx: &CollectCtx) -> CollectorOutput {
@@ -241,6 +260,7 @@ impl FactCollector for AnalyzerCollector {
                             parse_stderr: false,
                             // clippy may resolve/build deps on a cold worktree — keep net On.
                             network: NetworkPolicy::On,
+                            builds: true,
                         });
                     }
                     None => runs.push(skipped_run(
@@ -286,7 +306,6 @@ impl FactCollector for AnalyzerCollector {
         // returns its own `(run, findings)`, so the collector's wall-clock is the slowest
         // single tool, not the serial sum. Every tool is fail-soft inside `run_tool`.
         let repo_root = ctx.repo_root.clone();
-        let timeout_secs = self.timeout_secs;
         let ran: Vec<(AnalyzerRun, Vec<AnalysisFinding>)> = futures_util::stream::iter(tasks)
             .map(|t| {
                 let sandbox = sandbox.clone();
@@ -298,7 +317,7 @@ impl FactCollector for AnalyzerCollector {
                         &repo_root,
                         t.tool,
                         &t.cmd,
-                        timeout_secs,
+                        self.task_timeout(t.builds),
                         changed_set,
                         t.parser,
                         t.parse_stderr,
@@ -343,6 +362,15 @@ impl FactCollector for AnalyzerCollector {
 }
 
 impl AnalyzerCollector {
+    /// The per-tool timeout: `build_timeout_secs` for a tool that compiles the code.
+    fn task_timeout(&self, builds: bool) -> u64 {
+        if builds {
+            self.build_timeout_secs
+        } else {
+            self.timeout_secs
+        }
+    }
+
     /// The `--config <path> ` fragment (trailing space) for golangci-lint, or `""`.
     /// A configured path wins; otherwise the embedded comprehensive config is
     /// materialized to a temp file. If neither is available, returns `""` so
@@ -380,6 +408,7 @@ impl AnalyzerCollector {
                 parser,
                 parse_stderr,
                 network: NetworkPolicy::On,
+                builds: false,
             }),
             None => runs.push(skipped_run(
                 tool,
@@ -410,6 +439,7 @@ impl AnalyzerCollector {
                 parser,
                 parse_stderr,
                 network: NetworkPolicy::Off,
+                builds: false,
             }),
             None => runs.push(skipped_run(
                 tool,
@@ -1166,6 +1196,7 @@ mod tests {
     fn collector(golangci_config: &str) -> AnalyzerCollector {
         AnalyzerCollector {
             timeout_secs: 30,
+            build_timeout_secs: 600,
             parallelism: 4,
             golangci_config: golangci_config.to_string(),
             tool_provider: None,
@@ -1588,6 +1619,7 @@ mod tests {
         }
         let with_prefix = AnalyzerCollector {
             timeout_secs: 1,
+            build_timeout_secs: 1,
             parallelism: 1,
             golangci_config: String::new(),
             tool_provider: Some(std::sync::Arc::new(Fake)),
@@ -1700,6 +1732,78 @@ mod tests {
             r.reason.chars().count() <= 213,
             "reason bounded: {} chars",
             r.reason.chars().count()
+        );
+    }
+    /// The per-tool timeout and the analyzer's fan-out deadline. Each row: the tool's
+    /// kind, the collector's two timeouts, the fan-out default, and what each gives.
+    #[rstest::rstest]
+    #[case::positive_build_tool_gets_build_timeout(
+        "clippy runs under the build timeout",
+        true,
+        45,
+        600,
+        60,
+        600,
+        660
+    )]
+    #[case::positive_lint_tool_keeps_short_timeout(
+        "a linter keeps the short timeout",
+        false,
+        45,
+        600,
+        60,
+        45,
+        660
+    )]
+    #[case::corner_default_already_longer(
+        "a longer fan-out default is kept",
+        true,
+        45,
+        600,
+        3_000,
+        600,
+        3_000
+    )]
+    #[case::boundary_one_second_timeouts(
+        "the smallest timeouts still leave the slack",
+        true,
+        1,
+        1,
+        0,
+        1,
+        17
+    )]
+    #[case::adversarial_huge_timeouts_saturate(
+        "huge timeouts saturate, never overflow",
+        true,
+        u64::MAX,
+        u64::MAX,
+        60,
+        u64::MAX,
+        u64::MAX
+    )]
+    fn timeout_and_deadline_cases(
+        #[case] description: &str,
+        #[case] builds: bool,
+        #[case] timeout_secs: u64,
+        #[case] build_timeout_secs: u64,
+        #[case] default_secs: u64,
+        #[case] want_timeout: u64,
+        #[case] want_deadline: u64,
+    ) {
+        use crate::collector::FactCollector;
+        let c = AnalyzerCollector {
+            timeout_secs,
+            build_timeout_secs,
+            parallelism: 1,
+            golangci_config: String::new(),
+            tool_provider: None,
+        };
+        assert_eq!(c.task_timeout(builds), want_timeout, "{description}");
+        assert_eq!(
+            c.deadline(std::time::Duration::from_secs(default_secs)),
+            std::time::Duration::from_secs(want_deadline),
+            "{description}"
         );
     }
 }

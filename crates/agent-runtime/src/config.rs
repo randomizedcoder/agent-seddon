@@ -1972,6 +1972,10 @@ pub struct ReviewCfg {
     /// Per-tool timeout for the analyzer (seconds). Bounds a cold/slow linter run.
     #[serde(default = "default_analyze_timeout")]
     pub analyze_timeout_secs: u64,
+    /// Per-tool timeout (seconds) for the analyzer tools that compile the code
+    /// (clippy), which build every dependency on a cold worktree. Capped at an hour.
+    #[serde(default = "default_analyze_build_timeout")]
+    pub analyze_build_timeout_secs: u64,
     /// How many analyzer tools run concurrently (review-analysis-depth Inc 2). The
     /// Go suite (golangci-lint + gosec + go vet + gofmt) fans out under this budget;
     /// each Go tool's `GOMAXPROCS` is capped to `cpus / parallelism` so N tools don't
@@ -2071,6 +2075,7 @@ impl Default for ReviewCfg {
             context_budget_bytes: default_review_budget(),
             analyze: true,
             analyze_timeout_secs: default_analyze_timeout(),
+            analyze_build_timeout_secs: default_analyze_build_timeout(),
             analyze_parallelism: default_analyze_parallelism(),
             analyzer_config: String::new(),
             signatures: true,
@@ -2116,6 +2121,9 @@ fn default_review_budget() -> usize {
 }
 fn default_analyze_timeout() -> u64 {
     45
+}
+fn default_analyze_build_timeout() -> u64 {
+    600
 }
 fn default_analyze_parallelism() -> usize {
     4

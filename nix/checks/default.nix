@@ -225,8 +225,11 @@ in
   # Static-analysis coverage for the review flow: a self-contained, stdlib-only Go
   # module with a deliberate lint hit + the pinned `go`/`golangci-lint` on the agent's PATH;
   # assert `agent --review` surfaces the finding. Offline (no module download), so
-  # it runs in the hermetic sandbox. clippy is covered live (dev shell + eval).
+  # it runs in the hermetic sandbox. clippy is covered by review-clippy below.
   review-analyze = agentCheck ./review-analyze.nix { };
+  # clippy coverage: a dependency-free crate with a deliberate `needless_return`;
+  # assert the review runs `cargo clippy` from the agent's own PATH and surfaces it.
+  review-clippy = agentCheck ./review-clippy.nix { };
   # Shellcheck coverage (review-fleet C12): a change adding a shell script with an
   # unquoted variable (SC2086) + an inline disable directive; assert the
   # `Shell scripts (shellcheck):` section surfaces the finding and flags the

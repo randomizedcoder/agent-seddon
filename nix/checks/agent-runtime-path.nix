@@ -116,6 +116,30 @@ let
       expected = "found";
     }
     {
+      name = "positive_cargo_clippy";
+      description = "`cargo clippy` runs this subcommand; without it clippy fails with \"no such command\"";
+      program = "cargo-clippy";
+      expected = "found";
+    }
+    {
+      name = "positive_clippy_driver";
+      description = "cargo-clippy compiles each crate through clippy-driver";
+      program = "clippy-driver";
+      expected = "found";
+    }
+    {
+      name = "positive_rustc";
+      description = "clippy compiles the changed crates and their dependencies";
+      program = "rustc";
+      expected = "found";
+    }
+    {
+      name = "positive_protoc";
+      description = "prost/tonic build scripts run protoc while clippy builds";
+      program = "protoc";
+      expected = "found";
+    }
+    {
       name = "positive_shellcheck";
       description = "the review shellcheck collector";
       program = "shellcheck";
