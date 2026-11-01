@@ -569,6 +569,12 @@ let
         note_fail 1; contract_exit ""
       fi
 
+      # The theme editor action switches this user's active theme; remember it so
+      # step 5b can put it back.
+      active_before="$(grpcurl -d '{}' -plaintext 127.0.0.1:${toString gatewayPort} \
+          agent.v1.ThemeService/GetActive 2>/dev/null || true)"
+      theme_before="$(echo "$active_before" | jq -r '.theme.id // ""' 2>/dev/null || true)"
+      mode_before="$(echo "$active_before" | jq -r '.mode // "THEME_MODE_UNSPECIFIED"' 2>/dev/null || true)"
       # --- 3. drive the web app through the bridge -------------------------------
       # `flutter drive -d web-server` serves + drives its OWN instance of the app;
       # what matters is the app's grpc-web calls go to the Envoy bridge (via the
@@ -671,6 +677,16 @@ let
             got="$(grpcurl -d '{}' -plaintext 127.0.0.1:${toString gatewayPort} \
                     agent.v1.PromptService/GetActivePersonality 2>/dev/null || true)"
             echo "$got" | jq -e --arg id "$value" '(.id // .name // "") == $id' >/dev/null 2>&1 || state_ok=0 ;;
+          *ThemeService/Put)
+            got="$(grpcurl -d "{\"id\":\"$value\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
+                    agent.v1.ThemeService/Get 2>/dev/null || true)"
+            echo "$got" | jq -e --arg id "$value" '.id == $id' >/dev/null 2>&1 || state_ok=0 ;;
+          *ThemeService/SetActive)
+            got="$(grpcurl -d '{}' -plaintext 127.0.0.1:${toString gatewayPort} \
+                    agent.v1.ThemeService/GetActive 2>/dev/null || true)"
+            echo "$got" | jq -e --arg id "$value" '.theme.id == $id' >/dev/null 2>&1 || state_ok=0 ;;
+          # Export is a read: it changes nothing, so the metrics delta is the proof.
+          *ThemeService/Export) mapped=0 ;;
           *) mapped=0; echo "  [warn] no read-RPC mapping for $rpc — proven by metrics delta only" ;;
         esac
         if [ "$mapped" -eq 1 ] && [ "$state_ok" -eq 0 ]; then
@@ -707,11 +723,22 @@ let
       # The Router upstreams carry a unique per-run id; remove them so repeated
       # runs don't accumulate registry entries. Best-effort (an active-personality
       # change has no prior value to restore, so it is left as set).
-      for uid in $(echo "$actions" | jq -r '.actions[] | select(.rpc|endswith("/Put")) | .value' | sort -u); do
+      for uid in $(echo "$actions" | jq -r '.actions[] | select(.rpc|endswith("ProviderRegistryService/Put")) | .value' | sort -u); do
         [ -n "$uid" ] || continue
         grpcurl -d "{\"id\":\"$uid\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
           agent.v1.ProviderRegistryService/Delete >/dev/null 2>&1 || true
       done
+      # The editor's theme likewise, then the user's previous active theme back.
+      for tid in $(echo "$actions" | jq -r '.actions[] | select(.rpc|endswith("ThemeService/Put")) | .value' | sort -u); do
+        [ -n "$tid" ] || continue
+        grpcurl -d "{\"id\":\"$tid\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
+          agent.v1.ThemeService/Delete >/dev/null 2>&1 || true
+      done
+      if [ -n "$theme_before" ]; then
+        jq -cn --arg id "$theme_before" --arg mode "$mode_before" '{theme_id:$id, mode:$mode}' \
+          | grpcurl -d @ -plaintext 127.0.0.1:${toString gatewayPort} \
+          agent.v1.ThemeService/SetActive >/dev/null 2>&1 || true
+      fi
 
       # --- 5c. perf rows -> agent.portal_gui_perf (inc 09; best-effort trend record) ---
       # Every driven action doubles as a timing sample. We record the client-perceived
@@ -740,6 +767,9 @@ let
           *ProviderRegistryService/Enable) echo registry.enable ;;
           *ProviderRegistryService/Get) echo registry.get ;;
           *PromptService/SetActivePersonality) echo prompt.set_active_personality ;;
+          *ThemeService/Put) echo theme.put ;;
+          *ThemeService/SetActive) echo theme.set_active ;;
+          *ThemeService/Export) echo theme.export ;;
           *) echo "" ;;
         esac
       }

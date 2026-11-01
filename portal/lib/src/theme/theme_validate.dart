@@ -255,23 +255,7 @@ void _checkPalette(pb.Palette p, _Level level) {
           '$set is set without $unset: set both or neither, so their contrast can be checked');
     }
   }
-  final pairs = <(String, String, double)>[
-    ('on_surface', 'surface', level.text),
-    ('on_surface', 'background', level.text),
-    ('on_surface_variant', 'surface_variant', level.text),
-    ('on_primary', 'primary', level.text),
-    ('on_secondary', 'secondary', level.text),
-    ('on_error', 'error', level.text),
-    ('error', 'surface', level.text),
-    ('success', 'surface', level.text),
-    ('warning', 'surface', level.text),
-    ('info', 'surface', level.text),
-    ('muted', 'surface', level.text),
-    ('code_foreground', 'code_background', level.text),
-    ('primary', 'surface', level.accent),
-    ('focus', 'background', _focus),
-    if (level.outline != null) ('outline', 'background', level.outline!),
-  ];
+  final pairs = _pairsFor(level);
   for (final (fg, bg, min) in pairs) {
     final f = c[fg], b = c[bg];
     if (f == null || b == null) continue;
@@ -284,6 +268,97 @@ void _checkPalette(pb.Palette p, _Level level) {
           '$shown:1, needs $min:1 (${level.name})');
     }
   }
+}
+
+/// Every colour pair whose contrast [validateTheme] checks, at [level]: text
+/// pairs at the level's text ratio, the accent and outline at their UI ratios,
+/// the focus ring at 3:1.
+List<(String, String, double)> _pairsFor(_Level level) => [
+      ('on_surface', 'surface', level.text),
+      ('on_surface', 'background', level.text),
+      ('on_surface_variant', 'surface_variant', level.text),
+      ('on_primary', 'primary', level.text),
+      ('on_secondary', 'secondary', level.text),
+      ('on_error', 'error', level.text),
+      ('error', 'surface', level.text),
+      ('success', 'surface', level.text),
+      ('warning', 'surface', level.text),
+      ('info', 'surface', level.text),
+      ('muted', 'surface', level.text),
+      ('code_foreground', 'code_background', level.text),
+      ('primary', 'surface', level.accent),
+      ('focus', 'background', _focus),
+      if (level.outline != null) ('outline', 'background', level.outline!),
+    ];
+
+/// One pair the validator checks, as the theme editor shows it.
+class ContrastCheck {
+  const ContrastCheck(this.fg, this.bg, this.min, this.ratio, this.level);
+
+  final String fg, bg;
+
+  /// The ratio the pair needs.
+  final double min;
+
+  /// The pair's ratio; null while either colour is unset or not a colour.
+  final double? ratio;
+
+  /// `AA` or `AAA`: the theme's contrast level.
+  final String level;
+
+  bool get passes => ratio != null && ratio! >= min;
+
+  /// The ratio as the validator prints it: truncated, never rounded up to a pass.
+  String get shown => ratio == null ? '–' : '${((ratio! * 100).floor() / 100).toStringAsFixed(2)}:1';
+}
+
+/// The contrast of each pair [validateTheme] checks in [p], a palette of [t]
+/// (whose accessibility block sets the level). Unlike the validator it never
+/// throws: a colour that is unset or does not parse gives a null ratio, so an
+/// editor can show every pair while the author types.
+List<ContrastCheck> paletteContrast(pb.Theme t, pb.Palette p) {
+  final level = _level(t);
+  int? colour(String v) {
+    if (v.isEmpty) return null;
+    try {
+      return parseColor(v);
+    } on ThemeError {
+      return null;
+    }
+  }
+
+  final sem = p.semantic;
+  final c = <String, int?>{
+    'primary': colour(p.primary),
+    'on_primary': colour(p.onPrimary),
+    'secondary': colour(p.secondary),
+    'on_secondary': colour(p.onSecondary),
+    'surface': colour(p.surface),
+    'on_surface': colour(p.onSurface),
+    'background': colour(p.background),
+    'surface_variant': colour(p.surfaceVariant),
+    'on_surface_variant': colour(p.onSurfaceVariant),
+    'outline': colour(p.outline),
+    'error': colour(p.error),
+    'on_error': colour(p.onError),
+    'focus': colour(p.focus),
+    'success': colour(sem.success),
+    'warning': colour(sem.warning),
+    'info': colour(sem.info),
+    'muted': colour(sem.muted),
+    'code_background': colour(sem.codeBackground),
+    'code_foreground': colour(sem.codeForeground),
+  };
+  return [
+    for (final (fg, bg, min) in _pairsFor(level))
+      ContrastCheck(
+        fg,
+        bg,
+        min,
+        c[fg] == null || c[bg] == null ? null : contrastRatio(c[fg]!, c[bg]!),
+        level.name,
+      ),
+  ];
 }
 
 void _checkMap(String field, Map<String, String> map, List<String> allowed) {

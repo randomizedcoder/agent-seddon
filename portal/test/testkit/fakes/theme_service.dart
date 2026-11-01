@@ -18,6 +18,10 @@ class FakeThemeService extends ThemeServiceBase {
   ListThemesResponse listResponse = ListThemesResponse();
   Theme getResponse = Theme();
   Theme putResponse = Theme();
+
+  /// When set, `Put` answers this function of the request instead of
+  /// [putResponse] (e.g. the request stored, with a version).
+  Theme Function(Theme request)? putAnswer;
   DeleteThemeResponse deleteResponse = DeleteThemeResponse();
   ImportThemeResponse importResponse = ImportThemeResponse();
   ExportThemeResponse exportResponse = ExportThemeResponse();
@@ -72,7 +76,7 @@ class FakeThemeService extends ThemeServiceBase {
   Future<Theme> put(ServiceCall call, Theme request) async {
     _log.record('agent.v1.ThemeService/Put', request);
     await _guard('Put');
-    return putResponse;
+    return putAnswer?.call(request) ?? putResponse;
   }
 
   @override
