@@ -26,6 +26,18 @@ extension points intact:
   deferred.
 - **Default-on, fail-soft:** `[review] analyze = true` (binaries are `/nix/store`-
   cached) + `analyze_timeout_secs` (default 45) + skip-if-tool-missing (exit 127).
+  clippy compiles the changed crates and their dependencies, so it runs under
+  `analyze_build_timeout_secs` (default 600) instead, and the analyzer's fan-out
+  deadline stretches to fit it (a cold run of four of our crates took ~52 s on l2).
+  The stretch covers any start order under `analyze_parallelism`: the longest tool
+  plus the six lint tools spread over the slots, `max(build, lint) + ⌈6/p⌉·lint`,
+  plus 15 s slack (705 s at the defaults, 885 s with `analyze_parallelism = 1`).
+  The engine reports that stretch (`ReviewCollector::time_budget`, the slowest
+  collector's deadline), and the fleet bounds its inline grounding step by its
+  5-minute forge prep timeout **plus** that budget (capped at 2 h), so a cold clippy
+  build doesn't time out the whole grounding and leave the review with no facts.
+  The cost: grounding runs inline in the fleet's serial trigger loop, so a cold
+  build delays the next trigger by up to the analyzer's deadline.
   A cold/slow/missing/erroring linter → a recorded `skipped`/`timeout`/`failed`
   `AnalyzerRun`, never a blocked bundle.
 - **Tool provisioning (operational):** with the default `[review] tool_provider =

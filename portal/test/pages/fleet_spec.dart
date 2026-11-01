@@ -18,6 +18,14 @@ const fleetSpec = PageSpec('fleet', [
   ),
   SpecRow(
     elementId: 'fleet.review.item',
+    caseClass: CaseClass.positive,
+    name: 'subtitle_names_static_analysis',
+    description:
+        'the item subtitle says the count is static-analysis findings, not the reviewer\'s issues',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.review.item',
     caseClass: CaseClass.boundary,
     name: 'empty_list_no_items',
     description: 'an empty ListReviews renders the empty state, no items',

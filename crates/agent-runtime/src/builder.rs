@@ -93,6 +93,7 @@ pub(crate) fn build_review_orchestrator(
         orch = orch.with_analyzer(
             sandbox.clone(),
             review.analyze_timeout_secs,
+            review.analyze_build_timeout_secs,
             review.analyze_parallelism,
             review.analyzer_config.clone(),
             tool_provider.clone(),

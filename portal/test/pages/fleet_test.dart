@@ -102,6 +102,13 @@ void main() {
           expect(robot.log.fired(rosterRpc), isTrue);
           await robot.settle();
 
+        case 'positive_subtitle_names_static_analysis':
+          fake.listReviewsResponse = reviews([summary(findings: 3)]);
+          await robot.load();
+          expect(robot.textShown('3 static-analysis findings'), isTrue);
+          expect(robot.textShown('lint findings'), isFalse);
+          await robot.settle();
+
         case 'boundary_empty_list_no_items':
           fake.listReviewsResponse = reviews([]);
           await robot.load();

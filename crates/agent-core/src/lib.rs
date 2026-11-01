@@ -6361,6 +6361,15 @@ pub trait ReviewCollector: Send + Sync {
     /// bundle from whatever collectors succeeded; only an unresolvable target is a
     /// hard error.
     async fn collect(&self, target: &ReviewTarget) -> Result<ReviewFacts>;
+
+    /// How long one [`Self::collect`] may legitimately spend in its collectors (the
+    /// slowest collector's deadline), beyond resolving the target. A caller bounding a
+    /// whole collect widens its timeout by this so it never cuts a run the engine itself
+    /// would let finish (a cold clippy build). `None`: no stretch to report (a remote
+    /// engine bounds itself).
+    fn time_budget(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// Runs the deterministic review engine for a [`ReviewTarget`] and renders its
@@ -6386,6 +6395,13 @@ pub trait ReviewGrounder: Send + Sync {
     /// whose engine is already rooted (the single-repo / remote case) may treat `root`
     /// as advisory; the fleet's multi-repo grounder honours it.
     async fn ground(&self, root: &std::path::Path, target: ReviewTarget) -> Result<GroundedReview>;
+
+    /// The engine's [`ReviewCollector::time_budget`]: how long one grounding's collectors
+    /// may legitimately run, on top of the forge round-trips. The fleet widens its
+    /// grounding timeout by it. `None`: no stretch.
+    fn time_budget(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// The output of one review-engine run (review-fleet C10): the rendered `brief` handed to

@@ -115,4 +115,10 @@ impl CollectorOutput {
 pub(crate) trait FactCollector: Send + Sync {
     fn name(&self) -> &'static str;
     async fn collect(&self, ctx: &CollectCtx) -> CollectorOutput;
+    /// How long this collector may run, given the orchestrator's `default`. A
+    /// collector that compiles the code (the analyzer's clippy) needs longer than
+    /// the fan-out's usual bound; the rest keep the default.
+    fn deadline(&self, default: std::time::Duration) -> std::time::Duration {
+        default
+    }
 }

@@ -505,7 +505,7 @@ class _FleetPageState extends State<FleetPage> {
                       subtitle: Text(
                         'risk ${r.riskScore.toStringAsFixed(2)}'
                         '${r.gateFailed ? " · gate failed" : ""}'
-                        ' · ${r.nFindings} findings',
+                        ' · ${r.nFindings} static-analysis findings',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),

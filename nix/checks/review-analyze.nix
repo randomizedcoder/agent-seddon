@@ -8,8 +8,7 @@
 #
 # Offline + deterministic: the module imports only the stdlib, so golangci-lint's
 # typecheck needs no module download (GOPROXY=off, caches in temp) — it runs in the
-# hermetic `nix flake check` sandbox. clippy is exercised live (dev shell + eval);
-# reproducing it here would need the whole vendored Rust build tree.
+# hermetic `nix flake check` sandbox. clippy has its own check (review-clippy.nix).
 {
   pkgs,
   agent,

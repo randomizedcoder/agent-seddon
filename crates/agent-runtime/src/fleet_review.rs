@@ -631,7 +631,12 @@ mod tests {
         );
         // Both seams are wired.
         let _ = ctx.repo;
-        let _ = ctx.grounder;
+        // The grounder reports the default analyzer's deadline (45s lints, 600s build,
+        // 4 slots), so the fleet's grounding timeout lets a cold clippy build finish.
+        assert_eq!(
+            ctx.grounder.time_budget(),
+            Some(std::time::Duration::from_secs(705))
+        );
     }
 
     // A minimal in-memory forge-card registry double for the card-by-id path.

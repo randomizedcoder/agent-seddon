@@ -72,7 +72,7 @@ pub fn render_draft(
         ch.base_rev, ch.head_rev
     ));
     out.push_str(&format!(
-        "- Files changed: {}\n- Risk: {:.2} (gate {})\n- Findings: {}\n\n",
+        "- Files changed: {}\n- Risk: {:.2} (gate {})\n- Static-analysis findings: {}\n\n",
         ch.files.len(),
         facts.risk.max_score,
         if facts.risk.gate_failed {
@@ -835,6 +835,16 @@ mod draft_tests {
         assert!(review_at < facts_at, "narrative precedes grounded facts");
         assert!(md.contains("One must-fix in x.rs."), "narrative rendered");
         assert!(md.contains("gate FAILED"), "risk gate surfaced");
+        // The count is the linters', not the reviewer's issues (a draft with three
+        // must-fixes read "Findings: 0").
+        assert!(
+            md.contains(&format!(
+                "- Static-analysis findings: {}\n",
+                facts().analysis.findings.len()
+            )),
+            "the count says whose findings it is"
+        );
+        assert!(!md.contains("\n- Findings:"), "no bare `Findings` count");
     }
 
     #[test]

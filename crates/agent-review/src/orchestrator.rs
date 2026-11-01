@@ -101,6 +101,10 @@ pub enum ReviewEvent {
 /// Observability hook (see [`ReviewEvent`]).
 pub type ReviewObserver = Arc<dyn Fn(ReviewEvent) + Send + Sync>;
 
+/// Upper bound on `[review] analyze_build_timeout_secs`: an operator typo can't park
+/// a review for days.
+const MAX_BUILD_TIMEOUT_SECS: u64 = 3600;
+
 /// Runs the deterministic fact collectors for a review target.
 pub struct ReviewOrchestrator {
     repo_root: PathBuf,
@@ -177,15 +181,30 @@ impl ReviewOrchestrator {
         self
     }
 
+    /// The longest the collector fan-out may legitimately run: the collectors run
+    /// concurrently, each under its own deadline, so this is the largest of those (never
+    /// below the fan-out default). A caller that bounds a whole `collect` (the fleet's
+    /// grounding step) must allow at least this, or it cuts a collector this
+    /// orchestrator would have let finish.
+    pub fn collect_deadline(&self) -> Duration {
+        self.collectors
+            .iter()
+            .map(|c| c.deadline(self.deadline))
+            .fold(self.deadline, Duration::max)
+    }
+
     /// Enable the static-analysis collector (`[review] analyze = true`). It needs a
     /// [`Sandbox`] to shell out to the linters; without one it is a no-op. The
     /// `tool_provider` resolves each linter's program (review-analysis-depth Inc 1);
     /// `None` ⇒ resolve to the bare name on `PATH` (the prior behaviour).
+    /// `build_timeout_secs` bounds the tools that compile the code (clippy), which a
+    /// cold worktree can't finish inside `timeout_secs`.
     #[allow(clippy::too_many_arguments)]
     pub fn with_analyzer(
         mut self,
         sandbox: Option<Arc<dyn Sandbox>>,
         timeout_secs: u64,
+        build_timeout_secs: u64,
         parallelism: usize,
         golangci_config: String,
         tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
@@ -194,6 +213,7 @@ impl ReviewOrchestrator {
         self.analyze_timeout_secs = timeout_secs.max(1);
         self.collectors.push(Box::new(AnalyzerCollector {
             timeout_secs: self.analyze_timeout_secs,
+            build_timeout_secs: build_timeout_secs.clamp(1, MAX_BUILD_TIMEOUT_SECS),
             parallelism: parallelism.max(1),
             golangci_config,
             tool_provider,
@@ -389,6 +409,10 @@ impl ReviewCollector for ReviewOrchestrator {
         "orchestrator"
     }
 
+    fn time_budget(&self) -> Option<Duration> {
+        Some(self.collect_deadline())
+    }
+
     async fn collect(&self, target: &ReviewTarget) -> Result<ReviewFacts> {
         let started = Instant::now();
         let r = self.resolve(target).await?;
@@ -414,7 +438,7 @@ impl ReviewCollector for ReviewOrchestrator {
             futures_util::future::join_all(
                 self.collectors
                     .iter()
-                    .map(|c| run_one(c.as_ref(), &ctx, self.deadline)),
+                    .map(|c| run_one(c.as_ref(), &ctx, c.deadline(self.deadline))),
             )
             .await
         }
@@ -852,5 +876,177 @@ mod tests {
             "no fetch when the PR head is already present"
         );
         assert_eq!(r.head.as_str(), head_oid, "head from the present local ref");
+    }
+    /// A collector that takes `takes` and asks for `wants` (or the default).
+    struct Sleepy {
+        takes: Duration,
+        wants: Option<Duration>,
+    }
+
+    #[async_trait]
+    impl FactCollector for Sleepy {
+        fn name(&self) -> &'static str {
+            "sleepy"
+        }
+        async fn collect(&self, _ctx: &CollectCtx) -> CollectorOutput {
+            tokio::time::sleep(self.takes).await;
+            CollectorOutput::skipped("done")
+        }
+        fn deadline(&self, default: Duration) -> Duration {
+            self.wants.unwrap_or(default)
+        }
+    }
+
+    fn sleepy_ctx() -> CollectCtx {
+        CollectCtx {
+            repo_root: PathBuf::from("."),
+            base: Revision::from("0".repeat(40)),
+            head: Revision::from("0".repeat(40)),
+            base_label: "main".into(),
+            head_label: "head".into(),
+            default_branch: "main".into(),
+            repo: Arc::new(agent_testkit::FixtureRepo::new()),
+            search: None,
+            branch_names: Vec::new(),
+            sandbox: None,
+        }
+    }
+
+    /// The fan-out honours each collector's own deadline. Each row: how long the
+    /// collector takes, the deadline it asks for, and whether it finishes.
+    #[rstest::rstest]
+    #[case::positive_longer_deadline_lets_it_finish(
+        "a collector that asks for longer runs past the default",
+        120,
+        Some(5_000),
+        true
+    )]
+    #[case::negative_default_cuts_it_off(
+        "without the hook the default deadline applies",
+        120,
+        None,
+        false
+    )]
+    #[case::corner_shorter_ask_is_honoured(
+        "a collector may also ask for less",
+        120,
+        Some(10),
+        false
+    )]
+    #[case::boundary_fast_collector_unaffected(
+        "a fast collector finishes under the default",
+        0,
+        None,
+        true
+    )]
+    #[tokio::test]
+    async fn collector_deadline_cases(
+        #[case] description: &str,
+        #[case] takes_ms: u64,
+        #[case] wants_ms: Option<u64>,
+        #[case] finishes: bool,
+    ) {
+        let c = Sleepy {
+            takes: Duration::from_millis(takes_ms),
+            wants: wants_ms.map(Duration::from_millis),
+        };
+        let default = Duration::from_millis(40);
+        let ran = run_one(&c, &sleepy_ctx(), c.deadline(default)).await;
+        assert_eq!(
+            ran.reason != "deadline exceeded",
+            finishes,
+            "{description}: {}",
+            ran.reason
+        );
+    }
+
+    /// `with_analyzer` clamps its knobs before the analyzer sees them; the resulting
+    /// deadline (from a zero fan-out default) shows what survived the clamp.
+    #[rstest::rstest]
+    #[case::positive_defaults(
+        "the shipped defaults: 45s lint, 600s build, 4 slots",
+        45,
+        600,
+        4,
+        705
+    )]
+    #[case::boundary_zeros_raise_to_one("zero timeouts and parallelism become 1", 0, 0, 0, 22)]
+    #[case::boundary_build_at_cap(
+        "a build timeout of exactly the cap is kept",
+        45,
+        3_600,
+        4,
+        3_705
+    )]
+    #[case::boundary_build_over_cap("one second over the cap is clamped", 45, 3_601, 4, 3_705)]
+    #[case::adversarial_huge_build_timeout(
+        "u64::MAX build timeout is capped at an hour",
+        45,
+        u64::MAX,
+        4,
+        3_705
+    )]
+    fn with_analyzer_clamp_cases(
+        #[case] description: &str,
+        #[case] timeout_secs: u64,
+        #[case] build_timeout_secs: u64,
+        #[case] parallelism: usize,
+        #[case] want_deadline_secs: u64,
+    ) {
+        let o = orchestrator(Arc::new(PrFakeRepo::new(true))).with_analyzer(
+            None,
+            timeout_secs,
+            build_timeout_secs,
+            parallelism,
+            String::new(),
+            None,
+        );
+        let analyzer = o.collectors.last().expect("analyzer pushed");
+        assert_eq!(analyzer.name(), "analyzer", "{description}");
+        assert_eq!(
+            analyzer.deadline(Duration::ZERO),
+            Duration::from_secs(want_deadline_secs),
+            "{description}"
+        );
+    }
+
+    /// `collect_deadline` is the slowest collector's deadline, never under the default.
+    #[rstest::rstest]
+    #[case::positive_analyzer_stretches(
+        "the analyzer's 705s outlasts a 60s default",
+        60,
+        true,
+        705
+    )]
+    #[case::positive_no_stretch("without the analyzer the default is the bound", 60, false, 60)]
+    #[case::corner_default_wins("a default above the analyzer's deadline is kept", 900, true, 900)]
+    #[case::boundary_zero_default(
+        "a zero default still allows the analyzer its time",
+        0,
+        true,
+        705
+    )]
+    #[case::adversarial_huge_default(
+        "a huge default is returned, not overflowed",
+        u64::MAX,
+        true,
+        u64::MAX
+    )]
+    fn collect_deadline_cases(
+        #[case] description: &str,
+        #[case] default_secs: u64,
+        #[case] analyzer: bool,
+        #[case] want_secs: u64,
+    ) {
+        let mut o = orchestrator(Arc::new(PrFakeRepo::new(true)))
+            .with_deadline(Duration::from_secs(default_secs));
+        if analyzer {
+            o = o.with_analyzer(None, 45, 600, 4, String::new(), None);
+        }
+        assert_eq!(
+            o.collect_deadline(),
+            Duration::from_secs(want_secs),
+            "{description}"
+        );
     }
 }

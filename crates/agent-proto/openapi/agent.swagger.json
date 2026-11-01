@@ -10551,7 +10551,8 @@
         },
         "nFindings": {
           "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "description": "Static-analysis (linter) findings the review was grounded on, not the issues\nthe reviewer raised in its narrative."
         },
         "filesChanged": {
           "type": "integer",

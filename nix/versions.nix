@@ -250,6 +250,10 @@ in
   gcc = pkgs.gcc;
   # `cargo`: cargo-deny shells out to `cargo metadata`.
   cargo = pkgs.cargo;
+  # `cargo clippy` (the review analyzer's Rust lints) needs clippy and the rustc it
+  # wraps; a prost/tonic build script also needs `protoc` (`protobuf`, above).
+  clippy = pkgs.clippy;
+  rustc = pkgs.rustc;
 
   # `grpc-health-probe`: the k8s health probe for the strict-mTLS role listeners
   # (docs/design/k8s/04). The kubelet's native `grpc:` prober dials plaintext with

@@ -72,8 +72,18 @@ fn embedded_golangci_config() -> Option<PathBuf> {
     .clone()
 }
 
+/// Slack on the analyzer's fan-out deadline beyond its tools' own timeouts.
+const ANALYZER_DEADLINE_SLACK_SECS: u64 = 15;
+
+/// The most non-building tools one run can plan: golangci-lint, gosec, go vet,
+/// gofmt, cargo-audit and cargo-deny. Clippy is the one tool that builds.
+const MAX_LINT_TOOLS: u64 = 6;
+
 pub(crate) struct AnalyzerCollector {
     pub timeout_secs: u64,
+    /// Per-tool timeout for the tools that compile the code (clippy): a cold worktree
+    /// builds every dependency first, far past `timeout_secs`.
+    pub build_timeout_secs: u64,
     /// How many tools run concurrently (review-analysis-depth Inc 2). Clamped ≥ 1.
     pub parallelism: usize,
     /// golangci-lint config path (review-analysis-depth Inc 2-golangci). Empty ⇒ the
@@ -96,12 +106,31 @@ struct ToolTask {
     /// cold worktree); the Rust supply-chain tools (Inc 5a) run `Off` as defense-in-depth
     /// (they are already offline via `--db`/`-n`/`--offline`).
     network: NetworkPolicy,
+    /// Whether the tool compiles the code, and so runs under `build_timeout_secs`.
+    builds: bool,
 }
 
 #[async_trait::async_trait]
 impl FactCollector for AnalyzerCollector {
     fn name(&self) -> &'static str {
         "analyzer"
+    }
+
+    /// Room for every planned tool to finish under `parallelism`, so the fan-out
+    /// deadline never cuts off a clippy run its own timeout allows (and with it every
+    /// other tool's findings). Graham's bound for any start order: the longest tool,
+    /// plus the lint tools spread over the slots, plus slack.
+    fn deadline(&self, default: std::time::Duration) -> std::time::Duration {
+        let slots = (self.parallelism.max(1) as u64).min(MAX_LINT_TOOLS);
+        let need = self
+            .build_timeout_secs
+            .max(self.timeout_secs)
+            .saturating_add(
+                self.timeout_secs
+                    .saturating_mul(MAX_LINT_TOOLS.div_ceil(slots)),
+            )
+            .saturating_add(ANALYZER_DEADLINE_SLACK_SECS);
+        default.max(std::time::Duration::from_secs(need))
     }
 
     async fn collect(&self, ctx: &CollectCtx) -> CollectorOutput {
@@ -130,6 +159,79 @@ impl FactCollector for AnalyzerCollector {
             return CollectorOutput::skipped("no analyzable (.go/.rs) changes");
         }
 
+        let (mut runs, tasks) = self.plan(&ctx.repo_root, &changed, has_go, has_rust).await;
+        let parallelism = self.parallelism.max(1);
+
+        // Fan the resolved tools out concurrently under the parallelism budget: each
+        // returns its own `(run, findings)`, so the collector's wall-clock is the slowest
+        // single tool, not the serial sum. Every tool is fail-soft inside `run_tool`.
+        let repo_root = ctx.repo_root.clone();
+        let ran: Vec<(AnalyzerRun, Vec<AnalysisFinding>)> = futures_util::stream::iter(tasks)
+            .map(|t| {
+                let sandbox = sandbox.clone();
+                let repo_root = repo_root.clone();
+                let changed_set = &changed_set;
+                async move {
+                    run_tool(
+                        &sandbox,
+                        &repo_root,
+                        t.tool,
+                        &t.cmd,
+                        self.task_timeout(t.builds),
+                        changed_set,
+                        t.parser,
+                        t.parse_stderr,
+                        t.network,
+                    )
+                    .await
+                }
+            })
+            .buffer_unordered(parallelism)
+            .collect()
+            .await;
+
+        let mut findings = Vec::new();
+        for (r, mut f) in ran {
+            runs.push(r);
+            findings.append(&mut f);
+        }
+        // Order runs deterministically (fan-out completes out of order).
+        runs.sort_by(|a, b| a.tool.cmp(&b.tool));
+
+        // Union-dedupe identical findings surfaced by more than one tool.
+        dedupe_findings(&mut findings);
+        // Cap the total finding count (drop-with-count), changed-file findings first.
+        findings.sort_by_key(|f| !f.in_change);
+        if findings.len() > MAX_FINDINGS {
+            findings.truncate(MAX_FINDINGS);
+        }
+        let language = match (has_go, has_rust) {
+            (true, true) => "mixed",
+            (true, false) => "go",
+            _ => "rust",
+        };
+
+        CollectorOutput::ok(FactFragment::Analysis {
+            report: AnalysisReport {
+                language: language.into(),
+                runs,
+                findings,
+            },
+        })
+    }
+}
+
+impl AnalyzerCollector {
+    /// The tools to run for a change: the resolved invocations (`tasks`, fanned out by
+    /// `collect`) and the fail-soft records of those that couldn't be planned (`runs`:
+    /// an unresolved program, no owning crate).
+    async fn plan(
+        &self,
+        repo_root: &std::path::Path,
+        changed: &[PathBuf],
+        has_go: bool,
+        has_rust: bool,
+    ) -> (Vec<AnalyzerRun>, Vec<ToolTask>) {
         // `runs` accrues fail-soft records for tools we couldn't even plan (unresolved
         // program, no owning crate); `tasks` are the resolved invocations that fan out.
         let mut runs = Vec::new();
@@ -148,7 +250,7 @@ impl FactCollector for AnalyzerCollector {
             // Scope dirs derive from attacker-controlled diff paths: `go_scope` drops any
             // with an unsafe component, and each survivor is single-quoted before it reaches
             // `bash -c` (defense in depth) — a dir can never break out into shell interpretation.
-            let dirs = go_scope(&changed);
+            let dirs = go_scope(changed);
             let dir_args = dirs
                 .iter()
                 .map(|d| shell_quote(d))
@@ -218,7 +320,7 @@ impl FactCollector for AnalyzerCollector {
             }
         }
         if has_rust {
-            let crates = rust_scope(&ctx.repo_root, &changed);
+            let crates = rust_scope(repo_root, changed);
             if crates.is_empty() {
                 runs.push(skipped_run(
                     "clippy",
@@ -241,6 +343,7 @@ impl FactCollector for AnalyzerCollector {
                             parse_stderr: false,
                             // clippy may resolve/build deps on a cold worktree — keep net On.
                             network: NetworkPolicy::On,
+                            builds: true,
                         });
                     }
                     None => runs.push(skipped_run(
@@ -281,68 +384,18 @@ impl FactCollector for AnalyzerCollector {
             )
             .await;
         }
-
-        // Fan the resolved tools out concurrently under the parallelism budget: each
-        // returns its own `(run, findings)`, so the collector's wall-clock is the slowest
-        // single tool, not the serial sum. Every tool is fail-soft inside `run_tool`.
-        let repo_root = ctx.repo_root.clone();
-        let timeout_secs = self.timeout_secs;
-        let ran: Vec<(AnalyzerRun, Vec<AnalysisFinding>)> = futures_util::stream::iter(tasks)
-            .map(|t| {
-                let sandbox = sandbox.clone();
-                let repo_root = repo_root.clone();
-                let changed_set = &changed_set;
-                async move {
-                    run_tool(
-                        &sandbox,
-                        &repo_root,
-                        t.tool,
-                        &t.cmd,
-                        timeout_secs,
-                        changed_set,
-                        t.parser,
-                        t.parse_stderr,
-                        t.network,
-                    )
-                    .await
-                }
-            })
-            .buffer_unordered(parallelism)
-            .collect()
-            .await;
-
-        let mut findings = Vec::new();
-        for (r, mut f) in ran {
-            runs.push(r);
-            findings.append(&mut f);
-        }
-        // Order runs deterministically (fan-out completes out of order).
-        runs.sort_by(|a, b| a.tool.cmp(&b.tool));
-
-        // Union-dedupe identical findings surfaced by more than one tool.
-        dedupe_findings(&mut findings);
-        // Cap the total finding count (drop-with-count), changed-file findings first.
-        findings.sort_by_key(|f| !f.in_change);
-        if findings.len() > MAX_FINDINGS {
-            findings.truncate(MAX_FINDINGS);
-        }
-        let language = match (has_go, has_rust) {
-            (true, true) => "mixed",
-            (true, false) => "go",
-            _ => "rust",
-        };
-
-        CollectorOutput::ok(FactFragment::Analysis {
-            report: AnalysisReport {
-                language: language.into(),
-                runs,
-                findings,
-            },
-        })
+        (runs, tasks)
     }
-}
 
-impl AnalyzerCollector {
+    /// The per-tool timeout: `build_timeout_secs` for a tool that compiles the code.
+    fn task_timeout(&self, builds: bool) -> u64 {
+        if builds {
+            self.build_timeout_secs
+        } else {
+            self.timeout_secs
+        }
+    }
+
     /// The `--config <path> ` fragment (trailing space) for golangci-lint, or `""`.
     /// A configured path wins; otherwise the embedded comprehensive config is
     /// materialized to a temp file. If neither is available, returns `""` so
@@ -380,6 +433,7 @@ impl AnalyzerCollector {
                 parser,
                 parse_stderr,
                 network: NetworkPolicy::On,
+                builds: false,
             }),
             None => runs.push(skipped_run(
                 tool,
@@ -410,6 +464,7 @@ impl AnalyzerCollector {
                 parser,
                 parse_stderr,
                 network: NetworkPolicy::Off,
+                builds: false,
             }),
             None => runs.push(skipped_run(
                 tool,
@@ -1166,6 +1221,7 @@ mod tests {
     fn collector(golangci_config: &str) -> AnalyzerCollector {
         AnalyzerCollector {
             timeout_secs: 30,
+            build_timeout_secs: 600,
             parallelism: 4,
             golangci_config: golangci_config.to_string(),
             tool_provider: None,
@@ -1588,6 +1644,7 @@ mod tests {
         }
         let with_prefix = AnalyzerCollector {
             timeout_secs: 1,
+            build_timeout_secs: 1,
             parallelism: 1,
             golangci_config: String::new(),
             tool_provider: Some(std::sync::Arc::new(Fake)),
@@ -1700,6 +1757,204 @@ mod tests {
             r.reason.chars().count() <= 213,
             "reason bounded: {} chars",
             r.reason.chars().count()
+        );
+    }
+    /// The per-tool timeout and the analyzer's fan-out deadline. Each row: the tool's
+    /// kind, the collector's two timeouts, its parallelism, the fan-out default, and
+    /// what each gives as (timeout, deadline). Deadline = max(default, max(build, lint) + ⌈6/p⌉·lint + 15).
+    #[rstest::rstest]
+    #[case::positive_build_tool_gets_build_timeout(
+        "clippy runs under the build timeout; default parallelism 4",
+        true,
+        45,
+        600,
+        4,
+        60,
+        (600, 705)
+    )]
+    #[case::positive_lint_tool_keeps_short_timeout(
+        "a linter keeps the short timeout",
+        false,
+        45,
+        600,
+        4,
+        60,
+        (45, 705)
+    )]
+    #[case::negative_parallelism_two_waits_for_three_waves(
+        "parallelism 2: clippy may start after two Go tools run their full 45s (t=90, ends 690)",
+        true,
+        45,
+        600,
+        2,
+        60,
+        (600, 750)
+    )]
+    #[case::negative_parallelism_one_is_serial(
+        "parallelism 1: every tool runs in turn (clippy may end at 870)",
+        true,
+        45,
+        600,
+        1,
+        60,
+        (600, 885)
+    )]
+    #[case::corner_parallelism_zero_means_one(
+        "parallelism 0 is treated as 1",
+        true,
+        45,
+        600,
+        0,
+        60,
+        (600, 885)
+    )]
+    #[case::corner_build_shorter_than_lint(
+        "a build timeout under the lint timeout uses the lint timeout as the longest tool",
+        true,
+        45,
+        10,
+        6,
+        60,
+        (10, 105)
+    )]
+    #[case::corner_default_already_longer(
+        "a longer fan-out default is kept",
+        true,
+        45,
+        600,
+        4,
+        3_000,
+        (600, 3_000)
+    )]
+    #[case::boundary_one_second_timeouts(
+        "the smallest timeouts, serial, still leave the slack",
+        true,
+        1,
+        1,
+        1,
+        0,
+        (1, 22)
+    )]
+    #[case::boundary_more_slots_than_tools(
+        "slots beyond the tool count don't shrink the bound below one wave",
+        true,
+        45,
+        600,
+        64,
+        60,
+        (600, 660)
+    )]
+    #[case::adversarial_huge_timeouts_saturate(
+        "huge timeouts saturate, never overflow",
+        true,
+        u64::MAX,
+        u64::MAX,
+        1,
+        60,
+        (u64::MAX, u64::MAX)
+    )]
+    #[case::adversarial_huge_parallelism(
+        "usize::MAX parallelism neither overflows nor divides by zero",
+        true,
+        45,
+        600,
+        usize::MAX,
+        60,
+        (600, 660)
+    )]
+    fn timeout_and_deadline_cases(
+        #[case] description: &str,
+        #[case] builds: bool,
+        #[case] timeout_secs: u64,
+        #[case] build_timeout_secs: u64,
+        #[case] parallelism: usize,
+        #[case] default_secs: u64,
+        #[case] (want_timeout, want_deadline): (u64, u64),
+    ) {
+        use crate::collector::FactCollector;
+        let c = AnalyzerCollector {
+            timeout_secs,
+            build_timeout_secs,
+            parallelism,
+            golangci_config: String::new(),
+            tool_provider: None,
+        };
+        assert_eq!(c.task_timeout(builds), want_timeout, "{description}");
+        assert_eq!(
+            c.deadline(std::time::Duration::from_secs(default_secs)),
+            std::time::Duration::from_secs(want_deadline),
+            "{description}"
+        );
+    }
+
+    /// What `plan` schedules for a change. The `MAX_LINT_TOOLS` bound in `deadline` is
+    /// only right while no change plans more lint tools than it: the mixed row plans
+    /// every tool, so adding a seventh lint fails here until the constant moves with it.
+    /// Each row: the changed files, the crate name in the fixture's Cargo.toml, and the
+    /// (lint tasks, build tasks, skipped runs) expected.
+    #[rstest::rstest]
+    #[case::positive_mixed_plans_every_tool(
+        "a Go + Rust change plans all six lints and clippy",
+        &["cmd/x/x.go", "fx/src/lib.rs"],
+        "fx",
+        (6, 1, 0)
+    )]
+    #[case::positive_go_only("a Go change plans the four Go tools", &["cmd/x/x.go"], "fx", (4, 0, 0))]
+    #[case::positive_rust_only(
+        "a Rust change plans the supply-chain pair and clippy",
+        &["fx/src/lib.rs"],
+        "fx",
+        (2, 1, 0)
+    )]
+    #[case::negative_rust_without_crate(
+        "a .rs file no crate owns skips clippy",
+        &["loose/x.rs"],
+        "fx",
+        (2, 0, 1)
+    )]
+    #[case::corner_go_file_outside_package(
+        "a top-level .go file still plans gofmt",
+        &["main.go"],
+        "fx",
+        (4, 0, 0)
+    )]
+    #[case::adversarial_injected_crate_name(
+        "a crate name carrying a shell substitution is dropped, so clippy is skipped",
+        &["fx/src/lib.rs"],
+        "x$(id)",
+        (2, 0, 1)
+    )]
+    #[tokio::test]
+    async fn plan_cases(
+        #[case] description: &str,
+        #[case] changed: &[&str],
+        #[case] crate_name: &str,
+        #[case] (want_lints, want_builds, want_skipped): (usize, usize, usize),
+    ) {
+        let tmp = agent_testkit::tempdir();
+        std::fs::create_dir_all(tmp.as_path().join("fx/src")).unwrap();
+        std::fs::write(
+            tmp.as_path().join("fx/Cargo.toml"),
+            format!("[package]\nname = \"{crate_name}\"\n"),
+        )
+        .unwrap();
+        let changed: Vec<PathBuf> = changed.iter().map(PathBuf::from).collect();
+        let has_go = changed.iter().any(|p| ext(p) == "go");
+        let has_rust = changed.iter().any(|p| ext(p) == "rs");
+        let (runs, tasks) = collector("")
+            .plan(tmp.as_path(), &changed, has_go, has_rust)
+            .await;
+        let lints = tasks.iter().filter(|t| !t.builds).count();
+        let builds = tasks.iter().filter(|t| t.builds).count();
+        assert_eq!(
+            (lints, builds, runs.len()),
+            (want_lints, want_builds, want_skipped),
+            "{description}"
+        );
+        assert!(
+            lints as u64 <= MAX_LINT_TOOLS,
+            "{description}: {lints} lint tools planned, but the deadline assumes at most \
+             {MAX_LINT_TOOLS}; raise MAX_LINT_TOOLS with the new tool"
         );
     }
 }

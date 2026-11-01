@@ -421,6 +421,10 @@ impl agent_core::ReviewGrounder for EngineGrounder {
         let brief = agent_review::render_facts_with(&facts, self.budget);
         Ok(agent_core::GroundedReview { brief, facts })
     }
+
+    fn time_budget(&self) -> Option<std::time::Duration> {
+        self.engine.time_budget()
+    }
 }
 
 /// The multi-repo [`agent_core::ReviewGrounder`] for the fleet (fleet-grounding track):
@@ -477,6 +481,25 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
         let facts = engine.collect(&target).await?;
         let brief = agent_review::render_facts_with(&facts, self.budget);
         Ok(agent_core::GroundedReview { brief, facts })
+    }
+
+    /// Every `ground` builds the same collectors (only the root differs), so the
+    /// deadline of one built here is the deadline of each run.
+    fn time_budget(&self) -> Option<std::time::Duration> {
+        Some(
+            crate::builder::build_review_orchestrator(
+                std::path::PathBuf::new(),
+                self.repo.clone(),
+                self.search.clone(),
+                self.forge.clone(),
+                self.sandbox.clone(),
+                self.pool.clone(),
+                self.tool_provider.clone(),
+                &self.review,
+                self.metrics.clone(),
+            )
+            .collect_deadline(),
+        )
     }
 }
 
@@ -5380,6 +5403,55 @@ mod tests {
         ) -> agent_core::Result<agent_core::ReviewFacts> {
             Ok(agent_core::ReviewFacts::default())
         }
+    }
+
+    /// A collector that reports a fixed budget, to see what a grounder passes on.
+    #[cfg(feature = "review")]
+    struct BudgetReview(Option<u64>);
+    #[cfg(feature = "review")]
+    #[async_trait::async_trait]
+    impl agent_core::ReviewCollector for BudgetReview {
+        fn name(&self) -> &str {
+            "budget-review"
+        }
+        async fn collect(
+            &self,
+            _target: &agent_core::ReviewTarget,
+        ) -> agent_core::Result<agent_core::ReviewFacts> {
+            Ok(agent_core::ReviewFacts::default())
+        }
+        fn time_budget(&self) -> Option<std::time::Duration> {
+            self.0.map(std::time::Duration::from_secs)
+        }
+    }
+
+    /// The single-repo grounder reports its engine's budget unchanged, so the fleet
+    /// widens its grounding timeout the same way on both paths.
+    #[cfg(feature = "review")]
+    #[rstest::rstest]
+    #[case::positive_passes_budget("the analyzer's budget reaches the fleet", Some(705), Some(705))]
+    #[case::negative_remote_engine("an engine with no budget (remote) reports none", None, None)]
+    #[case::boundary_zero("a zero budget is passed on, not dropped", Some(0), Some(0))]
+    #[case::adversarial_huge(
+        "a huge budget is passed on; the fleet caps it",
+        Some(u64::MAX),
+        Some(u64::MAX)
+    )]
+    fn engine_grounder_budget_cases(
+        #[case] description: &str,
+        #[case] engine: Option<u64>,
+        #[case] want: Option<u64>,
+    ) {
+        use agent_core::ReviewGrounder as _;
+        let g = EngineGrounder {
+            engine: Arc::new(BudgetReview(engine)),
+            budget: 4096,
+        };
+        assert_eq!(
+            g.time_budget(),
+            want.map(std::time::Duration::from_secs),
+            "{description}"
+        );
     }
 
     #[cfg(feature = "review")]

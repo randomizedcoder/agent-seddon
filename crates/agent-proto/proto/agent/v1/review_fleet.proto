@@ -126,6 +126,8 @@ message ReviewSummary {
   string head_sha = 4;
   double risk_score = 5;
   bool gate_failed = 6;
+  // Static-analysis (linter) findings the review was grounded on, not the issues
+  // the reviewer raised in its narrative.
   uint32 n_findings = 7;
   uint32 files_changed = 8;
   uint32 additions = 9;
