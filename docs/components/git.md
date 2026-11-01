@@ -138,6 +138,15 @@ mirror's `.git/config`, and is scoped to the one remote. The clone URL stays bar
 empty token is a no-op (public clone, unchanged). The fleet wires this from the row's
 resolved/minted forge credential for GitHub rows (`agent-runtime/src/fleet_review.rs`).
 
+`CliBackend::with_github_token_source(source)` takes an `agent_core::TokenSource`
+instead, read at **each** git invocation. The fleet caches a repo's backend across
+triggers, and a GitHub App installation token lives an hour; a backend holding the
+token it was built with fetched with a dead one from then on, and GitHub's 401 made
+git ask for a username (`could not read Username`). For a `ghapp:` row the source
+re-mints through the gated helper (the minter caches ~55 min, so a read is free);
+an unresolvable token fails the invocation rather than running it unauthenticated.
+The forge API client (`agent-forge` `ForgeHttp`) reads its credential the same way.
+
 ## Tools
 
 All read tools are `parallel_safe` (immutable objects), so the loop dispatches a

@@ -10,7 +10,8 @@
 //!   `Retry-After`), never hand-rolled.
 //! * **Bodies are bounded** — the payload is remote-controlled.
 
-use agent_core::{Error, Result, Secret};
+use agent_core::{Error, Result, TokenSource};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Cap on a response body we will parse.
@@ -20,9 +21,11 @@ pub struct ForgeHttp {
     client: reqwest::Client,
     /// API base, e.g. `https://api.github.com` or `https://gitlab.com/api/v4`.
     pub base: String,
-    /// The API credential. A [`Secret`], so it can't leak via `Debug`; it is read
-    /// (via `expose`) at exactly one place — the auth header in [`Self::request`].
-    token: Secret,
+    /// The API credential, resolved per request so a refreshed App installation token
+    /// is picked up. It yields a [`agent_core::Secret`], so it can't leak via `Debug`;
+    /// it is read (via `expose`) at exactly one place — the auth header in
+    /// [`Self::request`].
+    token: Arc<dyn TokenSource>,
     retry: agent_retry::RetryPolicy,
     /// Header the platform expects the token in.
     auth_header: &'static str,
@@ -34,7 +37,7 @@ pub struct ForgeHttp {
 impl ForgeHttp {
     pub fn new(
         base: String,
-        token: Secret,
+        token: impl Into<Arc<dyn TokenSource>>,
         timeout_secs: u64,
         max_retries: u32,
         auth_header: &'static str,
@@ -51,7 +54,7 @@ impl ForgeHttp {
         Ok(Self {
             client,
             base,
-            token,
+            token: token.into(),
             retry: agent_retry::RetryPolicy::new(max_retries),
             auth_header,
             auth_prefix,
@@ -62,7 +65,7 @@ impl ForgeHttp {
     /// Fail early and distinctly when there is no credential, rather than
     /// letting the platform return an opaque 401.
     pub fn require_token(&self, backend: &str) -> Result<()> {
-        if self.token.is_empty() {
+        if !self.token.is_configured() {
             return Err(Error::Repo(format!(
                 "{backend} is unavailable: no API token configured"
             )));
@@ -70,20 +73,30 @@ impl ForgeHttp {
         Ok(())
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        let token = self.token.token().await?;
         let url = format!(
             "{}/{}",
             self.base.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
-        let mut rb = self.client.request(method, url).header(
-            self.auth_header,
-            format!("{}{}", self.auth_prefix, self.token.expose()),
-        );
+        let mut rb = self.client.request(method, url);
+        // An empty credential sends no auth header (as the git path does), never a
+        // bare `Bearer `.
+        if !token.is_empty() {
+            rb = rb.header(
+                self.auth_header,
+                format!("{}{}", self.auth_prefix, token.expose()),
+            );
+        }
         for (k, v) in &self.extra {
             rb = rb.header(*k, v);
         }
-        rb
+        Ok(rb)
     }
 
     pub async fn get_json(&self, path: &str) -> Result<serde_json::Value> {
@@ -109,7 +122,12 @@ impl ForgeHttp {
             let m = method.clone();
             let b = body.clone();
             async move {
-                let mut rb = self.request(m, path);
+                // An unresolvable credential (a failed mint) is not a forge answer to
+                // retry here; the minter retries its own call.
+                let mut rb = match self.request(m, path).await {
+                    Ok(rb) => rb,
+                    Err(e) => return agent_retry::Attempt::Fail(e),
+                };
                 if let Some(b) = b {
                     rb = rb.json(&b);
                 }
@@ -307,5 +325,129 @@ mod tests {
         assert_eq!(nested(&v, "user", "login"), "" as &str);
         // The numeric reader must not panic; a real number is a valid answer.
         let _ = n(&v, "a");
+    }
+
+    /// Stands in for the App-token minter: each read hands out the next token, or
+    /// fails when `fail` is set.
+    struct RotatingSource {
+        reads: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TokenSource for RotatingSource {
+        async fn token(&self) -> Result<agent_core::Secret> {
+            let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::Repo("minting failed".into()));
+            }
+            Ok(agent_core::Secret::new(format!("ghs_{n}")))
+        }
+    }
+
+    /// A loopback API that answers each request with the `Authorization` it got,
+    /// counting the requests.
+    fn spawn_echo_auth() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use tiny_http::{Response, Server};
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = hits.clone();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let auth = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.to_string())
+                    .unwrap_or_default();
+                let body = serde_json::json!({ "auth": auth }).to_string();
+                let _ = request.respond(Response::from_string(body));
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    fn http_with(base: String, token: Arc<dyn TokenSource>) -> ForgeHttp {
+        ForgeHttp::new(base, token, 5, 0, "Authorization", "Bearer ", vec![]).unwrap()
+    }
+
+    /// The credential is read at each request, so a long-lived forge follows a
+    /// refreshed App installation token instead of sending the one it was built with.
+    #[tokio::test]
+    async fn positive_token_source_is_read_per_request() {
+        let (base, _hits) = spawn_echo_auth();
+        let http = http_with(
+            base,
+            Arc::new(RotatingSource {
+                reads: Default::default(),
+                fail: false,
+            }),
+        );
+        let first = http.get_json("x").await.unwrap();
+        let second = http.get_json("x").await.unwrap();
+        assert_eq!(first["auth"], "Bearer ghs_0");
+        assert_eq!(second["auth"], "Bearer ghs_1", "the newer token is sent");
+    }
+
+    /// An empty credential sends no `Authorization` header at all, not a bare prefix.
+    #[tokio::test]
+    async fn corner_empty_token_sends_no_auth_header() {
+        let (base, hits) = spawn_echo_auth();
+        let http = http_with(base, agent_core::Secret::new(String::new()).into());
+        let got = http.get_json("x").await.unwrap();
+        assert_eq!(got["auth"], "", "no header, not `Bearer `");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A credential that cannot be resolved fails the call without sending anything,
+    /// and is not retried as if the forge had answered.
+    #[tokio::test]
+    async fn adversarial_unresolvable_token_sends_nothing() {
+        let (base, hits) = spawn_echo_auth();
+        let src = Arc::new(RotatingSource {
+            reads: Default::default(),
+            fail: true,
+        });
+        let http = ForgeHttp::new(
+            base,
+            src.clone() as Arc<dyn TokenSource>,
+            5,
+            3,
+            "Authorization",
+            "Bearer ",
+            vec![],
+        )
+        .unwrap();
+        let err = http.get_json("x").await.unwrap_err().to_string();
+        assert!(
+            err.contains("minting failed"),
+            "the cause is reported: {err}"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no request sent"
+        );
+        assert_eq!(
+            src.reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a failed mint is not retried here"
+        );
+    }
+
+    /// `require_token` knows a missing credential without resolving one: only the
+    /// empty constant is missing, and a minted source counts as configured.
+    #[rstest]
+    #[case::negative_empty_secret(Arc::new(agent_core::Secret::default()) as Arc<dyn TokenSource>, false)]
+    #[case::positive_secret(Arc::new(agent_core::Secret::new("t")) as Arc<dyn TokenSource>, true)]
+    #[case::positive_minted_source(
+        Arc::new(RotatingSource { reads: Default::default(), fail: true }) as Arc<dyn TokenSource>,
+        true
+    )]
+    fn require_token_cases(#[case] token: Arc<dyn TokenSource>, #[case] ok: bool) {
+        let http = http_with("http://127.0.0.1:1".into(), token);
+        assert_eq!(http.require_token("github").is_ok(), ok);
     }
 }

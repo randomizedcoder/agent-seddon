@@ -16,7 +16,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use agent_core::{safe_segment, Error, Forge, ForgeCard, RepoEncoding, Result, Secret};
+use agent_core::{safe_segment, Error, Forge, ForgeCard, RepoEncoding, Result, TokenSource};
 
 /// The forge kinds built into this binary. The card's `kind` is validated against
 /// this at build time — "known kinds = registered kinds", not a core allow-list.
@@ -171,7 +171,8 @@ pub fn screen_base_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build a live `Forge` from a card and a per-use repo slug + resolved token.
+/// Build a live `Forge` from a card and a per-use repo slug + its credential (a
+/// resolved [`agent_core::Secret`], or a [`TokenSource`] read at each request).
 ///
 /// Resolves the base URL (card override, SSRF-screened; else the kind default),
 /// validates the card's `repo_encoding` matches the kind, decodes the slug, and
@@ -179,8 +180,9 @@ pub fn screen_base_url(url: &str) -> Result<()> {
 pub fn build_forge_from_card(
     card: &ForgeCard,
     repo: &str,
-    token: Secret,
+    token: impl Into<Arc<dyn TokenSource>>,
 ) -> Result<Arc<dyn Forge>> {
+    let token: Arc<dyn TokenSource> = token.into();
     let expected = expected_encoding(&card.kind).ok_or_else(|| unknown_kind(&card.kind))?;
     if card.repo_encoding != expected {
         return Err(Error::Config(format!(
@@ -236,6 +238,7 @@ pub fn build_forge_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::Secret;
     use rstest::rstest;
 
     fn card(kind: &str, base_url: &str, enc: RepoEncoding) -> ForgeCard {

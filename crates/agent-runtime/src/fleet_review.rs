@@ -302,20 +302,21 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         let mut cli = agent_git::CliBackend::new(mirror.clone(), mirror.clone(), worktrees, url)
             .with_pr_ref_template(template);
         // forge-auth F2b: authenticate the clone/fetch of a (possibly private) GitHub
-        // repo with the same credential the forge API uses. Re-resolve/-mint through the
-        // gated helper the forge build above already used — the minter caches (~55m) so a
-        // `ghapp:` token is free, and `env:`/`file:` is a cheap re-read; the ghapp IDOR
-        // gate (`ghapp_installation_allowed`) runs here too. An unresolvable credential
-        // already failed the forge build above, so a row that reached here resolves; an
-        // empty (public) token makes `with_github_token` a no-op. GitHub only — the
+        // repo with the same credential the forge API uses, through the gated helper the
+        // forge build above already used (the ghapp IDOR gate runs here too). This
+        // context is cached across triggers, so a `ghapp:` credential is a source that
+        // re-mints at each git call: a token captured here would die after its hour and
+        // every later fetch would fail. An unresolvable credential already failed the
+        // forge build above, so a row that reached here resolves; an empty (public)
+        // token makes `with_github_token_source` a no-op. GitHub only — the
         // `x-access-token` basic-auth form is GitHub's (GitLab/others are a follow-on).
         if backend == "github" {
-            let tok = crate::registry::mint_or_resolve_tenant_token(&row.user, &token_ref)
+            let tok = crate::registry::tenant_token_source(&row.user, &token_ref)
                 .await
                 .map_err(|e| {
                     Error::Fleet(format!("fleet row `{}`: clone credential: {e}", row.id))
                 })?;
-            cli = cli.with_github_token(&tok);
+            cli = cli.with_github_token_source(tok);
         }
         if let Some(sandbox) = &self.sandbox {
             cli = cli.with_sandbox(sandbox.clone());

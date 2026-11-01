@@ -293,6 +293,39 @@ impl std::fmt::Display for Secret {
     }
 }
 
+/// A credential read **at each use** rather than captured once. A GitHub App
+/// installation token lives an hour, so a long-lived client that held the token it was
+/// built with starts answering 401 an hour later; holding a source instead picks up
+/// the minter's refreshed token. A plain [`Secret`] is the constant source.
+#[async_trait::async_trait]
+pub trait TokenSource: Send + Sync {
+    /// The credential to send now.
+    async fn token(&self) -> crate::Result<Secret>;
+
+    /// Whether any credential is configured, known without resolving one (so a
+    /// missing token stays a distinct, early error). Only the empty constant is not.
+    fn is_configured(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenSource for Secret {
+    async fn token(&self) -> crate::Result<Secret> {
+        Ok(self.clone())
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.is_empty()
+    }
+}
+
+impl From<Secret> for std::sync::Arc<dyn TokenSource> {
+    fn from(s: Secret) -> Self {
+        std::sync::Arc::new(s)
+    }
+}
+
 #[cfg(test)]
 mod secret_tests {
     use super::*;
@@ -344,5 +377,21 @@ mod secret_tests {
     fn positive_deserialize_is_transparent_from_a_bare_string() {
         let s: Secret = serde_json::from_str("\"tok\"").unwrap();
         assert_eq!(s.expose(), "tok");
+    }
+
+    /// A `Secret` is the constant `TokenSource`: it hands back itself, and only the
+    /// empty one reports no credential configured.
+    #[rstest::rstest]
+    #[case::positive_token_is_itself(TOKEN, true)]
+    #[case::negative_empty_is_unconfigured("", false)]
+    #[tokio::test]
+    async fn secret_as_token_source(#[case] value: &str, #[case] configured: bool) {
+        let src: std::sync::Arc<dyn TokenSource> = Secret::new(value).into();
+        assert_eq!(
+            src.is_configured(),
+            configured,
+            "is_configured for {value:?}"
+        );
+        assert_eq!(src.token().await.unwrap().expose(), value);
     }
 }
