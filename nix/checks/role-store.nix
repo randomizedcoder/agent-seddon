@@ -16,13 +16,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-role" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-role --features role-store";
   }
 )

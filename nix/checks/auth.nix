@@ -16,13 +16,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-grpc" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-grpc --lib";
   }
 )

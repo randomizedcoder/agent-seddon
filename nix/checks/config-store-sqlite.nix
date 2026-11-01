@@ -14,13 +14,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-config-store" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-config-store --features config-store-sqlite";
   }
 )

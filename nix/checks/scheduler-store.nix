@@ -16,13 +16,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-scheduler" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-scheduler --features scheduler-store";
   }
 )

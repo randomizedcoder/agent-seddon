@@ -14,13 +14,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-tokenizer" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-tokenizer --features tokenizer-hf";
   }
 )

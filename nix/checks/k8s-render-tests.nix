@@ -18,14 +18,14 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
   renderedK3s,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-k8s-render" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-k8s-render";
     AGENT_RENDERED_K3S = renderedK3s;
   }

@@ -14,13 +14,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-forge" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-forge --features forge-store";
   }
 )

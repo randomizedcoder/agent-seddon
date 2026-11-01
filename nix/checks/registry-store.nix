@@ -15,13 +15,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-registry" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-registry --features registry-store";
   }
 )

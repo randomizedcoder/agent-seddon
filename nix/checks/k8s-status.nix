@@ -12,12 +12,12 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-k8s-status" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-k8s-status";
   }
 )
