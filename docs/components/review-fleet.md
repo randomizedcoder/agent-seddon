@@ -318,7 +318,9 @@ the other answer to a draft: it is never posted. Skip takes the same post lease 
 commits it, so an `Approve` racing it stands down even before the new row lands; a draft already
 posted (or whose post is in flight) answers `already_posted`. The draft gets a `status = skipped`
 row with the skipper in `approved_by`, and `Approve` of a skipped draft answers `skipped` without
-posting. Skip is final for that head: the head-oid dedup means a new commit on the PR is what gets
+posting. The draft's body is locked like a posted one.
+
+Skip is final for that head: the head-oid dedup means a new commit on the PR is what gets
 a fresh review. `ListReviews` takes `exclude_status` (at most 8 values), which the portal's Fleet tab
 uses to hide skipped drafts by default; its repo filter is a menu of the repos seen on the roster
 and in the drafts.

@@ -12,6 +12,9 @@
 # Table-driven: each row is a program the code runs, why, and whether it must
 # resolve. Probed under `env -i` with only the wrapper's PATH. The `negative_` rows
 # are the check-the-check: a probe that leaked the builder's PATH would find them.
+# A `builder_only` row must first resolve on this builder's own PATH, so the row
+# proves the leak would be seen rather than passing because nothing provides the name
+# (the old `makeWrapper` row: a setup-hook function, never a binary, so it could not fail).
 #
 # Operator-configured programs are out of scope (LSP servers, the non-Go SCIP
 # indexers, MCP stdio servers): they are off by default and named in config.
@@ -20,7 +23,7 @@
   agent,
 }:
 let
-  # name, description, program, expected ("found" | "absent").
+  # name, description, program, expected ("found" | "absent" | "builder_only").
   cases = [
     {
       name = "positive_bash";
@@ -180,9 +183,9 @@ let
     }
     {
       name = "negative_builder_only_tool";
-      description = "makeWrapper is on this builder's PATH only; the probe must not see it";
-      program = "makeWrapper";
-      expected = "absent";
+      description = "GNU hello is on this builder's PATH only; the probe must not see it";
+      program = "hello";
+      expected = "builder_only";
     }
     {
       name = "adversarial_path_traversal_name";
@@ -197,7 +200,8 @@ let
 in
 pkgs.runCommand "agent-runtime-path"
   {
-    nativeBuildInputs = [ pkgs.makeWrapper ];
+    # `hello` is the builder-only program the negative row looks for.
+    nativeBuildInputs = [ pkgs.hello ];
     inherit rows;
     passAsFile = [ "rows" ];
   }
@@ -213,6 +217,14 @@ pkgs.runCommand "agent-runtime-path"
     failed=0
     while IFS="$(printf '\t')" read -r name program expected description; do
       [ -n "$name" ] || continue
+      if [ "$expected" = builder_only ]; then
+        command -v -- "$program" >/dev/null || {
+          echo "FAIL $name: $program is not on the builder's PATH, so the row proves nothing — $description" >&2
+          failed=1
+          continue
+        }
+        expected=absent
+      fi
       # `env -i` + only the wrapper's PATH; bash itself must come from it.
       if ${pkgs.coreutils}/bin/env -i PATH="$rp" bash -c 'case "$1" in */*) exit 1;; esac; command -v -- "$1" >/dev/null' _ "$program" 2>/dev/null; then
         got=found
