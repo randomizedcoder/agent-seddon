@@ -4,8 +4,8 @@
 #
 # All of these run by default. crane reuses the shared `cargoArtifacts`
 # dependency build, so the checks only recompile first-party crates; the
-# `test-<crate>` and `clippy-<crate>` slices start from the foundation builds
-# in workspace-slice.nix.
+# per-crate `test-`, `clippy-`, `leak-` and `bench-` slices start from the
+# foundation builds in workspace-slice.nix.
 #
 {
   pkgs,
@@ -71,17 +71,30 @@ let
       value = craneCheck ./clippy.nix { inherit workspaceSlice crate; };
     }) workspaceSlice.crateNames
   );
+
+  # One `leak-<crate>` / `bench-<crate>` check per crate with leak tests / benches
+  # (nix/checks/{leak,bench}.nix), each on that crate's slice.
+  leak = craneCheck ./leak.nix { inherit lib workspaceSlice; };
+  bench = craneCheck ./bench.nix { inherit lib workspaceSlice versions; };
+  leakChecks = leak.checks;
+  benchChecks = bench.checks;
+  # `<name>` aggregates the `<name>-<crate>` checks into one linkFarm.
+  aggregate =
+    name: checks:
+    pkgs.linkFarm name (
+      lib.mapAttrsToList (n: path: {
+        name = lib.removePrefix "${name}-" n;
+        inherit path;
+      }) checks
+    );
 in
 testChecks
 // clippyChecks
+// leakChecks
+// benchChecks
 // {
   # Every crate linted on its own slice, and `clippy` as the aggregate.
-  clippy = pkgs.linkFarm "clippy" (
-    map (crate: {
-      name = crate;
-      path = clippyChecks."clippy-${crate}";
-    }) workspaceSlice.crateNames
-  );
+  clippy = aggregate "clippy" clippyChecks;
   rustfmt = craneCheck ./rustfmt.nix { };
   # nix/test-features.json matches the manifests (fix: `nix run .#gen-test-features`).
   test-features-sync = pkgs.runCommand "test-features-sync-check" { } ''
@@ -95,12 +108,7 @@ testChecks
   '';
 
   # Every crate's tests on its own slice, and `test` as the aggregate.
-  test = pkgs.linkFarm "test" (
-    map (crate: {
-      name = crate;
-      path = testChecks."test-${crate}";
-    }) workspaceSlice.crateNames
-  );
+  test = aggregate "test" testChecks;
   # The campaign track's first-autonomous-PR path end to end (CP-06b): the shipped
   # driver + planner + poller and the in-process worker over a real git checkout
   # with a bare origin, a scripted model and a fake forge (agent-runtime's
@@ -228,8 +236,15 @@ testChecks
   tokenizer-provider = craneCheck ./tokenizer-provider.nix { inherit workspaceSlice; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
-  bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };
-  leak = craneCheck ./leak.nix { inherit cargoArtifacts; };
+  bench = aggregate "bench" benchChecks;
+  leak = aggregate "leak" leakChecks;
+  # Every `crates/*/tests/*leak*.rs` and `crates/*/benches/*.rs` has a row in the
+  # leak/bench `runs` tables, so a new one can't land silently ungated.
+  leak-bench-sync = import ./leak-bench-sync.nix {
+    inherit pkgs lib src;
+    leakRuns = leak.runs;
+    benchRuns = bench.runs;
+  };
   # Lean-feature build gate: `cargo check` over a small matrix of
   # `--no-default-features` / single-feature builds of agent-runtime + agent-cli, so
   # a `#[cfg(feature = …)]` that is too narrow on a definition (or missing on a
