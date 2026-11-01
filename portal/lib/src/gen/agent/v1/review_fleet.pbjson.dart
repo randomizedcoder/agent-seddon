@@ -334,6 +334,53 @@ const SkipReviewReply$json = {
 final $typed_data.Uint8List skipReviewReplyDescriptor = $convert
     .base64Decode('Cg9Ta2lwUmV2aWV3UmVwbHkSFgoGc3RhdHVzGAEgASgJUgZzdGF0dXM=');
 
+@$core.Deprecated('Use skipReviewsRequestDescriptor instead')
+const SkipReviewsRequest$json = {
+  '1': 'SkipReviewsRequest',
+  '2': [
+    {'1': 'review_ids', '3': 1, '4': 3, '5': 9, '10': 'reviewIds'},
+  ],
+};
+
+/// Descriptor for `SkipReviewsRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List skipReviewsRequestDescriptor =
+    $convert.base64Decode(
+        'ChJTa2lwUmV2aWV3c1JlcXVlc3QSHQoKcmV2aWV3X2lkcxgBIAMoCVIJcmV2aWV3SWRz');
+
+@$core.Deprecated('Use skipResultDescriptor instead')
+const SkipResult$json = {
+  '1': 'SkipResult',
+  '2': [
+    {'1': 'review_id', '3': 1, '4': 1, '5': 9, '10': 'reviewId'},
+    {'1': 'status', '3': 2, '4': 1, '5': 9, '10': 'status'},
+  ],
+};
+
+/// Descriptor for `SkipResult`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List skipResultDescriptor = $convert.base64Decode(
+    'CgpTa2lwUmVzdWx0EhsKCXJldmlld19pZBgBIAEoCVIIcmV2aWV3SWQSFgoGc3RhdHVzGAIgAS'
+    'gJUgZzdGF0dXM=');
+
+@$core.Deprecated('Use skipReviewsReplyDescriptor instead')
+const SkipReviewsReply$json = {
+  '1': 'SkipReviewsReply',
+  '2': [
+    {
+      '1': 'results',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.agent.v1.SkipResult',
+      '10': 'results'
+    },
+  ],
+};
+
+/// Descriptor for `SkipReviewsReply`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List skipReviewsReplyDescriptor = $convert.base64Decode(
+    'ChBTa2lwUmV2aWV3c1JlcGx5Ei4KB3Jlc3VsdHMYASADKAsyFC5hZ2VudC52MS5Ta2lwUmVzdW'
+    'x0UgdyZXN1bHRz');
+
 @$core.Deprecated('Use preflightRequestDescriptor instead')
 const PreflightRequest$json = {
   '1': 'PreflightRequest',

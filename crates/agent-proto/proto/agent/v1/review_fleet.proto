@@ -207,6 +207,26 @@ message SkipReviewReply {
   string status = 1;
 }
 
+// Skip several drafts in one call (the portal's "Skip all shown", `agent fleet skip`).
+// The ids are explicit — the drafts the caller saw — never a server-side filter, so a
+// draft that arrives after the caller looked is never skipped by accident. 1..=500 ids,
+// each 1..=128 chars of `[A-Za-z0-9_-]`; anything else rejects the whole request.
+// Duplicates are skipped once.
+message SkipReviewsRequest {
+  repeated string review_ids = 1;
+}
+
+// One id's outcome; `status` is a `SkipReviewReply.status` value.
+message SkipResult {
+  string review_id = 1;
+  string status = 2;
+}
+
+// One result per distinct requested id, in request order.
+message SkipReviewsReply {
+  repeated SkipResult results = 1;
+}
+
 // Operational self-diagnosis of a running fleet process (docs/design/doctor/): run
 // the same probe set as `agent doctor` over gRPC, so a portal or a remote operator
 // can ask "are your dependencies healthy?" without shelling into the box. No input.
@@ -305,6 +325,15 @@ service ReviewFleetService {
   rpc SkipReview(SkipReviewRequest) returns (SkipReviewReply) {
     option (google.api.http) = {
       post: "/v1/fleet/reviews/{review_id}/skip"
+      body: "*"
+    };
+  }
+  // Skip many drafts at once (needs approve:review, like SkipReview). Each id goes
+  // through the same skip as SkipReview — the shared post lease included — and gets
+  // its own outcome. Opt-in like SkipReview; else UNIMPLEMENTED.
+  rpc SkipReviews(SkipReviewsRequest) returns (SkipReviewsReply) {
+    option (google.api.http) = {
+      post: "/v1/fleet/reviews:skip"
       body: "*"
     };
   }

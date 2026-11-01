@@ -378,6 +378,11 @@ mod tests {
         "/agent.v1.ReviewFleetService/SkipReview",
         false
     )]
+    #[case::negative_review_viewer_cannot_bulk_skip(
+        ROLE_REVIEW_VIEWER,
+        "/agent.v1.ReviewFleetService/SkipReviews",
+        false
+    )]
     #[case::negative_agent_user_cannot_read_roster(
         ROLE_AGENT_USER,
         "/agent.v1.ReviewFleetService/List",
@@ -408,6 +413,11 @@ mod tests {
     #[case::boundary_reviewer_skips_draft(
         ROLE_REVIEWER,
         "/agent.v1.ReviewFleetService/SkipReview",
+        true
+    )]
+    #[case::boundary_reviewer_bulk_skips_drafts(
+        ROLE_REVIEWER,
+        "/agent.v1.ReviewFleetService/SkipReviews",
         true
     )]
     #[case::boundary_reviewer_edits_draft(

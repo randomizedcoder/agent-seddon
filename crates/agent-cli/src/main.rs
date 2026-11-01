@@ -98,6 +98,13 @@ async fn main() -> Result<()> {
     // settings) can write edits back to the same file.
     config.source_path = Some(config_path.clone());
     agent_runtime::repo_index::validate(&config)?;
+    if let Mode::Fleet(args) = &mode {
+        println!(
+            "{}",
+            agent_runtime::fleet_cli::execute(&config, args).await?
+        );
+        return Ok(());
+    }
     if let Mode::Repo(args) = &mode {
         println!(
             "{}",
@@ -938,7 +945,9 @@ async fn main() -> Result<()> {
                 run_task_exit = Some(exit.code());
                 Ok(None)
             }
-            Mode::Repo(_) => unreachable!("repo commands return before building the agent"),
+            Mode::Repo(_) | Mode::Fleet(_) => {
+                unreachable!("repo/fleet commands return before building the agent")
+            }
             Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } | Mode::Token { .. } => {
                 unreachable!("login/logout/whoami/token return before the run")
             }
@@ -1063,6 +1072,8 @@ fn init_tracing(
 
 enum Mode {
     Repo(Vec<String>),
+    /// `agent fleet <verb> …` (agent_runtime::fleet_cli).
+    Fleet(Vec<String>),
     OneShot(String),
     Repl,
     ServeMcp,
@@ -1286,6 +1297,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut check_config = false;
     let mut doctor = false;
     let mut repo_args: Option<Vec<String>> = None;
+    let mut fleet_args: Option<Vec<String>> = None;
     let mut campaign: Option<campaign_cli::CampaignArgs> = None;
     let mut login = false;
     let mut logout = false;
@@ -1348,6 +1360,11 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                     std::process::exit(0);
                 }
                 repo_args = Some(parsed);
+                break;
+            }
+            // `agent fleet <verb> …`: everything after the word is the verb's.
+            "fleet" => {
+                fleet_args = Some(args.collect());
                 break;
             }
             "campaign" => {
@@ -1428,6 +1445,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
                      doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
                      repo <verb> …       index and inspect repository graphs (`agent repo --help`; opt-in build feature)\n  \
                      campaign <verb> …   manage campaigns — add / plan / list / show / approve / answer … (`agent campaign --help`)\n  \
+                     fleet <verb> …      operate a running review fleet — skip open drafts in bulk (`agent fleet help`)\n  \
                      login              sign in at the login issuer (device code) and keep an agent token [--issuer NAME] [--endpoint ADDR]\n  \
                      login --browser    sign in through a browser (loopback redirect) instead of a device code\n  \
                      logout              revoke the stored login's session and forget it [--issuer NAME]\n  \
@@ -1486,6 +1504,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
         Mode::CheckConfig
     } else if doctor {
         Mode::Doctor
+    } else if let Some(f) = fleet_args {
+        Mode::Fleet(f)
     } else if let Some(mut r) = repo_args {
         if let Some(t) = tenant {
             r.extend(["--tenant".into(), t]);
@@ -1779,6 +1799,22 @@ mod tests {
     fn login_words_refused(#[case] argv: &[&str], #[case] want: &str) {
         let err = login_mode(argv).expect_err("refused");
         assert!(format!("{err:#}").contains(want), "{err:#}");
+    }
+
+    // desc: `agent fleet …` hands every later word to the fleet verb parser
+    // (agent_runtime::fleet_cli), like `repo`; after `--` it is a goal word.
+    #[rstest::rstest]
+    #[case::positive_skip(&["fleet", "skip", "--dry-run"], Some(vec!["skip", "--dry-run"]))]
+    #[case::corner_bare_word(&["fleet"], Some(vec![]))]
+    #[case::boundary_flags_not_swallowed(&["fleet", "skip", "--repo", "a/b"], Some(vec!["skip", "--repo", "a/b"]))]
+    #[case::adversarial_after_double_dash_is_a_goal(&["--", "fleet", "skip"], None)]
+    fn fleet_word_parses(#[case] argv: &[&str], #[case] want: Option<Vec<&str>>) {
+        let got = match parse(argv).expect("parses").mode {
+            Mode::Fleet(words) => Some(words),
+            _ => None,
+        };
+        let want = want.map(|w| w.iter().map(ToString::to_string).collect::<Vec<_>>());
+        assert_eq!(got, want, "{argv:?}");
     }
 
     // desc: the `role = …` line of `--check-config`: no store prints `off`; a

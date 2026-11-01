@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_drafts
     additions     UInt32,
     deletions     UInt32,
     draft_path    String,                          -- path to the rendered C13 .md
-    status        String,                          -- drafted | approved | posted | superseded
+    status        String,                          -- drafted | approved | posted | superseded | skipped
     requested_by  Array(String),                   -- S19: tenant/subject of each ReviewNow caller (≤ 8)
     approved_by   String                           -- S19: tenant/subject of the approver; '' until posted
 )

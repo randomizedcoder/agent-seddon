@@ -85,6 +85,41 @@ impl GrpcFleet {
         })
     }
 
+    /// Skip several drafts in one call (at most [`agent_core::MAX_SKIP_BATCH`] ids; the
+    /// server rejects more). Returns each distinct id with its outcome, in request order.
+    /// An unrecognized wire status, or a result for an id that wasn't asked for, is a
+    /// protocol fault (`Err`).
+    pub async fn skip_reviews(
+        &self,
+        review_ids: &[String],
+    ) -> Result<Vec<(String, agent_core::SkipOutcome)>> {
+        let req = pb::SkipReviewsRequest {
+            review_ids: review_ids.to_vec(),
+        };
+        let results = unary!(self, skip_reviews, req)
+            .map_err(status_to_err)?
+            .into_inner()
+            .results;
+        results
+            .into_iter()
+            .map(|r| {
+                if !review_ids.contains(&r.review_id) {
+                    return Err(Error::Fleet(format!(
+                        "skip: a result for {:?}, which was not asked for",
+                        r.review_id.chars().take(40).collect::<String>()
+                    )));
+                }
+                let outcome = agent_core::SkipOutcome::from_wire(&r.status).ok_or_else(|| {
+                    Error::Fleet(format!(
+                        "skip: unrecognized status {:?} from server",
+                        r.status
+                    ))
+                })?;
+                Ok((r.review_id, outcome))
+            })
+            .collect()
+    }
+
     /// Operational self-diagnosis of a running fleet (docs/design/doctor/): run the
     /// process's probe set and return the report. Served only by the full
     /// `--serve-fleet` process; a bare control plane answers `UNIMPLEMENTED`. Each

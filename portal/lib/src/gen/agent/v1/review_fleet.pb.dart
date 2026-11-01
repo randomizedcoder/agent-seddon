@@ -925,6 +925,8 @@ class ReviewSummary extends $pb.GeneratedMessage {
   @$pb.TagNumber(6)
   void clearGateFailed() => $_clearField(6);
 
+  /// Static-analysis (linter) findings the review was grounded on, not the issues
+  /// the reviewer raised in its narrative.
   @$pb.TagNumber(7)
   $core.int get nFindings => $_getIZ(6);
   @$pb.TagNumber(7)
@@ -1280,7 +1282,8 @@ class GetReviewReply extends $pb.GeneratedMessage {
 /// `review_id` is untrusted wire input, looked up as a bound query arg; the new `body` is written
 /// to the draft's own server-minted `draft_path` (confined under the fleet root, size-capped) —
 /// never a wire-supplied path. Only an un-posted draft is editable: a draft whose status is
-/// `posted` or `approved` is locked (an edit would diverge from what was posted).
+/// `posted`, `approved` or `skipped` is locked (an edit would diverge from what was posted,
+/// or reopen a draft that was set aside).
 class UpdateReviewRequest extends $pb.GeneratedMessage {
   factory UpdateReviewRequest({
     $core.String? reviewId,
@@ -1350,7 +1353,7 @@ class UpdateReviewRequest extends $pb.GeneratedMessage {
 /// The outcome of an UpdateReview. `status` is one of:
 ///   "updated"   — the body was rewritten.
 ///   "not_found" — no persisted draft for this `review_id`.
-///   "locked"    — the draft is `posted`/`approved` and cannot be edited.
+///   "locked"    — the draft is `posted`/`approved`/`skipped` and cannot be edited.
 class UpdateReviewReply extends $pb.GeneratedMessage {
   factory UpdateReviewReply({
     $core.String? status,
@@ -1519,6 +1522,175 @@ class SkipReviewReply extends $pb.GeneratedMessage {
   $core.bool hasStatus() => $_has(0);
   @$pb.TagNumber(1)
   void clearStatus() => $_clearField(1);
+}
+
+/// Skip several drafts in one call (the portal's "Skip all shown", `agent fleet skip`).
+/// The ids are explicit — the drafts the caller saw — never a server-side filter, so a
+/// draft that arrives after the caller looked is never skipped by accident. 1..=500 ids,
+/// each 1..=128 chars of `[A-Za-z0-9_-]`; anything else rejects the whole request.
+/// Duplicates are skipped once.
+class SkipReviewsRequest extends $pb.GeneratedMessage {
+  factory SkipReviewsRequest({
+    $core.Iterable<$core.String>? reviewIds,
+  }) {
+    final result = create();
+    if (reviewIds != null) result.reviewIds.addAll(reviewIds);
+    return result;
+  }
+
+  SkipReviewsRequest._();
+
+  factory SkipReviewsRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SkipReviewsRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SkipReviewsRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..pPS(1, _omitFieldNames ? '' : 'reviewIds')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SkipReviewsRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SkipReviewsRequest copyWith(void Function(SkipReviewsRequest) updates) =>
+      super.copyWith((message) => updates(message as SkipReviewsRequest))
+          as SkipReviewsRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SkipReviewsRequest create() => SkipReviewsRequest._();
+  @$core.override
+  SkipReviewsRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SkipReviewsRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SkipReviewsRequest>(create);
+  static SkipReviewsRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<$core.String> get reviewIds => $_getList(0);
+}
+
+/// One id's outcome; `status` is a `SkipReviewReply.status` value.
+class SkipResult extends $pb.GeneratedMessage {
+  factory SkipResult({
+    $core.String? reviewId,
+    $core.String? status,
+  }) {
+    final result = create();
+    if (reviewId != null) result.reviewId = reviewId;
+    if (status != null) result.status = status;
+    return result;
+  }
+
+  SkipResult._();
+
+  factory SkipResult.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SkipResult.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SkipResult',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'reviewId')
+    ..aOS(2, _omitFieldNames ? '' : 'status')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SkipResult clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SkipResult copyWith(void Function(SkipResult) updates) =>
+      super.copyWith((message) => updates(message as SkipResult)) as SkipResult;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SkipResult create() => SkipResult._();
+  @$core.override
+  SkipResult createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SkipResult getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SkipResult>(create);
+  static SkipResult? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get reviewId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set reviewId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasReviewId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearReviewId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get status => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set status($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasStatus() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearStatus() => $_clearField(2);
+}
+
+/// One result per distinct requested id, in request order.
+class SkipReviewsReply extends $pb.GeneratedMessage {
+  factory SkipReviewsReply({
+    $core.Iterable<SkipResult>? results,
+  }) {
+    final result = create();
+    if (results != null) result.results.addAll(results);
+    return result;
+  }
+
+  SkipReviewsReply._();
+
+  factory SkipReviewsReply.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SkipReviewsReply.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SkipReviewsReply',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..pPM<SkipResult>(1, _omitFieldNames ? '' : 'results',
+        subBuilder: SkipResult.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SkipReviewsReply clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SkipReviewsReply copyWith(void Function(SkipReviewsReply) updates) =>
+      super.copyWith((message) => updates(message as SkipReviewsReply))
+          as SkipReviewsReply;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SkipReviewsReply create() => SkipReviewsReply._();
+  @$core.override
+  SkipReviewsReply createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SkipReviewsReply getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SkipReviewsReply>(create);
+  static SkipReviewsReply? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<SkipResult> get results => $_getList(0);
 }
 
 /// Operational self-diagnosis of a running fleet process (docs/design/doctor/): run

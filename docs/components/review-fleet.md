@@ -321,7 +321,22 @@ row with the skipper in `approved_by`, and `Approve` of a skipped draft answers 
 posting. The draft's body is locked like a posted one.
 
 Skip is final for that head: the head-oid dedup means a new commit on the PR is what gets
-a fresh review. `ListReviews` takes `exclude_status` (at most 8 values), which the portal's Fleet tab
+a fresh review.
+
+**Bulk skip** (`ReviewFleetService.SkipReviews(review_ids)`, `POST /v1/fleet/reviews:skip`, the
+same permission) skips up to 500 drafts in one call, each through the same skip, post lease
+included. The caller sends the ids it was shown, never a filter, so a draft that lands after it
+looked is never skipped unseen. The ids are checked before anything is skipped (1–500 ids,
+each 1–128 chars of `[A-Za-z0-9_-]`); a bad one rejects the whole request. Repeats are
+skipped once, and the reply carries one `SkipReview`-style status per id. A genuine fault
+partway (the history store is down) fails the call; the skips before it stand, and a retry
+reports them `already_skipped`.
+
+From a shell, `agent fleet skip` lists the open drafts (everything not posted or skipped,
+narrowed by `--repo OWNER/NAME` or `--status drafted|approved|superseded`), asks, and skips
+exactly those. `--dry-run` only lists; `--yes` skips without asking. It dials
+`[grpc.fleet] endpoint` (default `127.0.0.1:50086`) with the `[grpc.client] bearer`
+credential, such as a stored `agent login` token. Nothing is approved or posted. `ListReviews` takes `exclude_status` (at most 8 values), which the portal's Fleet tab
 uses to hide skipped drafts by default; its repo filter is a menu of the repos seen on the roster
 and in the drafts.
 

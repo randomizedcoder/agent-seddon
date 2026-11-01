@@ -68,6 +68,9 @@ mod dsn;
 // campaign store the `agent campaign …` verbs run against. Lazy by design.
 #[cfg(feature = "campaign")]
 pub mod campaign;
+/// `agent fleet …`: operator verbs over a running fleet (bulk skip).
+#[cfg(feature = "grpc")]
+pub mod fleet_cli;
 pub mod repo_index;
 // The `[campaign]` driver wiring (CP-05): config → `DriverConfig`, the tenant
 // selection rule, `build_driver` over the opened backend.
