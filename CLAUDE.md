@@ -42,9 +42,9 @@ nix run   .#buf-image           # regenerate the buf baseline after an intention
 `nix flake check` is the gate: it runs `clippy` with `-D warnings`, so the tree
 must be warning-clean. When in doubt, run it before considering work done.
 
-The unit tests run as one `test-<crate>` check per crate on a source slice, so an edit
-re-runs only the crates that can see it (`nix build .#checks.x86_64-linux.test-agent-review`
-runs one). See [`docs/components/testing.md`](docs/components/testing.md#per-crate-test-slices-the-gate).
+The unit tests and clippy run as one `test-<crate>` / `clippy-<crate>` check per crate on
+a source slice, so an edit re-runs only the crates that can see it
+(`nix build .#checks.x86_64-linux.clippy-agent-review` runs one). See [`docs/components/testing.md`](docs/components/testing.md#per-crate-test-slices-the-gate).
 
 ## Proto governance (buf)
 

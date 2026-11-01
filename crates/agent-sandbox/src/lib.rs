@@ -224,7 +224,9 @@ const TRUNCATION_MARKER: &[u8] = b"\n[stderr truncated: exceeded 8 MiB capture c
 const STDOUT_TRUNCATED_NOTE: &str = "\n[stdout truncated: exceeded 8 MiB capture cap]\n";
 
 /// Cheap probe: is `bin` a file on `$PATH`? (No exec-bit check — enough to pick or
-/// degrade, mirroring the `rg`-fast-path availability guard in search.)
+/// degrade, mirroring the `rg`-fast-path availability guard in search.) Only the
+/// backends that probe for a binary use it; a `sandbox-local`-only build has none.
+#[cfg(any(feature = "sandbox-nix", feature = "sandbox-bwrap", test))]
 pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|p| p.join(bin).is_file()))

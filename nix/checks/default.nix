@@ -61,10 +61,25 @@ let
       };
     }) workspaceSlice.crateNames
   );
+
+  # One `clippy-<crate>` check per workspace member (nix/checks/clippy.nix).
+  clippyChecks = lib.listToAttrs (
+    map (crate: {
+      name = "clippy-${crate}";
+      value = craneCheck ./clippy.nix { inherit workspaceSlice crate; };
+    }) workspaceSlice.crateNames
+  );
 in
 testChecks
+// clippyChecks
 // {
-  clippy = craneCheck ./clippy.nix { inherit cargoArtifacts; };
+  # Every crate linted on its own slice, and `clippy` as the aggregate.
+  clippy = pkgs.linkFarm "clippy" (
+    map (crate: {
+      name = crate;
+      path = clippyChecks."clippy-${crate}";
+    }) workspaceSlice.crateNames
+  );
   rustfmt = craneCheck ./rustfmt.nix { };
   # nix/test-features.json matches the manifests (fix: `nix run .#gen-test-features`).
   test-features-sync = pkgs.runCommand "test-features-sync-check" { } ''

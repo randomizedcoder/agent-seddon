@@ -159,6 +159,14 @@ a shared foundation build that every slice starts from, so a cold gate doesn't r
 `agent-core` 53 times. `nix build .#checks.x86_64-linux.test` builds every slice;
 `nix build .#checks.x86_64-linux.test-agent-review` runs one.
 
+Clippy is split the same way: `clippy-<crate>` runs
+`cargo clippy -p <crate> --all-targets --all-features -- -D warnings` on the crate's slice,
+starting from a foundation clippy build, and `nix build .#checks.x86_64-linux.clippy` builds
+all of them. The re-run table above holds for `clippy-*` too. Linting each crate under
+only its own features is stricter than the old single `--workspace --all-features` run,
+which unified every crate's features: code that is dead under one crate's feature set
+(say, a helper only some backends call) now fails that crate's check.
+
 Three things keep a slice testing what the whole-workspace `cargo test` tested:
 
 - **Features.** One workspace build unifies features, so a crate's tests ran with every
@@ -175,8 +183,8 @@ Three things keep a slice testing what the whole-workspace `cargo test` tested:
 - **Paths.** Every slice unpacks to the same directory, so cargo reuses the foundation
   build's compiled crates (it keys a workspace crate by its absolute path).
 
-The rest of the gate (`clippy`, `coverage`, `leak`, `bench`, `feature-matrix`, the binary
-and e2e checks) still builds from the whole workspace, so it re-runs on any change.
+The rest of the gate (`coverage`, `leak`, `bench`, `feature-matrix`, the binary and e2e
+checks) still builds from the whole workspace, so it re-runs on any change.
 
 ## Coverage
 
