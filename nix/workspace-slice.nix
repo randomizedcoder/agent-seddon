@@ -188,7 +188,7 @@ let
   foundationClippyArtifacts = craneLib.cargoClippy (
     commonArgs
     // {
-      pname = "workspace-foundation";
+      pname = "workspace-foundation-clippy";
       src = sliceFor foundation;
       inherit cargoArtifacts;
       cargoClippyExtraArgs =

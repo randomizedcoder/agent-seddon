@@ -3,7 +3,9 @@
 # Aggregates every `nix flake check` target for agent-seddon.
 #
 # All of these run by default. crane reuses the shared `cargoArtifacts`
-# dependency build, so clippy/test/audit only recompile first-party crates.
+# dependency build, so the checks only recompile first-party crates; the
+# `test-<crate>` and `clippy-<crate>` slices start from the foundation builds
+# in workspace-slice.nix.
 #
 {
   pkgs,
