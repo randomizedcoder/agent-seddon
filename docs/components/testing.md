@@ -134,6 +134,50 @@ harnesses always, the model tier (`e2e-live`/`e2e-expect`/`e2e-multi`) when
 .#soak`** loops the load harnesses for ~1h each (`SOAK_DURATION`). See
 [operating.md](../operating.md).
 
+## Per-crate test slices (the gate)
+
+`nix flake check` runs the unit tests as one check per crate, `test-<crate>`, each
+built from a **source slice** ([`nix/workspace-slice.nix`](../../nix/workspace-slice.nix)).
+A slice keeps the real code of the crate's workspace-dependency closure (normal, dev and
+build dependencies, `target.*` tables included) plus everything outside `crates/`, and
+replaces every other crate with crane's stub. Each piece is a filtered path, so a
+slice's hash follows its own content: editing a crate re-runs only the slices that can
+see it.
+
+| Edit | `test-*` checks re-run (of 53) |
+|------|------|
+| `agent-review`, `agent-runtime`, `agent-grpc`, `agent-forge` | 3 |
+| `agent-review-fleet`, `agent-tools`, `agent-theme` | 4 |
+| `agent-git` | 6 |
+| `agent-core` (47 crates depend on it) | 48 |
+| the root `Cargo.toml`/`Cargo.lock`, or anything outside `crates/` | all |
+
+Edit any one of 40 of the 53 crates and 5 or fewer slices re-run; the median is 4. The
+crates almost everything depends on (`agent-core`, `agent-metrics`, `agent-mcp`,
+`agent-testkit`, `agent-config-store`, `agent-proto`, `agent-retry`) are compiled once into
+a shared foundation build that every slice starts from, so a cold gate doesn't rebuild
+`agent-core` 53 times. `nix build .#checks.x86_64-linux.test` builds every slice;
+`nix build .#checks.x86_64-linux.test-agent-review` runs one.
+
+Three things keep a slice testing what the whole-workspace `cargo test` tested:
+
+- **Features.** One workspace build unifies features, so a crate's tests ran with every
+  feature any other crate turned on (agent-runtime's `auth`, the store backends, …).
+  [`nix/test-features.json`](../../nix/test-features.json) records each crate's unified
+  features from `cargo metadata`, and its `test-<crate>` passes them. It is generated:
+  after changing a crate's features or dependencies, run `nix run .#gen-test-features`
+  and commit the result; the `test-features-sync` check fails until you do.
+- **Files read across crates.** A test that reads another crate's files without depending
+  on it (an `include_str!` of a migration, a guard that scans other crates' sources)
+  needs that crate's real code in its slice: list it under `extraSources` in
+  `workspace-slice.nix`. A missing entry fails loudly: `include_str!` doesn't compile, and
+  the source-scanning guards (`no_raw_spawn`, `no_unscoped_spawn`) reject a dir of stubs.
+- **Paths.** Every slice unpacks to the same directory, so cargo reuses the foundation
+  build's compiled crates (it keys a workspace crate by its absolute path).
+
+The rest of the gate (`clippy`, `coverage`, `leak`, `bench`, `feature-matrix`, the binary
+and e2e checks) still builds from the whole workspace, so it re-runs on any change.
+
 ## Coverage
 
 Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)

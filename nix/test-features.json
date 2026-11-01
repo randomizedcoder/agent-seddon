@@ -1,0 +1,252 @@
+{
+  "agent-ast": [
+    "ast-go"
+  ],
+  "agent-cache": [
+    "cache-strategies"
+  ],
+  "agent-campaign": [
+    "campaign-postgres"
+  ],
+  "agent-cli": [
+    "auth",
+    "postgres"
+  ],
+  "agent-config-store": [
+    "config-store-postgres"
+  ],
+  "agent-context": [
+    "context-instant",
+    "context-mode-aware",
+    "context-sliding-window",
+    "context-summarizing"
+  ],
+  "agent-core": [],
+  "agent-digest": [
+    "digest-clickhouse",
+    "digest-postgres",
+    "digest-sqlite"
+  ],
+  "agent-doc-links": [],
+  "agent-egress": [],
+  "agent-embed": [
+    "embed-local"
+  ],
+  "agent-export": [
+    "export-render"
+  ],
+  "agent-forge": [
+    "forge-github",
+    "forge-gitlab",
+    "forge-store",
+    "forge-store-postgres"
+  ],
+  "agent-git": [
+    "git-cli"
+  ],
+  "agent-graph": [],
+  "agent-grpc": [
+    "auth"
+  ],
+  "agent-k8s-render": [],
+  "agent-k8s-secrets": [],
+  "agent-k8s-status": [],
+  "agent-lsp": [
+    "lsp-stdio"
+  ],
+  "agent-mcp": [],
+  "agent-memory": [
+    "memory-dimensions",
+    "memory-file"
+  ],
+  "agent-metrics": [],
+  "agent-metrics-proxy": [
+    "http"
+  ],
+  "agent-mode": [],
+  "agent-prompt": [
+    "prompt-store",
+    "prompt-store-postgres"
+  ],
+  "agent-proto": [],
+  "agent-providers": [
+    "provider-anthropic",
+    "provider-branching",
+    "provider-consensus",
+    "provider-openai-compat",
+    "provider-pool",
+    "provider-router"
+  ],
+  "agent-pty": [
+    "pty-local"
+  ],
+  "agent-reference": [
+    "reference-local"
+  ],
+  "agent-registry": [
+    "registry-store",
+    "registry-store-postgres"
+  ],
+  "agent-repo-graph": [],
+  "agent-retry": [],
+  "agent-review": [],
+  "agent-review-fleet": [
+    "fleet-store",
+    "fleet-store-postgres"
+  ],
+  "agent-role": [
+    "role-store",
+    "role-store-postgres"
+  ],
+  "agent-runtime": [
+    "ast",
+    "auth",
+    "auth-postgres",
+    "cache",
+    "campaign",
+    "campaign-postgres",
+    "config",
+    "config-schema",
+    "context-instant",
+    "context-mode-aware",
+    "context-sliding-window",
+    "context-summarizing",
+    "digest",
+    "digest-postgres",
+    "dimensions",
+    "fleet",
+    "fleet-postgres",
+    "fleet-store",
+    "forge",
+    "forge-github",
+    "forge-gitlab",
+    "forge-registry-postgres",
+    "forge-registry-store",
+    "git",
+    "graph",
+    "grpc",
+    "lsp",
+    "mcp",
+    "memory-file",
+    "metrics-proxy",
+    "mode",
+    "postgres",
+    "prompt",
+    "prompt-postgres",
+    "prompt-store",
+    "provider-anthropic",
+    "provider-consensus",
+    "provider-openai-compat",
+    "provider-pool",
+    "provider-router",
+    "pty",
+    "recall",
+    "reference",
+    "registry",
+    "registry-postgres",
+    "registry-store",
+    "review",
+    "role-postgres",
+    "role-store",
+    "scanner",
+    "scheduler",
+    "scheduler-postgres",
+    "scheduler-store",
+    "search",
+    "semantic-search",
+    "session",
+    "session-export",
+    "skill-write",
+    "structural-search",
+    "structured",
+    "subagents",
+    "tasks",
+    "theme-postgres",
+    "theme-store",
+    "tokenizer",
+    "tool-core",
+    "tool-edit",
+    "tool-metrics",
+    "tool-patch",
+    "tool-search",
+    "transport-registry-postgres",
+    "transport-registry-store",
+    "verifier",
+    "web",
+    "web-search",
+    "websearch-brave",
+    "websearch-searxng"
+  ],
+  "agent-sandbox": [
+    "sandbox-local",
+    "sandbox-nix"
+  ],
+  "agent-scanner": [
+    "scanner-secret",
+    "scanner-threat"
+  ],
+  "agent-scheduler": [
+    "scheduler-local",
+    "scheduler-store",
+    "scheduler-store-postgres"
+  ],
+  "agent-search": [
+    "search-tantivy",
+    "search-vector"
+  ],
+  "agent-session": [
+    "session-file"
+  ],
+  "agent-slack": [
+    "transport-store",
+    "transport-store-postgres"
+  ],
+  "agent-tasks": [
+    "tasks-memory"
+  ],
+  "agent-telemetry": [],
+  "agent-testkit": [
+    "oidc",
+    "pki"
+  ],
+  "agent-theme": [],
+  "agent-tokenizer": [
+    "tokenizer-approx"
+  ],
+  "agent-tools": [
+    "tool-ast-graph",
+    "tool-core",
+    "tool-edit",
+    "tool-forge",
+    "tool-git",
+    "tool-lsp",
+    "tool-metrics",
+    "tool-patch",
+    "tool-pty",
+    "tool-schedule",
+    "tool-search",
+    "tool-search-index",
+    "tool-session-export",
+    "tool-session-recall",
+    "tool-skill-write",
+    "tool-structural-search",
+    "tool-todo",
+    "tool-web",
+    "tool-web-search"
+  ],
+  "agent-validate": [
+    "validate-draft07"
+  ],
+  "agent-verifier": [
+    "verifier-ensemble",
+    "verifier-llm",
+    "verifier-schema"
+  ],
+  "agent-web": [
+    "web-local"
+  ],
+  "agent-web-search": [
+    "websearch-brave",
+    "websearch-searxng"
+  ]
+}

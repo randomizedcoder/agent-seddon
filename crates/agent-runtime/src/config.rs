@@ -6741,6 +6741,9 @@ mod tests {
         );
     }
 
+    /// `mode = "oidc"` needs the verifier, so this runs only with the `auth` feature
+    /// (on in the `agent` binary via agent-cli, off in agent-runtime's defaults).
+    #[cfg(feature = "auth")]
     #[test]
     fn negative_bearer_beside_service_token() {
         auth_cfg_checked_at_load(

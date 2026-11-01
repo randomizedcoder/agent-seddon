@@ -25,13 +25,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-runtime" ]) src cargoArtifacts;
     # Two filter substrings (libtest ORs them) → they must follow `--`; `cargo test`
     # itself takes only one positional TESTNAME.
     cargoTestExtraArgs = "-p agent-runtime --features registry-store,fleet-store,prompt-store,graph,scheduler-store,forge-registry-store,transport-registry-store -- tenant:: scheduler_driver::";

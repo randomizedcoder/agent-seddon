@@ -11,10 +11,12 @@
   craneLib,
   commonArgs,
   cargoArtifacts,
+  workspaceSlice,
   advisory-db,
   versions,
   constantsRs,
   openapiDoc,
+  testFeaturesJson,
   agent,
   go-ast,
   go-graph,
@@ -41,17 +43,53 @@ let
     path = src + "/rendered/k3s";
     name = "rendered-k3s";
   };
+  # Each crate's features in a whole-workspace build (nix/test-features.nix).
+  testFeatures = lib.importJSON (src + "/nix/test-features.json");
+
+  # One `test-<crate>` check per workspace member (nix/checks/test.nix).
+  testChecks = lib.listToAttrs (
+    map (crate: {
+      name = "test-${crate}";
+      value = craneCheck ./test.nix {
+        inherit
+          pkgs
+          workspaceSlice
+          renderedK3s
+          crate
+          ;
+        features = testFeatures.${crate} or [ ];
+      };
+    }) workspaceSlice.crateNames
+  );
 in
-{
+testChecks
+// {
   clippy = craneCheck ./clippy.nix { inherit cargoArtifacts; };
   rustfmt = craneCheck ./rustfmt.nix { };
-  test = craneCheck ./test.nix { inherit pkgs cargoArtifacts renderedK3s; };
+  # nix/test-features.json matches the manifests (fix: `nix run .#gen-test-features`).
+  test-features-sync = pkgs.runCommand "test-features-sync-check" { } ''
+    if ! diff -u ${src + "/nix/test-features.json"} ${testFeaturesJson}; then
+      echo "" >&2
+      echo "nix/test-features.json is stale vs the Cargo manifests." >&2
+      echo "Regenerate it: nix run .#gen-test-features" >&2
+      exit 1
+    fi
+    touch $out
+  '';
+
+  # Every crate's tests on its own slice, and `test` as the aggregate.
+  test = pkgs.linkFarm "test" (
+    map (crate: {
+      name = crate;
+      path = testChecks."test-${crate}";
+    }) workspaceSlice.crateNames
+  );
   # The campaign track's first-autonomous-PR path end to end (CP-06b): the shipped
   # driver + planner + poller and the in-process worker over a real git checkout
   # with a bare origin, a scripted model and a fake forge (agent-runtime's
   # `campaign_e2e` test). Redundant with `test` by design so the gate names the
   # increment. docs/design/campaigns/05-increments.md.
-  campaign-e2e = craneCheck ./campaign-e2e.nix { inherit pkgs cargoArtifacts; };
+  campaign-e2e = craneCheck ./campaign-e2e.nix { inherit pkgs workspaceSlice; };
   cargo-audit = craneCheck ./cargo-audit.nix { inherit advisory-db; };
   # `cargo deny check licenses bans sources` — supply-chain/licensing static
   # analysis over the dep graph (config in deny.toml at the repo root). Offline;
@@ -65,112 +103,112 @@ in
   # default so the main `test` check never builds the DB dep). PG-10 repointed this
   # tier onto `StorePrompt` over a config-store `SqliteBackend`; the dedicated,
   # feature-scoped check runs the sqlite path in the gate. docs/design/prompts/05-storage.md.
-  prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit cargoArtifacts; };
+  prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit workspaceSlice; };
   # Executes the sqlite ProviderRegistry tier's tests (feature `registry-sqlite`, off
   # by default). PG-11 retired the bespoke `SqliteRegistry` — the `sqlite` tier is now
   # `StoreRegistry` over a config-store `SqliteBackend` — and added this dedicated,
   # feature-scoped check (the bespoke impl had none, so its tests never ran in-gate);
   # the model-router 03 twin of prompt-sqlite/fleet-sqlite.
-  registry-sqlite = craneCheck ./registry-sqlite.nix { inherit cargoArtifacts; };
+  registry-sqlite = craneCheck ./registry-sqlite.nix { inherit workspaceSlice; };
   # Executes the bwrap Tier-1 isolation backend's tests (feature `sandbox-bwrap`, off by
   # default so the main `test` check never builds the seccomp/libc deps). The dedicated,
   # feature-scoped check that runs the pure argv/seccomp-BPF assembly in the gate; the
   # live-exec pillar tests self-skip where unprivileged namespaces are unavailable.
   # multi-tenancy C23 (docs/design/multi-tenancy/01-process-isolation.md).
-  sandbox-bwrap = craneCheck ./sandbox-bwrap.nix { inherit cargoArtifacts; };
+  sandbox-bwrap = craneCheck ./sandbox-bwrap.nix { inherit workspaceSlice; };
   # Executes the sqlite FleetRegistry roster tier's tests (feature `fleet-sqlite`,
   # off by default). PG-11 retired the bespoke `SqliteFleet` — the `sqlite` tier is now
   # `StoreFleet` over a config-store `SqliteBackend`; this dedicated, feature-scoped
   # check runs the sqlite path in the gate — the review-fleet C2 twin of
   # prompt-sqlite/registry-sqlite. docs/design/review-fleet/03-fleet-core.md.
-  fleet-sqlite = craneCheck ./fleet-sqlite.nix { inherit cargoArtifacts; };
+  fleet-sqlite = craneCheck ./fleet-sqlite.nix { inherit workspaceSlice; };
   # Executes the OIDC/JWT auth layer's verifier + tower-layer matrix (feature `auth`,
   # off by default so the main `test` check never builds `jsonwebtoken`/`reqwest`).
   # Hermetic (embedded keypair + in-memory JWKS + injected clock). config C33 / B1,
   # docs/design/config/09-increments.md.
-  auth = craneCheck ./auth.nix { inherit cargoArtifacts; };
+  auth = craneCheck ./auth.nix { inherit workspaceSlice; };
   # Executes the sqlite config-store backend's trait matrix (feature
   # `config-store-sqlite`, off by default so the main `test` check never builds the
   # DB dep). The dedicated, feature-scoped check that runs them in the gate — the
   # config-architecture A1 twin of fleet-sqlite. docs/design/config/09-increments.md.
-  config-store-sqlite = craneCheck ./config-store-sqlite.nix { inherit cargoArtifacts; };
+  config-store-sqlite = craneCheck ./config-store-sqlite.nix { inherit workspaceSlice; };
   # Executes the `PgRepoGraph` tier's DB-free unit tables (feature
   # `repo-graph-postgres`, off by default so the standard build stays `agent-core`-only
   # and DB-free): the `with_tenant` refusals, the read clamps, the `UNNEST` array
   # builders and `map_db` (repo-knowledge RK-02, tier P1). The conformance reuse (R3)
   # and pg-only (R4) rows are `#[ignore]`-gated and run under `nix run .#pg-integration`;
   # clippy `--all-features` lints the tier in-gate. docs/design/repo-knowledge/06-increments.md.
-  repo-graph = craneCheck ./repo-graph.nix { inherit cargoArtifacts; };
+  repo-graph = craneCheck ./repo-graph.nix { inherit workspaceSlice; };
   repo-graph-index = craneCheck ./repo-graph-index.nix { inherit pkgs cargoArtifacts; };
-  repo-graph-rust = craneCheck ./repo-graph-rust.nix { inherit cargoArtifacts; };
+  repo-graph-rust = craneCheck ./repo-graph-rust.nix { inherit workspaceSlice; };
   # Executes the shared-store `ProviderRegistry` backend (`StoreRegistry`) matrix
   # over the in-memory config store (feature `registry-store`, off by default so
   # the main `test` check never builds the store dep). The config-architecture A3
   # registry-convergence twin of config-store-sqlite. docs/design/config/09-increments.md.
-  registry-store = craneCheck ./registry-store.nix { inherit cargoArtifacts; };
+  registry-store = craneCheck ./registry-store.nix { inherit workspaceSlice; };
   # Executes the shared-store `FleetRegistry` backend (`StoreFleet`) matrix over the
   # in-memory config store (feature `fleet-store`, off by default). The config-
   # architecture A3b fleet-convergence twin of registry-store. docs/design/config/09-increments.md.
-  fleet-store = craneCheck ./fleet-store.nix { inherit cargoArtifacts; };
+  fleet-store = craneCheck ./fleet-store.nix { inherit workspaceSlice; };
   # Executes the shared-store `PromptStore` backend (`StorePrompt`) matrix over the
   # in-memory config store (feature `prompt-store`, off by default). The config-
   # architecture A3c prompt-convergence (outlier) twin of registry-store. docs/design/config/09-increments.md.
-  prompt-store = craneCheck ./prompt-store.nix { inherit cargoArtifacts; };
+  prompt-store = craneCheck ./prompt-store.nix { inherit workspaceSlice; };
   # Executes the shared-store `RoleRegistry` backend (`StoreRoles`) matrix over the
   # in-memory config store (feature `role-store`, off by default). The config-
   # architecture C1b RBAC-role-card twin of registry-store. docs/design/config/09-increments.md.
-  role-store = craneCheck ./role-store.nix { inherit cargoArtifacts; };
+  role-store = craneCheck ./role-store.nix { inherit workspaceSlice; };
   # Executes the durable, tenant-keyed `Scheduler` backend (`StoreScheduler`) matrix
   # over the in-memory config store (feature `scheduler-store`, off by default). The
   # config-architecture C2c durable-scheduler twin of registry-store. docs/design/config/10-per-tenant-scheduler.md.
-  scheduler-store = craneCheck ./scheduler-store.nix { inherit cargoArtifacts; };
+  scheduler-store = craneCheck ./scheduler-store.nix { inherit workspaceSlice; };
   # Executes the shared-store `ForgeRegistry` backend (`StoreForges`) matrix + the
   # forge-kind builder (card validation / repo-encoding / SSRF screen) over the
   # in-memory config store (feature `forge-store`, off by default). The config-
   # architecture C36 forge-card twin of registry-store. docs/design/config/09-increments.md.
-  forge-registry-store = craneCheck ./forge-registry-store.nix { inherit cargoArtifacts; };
+  forge-registry-store = craneCheck ./forge-registry-store.nix { inherit workspaceSlice; };
   # Executes the GitHub-App mint IDOR gate (`ghapp_allowed` = bootstrap ∪ verified) + the
   # ownership-verified install onboarding, behind the non-default `forge-ghapp` feature
   # (forge-auth F2 + F5c2). The default `test` check builds forge-ghapp off, so this runs the cross-tenant
   # minting authorization decision in the gate. docs/design/forge-auth/STATUS.md.
-  forge-ghapp = craneCheck ./forge-ghapp.nix { inherit cargoArtifacts; };
+  forge-ghapp = craneCheck ./forge-ghapp.nix { inherit workspaceSlice; };
   # Executes the Gitea `Forge` backend + the gitea arm of the forge-kind builder
   # (feature `forge-gitea`, off by default so the standard github+gitlab build is
   # unchanged). The config-architecture D1b new-host check. docs/design/config/04-forge-registry.md.
-  forge-gitea = craneCheck ./forge-gitea.nix { inherit cargoArtifacts; };
+  forge-gitea = craneCheck ./forge-gitea.nix { inherit workspaceSlice; };
   # Executes the Bitbucket Cloud `Forge` backend + the bitbucket arm of the forge-kind
   # builder (feature `forge-bitbucket`, off by default). The D1b divergent-API host
   # check — body-envelope paging, no review object, nested fields, upper-case state.
-  forge-bitbucket = craneCheck ./forge-bitbucket.nix { inherit cargoArtifacts; };
+  forge-bitbucket = craneCheck ./forge-bitbucket.nix { inherit workspaceSlice; };
   # Executes the shared-store `TransportRegistry` backend (`StoreTransports`) matrix +
   # the transport-kind builder (card validation / channel purpose / endpoint SSRF
   # screen) + the rate-limit / soft-fail primitives, over the in-memory config store
   # (feature `transport-store`, off by default). The config-architecture C37
   # message-transport twin of forge-registry-store. docs/design/config/09-increments.md.
-  transport-registry-store = craneCheck ./transport-registry-store.nix { inherit cargoArtifacts; };
+  transport-registry-store = craneCheck ./transport-registry-store.nix { inherit workspaceSlice; };
   # Executes the Matrix `MessageTransport` impl (room-id path encoding / response
   # classify / no-token error) + the matrix arm of the transport-kind factory
   # (feature `transport-matrix`, off by default so the default build stays Slack-only).
   # The D2b message-transport twin of forge-gitea. docs/design/config/05-message-transport.md.
-  transport-matrix = craneCheck ./transport-matrix.nix { inherit cargoArtifacts; };
+  transport-matrix = craneCheck ./transport-matrix.nix { inherit workspaceSlice; };
   # Executes the per-tenant routing layer (`PerTenant<S>`) matrix + end-to-end
   # isolation over the real converged stores (features registry-store/fleet-store/
   # prompt-store, off by default). The config-architecture C2 per-tenant-plane check.
   # docs/design/config/09-increments.md.
-  per-tenant = craneCheck ./per-tenant.nix { inherit cargoArtifacts; };
+  per-tenant = craneCheck ./per-tenant.nix { inherit workspaceSlice; };
   # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
   # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
   # feature-scoped check that runs them in the gate. Parity spec 23; offline
   # (vendored ranks). docs/components/tokenizer.md.
-  tokenizer-tiktoken = craneCheck ./tokenizer-tiktoken.nix { inherit cargoArtifacts; };
+  tokenizer-tiktoken = craneCheck ./tokenizer-tiktoken.nix { inherit workspaceSlice; };
   # Executes the `hf` tokenizer backend's tests (feature `tokenizer-hf`, off by
   # default). Counts with a local model's `tokenizer.json` via the HuggingFace
   # `tokenizers` crate; offline (tiny fixture vocab). Parity spec 23.
-  tokenizer-hf = craneCheck ./tokenizer-hf.nix { inherit cargoArtifacts; };
+  tokenizer-hf = craneCheck ./tokenizer-hf.nix { inherit workspaceSlice; };
   # Executes the `provider` tokenizer backend's tests (feature `tokenizer-provider`,
   # off by default) against a tiny_http loopback server — hermetic, no real endpoint.
   # Covers auth-header, response clamping, and the key/body no-leak error path.
-  tokenizer-provider = craneCheck ./tokenizer-provider.nix { inherit cargoArtifacts; };
+  tokenizer-provider = craneCheck ./tokenizer-provider.nix { inherit workspaceSlice; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
   bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };
@@ -418,7 +456,7 @@ in
   # table-driven rstest suite over rendered/k3s/ pinning the renderer's
   # hardening/identity/GitOps invariants plus the adversarial check-the-checks rows
   # (k8s track K3, docs/design/k8s/04).
-  k8s-render-tests = craneCheck ./k8s-render-tests.nix { inherit cargoArtifacts renderedK3s; };
+  k8s-render-tests = craneCheck ./k8s-render-tests.nix { inherit workspaceSlice renderedK3s; };
   # Schema-validity (not just drift/invariants) of every rendered object:
   # `kubeconform -strict` over rendered/k3s, incl. the cert-manager and ArgoCD
   # custom resources, against schemas vendored + pinned here (no network, no
@@ -428,13 +466,13 @@ in
   # (crates/agent-k8s-secrets): manifest parse + fail-closed source validation + Secret
   # build + redaction, with the mandatory `adversarial_` rows (k8s track K3,
   # docs/design/k8s/07-secrets.md). The `k8s-render-tests` twin.
-  k8s-secrets = craneCheck ./k8s-secrets.nix { inherit cargoArtifacts; };
+  k8s-secrets = craneCheck ./k8s-secrets.nix { inherit workspaceSlice; };
   # Correctness of the `nix run .#k8s-status` health tool's pure core
   # (crates/agent-k8s-status): parse `kubectl get … -o json`, grade each ArgoCD
   # Application + role Deployment, roll up green/red — with the mandatory `adversarial_`
   # rows proving hostile/missing fields fail closed (k8s track K3, docs/design/k8s/04).
   # The `k8s-secrets` / `k8s-render-tests` twin.
-  k8s-status = craneCheck ./k8s-status.nix { inherit cargoArtifacts; };
+  k8s-status = craneCheck ./k8s-status.nix { inherit workspaceSlice; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.

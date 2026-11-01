@@ -125,6 +125,20 @@ let
   # Build all workspace dependencies once; reused by the package + every check.
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+  # Per-crate source slices (real code for one crate's closure, stubs elsewhere), so
+  # a check rebuilds only when a crate it can see changes.
+  workspaceSlice = import ./workspace-slice.nix {
+    inherit
+      lib
+      pkgs
+      craneLib
+      cleanedSrc
+      commonArgs
+      cargoArtifacts
+      ;
+    root = src;
+  };
+
   # The `agent` binary (from crates/agent-cli).
   #
   # `buildPackage` runs the test suite as its check phase, so it needs the same
@@ -263,6 +277,30 @@ let
     text = ''
       dest="''${1:-crates/agent-grpc/src/constants.rs}"
       cp -f ${constantsRs} "$dest"
+      chmod u+w "$dest"
+      echo "wrote $dest"
+    '';
+  };
+
+  # Each workspace crate's features in a whole-workspace build, for the per-crate
+  # `test-<crate>` checks (nix/test-features.nix). Shared by the
+  # `gen-test-features` app and the `test-features-sync` check.
+  testFeaturesJson = import ./test-features.nix {
+    inherit
+      pkgs
+      craneLib
+      commonArgs
+      workspaceSlice
+      ;
+  };
+
+  # Writes nix/test-features.json. Run after changing a crate's `[features]` or a
+  # dependency's `features = [...]` (the `test-features-sync` check says when).
+  gen-test-features = pkgs.writeShellApplication {
+    name = "gen-test-features";
+    text = ''
+      dest="''${1:-nix/test-features.json}"
+      cp -f ${testFeaturesJson} "$dest"
       chmod u+w "$dest"
       echo "wrote $dest"
     '';
@@ -643,10 +681,12 @@ let
       craneLib
       commonArgs
       cargoArtifacts
+      workspaceSlice
       advisory-db
       versions
       constantsRs
       openapiDoc
+      testFeaturesJson
       agent
       go-ast
       go-graph
@@ -959,6 +999,7 @@ in
         clean
         gen-constants
         gen-openapi
+        gen-test-features
         buf-image
         k8s-images
         k8s-render-manifests

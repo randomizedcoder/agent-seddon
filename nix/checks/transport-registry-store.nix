@@ -15,13 +15,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-slack" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-slack --features transport-store";
   }
 )

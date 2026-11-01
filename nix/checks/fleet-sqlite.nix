@@ -15,13 +15,13 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-review-fleet" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-review-fleet --features fleet-sqlite";
   }
 )

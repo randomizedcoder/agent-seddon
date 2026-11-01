@@ -16,13 +16,13 @@
   pkgs,
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-runtime" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-runtime --test campaign_e2e";
     # The hermetic check sandbox has no host PATH: the worker's checkpoint and push
     # shell out to `git` through `agent-git`'s CLI backend.

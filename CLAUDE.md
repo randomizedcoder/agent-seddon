@@ -35,11 +35,16 @@ nix flake check                 # clippy -D warnings + rustfmt + tests + cargo-a
 nix fmt                         # format all .nix files
 nix build .#agent               # build the `agent` binary -> ./result/bin/agent
 nix run   .#gen-constants       # regenerate constants.rs after editing nix/constants.nix
+nix run   .#gen-test-features   # regenerate nix/test-features.json after changing crate features/deps
 nix run   .#buf-image           # regenerate the buf baseline after an intentional wire change
 ```
 
 `nix flake check` is the gate: it runs `clippy` with `-D warnings`, so the tree
 must be warning-clean. When in doubt, run it before considering work done.
+
+The unit tests run as one `test-<crate>` check per crate on a source slice, so an edit
+re-runs only the crates that can see it (`nix build .#checks.x86_64-linux.test-agent-review`
+runs one). See [`docs/components/testing.md`](docs/components/testing.md#per-crate-test-slices-the-gate).
 
 ## Proto governance (buf)
 

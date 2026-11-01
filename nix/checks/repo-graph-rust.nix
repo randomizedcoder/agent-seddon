@@ -2,12 +2,12 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit (workspaceSlice.sliceArgs [ "agent-repo-graph" ]) src cargoArtifacts;
     cargoTestExtraArgs = "-p agent-repo-graph --features extract-rust";
   }
 )

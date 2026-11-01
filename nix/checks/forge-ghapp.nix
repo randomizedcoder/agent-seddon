@@ -33,13 +33,21 @@
 {
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
 }:
 
 craneLib.cargoTest (
   commonArgs
   // {
-    inherit cargoArtifacts;
+    inherit
+      (workspaceSlice.sliceArgs [
+        "agent-runtime"
+        "agent-forge"
+        "agent-cli"
+      ])
+      src
+      cargoArtifacts
+      ;
     cargoTestExtraArgs = "-p agent-runtime -p agent-forge -p agent-cli --features forge-ghapp -- secrets:: install_gate:: install_lifecycle:: ghapp webhook";
   }
 )

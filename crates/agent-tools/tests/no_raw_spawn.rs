@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
+use rstest::rstest;
+
 /// Crate `src` dirs whose production code must be spawn-free, relative to the
 /// workspace root.
 const SCANNED: &[&str] = &[
@@ -36,6 +38,23 @@ const SCANNED: &[&str] = &[
 ///   force `Manifest::build`/`compare` and their callers async for no security
 ///   gain. Kept as a raw spawn, explicitly and narrowly.
 const ALLOWED: &[&str] = &["crates/agent-search/src/manifest.rs"];
+
+/// The first line of crane's `mkDummySrc` stub. The nix gate tests each crate on a
+/// source slice where crates outside its dependency closure are such stubs, so a
+/// scanned dir must be declared in `nix/workspace-slice.nix` (`extraSources`).
+const CRANE_STUB: &str = "#![allow(clippy::all)]\n#![allow(dead_code)]";
+
+/// Why a scanned dir's files can't be trusted to be the real source (`None` when
+/// they can): a guard that scans nothing, or only stubs, would pass vacuously.
+fn unscannable(bodies: &[String]) -> Option<&'static str> {
+    if bodies.is_empty() {
+        Some("no .rs files")
+    } else if bodies.iter().all(|b| b.starts_with(CRANE_STUB)) {
+        Some("only crane stubs (add the crate to `extraSources` in nix/workspace-slice.nix)")
+    } else {
+        None
+    }
+}
 
 fn workspace_root() -> PathBuf {
     // this crate is crates/agent-tools; the workspace root is two up.
@@ -77,6 +96,13 @@ fn adversarial_no_raw_command_outside_seam() {
     for rel in SCANNED {
         let mut files = Vec::new();
         rs_files(&root.join(rel), &mut files);
+        let bodies: Vec<String> = files
+            .iter()
+            .map(|f| std::fs::read_to_string(f).unwrap_or_default())
+            .collect();
+        if let Some(why) = unscannable(&bodies) {
+            panic!("{rel}: {why}");
+        }
         for f in files {
             let workspace_rel = f
                 .strip_prefix(&root)
@@ -102,3 +128,29 @@ fn adversarial_no_raw_command_outside_seam() {
          ALLOWED): {offenders:?}"
     );
 }
+
+// Check the check: a dir of stubs or nothing fails the guard instead of passing it.
+#[rstest]
+// desc: real source is scanned.
+#[case::positive_real_source(&["pub fn f() {}"], None)]
+// desc: a stub beside a real file still scans the real file.
+#[case::corner_stub_and_real(&[STUB_FIXTURE, "pub fn f() {}"], None)]
+// desc: a missing or empty dir scans nothing.
+#[case::negative_no_files(&[], Some("no .rs files"))]
+// desc: a crate outside the slice's closure is only crane's stub.
+#[case::adversarial_only_stubs(&[STUB_FIXTURE], Some("only crane stubs"))]
+// desc: the stub text later in a file isn't a stub file.
+#[case::boundary_marker_not_at_start(&["// x\n#![allow(clippy::all)]\n#![allow(dead_code)]"], None)]
+fn unscannable_cases(#[case] bodies: &[&str], #[case] want: Option<&str>) {
+    let bodies: Vec<String> = bodies.iter().map(ToString::to_string).collect();
+    let got = unscannable(&bodies);
+    match want {
+        None => assert_eq!(got, None, "{bodies:?}"),
+        Some(w) => assert!(
+            got.is_some_and(|g| g.starts_with(w)),
+            "{bodies:?} -> {got:?}"
+        ),
+    }
+}
+
+const STUB_FIXTURE: &str = "#![allow(clippy::all)]\n#![allow(dead_code)]\npub fn main() {}\n";
