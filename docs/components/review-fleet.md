@@ -338,9 +338,23 @@ exactly those in one `SkipReviews` call (a listing is capped at 500, the same as
 the exact answer `yes` confirms; anything else, or closed stdin, skips nothing. `--dry-run` only
 lists and wins over `--yes`; `--yes` skips without asking. The call is bounded at 5 minutes. It dials
 `[grpc.fleet] endpoint` (default `127.0.0.1:50086`) with the `[grpc.client] bearer`
-credential, such as a stored `agent login` token. Nothing is approved or posted. `ListReviews` takes `exclude_status` (at most 8 values), which the portal's Fleet tab
-uses to hide skipped drafts by default; its repo filter is a menu of the repos seen on the roster
-and in the drafts.
+credential, such as a stored `agent login` token. Nothing is approved or posted.
+
+`ListReviews` takes `exclude_status` (at most 8 values). The portal's Fleet tab uses it to split
+the drafts into two views, an **Inbox | History** toggle at the head of the filter bar:
+
+- **Inbox** (the default) lists the drafts that still need a decision: `drafted`, and `approved`
+  (an approval whose post failed). It excludes `posted`, `superseded` and `skipped`. Its status
+  menu offers only those two statuses. **Skip all N shown** (`approve:review`) sends exactly the
+  ids on screen to `SkipReviews`, after a confirm naming the count and repo, then snacks the
+  outcome counts ("12 skipped, 1 already posted").
+- **History** lists the finished drafts: `posted`, `skipped` and `superseded`, newest first. It is
+  read-only: no Approve, Skip, edit or Skip all. The detail pane still shows the body and who
+  approved or skipped it.
+
+The repo filter is a menu of the repos seen on the roster and in the drafts, and it carries over
+between the views. A listing that reaches the server's 500-row cap says "Showing the newest 500";
+there is no paging yet.
 
 **Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
 `every {poll_secs}` job per enabled, forge-capable roster row (kept in step with the roster by the

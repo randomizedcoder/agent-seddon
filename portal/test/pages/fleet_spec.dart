@@ -100,22 +100,153 @@ const fleetSpec = PageSpec('fleet', [
   SpecRow(
     elementId: 'fleet.filter.status',
     caseClass: CaseClass.boundary,
-    name: 'default_hides_skipped',
-    description: 'the first list asks for every status except skipped',
+    name: 'default_is_inbox',
+    description: 'the first list is the Inbox: no status, excluding posted, '
+        'superseded and skipped',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
     elementId: 'fleet.filter.status',
     caseClass: CaseClass.positive,
-    name: 'show_skipped',
-    description: 'choosing "skipped" lists only skipped drafts, excluding nothing',
+    name: 'history_show_skipped',
+    description: 'in History, choosing "skipped" lists only skipped drafts',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
     elementId: 'fleet.filter.status',
     caseClass: CaseClass.corner,
-    name: 'all_includes_skipped',
-    description: 'choosing "all" sends no status and no exclusion',
+    name: 'history_all_finished',
+    description: 'History\'s "all finished" sends no status and excludes drafted '
+        'and approved',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.filter.status',
+    caseClass: CaseClass.corner,
+    name: 'inbox_menu_offers_open_only',
+    description: 'the Inbox status menu offers all open, drafted and approved, '
+        'never a finished status',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  // ── Inbox | History ─────────────────────────────────────────────────────────
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.positive,
+    name: 'history_lists_finished',
+    description: 'History re-lists excluding drafted and approved',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.positive,
+    name: 'history_is_read_only',
+    description: 'a History draft has no Approve or Skip button and no editor, '
+        'even a superseded one',
+    expectedRpc: 'agent.v1.ReviewFleetService/GetReview',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.boundary,
+    name: 'view_switch_resets_status',
+    description: 'switching view drops a status the other view has no menu entry '
+        'for',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.corner,
+    name: 'repo_filter_shared_across_views',
+    description: 'the repo filter carries over when the view changes',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  // ── skip all shown ──────────────────────────────────────────────────────────
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.positive,
+    name: 'skip_all_sends_shown_ids',
+    description: 'Skip all → confirm fires SkipReviews with every listed id, '
+        'snacks the counts and re-lists',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll.confirm',
+    caseClass: CaseClass.positive,
+    name: 'confirm_fires_skip_reviews',
+    description: 'the confirm button is what dispatches SkipReviews',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll.cancel',
+    caseClass: CaseClass.positive,
+    name: 'skip_all_cancel_no_rpc',
+    description: 'Cancel dismisses the dialog and fires no SkipReviews',
+    expectedRpc: 'local',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_partial_outcomes_summary',
+    description: 'mixed outcomes are summed in one snack: "2 skipped, 1 already '
+        'posted"',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_hidden_when_empty',
+    description: 'an empty Inbox offers no Skip all',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.boundary,
+    name: 'skip_all_hidden_in_history',
+    description: 'History offers no Skip all',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.negative,
+    name: 'skip_all_without_approve_role_hidden',
+    description: 'a user without approve:review gets no Skip all',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.negative,
+    name: 'skip_all_error_snack',
+    description: 'a failed SkipReviews surfaces "Skip all failed" and re-lists',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.adversarial,
+    name: 'skip_all_only_shown_ids',
+    description: 'a draft that arrived after the list loaded is not in the '
+        'request: only the ids on screen are sent',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.adversarial,
+    name: 'double_click_one_skip_all',
+    description: 'a rapid double-click on confirm fires exactly one SkipReviews',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  // ── list cap ────────────────────────────────────────────────────────────────
+  SpecRow(
+    elementId: 'fleet.list.capped',
+    caseClass: CaseClass.positive,
+    name: 'capped_list_says_newest',
+    description: 'a listing at the server\'s 500-row cap says it shows the newest '
+        '500',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.list.capped',
+    caseClass: CaseClass.boundary,
+    name: 'under_cap_has_no_note',
+    description: '499 drafts show no cap note',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(

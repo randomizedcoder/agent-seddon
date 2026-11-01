@@ -85,6 +85,11 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
 > foundation for the [multi-tenancy track](../multi-tenancy/) (components C24/C25), tracked
 > there — not fleet increments 1–8.
 
+- **2026-11-01** — **Fleet tab Inbox | History.** The Fleet tab's list is split by a toggle.
+  The Inbox (default) holds drafted and approved drafts and has **Skip all N shown**, which
+  sends the ids on screen to `SkipReviews`. History holds posted, skipped and superseded
+  drafts, read-only. The old "not skipped / all" status filter is replaced by a status menu
+  for each view; a 500-row listing says it shows the newest 500.
 - **2026-11-01** — **Bulk skip.** `SkipReviews` skips up to 500 drafts by id in one call,
   each through `SkipReview`'s path (post lease included); the ids are explicit so nothing
   unseen is skipped. `agent fleet skip [--repo] [--status] [--dry-run] [--yes]` lists the

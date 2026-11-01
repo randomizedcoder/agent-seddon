@@ -41,6 +41,7 @@ class FleetRobot extends Robot {
   static const _list = 'agent.v1.ReviewFleetService/ListReviews';
   static const _approve = 'agent.v1.ReviewFleetService/Approve';
   static const _skip = 'agent.v1.ReviewFleetService/SkipReview';
+  static const _skipMany = 'agent.v1.ReviewFleetService/SkipReviews';
   static const _update = 'agent.v1.ReviewFleetService/UpdateReview';
   static const _reviewNow = 'agent.v1.ReviewFleetService/ReviewNow';
   static const _setEnabled = 'agent.v1.ReviewFleetService/SetEnabled';
@@ -191,6 +192,47 @@ class FleetRobot extends Robot {
     await tester.pump(); // selecting fires _reload — settle it via the RPC below
     await pumpUntil(() => log.countOf(_list) > before, reason: 'status filter');
     await pumpUntil(() => !showsSpinner, reason: 'status re-list');
+  }
+
+  /// Switch the list between Inbox and History (the `fleet.view` toggle).
+  Future<void> selectView(String label) async {
+    final before = log.countOf(_list);
+    await tester.tap(find.descendant(
+        of: byKey('fleet.view'), matching: find.text(label)));
+    await tester.pump(); // fires _reload — settle it via the RPC below
+    await pumpUntil(() => log.countOf(_list) > before, reason: 'view switch');
+    await pumpUntil(() => !showsSpinner, reason: 'view re-list');
+  }
+
+  // ── skip all shown ──────────────────────────────────────────────────────────
+  Future<void> openSkipAll() async {
+    await tester.tap(byKey('fleet.skipAll'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> confirmSkipAll() async {
+    final before = log.countOf(_skipMany);
+    await tester.runAsync(() async {
+      await tester.tap(byKey('fleet.skipAll.confirm'));
+    });
+    await tester.pump();
+    await pumpUntil(() => log.countOf(_skipMany) > before,
+        reason: 'skip all fires');
+  }
+
+  Future<void> cancelSkipAll() async {
+    await tester.tap(byKey('fleet.skipAll.cancel'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  /// Two taps on confirm with no frame between them; see [doubleConfirmApprove].
+  Future<void> doubleConfirmSkipAll() async {
+    await tester.tap(byKey('fleet.skipAll.confirm'), warnIfMissed: false);
+    await tester.tap(byKey('fleet.skipAll.confirm'), warnIfMissed: false);
+    await tester.pump();
+    await pumpUntil(() => log.fired(_skipMany), reason: 'one skip-all to fire');
   }
 
   // ── sessions strip ──────────────────────────────────────────────────────────

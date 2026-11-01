@@ -110,13 +110,13 @@ void main() {
       final robot = await FleetRobot.create(tester)
         ..theme = builtinThemeData('accessible');
       robot.fleet.listReviewsResponse = ListReviewsReply(reviews: [
-        for (final s in ['drafted', 'approved', 'posted', 'superseded'])
+        for (final s in ['drafted', 'approved', 'posted', 'superseded', 'skipped'])
           ReviewSummary(
               reviewId: s, repo: 'o__n', prNumber: Int64(1), status: s),
       ]);
       await robot.load();
       final handle = tester.ensureSemantics();
-      for (final s in ['drafted', 'approved', 'posted', 'superseded']) {
+      for (final s in ['drafted', 'approved', 'posted', 'superseded', 'skipped']) {
         // The row merges its children, so the status is one word of its label.
         expect(find.bySemanticsLabel(RegExp('\\b$s\\b'), skipOffstage: false),
             findsWidgets,
