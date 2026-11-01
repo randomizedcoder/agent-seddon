@@ -233,6 +233,29 @@ const fleetSpec = PageSpec('fleet', [
     description: 'a rapid double-click on confirm fires exactly one SkipReviews',
     expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
   ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.adversarial,
+    name: 'skip_all_disabled_while_in_flight',
+    description: 'while SkipReviews is in flight the Skip all button is disabled, '
+        'so a second batch can\'t start',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_at_cap_warns_older_remain',
+    description: 'at the 500-row cap the confirm says older drafts stay in the '
+        'Inbox',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.boundary,
+    name: 'history_empty_says_none_finished',
+    description: 'an unfiltered empty History says no finished drafts yet',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
   // ── list cap ────────────────────────────────────────────────────────────────
   SpecRow(
     elementId: 'fleet.list.capped',

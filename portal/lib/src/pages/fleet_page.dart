@@ -117,6 +117,8 @@ class _FleetPageState extends State<FleetPage> {
   bool _loading = true;
   String? _error;
   bool _showSessions = false;
+  // A Skip all is in flight: its button is disabled, so a second can't start.
+  bool _skippingAll = false;
 
   @override
   void initState() {
@@ -403,13 +405,18 @@ class _FleetPageState extends State<FleetPage> {
     final ids = [for (final r in _reviews) r.reviewId];
     if (ids.isEmpty) return;
     final where = _repo.isEmpty ? 'across all repos' : 'in ${_repoLabel(_repo)}';
+    // A full listing may have older drafts behind it, which this can't reach.
+    final capped = _reviews.length >= _listCap;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('Skip all ${ids.length} shown drafts?'),
         content: Text(
           'The ${ids.length} drafts listed $where are never posted. They move '
-          'to History. A new commit on a PR gets a fresh review.',
+          'to History. A new commit on a PR gets a fresh review.'
+          '${capped ? '\n\nOnly the newest $_listCap are listed. Older drafts '
+              'stay in the Inbox; press Skip all again for them.' : ''}',
+          key: const Key('fleet.skipAll.body'),
         ),
         actions: [
           TextButton(
@@ -425,9 +432,13 @@ class _FleetPageState extends State<FleetPage> {
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true || _skippingAll) return;
+    setState(() => _skippingAll = true);
     final counts = <String, int>{};
     try {
+      // Today this runs once: a listing is at most `MAX_DRAFT_ROWS`, which
+      // agent-core asserts is <= `MAX_SKIP_BATCH`. It batches anyway, so the
+      // page stays correct if the two caps ever diverge.
       for (var i = 0; i < ids.length; i += _skipBatch) {
         final reply = await widget.clients.fleet.skipReviews(
           SkipReviewsRequest()
@@ -441,6 +452,8 @@ class _FleetPageState extends State<FleetPage> {
     } catch (e) {
       _snack('Skip all failed: $e'
           '${counts.isEmpty ? "" : " (after ${_skipSummary(counts)})"}');
+    } finally {
+      if (mounted) setState(() => _skippingAll = false);
     }
     await _reload();
   }
@@ -548,7 +561,7 @@ class _FleetPageState extends State<FleetPage> {
                     CapabilityScope.of(context).can('approve', 'review'))
                   OutlinedButton.icon(
                     key: const Key('fleet.skipAll'),
-                    onPressed: _skipAll,
+                    onPressed: _skippingAll ? null : _skipAll,
                     icon: const Icon(Icons.block, size: 18),
                     label: Text('Skip all ${_reviews.length} shown'),
                   ),
@@ -611,9 +624,11 @@ class _FleetPageState extends State<FleetPage> {
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Text(
-                        _view == _View.inbox && _status.isEmpty
-                            ? 'Inbox empty: no drafts await a decision.'
-                            : 'No review drafts match.',
+                        _status.isNotEmpty
+                            ? 'No review drafts match.'
+                            : _view == _View.inbox
+                                ? 'Inbox empty: no drafts await a decision.'
+                                : 'No finished drafts yet.',
                         textAlign: TextAlign.center),
                   ),
                 )

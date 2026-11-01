@@ -421,6 +421,44 @@ void main() {
           fake.responseDelay = Duration.zero;
           await robot.unmountAndSettle();
 
+        case 'adversarial_skip_all_disabled_while_in_flight':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = skipped(['r1']);
+          await robot.load();
+          fake.responseDelay = const Duration(milliseconds: 300);
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          expect(robot.buttonEnabled('fleet.skipAll'), isFalse,
+              reason: 'disabled until the call returns');
+          expect(robot.log.countOf(skipManyRpc), 1);
+          fake.responseDelay = Duration.zero;
+          await robot.unmountAndSettle();
+
+        case 'corner_skip_all_at_cap_warns_older_remain':
+          fake.listReviewsResponse =
+              reviews([for (var i = 0; i < 500; i++) summary(id: 'r$i')]);
+          await robot.load();
+          await robot.openSkipAll();
+          expect(robot.textShown('Skip all 500 shown drafts?'), isTrue);
+          expect(
+              find
+                  .textContaining('Older drafts stay in the Inbox')
+                  .evaluate()
+                  .isNotEmpty,
+              isTrue);
+          await robot.cancelSkipAll();
+          expect(robot.log.fired(skipManyRpc), isFalse);
+          await robot.settle();
+
+        case 'boundary_history_empty_says_none_finished':
+          fake.listReviewsResponse = reviews([]);
+          await robot.load();
+          await robot.selectView('History');
+          expect(robot.textShown('No finished drafts yet.'), isTrue);
+          expect(robot.textShown('Inbox empty: no drafts await a decision.'),
+              isFalse);
+          await robot.settle();
+
         // ── list cap ──────────────────────────────────────────────────────────
         case 'positive_capped_list_says_newest':
           fake.listReviewsResponse =
@@ -428,6 +466,9 @@ void main() {
           await robot.load();
           expect(robot.exists('fleet.list.capped'), isTrue);
           expect(robot.textShown('Showing the newest 500.'), isTrue);
+          await robot.selectView('History');
+          expect(robot.exists('fleet.list.capped'), isTrue,
+              reason: 'History says so too');
           await robot.settle();
 
         case 'boundary_under_cap_has_no_note':

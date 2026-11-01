@@ -341,13 +341,15 @@ lists and wins over `--yes`; `--yes` skips without asking. The call is bounded a
 credential, such as a stored `agent login` token. Nothing is approved or posted.
 
 `ListReviews` takes `exclude_status` (at most 8 values). The portal's Fleet tab uses it to split
-the drafts into two views, an **Inbox | History** toggle at the head of the filter bar:
+the drafts into two views, with an **Inbox | History** toggle in the filter bar:
 
 - **Inbox** (the default) lists the drafts that still need a decision: `drafted`, and `approved`
   (an approval whose post failed). It excludes `posted`, `superseded` and `skipped`. Its status
   menu offers only those two statuses. **Skip all N shown** (`approve:review`) sends exactly the
   ids on screen to `SkipReviews`, after a confirm naming the count and repo, then snacks the
-  outcome counts ("12 skipped, 1 already posted").
+  outcome counts ("12 skipped, 1 already posted"). The button is disabled while the call is in
+  flight. When the Inbox is at the 500-row cap, the confirm says older drafts remain for another
+  press.
 - **History** lists the finished drafts: `posted`, `skipped` and `superseded`, newest first. It is
   read-only: no Approve, Skip, edit or Skip all. The detail pane still shows the body and who
   approved or skipped it.
