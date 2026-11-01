@@ -182,10 +182,35 @@ let
     }
   );
 
+  # The foundation crates linted, for the `clippy-<crate>` checks to start from:
+  # clippy checks workspace crates through `clippy-driver`, so a plain build's
+  # artifacts don't count as linted. Same features as `foundationArtifacts`.
+  foundationClippyArtifacts = craneLib.cargoClippy (
+    commonArgs
+    // {
+      pname = "workspace-foundation-clippy";
+      src = sliceFor foundation;
+      inherit cargoArtifacts;
+      cargoClippyExtraArgs =
+        lib.concatMapStringsSep " " (c: "-p ${c}") foundation
+        + " --all-targets"
+        + lib.optionalString (
+          foundationFeatures != [ ]
+        ) " --features ${lib.concatStringsSep "," foundationFeatures}"
+        + " -- -D warnings";
+    }
+  );
+
   # Arguments that point a crane check at one slice, on top of the foundation.
   sliceArgs = names: {
     src = sliceFor names;
     cargoArtifacts = foundationArtifacts;
+  };
+
+  # The same, for a clippy check (on top of the linted foundation).
+  clippySliceArgs = names: {
+    src = sliceFor names;
+    cargoArtifacts = foundationClippyArtifacts;
   };
 in
 {
@@ -193,10 +218,12 @@ in
     closureOf
     sliceFor
     sliceArgs
+    clippySliceArgs
     dummy
     extraSources
     foundation
     foundationArtifacts
+    foundationClippyArtifacts
     ;
   crateNames = lib.attrNames dirByName;
 }

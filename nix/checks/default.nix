@@ -3,7 +3,9 @@
 # Aggregates every `nix flake check` target for agent-seddon.
 #
 # All of these run by default. crane reuses the shared `cargoArtifacts`
-# dependency build, so clippy/test/audit only recompile first-party crates.
+# dependency build, so the checks only recompile first-party crates; the
+# `test-<crate>` and `clippy-<crate>` slices start from the foundation builds
+# in workspace-slice.nix.
 #
 {
   pkgs,
@@ -61,10 +63,25 @@ let
       };
     }) workspaceSlice.crateNames
   );
+
+  # One `clippy-<crate>` check per workspace member (nix/checks/clippy.nix).
+  clippyChecks = lib.listToAttrs (
+    map (crate: {
+      name = "clippy-${crate}";
+      value = craneCheck ./clippy.nix { inherit workspaceSlice crate; };
+    }) workspaceSlice.crateNames
+  );
 in
 testChecks
+// clippyChecks
 // {
-  clippy = craneCheck ./clippy.nix { inherit cargoArtifacts; };
+  # Every crate linted on its own slice, and `clippy` as the aggregate.
+  clippy = pkgs.linkFarm "clippy" (
+    map (crate: {
+      name = crate;
+      path = clippyChecks."clippy-${crate}";
+    }) workspaceSlice.crateNames
+  );
   rustfmt = craneCheck ./rustfmt.nix { };
   # nix/test-features.json matches the manifests (fix: `nix run .#gen-test-features`).
   test-features-sync = pkgs.runCommand "test-features-sync-check" { } ''

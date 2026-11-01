@@ -159,6 +159,24 @@ a shared foundation build that every slice starts from, so a cold gate doesn't r
 `agent-core` 53 times. `nix build .#checks.x86_64-linux.test` builds every slice;
 `nix build .#checks.x86_64-linux.test-agent-review` runs one.
 
+Clippy is split the same way: `clippy-<crate>` runs
+`cargo clippy -p <crate> --all-targets --all-features -- -D warnings` on the crate's slice,
+starting from a foundation clippy build, and `nix build .#checks.x86_64-linux.clippy` builds
+all of them. The re-run table above holds for `clippy-*` too.
+
+Each slice also lints its workspace dependencies under the features that crate enables,
+which is stricter than the old single `--workspace --all-features` run (that run unified
+every crate's features). A helper that only some of a dependency's features call fails the
+check of the crate whose feature set leaves it dead, not the helper's own crate. For
+example, `agent-sandbox`'s `on_path` failed `clippy-agent-tools`, which enables only
+`sandbox-local`.
+
+Two costs come with the split. A lint error in a foundation crate fails every
+`clippy-*` check at once, because they all start from the foundation clippy build (an
+`agent-core` test failure fans out the same way). And a cold gate lints each crate once
+per slice that contains it, rather than once in total. The payoff is the warm path, where
+a typical edit re-runs about 4 slices.
+
 Three things keep a slice testing what the whole-workspace `cargo test` tested:
 
 - **Features.** One workspace build unifies features, so a crate's tests ran with every
@@ -175,8 +193,8 @@ Three things keep a slice testing what the whole-workspace `cargo test` tested:
 - **Paths.** Every slice unpacks to the same directory, so cargo reuses the foundation
   build's compiled crates (it keys a workspace crate by its absolute path).
 
-The rest of the gate (`clippy`, `coverage`, `leak`, `bench`, `feature-matrix`, the binary
-and e2e checks) still builds from the whole workspace, so it re-runs on any change.
+The rest of the gate (`coverage`, `leak`, `bench`, `feature-matrix`, the binary and e2e
+checks) still builds from the whole workspace, so it re-runs on any change.
 
 ## Coverage
 
