@@ -84,10 +84,15 @@ impl ForgeHttp {
             self.base.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
-        let mut rb = self.client.request(method, url).header(
-            self.auth_header,
-            format!("{}{}", self.auth_prefix, token.expose()),
-        );
+        let mut rb = self.client.request(method, url);
+        // An empty credential sends no auth header (as the git path does), never a
+        // bare `Bearer `.
+        if !token.is_empty() {
+            rb = rb.header(
+                self.auth_header,
+                format!("{}{}", self.auth_prefix, token.expose()),
+            );
+        }
         for (k, v) in &self.extra {
             rb = rb.header(*k, v);
         }
@@ -384,6 +389,16 @@ mod tests {
         let second = http.get_json("x").await.unwrap();
         assert_eq!(first["auth"], "Bearer ghs_0");
         assert_eq!(second["auth"], "Bearer ghs_1", "the newer token is sent");
+    }
+
+    /// An empty credential sends no `Authorization` header at all, not a bare prefix.
+    #[tokio::test]
+    async fn corner_empty_token_sends_no_auth_header() {
+        let (base, hits) = spawn_echo_auth();
+        let http = http_with(base, agent_core::Secret::new(String::new()).into());
+        let got = http.get_json("x").await.unwrap();
+        assert_eq!(got["auth"], "", "no header, not `Bearer `");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A credential that cannot be resolved fails the call without sending anything,

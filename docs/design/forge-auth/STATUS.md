@@ -83,6 +83,9 @@ flow (F5) and the webhook seam (F6). F6 is the largest and independently valuabl
   request/invocation and fail closed if the source errs. Tables: core (`Secret` as source, 2), forge (`ForgeHttp`
   per-request read, unresolvable sends nothing, `require_token` 3), git (per-call read, unresolvable spawns
   nothing), runtime (source re-mints, fails closed after uninstall, non-ghapp constant, bad id at build).
+  From the fleet's draft review: only remote git ops (`clone`/`fetch`/`push`/`ls-remote`) resolve the
+  credential, so a failed re-mint can't fail a local `rev-parse` or `diff` (`touches_remote`, 10 rows, plus a
+  failing-source local read), and `ForgeHttp` sends no auth header for an empty token rather than a bare prefix.
 
 - **F3 (PR #629):** the webhook credential. Added `webhook_secret_ref` to the bootstrap `[github_app]` config
   (`GithubAppCfg`, `crates/agent-runtime/src/config.rs`) — **optional**, `env:`/`file:` only (a `ghapp:` mint or an

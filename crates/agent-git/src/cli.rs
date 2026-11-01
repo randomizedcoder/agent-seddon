@@ -282,10 +282,12 @@ impl CliBackend {
         let mut spec = ExecSpec::argv(argv, cwd).timeout(GIT_TIMEOUT_SECS);
         // Attach the clone/fetch credential (if any) as command-scoped config through
         // the child env — never as an arg, so the error paths below (which `args.join`)
-        // cannot echo it. Inert for local object reads; applied to remote ops (clone,
-        // fetch) that actually need it.
-        for (k, v) in self.auth_env().await? {
-            spec = spec.env_set(k, v);
+        // cannot echo it. Only remote ops resolve it: a local read never needs the
+        // network, so a failed re-mint must not fail a `rev-parse` or `diff`.
+        if touches_remote(args) {
+            for (k, v) in self.auth_env().await? {
+                spec = spec.env_set(k, v);
+            }
         }
         let out = self
             .sandbox
@@ -313,6 +315,15 @@ impl CliBackend {
         let bytes = self.git_bytes(cwd, args).await?;
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
+}
+
+/// Whether a git invocation talks to the remote, and so needs the credential.
+/// Every remote op this backend runs starts with one of these subcommands.
+fn touches_remote(args: &[&str]) -> bool {
+    matches!(
+        args.first(),
+        Some(&("clone" | "fetch" | "push" | "ls-remote"))
+    )
 }
 
 /// `scheme://host/` of a `scheme://host/path` URL (up to and including the third `/`),
@@ -1518,7 +1529,8 @@ mod tests {
         );
     }
 
-    /// A reused mirror's `fetch` (and its `rev-parse`) also carry the credential.
+    /// A reused mirror's `fetch` also carries the credential; its local `rev-parse`
+    /// does not.
     #[tokio::test]
     async fn positive_fetch_is_also_authenticated() {
         let rec = RecordingSandbox::new(ok_out(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"));
@@ -1539,13 +1551,18 @@ mod tests {
         b.fetch_pr(9).await.unwrap();
 
         let envs = rec.all_env_sets();
-        assert!(!envs.is_empty(), "the fetch funnelled git calls");
-        for e in &envs {
+        let argvs = rec.all_argvs();
+        assert!(
+            argvs.iter().any(|a| a[3] == "fetch"),
+            "the fetch funnelled a git fetch: {argvs:?}"
+        );
+        for (argv, e) in argvs.iter().zip(&envs) {
             let m: std::collections::HashMap<_, _> = e.iter().cloned().collect();
+            let want = (argv[3] == "fetch").then_some("http.https://github.com/.extraHeader");
             assert_eq!(
                 m.get("GIT_CONFIG_KEY_0").map(String::as_str),
-                Some("http.https://github.com/.extraHeader"),
-                "every remote op carries the header"
+                want,
+                "only the remote op carries the header: {argv:?}"
             );
         }
     }
@@ -1762,5 +1779,57 @@ mod tests {
             .decode(payload)
             .unwrap();
         assert_eq!(decoded, format!("x-access-token:{hostile}").into_bytes());
+    }
+    /// Which subcommands resolve the credential. Each row: the git args, and whether
+    /// the call is a remote op that needs it.
+    #[rstest]
+    #[case::positive_clone("a mirror clone talks to the remote", &["clone", "--mirror", "u", "m"], true)]
+    #[case::positive_fetch("a fetch talks to the remote", &["fetch", "--prune", "--all"], true)]
+    #[case::positive_push("a push talks to the remote", &["push", "origin", "r"], true)]
+    #[case::positive_ls_remote("ls-remote talks to the remote", &["ls-remote", "origin"], true)]
+    #[case::negative_rev_parse("rev-parse is a local read", &["rev-parse", "--verify", "HEAD"], false)]
+    #[case::negative_cat_file("cat-file is a local read", &["cat-file", "blob", "abc"], false)]
+    #[case::negative_remote_get_url("reading the remote URL is local config", &["remote", "get-url", "origin"], false)]
+    #[case::corner_empty("no args at all", &[], false)]
+    #[case::adversarial_fetch_not_first("a ref named `fetch` is not the subcommand", &["rev-parse", "fetch"], false)]
+    #[case::adversarial_case("subcommands are case-sensitive", &["FETCH"], false)]
+    fn touches_remote_cases(
+        #[case] description: &str,
+        #[case] args: &[&str],
+        #[case] expected: bool,
+    ) {
+        assert_eq!(touches_remote(args), expected, "{description}: {args:?}");
+    }
+
+    /// A credential that cannot be resolved fails only the remote ops: a local read
+    /// runs, with no header and without consulting the source.
+    #[tokio::test]
+    async fn corner_failing_source_leaves_local_reads_working() {
+        let rec = RecordingSandbox::new(ok_out(b"0123abcd\n"));
+        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let src = Arc::new(RotatingSource {
+            reads: Default::default(),
+            fail: true,
+        });
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_github_token_source(src.clone());
+
+        let oid = b.resolve(&Revision("HEAD".into())).await.unwrap();
+        assert_eq!(oid.as_str(), "0123abcd");
+        assert_eq!(
+            rec.all_env_sets(),
+            vec![Vec::<(String, String)>::new()],
+            "no credential on a local read"
+        );
+        assert_eq!(
+            src.reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the source is not consulted for a local read"
+        );
+        assert!(
+            b.ensure_mirror().await.is_err(),
+            "the remote op still fails closed"
+        );
     }
 }
