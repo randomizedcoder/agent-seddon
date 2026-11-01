@@ -11,8 +11,13 @@
 
 use crate::ch::ChReader;
 use crate::rows::{ReviewDraftRow, ReviewFeedbackRow};
+// MAX_DRAFT_ROWS: the hard cap on the draft records [`ClickHouseHistory::list_drafts`]
+// returns, so the operator/portal surface is bounded even if a `limit` of 0 (⇒ the cap) or an
+// over-large `limit` arrives on the wire (untrusted). Newest-first, so the cap keeps the most
+// recent. It lives in `agent-core` so `agent fleet skip` and `SkipReviews` stay in step with it.
 use agent_core::{
     Feedback, FleetHistory, PriorReview, Result, ReviewDraftFilter, ReviewDraftRecord,
+    MAX_DRAFT_ROWS,
 };
 use async_trait::async_trait;
 use klickhouse::QueryBuilder;
@@ -23,11 +28,6 @@ use std::collections::HashMap;
 struct TableNameRow {
     name: String,
 }
-
-/// Hard cap on the number of draft records [`ClickHouseHistory::list_drafts`] returns — the
-/// operator/portal surface is bounded even if a `limit` of 0 (⇒ the cap) or an over-large
-/// `limit` arrives on the wire (untrusted). Newest-first, so the cap keeps the most recent.
-const MAX_DRAFT_ROWS: usize = 500;
 
 /// Hard cap on the number of *raw* rows [`ClickHouseHistory::list_drafts`] fetches before the
 /// in-memory dedup/cap in [`finalize_drafts`]. `agent_review_drafts` is append-only (a

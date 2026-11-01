@@ -100,10 +100,12 @@ impl GrpcFleet {
             .map_err(status_to_err)?
             .into_inner()
             .results;
+        let asked: std::collections::HashSet<&str> =
+            review_ids.iter().map(String::as_str).collect();
         results
             .into_iter()
             .map(|r| {
-                if !review_ids.contains(&r.review_id) {
+                if !asked.contains(r.review_id.as_str()) {
                     return Err(Error::Fleet(format!(
                         "skip: a result for {:?}, which was not asked for",
                         r.review_id.chars().take(40).collect::<String>()
@@ -112,7 +114,7 @@ impl GrpcFleet {
                 let outcome = agent_core::SkipOutcome::from_wire(&r.status).ok_or_else(|| {
                     Error::Fleet(format!(
                         "skip: unrecognized status {:?} from server",
-                        r.status
+                        r.status.chars().take(40).collect::<String>()
                     ))
                 })?;
                 Ok((r.review_id, outcome))

@@ -334,7 +334,9 @@ reports them `already_skipped`.
 
 From a shell, `agent fleet skip` lists the open drafts (everything not posted or skipped,
 narrowed by `--repo OWNER/NAME` or `--status drafted|approved|superseded`), asks, and skips
-exactly those. `--dry-run` only lists; `--yes` skips without asking. It dials
+exactly those in one `SkipReviews` call (a listing is capped at 500, the same as a call). Only
+the exact answer `yes` confirms; anything else, or closed stdin, skips nothing. `--dry-run` only
+lists and wins over `--yes`; `--yes` skips without asking. The call is bounded at 5 minutes. It dials
 `[grpc.fleet] endpoint` (default `127.0.0.1:50086`) with the `[grpc.client] bearer`
 credential, such as a stored `agent login` token. Nothing is approved or posted. `ListReviews` takes `exclude_status` (at most 8 values), which the portal's Fleet tab
 uses to hide skipped drafts by default; its repo filter is a menu of the repos seen on the roster

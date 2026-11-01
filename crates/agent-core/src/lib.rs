@@ -6793,8 +6793,13 @@ impl SkipOutcome {
     }
 }
 
-/// Most ids one `SkipReviews` call takes (the `ListReviews` row cap).
+/// Most draft records one `ListReviews` returns, whatever `limit` asks for. The history
+/// stores clamp to it; `agent fleet skip` uses it to tell a full listing from a cut-off one.
+pub const MAX_DRAFT_ROWS: usize = 500;
+/// Most ids one `SkipReviews` call takes.
 pub const MAX_SKIP_BATCH: usize = 500;
+// A whole listing fits in one `SkipReviews` call, so "skip what was listed" is one call.
+const _: () = assert!(MAX_DRAFT_ROWS <= MAX_SKIP_BATCH);
 /// Longest review id `SkipReviews` accepts (ids are UUIDs, 36 chars).
 pub const MAX_REVIEW_ID_LEN: usize = 128;
 

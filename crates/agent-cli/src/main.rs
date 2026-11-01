@@ -1364,7 +1364,13 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             }
             // `agent fleet <verb> …`: everything after the word is the verb's.
             "fleet" => {
-                fleet_args = Some(args.collect());
+                let parsed: Vec<String> = args.collect();
+                // Usage needs no config: print it before one is read.
+                if parsed.is_empty() || matches!(parsed[0].as_str(), "--help" | "-h" | "help") {
+                    println!("{}", agent_runtime::fleet_cli::USAGE);
+                    std::process::exit(0);
+                }
+                fleet_args = Some(parsed);
                 break;
             }
             "campaign" => {

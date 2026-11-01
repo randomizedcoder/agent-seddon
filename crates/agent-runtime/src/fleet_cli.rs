@@ -10,7 +10,9 @@
 //! `agent login` token) when auth is on. Everything the server sends back is
 //! untrusted: repo names are cleaned of control characters before printing.
 
+use std::collections::HashSet;
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use agent_core::{draft_status, ReviewDraftFilter, ReviewDraftRecord, SkipOutcome};
 use anyhow::{bail, Context, Result};
@@ -148,8 +150,12 @@ pub fn skip_targets(rows: &[ReviewDraftRecord]) -> Vec<String> {
 
 /// One line per draft: repo, PR, status, id.
 fn render(rows: &[ReviewDraftRecord], targets: &[String]) -> String {
+    let targets: HashSet<&str> = targets.iter().map(String::as_str).collect();
     let mut out = String::new();
-    for r in rows.iter().filter(|r| targets.contains(&r.review_id)) {
+    for r in rows
+        .iter()
+        .filter(|r| targets.contains(r.review_id.as_str()))
+    {
         out.push_str(&format!(
             "  {}#{}  {}  {}\n",
             clean(&r.repo.replacen("__", "/", 1)),
@@ -177,6 +183,42 @@ pub fn tally(results: &[(String, SkipOutcome)]) -> String {
     .join(", ")
 }
 
+/// What `fleet skip` does once it has listed `n` open drafts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Nothing is open: no prompt, no call.
+    Nothing,
+    /// `--dry-run`: print the list, skip nothing.
+    DryRun,
+    /// Print the list and ask before skipping.
+    Ask,
+    /// `--yes`: skip without asking.
+    Skip,
+}
+
+/// The step for `a` with `n` open drafts. `--dry-run` wins over `--yes`.
+pub fn step(a: &SkipArgs, n: usize) -> Step {
+    match (n, a.dry_run, a.yes) {
+        (0, _, _) => Step::Nothing,
+        (_, true, _) => Step::DryRun,
+        (_, false, true) => Step::Skip,
+        (_, false, false) => Step::Ask,
+    }
+}
+
+/// Read the answer to the skip prompt: only the exact word `yes` (surrounding
+/// whitespace aside) confirms. Anything else, including `YES` and end of input,
+/// skips nothing.
+pub fn confirmed(input: &mut impl BufRead) -> Result<bool> {
+    let mut answer = String::new();
+    let n = input.read_line(&mut answer)?;
+    Ok(n > 0 && answer.trim() == "yes")
+}
+
+/// How long `fleet skip` waits for `SkipReviews` (up to [`agent_core::MAX_SKIP_BATCH`]
+/// lease-guarded skips, one after another).
+const SKIP_DEADLINE: Duration = Duration::from_secs(300);
+
 /// Run `agent fleet …`, returning what to print.
 pub async fn execute(cfg: &Config, args: &[String]) -> Result<String> {
     let a = match parse(args)? {
@@ -195,13 +237,11 @@ pub async fn execute(cfg: &Config, args: &[String]) -> Result<String> {
         .await
         .context("listing review drafts")?;
     let targets = skip_targets(&rows);
-    if targets.is_empty() {
-        return Ok("no open review drafts to skip".into());
-    }
-    let more = if rows.len() >= agent_core::MAX_SKIP_BATCH {
+    // The listing has no cursor: a full page may have more behind it.
+    let more = if rows.len() >= agent_core::MAX_DRAFT_ROWS {
         format!(
             "\n(the listing stops at {}; run again for the rest)",
-            agent_core::MAX_SKIP_BATCH
+            agent_core::MAX_DRAFT_ROWS
         )
     } else {
         String::new()
@@ -211,30 +251,35 @@ pub async fn execute(cfg: &Config, args: &[String]) -> Result<String> {
         targets.len(),
         render(&rows, &targets)
     );
-    if a.dry_run {
-        return Ok(format!("{listing}\n--dry-run: nothing skipped"));
-    }
-    if !a.yes {
-        print!(
-            "{listing}\nSkip all {}? Type `yes` to continue: ",
-            targets.len()
-        );
-        std::io::stdout().flush()?;
-        let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer)?;
-        if answer.trim() != "yes" {
-            return Ok("not confirmed: nothing skipped".into());
+    match step(&a, targets.len()) {
+        Step::Nothing => return Ok("no open review drafts to skip".into()),
+        Step::DryRun => return Ok(format!("{listing}\n--dry-run: nothing skipped")),
+        Step::Ask => {
+            print!(
+                "{listing}\nSkip all {}? Type `yes` to continue: ",
+                targets.len()
+            );
+            std::io::stdout().flush()?;
+            if !confirmed(&mut std::io::stdin().lock())? {
+                return Ok("not confirmed: nothing skipped".into());
+            }
         }
+        Step::Skip => {}
     }
-    let mut results = Vec::with_capacity(targets.len());
-    for batch in targets.chunks(agent_core::MAX_SKIP_BATCH) {
-        results.extend(
-            client
-                .skip_reviews(batch)
-                .await
-                .context("skipping review drafts")?,
-        );
-    }
+    // One call: a whole listing fits (MAX_DRAFT_ROWS <= MAX_SKIP_BATCH, asserted in agent-core).
+    let results = tokio::time::timeout(SKIP_DEADLINE, client.skip_reviews(&targets))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "no answer from SkipReviews within {}s; some drafts may be skipped. \
+                 Run `agent fleet skip --dry-run` to see what is left",
+                SKIP_DEADLINE.as_secs()
+            )
+        })?
+        .context(
+            "skipping review drafts (the ones skipped before the failure stay skipped; \
+             run again to finish)",
+        )?;
     Ok(format!("{}{more}", tally(&results)))
 }
 
@@ -410,5 +455,69 @@ mod tests {
         assert!(out.contains(shown), "{description}: {out:?}");
         assert!(!out.contains('\u{1b}'), "{description}");
         assert_eq!(out.lines().count(), 1, "{description}");
+    }
+
+    fn args(dry_run: bool, yes: bool) -> SkipArgs {
+        SkipArgs {
+            dry_run,
+            yes,
+            ..SkipArgs::default()
+        }
+    }
+
+    /// The confirm gate: description, flags, open drafts, expected step. Only `Step::Skip`
+    /// and a confirmed `Step::Ask` reach `SkipReviews`.
+    #[rstest]
+    #[case::positive_asks_by_default("no flags: list, then ask", args(false, false), 3, Step::Ask)]
+    #[case::positive_yes_skips("--yes skips without asking", args(false, true), 3, Step::Skip)]
+    #[case::positive_dry_run_lists("--dry-run lists only", args(true, false), 3, Step::DryRun)]
+    #[case::corner_dry_run_beats_yes(
+        "--dry-run --yes still skips nothing",
+        args(true, true),
+        3,
+        Step::DryRun
+    )]
+    #[case::boundary_nothing_open(
+        "no open drafts: no prompt, no call",
+        args(false, true),
+        0,
+        Step::Nothing
+    )]
+    #[case::boundary_one_open(
+        "a single open draft is still asked about",
+        args(false, false),
+        1,
+        Step::Ask
+    )]
+    #[case::boundary_full_listing(
+        "a full listing is one skip",
+        args(false, true),
+        agent_core::MAX_DRAFT_ROWS,
+        Step::Skip
+    )]
+    fn step_cases(
+        #[case] description: &str,
+        #[case] a: SkipArgs,
+        #[case] n: usize,
+        #[case] expected: Step,
+    ) {
+        assert_eq!(step(&a, n), expected, "{description}");
+    }
+
+    /// The prompt's answer: description, typed input, whether it confirms.
+    #[rstest]
+    #[case::positive_yes("`yes` confirms", "yes\n", true)]
+    #[case::corner_padded_yes("surrounding whitespace is ignored", "  yes \r\n", true)]
+    #[case::corner_yes_without_newline("`yes` then end of input confirms", "yes", true)]
+    #[case::negative_no("`no` skips nothing", "no\n", false)]
+    #[case::negative_y("`y` is not enough", "y\n", false)]
+    #[case::negative_empty_line("a bare Enter skips nothing", "\n", false)]
+    #[case::boundary_eof("end of input (stdin closed) fails closed", "", false)]
+    #[case::adversarial_upper_case("`YES` is not the word asked for", "YES\n", false)]
+    #[case::adversarial_yes_prefix("`yesterday` is not `yes`", "yesterday\n", false)]
+    #[case::adversarial_second_line("only the first line counts", "no\nyes\n", false)]
+    fn confirmed_cases(#[case] description: &str, #[case] input: &str, #[case] expected: bool) {
+        let mut r = std::io::Cursor::new(input.as_bytes());
+        assert_eq!(confirmed(&mut r).unwrap(), expected, "{description}");
     }
 }
