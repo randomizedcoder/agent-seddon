@@ -82,6 +82,25 @@ class ThemeServiceClient extends $grpc.Client {
     return $createUnaryCall(_$setActive, request, options: options);
   }
 
+  /// Parse a textproto theme (the file form) for the editor. Stores nothing.
+  /// Text that does not parse is INVALID_ARGUMENT; a theme that parses but would
+  /// not be accepted by Put comes back with `problem` set, so it can be fixed.
+  $grpc.ResponseFuture<$0.ImportThemeResponse> import(
+    $0.ImportThemeRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$import, request, options: options);
+  }
+
+  /// A theme as textproto, for sharing or committing to config/themes/. Stores
+  /// nothing; the server-set fields are left out.
+  $grpc.ResponseFuture<$0.ExportThemeResponse> export(
+    $0.ExportThemeRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$export, request, options: options);
+  }
+
   // method descriptors
 
   static final _$list =
@@ -112,6 +131,16 @@ class ThemeServiceClient extends $grpc.Client {
           '/agent.v1.ThemeService/SetActive',
           ($0.SetActiveThemeRequest value) => value.writeToBuffer(),
           $0.ActiveTheme.fromBuffer);
+  static final _$import =
+      $grpc.ClientMethod<$0.ImportThemeRequest, $0.ImportThemeResponse>(
+          '/agent.v1.ThemeService/Import',
+          ($0.ImportThemeRequest value) => value.writeToBuffer(),
+          $0.ImportThemeResponse.fromBuffer);
+  static final _$export =
+      $grpc.ClientMethod<$0.ExportThemeRequest, $0.ExportThemeResponse>(
+          '/agent.v1.ThemeService/Export',
+          ($0.ExportThemeRequest value) => value.writeToBuffer(),
+          $0.ExportThemeResponse.fromBuffer);
 }
 
 @$pb.GrpcServiceName('agent.v1.ThemeService')
@@ -165,6 +194,24 @@ abstract class ThemeServiceBase extends $grpc.Service {
         ($core.List<$core.int> value) =>
             $0.SetActiveThemeRequest.fromBuffer(value),
         ($0.ActiveTheme value) => value.writeToBuffer()));
+    $addMethod(
+        $grpc.ServiceMethod<$0.ImportThemeRequest, $0.ImportThemeResponse>(
+            'Import',
+            import_Pre,
+            false,
+            false,
+            ($core.List<$core.int> value) =>
+                $0.ImportThemeRequest.fromBuffer(value),
+            ($0.ImportThemeResponse value) => value.writeToBuffer()));
+    $addMethod(
+        $grpc.ServiceMethod<$0.ExportThemeRequest, $0.ExportThemeResponse>(
+            'Export',
+            export_Pre,
+            false,
+            false,
+            ($core.List<$core.int> value) =>
+                $0.ExportThemeRequest.fromBuffer(value),
+            ($0.ExportThemeResponse value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.ListThemesResponse> list_Pre($grpc.ServiceCall $call,
@@ -213,4 +260,20 @@ abstract class ThemeServiceBase extends $grpc.Service {
 
   $async.Future<$0.ActiveTheme> setActive(
       $grpc.ServiceCall call, $0.SetActiveThemeRequest request);
+
+  $async.Future<$0.ImportThemeResponse> import_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.ImportThemeRequest> $request) async {
+    return import($call, await $request);
+  }
+
+  $async.Future<$0.ImportThemeResponse> import(
+      $grpc.ServiceCall call, $0.ImportThemeRequest request);
+
+  $async.Future<$0.ExportThemeResponse> export_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.ExportThemeRequest> $request) async {
+    return export($call, await $request);
+  }
+
+  $async.Future<$0.ExportThemeResponse> export(
+      $grpc.ServiceCall call, $0.ExportThemeRequest request);
 }

@@ -3,6 +3,8 @@
 //! already emits — the same approach as `agent-graph`'s cognition graphs.
 
 use agent_proto::pb;
+use prost::Message;
+use prost_reflect::text_format::FormatOptions;
 use prost_reflect::{DescriptorPool, DynamicMessage, MapKey, MessageDescriptor, Value};
 use serde_json::{Map, Value as Json};
 use std::sync::OnceLock;
@@ -38,6 +40,29 @@ pub fn parse(text: &str) -> Result<pb::Theme, ThemeError> {
         .map_err(|e| ThemeError::new(ThemeErrorKind::Parse, format!("textproto: {e}")))?;
     msg.transcode_to()
         .map_err(|e| ThemeError::new(ThemeErrorKind::Parse, format!("transcode: {e}")))
+}
+
+/// Print a theme as pretty textproto, the form [`parse`] reads back. Capped like
+/// [`parse`], so an export is always importable.
+pub fn print(theme: &pb::Theme) -> Result<String, ThemeError> {
+    let len = theme.encoded_len();
+    if len > MAX_THEME_BYTES {
+        return Err(ThemeError::new(
+            ThemeErrorKind::TooLarge,
+            format!("{len} bytes, cap {MAX_THEME_BYTES}; refusing to print"),
+        ));
+    }
+    let mut msg = DynamicMessage::new(theme_descriptor());
+    msg.transcode_from(theme)
+        .expect("a pb::Theme transcodes to its own descriptor");
+    let text = msg.to_text_format_with_options(&FormatOptions::new().pretty(true));
+    if text.len() > MAX_THEME_BYTES {
+        return Err(ThemeError::new(
+            ThemeErrorKind::TooLarge,
+            format!("{} bytes of text, cap {MAX_THEME_BYTES}", text.len()),
+        ));
+    }
+    Ok(text)
 }
 
 /// The proto3 JSON form of a theme (lowerCamelCase names, enums by name, unset

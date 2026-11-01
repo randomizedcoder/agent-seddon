@@ -13,7 +13,7 @@ progress is in its [STATUS](../design/visual/STATUS.md).
 | Their portal copies | `portal/assets/themes/<id>.json` (proto3 JSON; Dart cannot read textproto) |
 | Validator | `agent_theme::validate`: the rules in [06](../design/visual/06-security-and-validation.md) |
 | Colour parse + WCAG contrast | `agent_theme::color` |
-| Textproto parse, JSON export | `agent_theme::textproto` |
+| Textproto parse and print, JSON export | `agent_theme::textproto` |
 | Compiled-in built-ins | `agent_theme::builtins()` |
 | Portal: validator port, mapper, controller, pickers | `portal/lib/src/theme/` (below) |
 | User themes + each user's active theme | `agent_theme::ThemeBook` (`book.rs`) over `agent-config-store` |
@@ -53,8 +53,14 @@ is what a user sees before picking. The NixOS `agent-stack` module sets `postgre
 - **Active theme.** `GetActive` answers the user's pick if they can still see it, else
   `default_theme`, else `prototype`, and says which (`ActiveSource`). `SetActive` needs
   only `(read, theme)`, so a viewer can pick.
+- **Import and export.** `Import` parses textproto for the theme editor and stores
+  nothing: text that does not parse (or is over 64 KiB) is `INVALID_ARGUMENT`; a theme
+  that parses comes back with the server-set fields cleared and, in `problem`, why `Put`
+  would refuse it, so it can be fixed in the editor. `Export` prints a draft as pretty
+  textproto without the server-set fields. Both need only `(read, theme)`.
 
-REST: `GET /v1/themes`, `GET|PUT|DELETE /v1/themes/{id}`, `GET|PUT /v1/active-theme`.
+REST: `GET /v1/themes`, `GET|PUT|DELETE /v1/themes/{id}`, `GET|PUT /v1/active-theme`,
+`POST /v1/theme-import`, `POST /v1/theme-export`.
 
 ## In the portal
 

@@ -415,6 +415,71 @@ final $typed_data.Uint8List deleteThemeResponseDescriptor = $convert.base64Decod
     'ChNEZWxldGVUaGVtZVJlc3BvbnNlEikKEHJlc3RvcmVkX2J1aWx0aW4YASABKAhSD3Jlc3Rvcm'
     'VkQnVpbHRpbg==');
 
+@$core.Deprecated('Use importThemeRequestDescriptor instead')
+const ImportThemeRequest$json = {
+  '1': 'ImportThemeRequest',
+  '2': [
+    {'1': 'text', '3': 1, '4': 1, '5': 9, '10': 'text'},
+  ],
+};
+
+/// Descriptor for `ImportThemeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List importThemeRequestDescriptor = $convert
+    .base64Decode('ChJJbXBvcnRUaGVtZVJlcXVlc3QSEgoEdGV4dBgBIAEoCVIEdGV4dA==');
+
+@$core.Deprecated('Use importThemeResponseDescriptor instead')
+const ImportThemeResponse$json = {
+  '1': 'ImportThemeResponse',
+  '2': [
+    {
+      '1': 'theme',
+      '3': 1,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.Theme',
+      '10': 'theme'
+    },
+    {'1': 'problem', '3': 2, '4': 1, '5': 9, '10': 'problem'},
+  ],
+};
+
+/// Descriptor for `ImportThemeResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List importThemeResponseDescriptor = $convert.base64Decode(
+    'ChNJbXBvcnRUaGVtZVJlc3BvbnNlEiUKBXRoZW1lGAEgASgLMg8uYWdlbnQudjEuVGhlbWVSBX'
+    'RoZW1lEhgKB3Byb2JsZW0YAiABKAlSB3Byb2JsZW0=');
+
+@$core.Deprecated('Use exportThemeRequestDescriptor instead')
+const ExportThemeRequest$json = {
+  '1': 'ExportThemeRequest',
+  '2': [
+    {
+      '1': 'theme',
+      '3': 1,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.Theme',
+      '10': 'theme'
+    },
+  ],
+};
+
+/// Descriptor for `ExportThemeRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List exportThemeRequestDescriptor = $convert.base64Decode(
+    'ChJFeHBvcnRUaGVtZVJlcXVlc3QSJQoFdGhlbWUYASABKAsyDy5hZ2VudC52MS5UaGVtZVIFdG'
+    'hlbWU=');
+
+@$core.Deprecated('Use exportThemeResponseDescriptor instead')
+const ExportThemeResponse$json = {
+  '1': 'ExportThemeResponse',
+  '2': [
+    {'1': 'text', '3': 1, '4': 1, '5': 9, '10': 'text'},
+  ],
+};
+
+/// Descriptor for `ExportThemeResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List exportThemeResponseDescriptor = $convert
+    .base64Decode('ChNFeHBvcnRUaGVtZVJlc3BvbnNlEhIKBHRleHQYASABKAlSBHRleHQ=');
+
 @$core.Deprecated('Use activeThemeDescriptor instead')
 const ActiveTheme$json = {
   '1': 'ActiveTheme',

@@ -13,7 +13,7 @@ One PR per increment. Every increment that changes the UI gets the Playwright re
 | 1 | **Design track** — this folder: model, built-ins, user themes, per-user active theme, portal integration, validation, testing, accessibility, visual review | — | — | — | — | — | **merged** (#657) |
 | 2 | **Model + built-ins + picker** — `theme.proto` messages; `config/themes/*.textproto` + `portal/assets/themes/` with the parity test; fonts; `src/theme/` mapper, `SeddonColors`, controller; hardcoded colours removed; picker in Settings and the nav rail (choice kept in `localStorage`); semantics tree on, labels, icon + text status ([`08`](08-accessibility.md)) | ✅ | parity + validator | ✅ | colour, contrast, validate, mapper, a11y, lint tables | ✅ | **merged** (#658; 2b #659, landed on main by #660) |
 | 3 | **`ThemeService` + per-user active theme** — CRUD + `GetActive`/`SetActive`; `themes` and `user_prefs` collections; `[themes] store`; NixOS module on Postgres; portal reads and writes the server preference | ✅ | ✅ | ✅ | service + resolution tables, mt-audit | ✅ | **merged** (#661 service, #662 portal) |
-| 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | — | — | ✅ | editor widget tables | ✅ | planned |
+| 4 | **Theme editor** — clone, edit with live preview and contrast badges, import and export textproto, publish to the tenant | ✅ | ✅ | ✅ | import/export + editor widget tables | ✅ | **4a in review** (Import/Export RPCs); 4b portal editor next |
 
 ## As built
 
@@ -182,6 +182,21 @@ Playwright review).
   `semantic.nav_tint` (green, turquoise, pink, yellow, blue, red, white); data only, no
   code. Every colour is at least 6.7:1 on the black rail. Checked on l2 by serving the
   regenerated `tn3270.json` to the deployed portal.
+
+### 4a — `Import` and `Export`
+
+- Increment 4 is split like 3: **4a** adds the two RPCs the editor needs, **4b** the
+  portal editor.
+- `Import(text)` parses a textproto theme and stores nothing. Text that does not parse
+  is `INVALID_ARGUMENT`; a theme that parses but that `Put` would refuse (a built-in's
+  id, low contrast, an unknown font) comes back with `problem` set, so the editor can
+  show it and the author can fix it. `Export(theme)` prints pretty textproto.
+- Both leave out the server-set fields (`builtin`, `version`, `owner`), so an exported
+  file imports back to the same draft (a round-trip row per built-in), and a file that
+  sets them cannot smuggle them in.
+- Both are `(read, theme)`: they parse and print, and storing is still `Put`. Both refuse
+  text or a draft over the 64 KiB cap before parsing or printing. REST:
+  `POST /v1/theme-import`, `POST /v1/theme-export`.
 
 ## Open questions
 

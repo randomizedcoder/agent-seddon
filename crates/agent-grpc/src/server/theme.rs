@@ -190,6 +190,47 @@ impl pb::theme_service_server::ThemeService for ThemeSvc {
         .instrument(sp);
         super::run_scoped(key, work).await
     }
+
+    async fn import(
+        &self,
+        request: Request<pb::ImportThemeRequest>,
+    ) -> Result<Response<pb::ImportThemeResponse>, Status> {
+        let key = super::identity_key(request.metadata());
+        let sp = span("theme.import", request.metadata());
+        let book = self.book.clone();
+        let work = async move {
+            let (theme, problem) = book
+                .import(&request.into_inner().text)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            Ok(Response::new(pb::ImportThemeResponse {
+                theme: Some(theme),
+                problem: problem.unwrap_or_default(),
+            }))
+        }
+        .instrument(sp);
+        super::run_scoped(key, work).await
+    }
+
+    async fn export(
+        &self,
+        request: Request<pb::ExportThemeRequest>,
+    ) -> Result<Response<pb::ExportThemeResponse>, Status> {
+        let key = super::identity_key(request.metadata());
+        let sp = span("theme.export", request.metadata());
+        let book = self.book.clone();
+        let work = async move {
+            let theme = request
+                .into_inner()
+                .theme
+                .ok_or_else(|| Status::invalid_argument("no theme to export"))?;
+            let text = book
+                .export(theme)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            Ok(Response::new(pb::ExportThemeResponse { text }))
+        }
+        .instrument(sp);
+        super::run_scoped(key, work).await
+    }
 }
 
 pub fn theme_router(book: Arc<ThemeBook>) -> Router {
@@ -415,6 +456,73 @@ mod tests {
         assert!(
             !s.message().contains("/var/lib"),
             "{description}: store detail leaked"
+        );
+    }
+
+    /// One Import/Export row: the call, the wire code, and (for Import) whether a problem is set.
+    struct WireCase {
+        description: &'static str,
+        call: WireCall,
+        expected: Code,
+        expected_problem: bool,
+    }
+
+    enum WireCall {
+        Import(String),
+        /// Export this theme, then import the text.
+        ImportOf(pb::Theme),
+        Export(Option<pb::Theme>),
+    }
+
+    #[rstest]
+    #[case::positive_import_exported_theme(WireCase { description: "an exported user theme imports with no problem", call: WireCall::ImportOf(theme("blue", false)), expected: Code::Ok, expected_problem: false })]
+    #[case::corner_import_partial_draft(WireCase { description: "a draft missing its palettes imports, with what Put would refuse in `problem`", call: WireCall::Import("id: \"blue\"\nname: \"Blue\"".into()), expected: Code::Ok, expected_problem: true })]
+    #[case::positive_export(WireCase { description: "a theme exports as text", call: WireCall::Export(Some(theme("blue", false))), expected: Code::Ok, expected_problem: false })]
+    #[case::negative_import_garbage(WireCase { description: "text that is not textproto is INVALID_ARGUMENT", call: WireCall::Import("{{{ not a theme".into()), expected: Code::InvalidArgument, expected_problem: false })]
+    #[case::negative_import_builtin_id(WireCase { description: "a built-in's id imports, with the problem set", call: WireCall::Import("id: \"windows\"\nname: \"W\"".into()), expected: Code::Ok, expected_problem: true })]
+    #[case::corner_export_nothing(WireCase { description: "Export with no theme is INVALID_ARGUMENT", call: WireCall::Export(None), expected: Code::InvalidArgument, expected_problem: false })]
+    #[case::boundary_import_empty(WireCase { description: "empty text parses to an empty draft, which Put would refuse", call: WireCall::Import(String::new()), expected: Code::Ok, expected_problem: true })]
+    #[case::adversarial_import_over_cap(WireCase { description: "text over 64 KiB is refused before parsing", call: WireCall::Import(format!("name: \"{}\"", "x".repeat(agent_theme::MAX_THEME_BYTES))), expected: Code::InvalidArgument, expected_problem: false })]
+    #[case::adversarial_export_over_cap(WireCase { description: "a draft over 64 KiB has no export", call: WireCall::Export(Some(pb::Theme { description: "x".repeat(agent_theme::MAX_THEME_BYTES + 1), ..theme("blue", false) })), expected: Code::InvalidArgument, expected_problem: false })]
+    #[tokio::test]
+    async fn import_export_table(#[case] c: WireCase) {
+        let s = svc();
+        let call = match c.call {
+            WireCall::ImportOf(theme) => {
+                let req = pb::ExportThemeRequest { theme: Some(theme) };
+                WireCall::Import(s.export(Request::new(req)).await.unwrap().into_inner().text)
+            }
+            other => other,
+        };
+        let (code, problem) = match call {
+            WireCall::Import(text) => match s
+                .import(Request::new(pb::ImportThemeRequest { text }))
+                .await
+            {
+                Ok(r) => (Code::Ok, !r.into_inner().problem.is_empty()),
+                Err(e) => (e.code(), false),
+            },
+            WireCall::Export(theme) => match s
+                .export(Request::new(pb::ExportThemeRequest { theme }))
+                .await
+            {
+                Ok(r) => {
+                    assert!(
+                        !r.into_inner().text.is_empty(),
+                        "{}: export text",
+                        c.description
+                    );
+                    (Code::Ok, false)
+                }
+                Err(e) => (e.code(), false),
+            },
+            WireCall::ImportOf(_) => unreachable!("exported above"),
+        };
+        assert_eq!(code, c.expected, "{}", c.description);
+        assert_eq!(
+            problem, c.expected_problem,
+            "{}: problem set?",
+            c.description
         );
     }
 }

@@ -19,6 +19,8 @@ class FakeThemeService extends ThemeServiceBase {
   Theme getResponse = Theme();
   Theme putResponse = Theme();
   DeleteThemeResponse deleteResponse = DeleteThemeResponse();
+  ImportThemeResponse importResponse = ImportThemeResponse();
+  ExportThemeResponse exportResponse = ExportThemeResponse();
 
   /// What `GetActive` answers (the user's stored choice, resolved).
   ActiveTheme active = ActiveTheme();
@@ -99,5 +101,19 @@ class FakeThemeService extends ThemeServiceBase {
       source: ActiveSource.ACTIVE_SOURCE_USER,
     );
     return active;
+  }
+
+  @override
+  Future<ImportThemeResponse> import(ServiceCall call, ImportThemeRequest request) async {
+    _log.record('agent.v1.ThemeService/Import', request);
+    await _guard('Import');
+    return importResponse;
+  }
+
+  @override
+  Future<ExportThemeResponse> export(ServiceCall call, ExportThemeRequest request) async {
+    _log.record('agent.v1.ThemeService/Export', request);
+    await _guard('Export');
+    return exportResponse;
   }
 }
