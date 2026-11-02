@@ -113,13 +113,19 @@ asks it to:
   [review-fleet.md](review-fleet.md)).
 - **A quota is `(api base, credential)`.** The credential is a keyed hash
   (per-process `RandomState`) of the token; the token itself is never kept. Two tenants
-  with different tokens never share a hold. The gate map holds at most 1024 quotas.
+  with different tokens never share a hold. A credential whose quota outlives its token
+  names it instead (`TokenSource::quota_identity`): a GitHub App source names its tenant
+  and `ghapp:<installation>` ref, since GitHub limits the installation while its token
+  rotates hourly, so a held gate and the cached ETags survive the rotation. That identity
+  is hashed the same way, apart from tokens. The gate map holds at most 1024 quotas.
 - **Conditional GETs.** A GET whose earlier answer carried an `ETag` is re-sent with
   `If-None-Match`; a `304` (which GitHub does not count against the quota) is answered from
   the cached body, which is only copied out on a `304`. The cache is per quota and URL, at
-  most 32 entries of at most 2 MiB (least recently used evicted first), and
-  an ETag over 256 bytes or with non-printable bytes is not stored. A `304` with nothing
-  cached is an error, not an empty answer.
+  most 32 entries of at most 2 MiB on the wire (least recently used evicted first; the
+  parsed bodies can take a small multiple of that on the heap), and an ETag over 256 bytes
+  or with non-printable bytes is not stored. A `304` to a GET sent with an ETag whose
+  entry went meanwhile (evicted or replaced) is re-sent once without `If-None-Match`; a
+  `304` to a GET sent without one is an error, not an empty answer.
 
 The GitHub App token mint and the install-time OAuth calls use the same rules
 (`pace::answer`), so a rate-limited mint is not retried early either.

@@ -307,6 +307,15 @@ pub trait TokenSource: Send + Sync {
     fn is_configured(&self) -> bool {
         true
     }
+
+    /// A stable name for the rate-limit quota this credential draws on, when the quota
+    /// outlives the token: a GitHub App's limit is per installation while its token
+    /// rotates hourly, so keying the quota on the token would lose a held gate and the
+    /// conditional-request cache at each rotation. `None` (the default) means the token
+    /// itself is the quota. Never a secret, but treated as one: callers only hash it.
+    fn quota_identity(&self) -> Option<String> {
+        None
+    }
 }
 
 #[async_trait::async_trait]

@@ -106,7 +106,8 @@ pub async fn poll_session(
     Ok(report)
 }
 
-/// The first wait after a failed poll. Each further consecutive failure doubles it.
+/// The backoff base after a failed poll. With equal jitter the first wait falls in
+/// `[base/2, base)`; each further consecutive failure doubles it.
 pub const POLL_BACKOFF_BASE: Duration = Duration::from_secs(60);
 /// The longest wait between polls of a failing row.
 pub const POLL_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);

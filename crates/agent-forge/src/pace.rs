@@ -52,8 +52,9 @@ pub const DEFAULT_LIMITED_WAIT: Duration = Duration::from_secs(60);
 pub const MAX_GATES: usize = 1024;
 /// Most cached `ETag` bodies held at once (the least recently stored is evicted).
 pub const MAX_CACHED: usize = 32;
-/// Largest response body cached for a conditional request; a bigger one is not cached.
-/// With [`MAX_CACHED`] this bounds the cache at 64 MiB.
+/// Largest response body (wire bytes) cached for a conditional request; a bigger one is
+/// not cached. With [`MAX_CACHED`] this bounds the cached wire bytes at 64 MiB; the
+/// parsed values can take a small multiple of that on the heap.
 pub const MAX_CACHED_BYTES: usize = 2 * 1024 * 1024;
 /// Longest `ETag` value kept and sent back.
 pub const MAX_ETAG_LEN: usize = 256;
@@ -168,7 +169,8 @@ pub fn usable_etag(etag: &str) -> bool {
         && etag.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
-/// One forge quota: the API base and a keyed hash of the credential.
+/// One forge quota: the API base and a keyed hash of the credential (or of its stable
+/// quota identity, see [`Pacer::quota_for`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Quota {
     base: String,
@@ -219,12 +221,19 @@ impl Pacer {
         GLOBAL.get_or_init(|| Arc::new(Pacer::new())).clone()
     }
 
-    /// The quota `credential` draws on at `base`. The credential is hashed with this
-    /// pacer's random key and dropped; only the hash is kept.
-    pub fn quota(&self, base: &str, credential: &str) -> Quota {
+    /// The quota a call draws on at `base`: the credential's stable `identity` when it
+    /// has one (a GitHub App installation, whose token rotates while its limit stays),
+    /// else the `token` itself. Either is hashed with this pacer's random key and
+    /// dropped. The two are hashed apart, so an identity never collides with a token
+    /// that happens to spell it.
+    pub fn quota_for(&self, base: &str, identity: Option<&str>, token: &str) -> Quota {
+        let credential = match identity {
+            Some(id) => self.keys.hash_one((1u8, id)),
+            None => self.keys.hash_one((0u8, token)),
+        };
         Quota {
             base: base.trim_end_matches('/').to_string(),
-            credential: self.keys.hash_one(credential),
+            credential,
         }
     }
 
@@ -353,6 +362,13 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use std::time::UNIX_EPOCH;
+
+    impl Pacer {
+        /// The quota a plain token draws on (no stable identity).
+        fn quota(&self, base: &str, token: &str) -> Quota {
+            self.quota_for(base, None, token)
+        }
+    }
 
     /// 2027-01-15T08:00:00Z, so the HTTP-date row below is 120s ahead.
     const NOW_SECS: u64 = 1_800_000_000;
@@ -699,6 +715,56 @@ mod tests {
             "no token in the key"
         );
         assert_ne!(a, b, "the hash key is per process");
+    }
+
+    /// The quota follows a credential's stable identity when it has one, else its
+    /// token; the two are hashed apart.
+    #[rstest]
+    #[case::positive_same_identity_other_token(
+        "one installation, a rotated token: the same quota",
+        (Some("t\nghapp:1"), "ghs_0"), (Some("t\nghapp:1"), "ghs_1"), true
+    )]
+    #[case::negative_other_identity(
+        "another installation, the same token: another quota",
+        (Some("t\nghapp:1"), "ghs_0"), (Some("t\nghapp:2"), "ghs_0"), false
+    )]
+    #[case::corner_no_identity_same_token(
+        "no identity: the token is the quota",
+        (None, "pat"), (None, "pat"), true
+    )]
+    #[case::negative_no_identity_other_token(
+        "no identity, another token: another quota",
+        (None, "pat"), (None, "pat2"), false
+    )]
+    #[case::adversarial_token_spelling_an_identity(
+        "a token spelling an identity is not that identity's quota",
+        (None, "t\nghapp:1"), (Some("t\nghapp:1"), "x"), false
+    )]
+    fn quota_identity_cases(
+        #[case] desc: &str,
+        #[case] a: (Option<&str>, &str),
+        #[case] b: (Option<&str>, &str),
+        #[case] same: bool,
+    ) {
+        let p = Pacer::new();
+        let base = "https://api.github.com";
+        assert_eq!(
+            p.quota_for(base, a.0, a.1) == p.quota_for(base, b.0, b.1),
+            same,
+            "{desc}"
+        );
+    }
+
+    /// Like the token, the identity is only hashed: it never shows in the key.
+    #[test]
+    fn adversarial_quota_keeps_no_identity() {
+        let q = Pacer::new().quota_for("https://api.github.com", Some("acme\nghapp:42"), "ghs_x");
+        let shown = format!("{q:?}");
+        assert!(
+            !shown.contains("ghapp") && !shown.contains("acme"),
+            "{shown}"
+        );
+        assert!(!shown.contains("ghs_x"), "{shown}");
     }
 
     /// Past MAX_GATES live gates the soonest-expiring one is dropped, so the map stays

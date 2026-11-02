@@ -104,14 +104,18 @@ impl ForgeHttp {
         Ok(())
     }
 
-    /// Build a request, and name the quota it draws on (the base + this credential).
+    /// Build a request, and name the quota it draws on (the base + this credential's
+    /// stable quota identity, or the token itself when it has none).
     async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
     ) -> Result<(reqwest::RequestBuilder, Quota)> {
         let token = self.token.token().await?;
-        let quota = self.pacer.quota(&self.base, token.expose());
+        let identity = self.token.quota_identity();
+        let quota = self
+            .pacer
+            .quota_for(&self.base, identity.as_deref(), token.expose());
         let url = format!(
             "{}/{}",
             self.base.trim_end_matches('/'),
@@ -156,84 +160,99 @@ impl ForgeHttp {
             let m = method.clone();
             let b = body.clone();
             async move {
-                // An unresolvable credential (a failed mint) is not a forge answer to
-                // retry here; the minter retries its own call.
-                let (mut rb, quota) = match self.request(m, path).await {
-                    Ok(built) => built,
-                    Err(e) => return agent_retry::Attempt::Fail(e),
-                };
-                // The forge asked this quota to slow down: send nothing until it said.
-                if let Some(left) = self.pacer.blocked(&quota, Instant::now()) {
-                    return agent_retry::Attempt::Fail(held_off(left));
-                }
-                let sent_etag = if get {
-                    self.pacer.cached_etag(&quota, path)
-                } else {
-                    None
-                };
-                if let Some(etag) = &sent_etag {
-                    rb = rb.header(reqwest::header::IF_NONE_MATCH, etag);
-                }
-                if let Some(b) = b {
-                    rb = rb.json(&b);
-                }
-                match rb.send().await {
-                    Ok(r) => {
-                        let code = r.status().as_u16();
-                        let sig = Signals::from_headers(r.headers());
-                        let now = SystemTime::now();
-                        if code == 304 {
-                            let body = sent_etag
-                                .as_deref()
-                                .and_then(|etag| self.pacer.cached_body(&quota, path, etag));
-                            if let Some(body) = body {
-                                // A 304 can still report the quota spent: hold until the reset.
-                                if let Some(wait) = pace::exhausted_wait(&sig, now) {
-                                    self.pacer.hold(&quota, wait, Instant::now());
-                                }
-                                return agent_retry::Attempt::Done((Reply::Cached(body), quota));
-                            }
-                        }
-                        // Status only: the body can echo the request, including the token.
-                        let err = Error::Repo(format!("forge api returned http {code}"));
-                        match pace::answer(code, &sig, now, self.retry.max_delay) {
-                            // A short wait is retried in place, after exactly that wait,
-                            // and gates the quota meanwhile for every other caller.
-                            pace::Answer::Retry(Some(wait)) => {
-                                self.pacer.hold(&quota, wait, Instant::now());
-                                agent_retry::Attempt::Retry {
-                                    err,
-                                    after: Some(wait),
-                                }
-                            }
-                            pace::Answer::Retry(None) => {
-                                agent_retry::Attempt::Retry { err, after: None }
-                            }
-                            // A longer one fails now; the gate turns away later calls.
-                            pace::Answer::GiveUp(wait) => {
-                                self.pacer.hold(&quota, wait, Instant::now());
-                                agent_retry::Attempt::Fail(Error::Repo(format!(
-                                    "forge api returned http {code}: rate limited for {}s",
-                                    wait.as_secs()
-                                )))
-                            }
-                            pace::Answer::Use => {
-                                // Accepted, but the quota is spent: the next call would be
-                                // refused, so none is made until the reset.
-                                if let Some(wait) = pace::exhausted_wait(&sig, now) {
-                                    self.pacer.hold(&quota, wait, Instant::now());
-                                }
-                                agent_retry::Attempt::Done((Reply::Fresh(r), quota))
-                            }
-                        }
+                // A 304 whose cached body went (evicted or replaced while the request was
+                // out) is re-asked once without If-None-Match; the unconditional resend
+                // can't take this branch again, so this runs at most twice.
+                let mut conditional = get;
+                loop {
+                    // An unresolvable credential (a failed mint) is not a forge answer to
+                    // retry here; the minter retries its own call.
+                    let (mut rb, quota) = match self.request(m.clone(), path).await {
+                        Ok(built) => built,
+                        Err(e) => return agent_retry::Attempt::Fail(e),
+                    };
+                    // The forge asked this quota to slow down: send nothing until it said.
+                    if let Some(left) = self.pacer.blocked(&quota, Instant::now()) {
+                        return agent_retry::Attempt::Fail(held_off(left));
                     }
-                    Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
-                        err: Error::Repo(format!("forge request failed: {e}")),
-                        after: None,
-                    },
-                    Err(e) => agent_retry::Attempt::Fail(Error::Repo(format!(
-                        "forge request failed: {e}"
-                    ))),
+                    let sent_etag = if conditional {
+                        self.pacer.cached_etag(&quota, path)
+                    } else {
+                        None
+                    };
+                    if let Some(etag) = &sent_etag {
+                        rb = rb.header(reqwest::header::IF_NONE_MATCH, etag);
+                    }
+                    if let Some(b) = &b {
+                        rb = rb.json(b);
+                    }
+                    return match rb.send().await {
+                        Ok(r) => {
+                            let code = r.status().as_u16();
+                            let sig = Signals::from_headers(r.headers());
+                            let now = SystemTime::now();
+                            if code == 304 {
+                                // A 304 can still report the quota spent: hold until the
+                                // reset (a resend below is then turned away by the gate).
+                                if let Some(wait) = pace::exhausted_wait(&sig, now) {
+                                    self.pacer.hold(&quota, wait, Instant::now());
+                                }
+                                let body = sent_etag
+                                    .as_deref()
+                                    .and_then(|etag| self.pacer.cached_body(&quota, path, etag));
+                                if let Some(body) = body {
+                                    return agent_retry::Attempt::Done((
+                                        Reply::Cached(body),
+                                        quota,
+                                    ));
+                                }
+                                // We sent a tag but its body is gone: ask again in full.
+                                if sent_etag.is_some() {
+                                    conditional = false;
+                                    continue;
+                                }
+                            }
+                            // Status only: the body can echo the request, including the token.
+                            let err = Error::Repo(format!("forge api returned http {code}"));
+                            match pace::answer(code, &sig, now, self.retry.max_delay) {
+                                // A short wait is retried in place, after exactly that wait,
+                                // and gates the quota meanwhile for every other caller.
+                                pace::Answer::Retry(Some(wait)) => {
+                                    self.pacer.hold(&quota, wait, Instant::now());
+                                    agent_retry::Attempt::Retry {
+                                        err,
+                                        after: Some(wait),
+                                    }
+                                }
+                                pace::Answer::Retry(None) => {
+                                    agent_retry::Attempt::Retry { err, after: None }
+                                }
+                                // A longer one fails now; the gate turns away later calls.
+                                pace::Answer::GiveUp(wait) => {
+                                    self.pacer.hold(&quota, wait, Instant::now());
+                                    agent_retry::Attempt::Fail(Error::Repo(format!(
+                                        "forge api returned http {code}: rate limited for {}s",
+                                        wait.as_secs()
+                                    )))
+                                }
+                                pace::Answer::Use => {
+                                    // Accepted, but the quota is spent: the next call would be
+                                    // refused, so none is made until the reset.
+                                    if let Some(wait) = pace::exhausted_wait(&sig, now) {
+                                        self.pacer.hold(&quota, wait, Instant::now());
+                                    }
+                                    agent_retry::Attempt::Done((Reply::Fresh(r), quota))
+                                }
+                            }
+                        }
+                        Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
+                            err: Error::Repo(format!("forge request failed: {e}")),
+                            after: None,
+                        },
+                        Err(e) => agent_retry::Attempt::Fail(Error::Repo(format!(
+                            "forge request failed: {e}"
+                        ))),
+                    };
                 }
             }
         })
@@ -563,13 +582,25 @@ mod tests {
     /// A loopback API that answers request `i` with `script[i]` (the last one repeats),
     /// recording each request's `If-None-Match` (empty when absent).
     fn spawn_scripted(script: Vec<Scripted>) -> (String, Arc<Mutex<Vec<String>>>) {
+        spawn_scripted_with(script, |_, _| {})
+    }
+
+    /// [`spawn_scripted`], running `before(i, base)` ahead of answering request `i` (so
+    /// a test can change client-side state while that request is out).
+    fn spawn_scripted_with(
+        script: Vec<Scripted>,
+        before: impl Fn(usize, &str) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         use tiny_http::{Header, Response, Server};
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let at = base.clone();
         std::thread::spawn(move || {
             for (i, request) in server.incoming_requests().enumerate() {
+                before(i, &at);
                 let inm = request
                     .headers()
                     .iter()
@@ -585,7 +616,7 @@ mod tests {
                 let _ = request.respond(resp);
             }
         });
-        (format!("http://127.0.0.1:{port}"), seen)
+        (base, seen)
     }
 
     /// A client on its own pacer, so tests never share gates.
@@ -766,6 +797,182 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), sent, "{desc}: requests sent");
         assert_eq!(seen[..2], [String::new(), "\"v1\"".to_string()], "{desc}");
+    }
+
+    /// A 304 whose cached entry went while the request was out (replaced under another
+    /// tag, or dropped) is not an error: the GET is re-sent once without If-None-Match
+    /// and the fresh answer used. The resend never loops: a 304 to it is an error.
+    #[rstest]
+    #[case::positive_replaced_entry_resends(
+        "the entry now carries another tag: one unconditional resend, its body used",
+        Some("\"v2\""),
+        vec![(200, vec![("ETag", "\"v1\"".into())], "[1]"), (304, vec![], ""), (200, vec![], "[3]")],
+        Ok(serde_json::json!([3])),
+        vec!["", "\"v1\"", ""]
+    )]
+    #[case::positive_dropped_entry_resends(
+        "the entry was dropped: one unconditional resend, its body used",
+        Some(""),
+        vec![(200, vec![("ETag", "\"v1\"".into())], "[1]"), (304, vec![], ""), (200, vec![], "[3]")],
+        Ok(serde_json::json!([3])),
+        vec!["", "\"v1\"", ""]
+    )]
+    #[case::negative_entry_kept_is_served(
+        "nothing changed while out: the 304 is served from the cache, no resend",
+        None,
+        vec![(200, vec![("ETag", "\"v1\"".into())], "[1]"), (304, vec![], "")],
+        Ok(serde_json::json!([1])),
+        vec!["", "\"v1\""]
+    )]
+    #[case::adversarial_304_to_the_resend_is_an_error(
+        "a forge that answers the unconditional resend with 304 too: an error, no loop",
+        Some(""),
+        vec![(200, vec![("ETag", "\"v1\"".into())], "[1]"), (304, vec![], "")],
+        Err("http 304"),
+        vec!["", "\"v1\"", ""]
+    )]
+    #[tokio::test]
+    async fn vanished_entry_cases(
+        #[case] desc: &str,
+        #[case] replace_with: Option<&'static str>,
+        #[case] script: Vec<Scripted>,
+        #[case] want: std::result::Result<serde_json::Value, &str>,
+        #[case] sent: Vec<&str>,
+    ) {
+        let pacer = Arc::new(Pacer::new());
+        let hook = pacer.clone();
+        // While the second (conditional) GET is out, replace or drop the cached entry;
+        // an unusable tag ("") drops it.
+        let (base, seen) = spawn_scripted_with(script, move |i, base| {
+            if let (1, Some(tag)) = (i, replace_with) {
+                let q = hook.quota_for(base, None, "tok");
+                hook.remember(&q, "pulls", tag, &serde_json::json!(["other"]), 9);
+            }
+        });
+        let http = paced(base, "tok", 0, pacer);
+        http.get_json("pulls").await.unwrap();
+        let got = http.get_json("pulls").await;
+        match (&got, &want) {
+            (Ok(v), Ok(w)) => assert_eq!(v, w, "{desc}"),
+            (Err(e), Err(frag)) => assert!(e.to_string().contains(frag), "{desc}: {e}"),
+            _ => panic!("{desc}: got {got:?}, want {want:?}"),
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            sent,
+            "{desc}: If-None-Match per request"
+        );
+    }
+
+    /// A credential with a stable quota identity, as the App-token source has: each
+    /// read hands out `token` (numbered per read when `rotate`).
+    struct IdentSource {
+        reads: std::sync::atomic::AtomicUsize,
+        token: &'static str,
+        rotate: bool,
+        identity: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl TokenSource for IdentSource {
+        async fn token(&self) -> Result<agent_core::Secret> {
+            let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(agent_core::Secret::new(if self.rotate {
+                format!("{}{n}", self.token)
+            } else {
+                self.token.to_string()
+            }))
+        }
+
+        fn quota_identity(&self) -> Option<String> {
+            self.identity.map(str::to_string)
+        }
+    }
+
+    fn ident(
+        base: &str,
+        pacer: &Arc<Pacer>,
+        (token, rotate, identity): (&'static str, bool, Option<&'static str>),
+    ) -> ForgeHttp {
+        http_with(
+            base.to_string(),
+            Arc::new(IdentSource {
+                reads: Default::default(),
+                token,
+                rotate,
+                identity,
+            }),
+        )
+        .with_pacer(pacer.clone())
+    }
+
+    /// A 429 gates the quota; is the next call (from the same client after its token
+    /// rotated, or from a second client) held off? The quota follows the credential's
+    /// stable identity when it has one, else the token.
+    #[rstest]
+    #[case::positive_rotated_token_same_installation(
+        "a rotated App token keeps its installation's gate",
+        ("ghs_", true, Some("t\nghapp:1")), None, 1
+    )]
+    #[case::negative_rotation_without_identity(
+        "with no identity a new token is a new quota (a PAT that changed)",
+        ("ghs_", true, None), None, 2
+    )]
+    #[case::positive_same_installation_other_client(
+        "another client on the same installation shares the gate",
+        ("ghs_a", false, Some("t\nghapp:1")), Some(("ghs_b", false, Some("t\nghapp:1"))), 1
+    )]
+    #[case::negative_other_installation(
+        "another installation is a separate quota",
+        ("ghs_a", false, Some("t\nghapp:1")), Some(("ghs_a", false, Some("t\nghapp:2"))), 2
+    )]
+    #[case::corner_static_same_token(
+        "two clients on one static token share the gate, as before",
+        ("pat", false, None), Some(("pat", false, None)), 1
+    )]
+    #[case::adversarial_token_spelling_an_identity(
+        "a token that spells an identity is not that installation's quota",
+        ("acme.ghapp.1", false, None), Some(("ghs_b", false, Some("acme.ghapp.1"))), 2
+    )]
+    #[tokio::test]
+    async fn quota_identity_cases(
+        #[case] desc: &str,
+        #[case] first: (&'static str, bool, Option<&'static str>),
+        #[case] second: Option<(&'static str, bool, Option<&'static str>)>,
+        #[case] sent: usize,
+    ) {
+        let (base, seen) = spawn_scripted(vec![
+            (429, vec![("Retry-After", "120".into())], "{}"),
+            (200, vec![], "[]"),
+        ]);
+        let pacer = Arc::new(Pacer::new());
+        let a = ident(&base, &pacer, first);
+        let b = second.map(|s| ident(&base, &pacer, s));
+        assert!(a.get_json("x").await.is_err(), "{desc}: the 429");
+        let _ = b.as_ref().unwrap_or(&a).get_json("x").await;
+        assert_eq!(seen.lock().unwrap().len(), sent, "{desc}: requests sent");
+    }
+
+    /// The conditional-request cache follows the installation too: after the App token
+    /// rotates, the next GET still sends the cached tag and a 304 is answered from it.
+    #[tokio::test]
+    async fn positive_rotated_token_keeps_the_etag() {
+        let (base, seen) = spawn_scripted(vec![
+            (200, vec![("ETag", "\"v1\"".into())], "[7]"),
+            (304, vec![], ""),
+        ]);
+        let http = ident(
+            &base,
+            &Arc::new(Pacer::new()),
+            ("ghs_", true, Some("t\nghapp:1")),
+        );
+        let first = http.get_json("pulls").await.unwrap();
+        let second = http.get_json("pulls").await.unwrap();
+        assert_eq!(second, first);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![String::new(), "\"v1\"".to_string()]
+        );
     }
 
     /// Another credential on the same API never sees the first credential's cached

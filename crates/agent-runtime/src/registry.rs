@@ -1651,6 +1651,12 @@ impl agent_core::TokenSource for MintedToken {
             .await
             .map_err(|e| agent_core::Error::Repo(format!("{e:#}")))
     }
+
+    /// GitHub limits an installation, not each hourly token: the tenant and its
+    /// `ghapp:<installation>` ref name the quota across rotations.
+    fn quota_identity(&self) -> Option<String> {
+        Some(format!("{}\n{}", self.tenant, self.token_ref))
+    }
 }
 
 /// The **sync** reconcile pre-check (review-fleet C5; forge-auth F2): can this row's
@@ -2307,5 +2313,31 @@ mod tests {
             let port = rx.recv().unwrap();
             format!("http://127.0.0.1:{port}")
         }
+    }
+
+    /// The App-token source names its quota by tenant + installation ref (stable across
+    /// the hourly rotation, distinct per installation and tenant); a plain secret has
+    /// no identity, so its token stays the quota.
+    #[cfg(feature = "fleet")]
+    #[rstest]
+    #[case::positive_installation_named("acme", "ghapp:42", Some("acme\nghapp:42"))]
+    #[case::negative_other_installation("acme", "ghapp:43", Some("acme\nghapp:43"))]
+    #[case::adversarial_other_tenant_same_installation("evil", "ghapp:42", Some("evil\nghapp:42"))]
+    fn minted_token_quota_identity(
+        #[case] tenant: &str,
+        #[case] token_ref: &str,
+        #[case] want: Option<&str>,
+    ) {
+        use agent_core::TokenSource;
+        let src = MintedToken {
+            tenant: tenant.to_string(),
+            token_ref: token_ref.to_string(),
+        };
+        assert_eq!(src.quota_identity().as_deref(), want);
+        assert_eq!(
+            agent_core::Secret::new("ghs_x").quota_identity(),
+            None,
+            "a static secret keys on its token"
+        );
     }
 }

@@ -116,6 +116,13 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   poll head; the capacity shed runs before the history read; a second client sharing the
   pacer is tested to honour a held quota; the hint-less 429 → 60 s give-up is documented
   as deliberate (GitHub's secondary-limit advice).
+  Review round 3: a GitHub App credential keys its quota on the tenant + installation ref
+  (`TokenSource::quota_identity`), so the hourly token rotation keeps the held gate and
+  the ETag cache; a `304` whose cache entry went while the request was out is re-sent
+  once unconditionally instead of failing the call; the cache's 64 MiB bound is stated as
+  wire bytes. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
+  names it) so a webhook-first trigger gets the early `UpToDate` too; today it always
+  fetches, which is only conservative.
 
 ## Decisions of record
 
