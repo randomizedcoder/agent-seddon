@@ -355,6 +355,13 @@ The poll is built to be a **good citizen** of the forge (most of all GitHub):
 - **Forge-side pacing.** The forge client honours `Retry-After` / rate-limit reset hints, holds
   a spent quota until it resets and sends conditional GETs. See
   [forge.md § Rate limits](forge.md#rate-limits).
+- **Who re-drives a rate-limited review.** A forge wait longer than the retry policy's 20 s
+  `max_delay` is not slept on: the call fails and the quota is held. This applies to every
+  trigger source, so a webhook, Slack or `ReviewNow` review that hits a long limit fails
+  rather than sleeping through it. Nothing re-sends it immediately, and nothing should: the hold
+  is shared, so a sooner retry would only be refused. The poll is the re-driver. Every
+  enabled forge row is polled (webhooks never replace the poll), a PR with no draft for its head
+  is triggered again, and the first poll after the hold lifts picks it up.
 
 **Slack watch (C7, inc 4b)** is the second trigger source, in the new
 [`agent-slack`](../../crates/agent-slack) crate (shared with C18's outbound progress poster,

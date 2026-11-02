@@ -262,8 +262,25 @@ impl Pacer {
         *gate = (*gate).max(until);
     }
 
-    /// The cached `(etag, body)` for a GET of `path` on `quota`, if any.
-    pub fn cached(&self, quota: &Quota, path: &str) -> Option<(String, serde_json::Value)> {
+    /// The ETag to send as `If-None-Match` on a GET of `path` on `quota`, if one is
+    /// cached. This counts as a use: the entry becomes the most recently used, so a hot
+    /// path is not evicted by a run of one-off ones.
+    pub fn cached_etag(&self, quota: &Quota, path: &str) -> Option<String> {
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.clock += 1;
+        let stamp = cache.clock;
+        let entry = cache.entries.get_mut(&(quota.clone(), path.to_string()))?;
+        entry.stamp = stamp;
+        Some(entry.etag.clone())
+    }
+
+    /// The cached body for a GET of `path` on `quota`, if its entry still carries
+    /// `etag` (the tag the `304` answered). Only read on a `304`, so a changed
+    /// resource never pays for a copy of the old body.
+    pub fn cached_body(&self, quota: &Quota, path: &str, etag: &str) -> Option<serde_json::Value> {
         let cache = self
             .cache
             .lock()
@@ -271,13 +288,14 @@ impl Pacer {
         cache
             .entries
             .get(&(quota.clone(), path.to_string()))
-            .map(|c| (c.etag.clone(), c.body.clone()))
+            .filter(|c| c.etag == etag)
+            .map(|c| c.body.clone())
     }
 
     /// Keep `body` (whose wire size was `size` bytes) as the answer to a GET of `path`
     /// on `quota`, tagged `etag`. An unusable `etag` ([`usable_etag`]) or a body over
     /// [`MAX_CACHED_BYTES`] is not cached, and drops any older entry for that path.
-    /// Past [`MAX_CACHED`] entries the least recently stored is evicted.
+    /// Past [`MAX_CACHED`] entries the least recently used is evicted.
     pub fn remember(
         &self,
         quota: &Quota,
@@ -783,10 +801,12 @@ mod tests {
             &body,
             size,
         );
-        let got = p.cached(&p.quota(base, reader), path);
+        let q = p.quota(base, reader);
+        let got = p.cached_etag(&q, path);
         assert_eq!(got.is_some(), hit, "{desc}");
-        if let Some((e, b)) = got {
-            assert_eq!((e.as_str(), b), (etag, body), "{desc}");
+        if let Some(e) = got {
+            assert_eq!(e, etag, "{desc}");
+            assert_eq!(p.cached_body(&q, path, &e), Some(body), "{desc}");
         }
     }
 
@@ -798,22 +818,57 @@ mod tests {
         let q = p.quota("b", "t");
         p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
         p.remember(&q, "x", "", &serde_json::json!(2), 1);
-        assert_eq!(p.cached(&q, "x"), None);
+        assert_eq!(p.cached_etag(&q, "x"), None);
     }
 
-    /// Past MAX_CACHED entries the least recently stored is evicted.
-    #[test]
-    fn boundary_cache_evicts_the_oldest() {
+    /// Past MAX_CACHED entries the least recently used is evicted: a path read since
+    /// it was stored outlives one-off paths stored after it.
+    #[rstest]
+    #[case::positive_untouched_oldest_goes(
+        "with no reads, the first stored is the one evicted",
+        None,
+        "p0"
+    )]
+    #[case::corner_read_entry_survives(
+        "a conditional GET of p0 makes it recent, so p1 is evicted instead",
+        Some("p0"),
+        "p1"
+    )]
+    fn boundary_cache_evicts_the_least_recently_used(
+        #[case] desc: &str,
+        #[case] read: Option<&str>,
+        #[case] evicted: &str,
+    ) {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        for i in 0..=MAX_CACHED {
+        for i in 0..MAX_CACHED {
             p.remember(&q, &format!("p{i}"), "\"e\"", &serde_json::json!(i), 1);
         }
-        assert_eq!(p.cached_len(), MAX_CACHED);
-        assert_eq!(p.cached(&q, "p0"), None, "the oldest went");
+        if let Some(path) = read {
+            assert!(p.cached_etag(&q, path).is_some(), "{desc}");
+        }
+        let newest = format!("p{MAX_CACHED}");
+        p.remember(&q, &newest, "\"e\"", &serde_json::json!(0), 1);
+        assert_eq!(p.cached_len(), MAX_CACHED, "{desc}");
+        assert_eq!(p.cached_etag(&q, evicted), None, "{desc}: {evicted} went");
         assert!(
-            p.cached(&q, &format!("p{MAX_CACHED}")).is_some(),
-            "the newest stayed"
+            p.cached_etag(&q, &newest).is_some(),
+            "{desc}: the newest stayed"
         );
+        if let Some(path) = read {
+            assert!(p.cached_etag(&q, path).is_some(), "{desc}: {path} stayed");
+        }
+    }
+
+    /// A body is only served for the ETag the 304 answered: an entry re-stored under
+    /// a new tag doesn't hand out its body for the old one.
+    #[rstest]
+    #[case::positive_same_tag("the tag sent is the tag stored", "\"e1\"", true)]
+    #[case::adversarial_stale_tag("a 304 for a tag no longer stored gets no body", "\"e0\"", false)]
+    fn cached_body_matches_the_tag(#[case] desc: &str, #[case] sent: &str, #[case] hit: bool) {
+        let p = Pacer::new();
+        let q = p.quota("b", "t");
+        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
+        assert_eq!(p.cached_body(&q, "x", sent).is_some(), hit, "{desc}");
     }
 }

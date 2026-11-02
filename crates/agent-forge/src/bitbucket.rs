@@ -129,8 +129,8 @@ fn to_pr(v: &serde_json::Value) -> PullRequest {
         target_branch: dig(v, &["destination", "branch", "name"]),
         // Bitbucket Cloud has no draft-PR flag.
         draft: false,
-        // Bitbucket reports an abbreviated hash, which `object_id` drops: the fleet then
-        // fetches the head to learn it, as before.
+        // The PR list gives a short hash here, which `object_id` drops (a full id is
+        // kept if one ever comes): the fleet then fetches the head to learn it.
         head_sha: object_id(&dig(v, &["source", "commit", "hash"])),
     }
 }

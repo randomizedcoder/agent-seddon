@@ -106,13 +106,16 @@ asks it to:
   **holds the quota** until the wait passes: every later call on that quota fails fast
   with "holding off another Ns" and sends nothing. A 2xx that reports
   `X-RateLimit-Remaining: 0` holds the quota until the reset too, so we stop before the
-  forge has to refuse us.
+  forge has to refuse us. A `304` that reports the quota spent holds it the same way.
+  A call that fails on a hold is not queued: the fleet's poll re-drives it (see
+  [review-fleet.md](review-fleet.md)).
 - **A quota is `(api base, credential)`.** The credential is a keyed hash
   (per-process `RandomState`) of the token; the token itself is never kept. Two tenants
   with different tokens never share a hold. The gate map holds at most 1024 quotas.
 - **Conditional GETs.** A GET whose earlier answer carried an `ETag` is re-sent with
   `If-None-Match`; a `304` (which GitHub does not count against the quota) is answered from
-  the cached body. The cache is per quota and URL, at most 32 entries of at most 2 MiB, and
+  the cached body, which is only copied out on a `304`. The cache is per quota and URL, at
+  most 32 entries of at most 2 MiB (least recently used evicted first), and
   an ETag over 256 bytes or with non-printable bytes is not stored. A `304` with nothing
   cached is an error, not an empty answer.
 

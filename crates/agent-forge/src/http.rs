@@ -166,12 +166,12 @@ impl ForgeHttp {
                 if let Some(left) = self.pacer.blocked(&quota, Instant::now()) {
                     return agent_retry::Attempt::Fail(held_off(left));
                 }
-                let cached = if get {
-                    self.pacer.cached(&quota, path)
+                let sent_etag = if get {
+                    self.pacer.cached_etag(&quota, path)
                 } else {
                     None
                 };
-                if let Some((etag, _)) = &cached {
+                if let Some(etag) = &sent_etag {
                     rb = rb.header(reqwest::header::IF_NONE_MATCH, etag);
                 }
                 if let Some(b) = b {
@@ -180,13 +180,20 @@ impl ForgeHttp {
                 match rb.send().await {
                     Ok(r) => {
                         let code = r.status().as_u16();
+                        let sig = Signals::from_headers(r.headers());
+                        let now = SystemTime::now();
                         if code == 304 {
-                            if let Some((_, body)) = cached {
+                            let body = sent_etag
+                                .as_deref()
+                                .and_then(|etag| self.pacer.cached_body(&quota, path, etag));
+                            if let Some(body) = body {
+                                // A 304 can still report the quota spent: hold until the reset.
+                                if let Some(wait) = pace::exhausted_wait(&sig, now) {
+                                    self.pacer.hold(&quota, wait, Instant::now());
+                                }
                                 return agent_retry::Attempt::Done((Reply::Cached(body), quota));
                             }
                         }
-                        let sig = Signals::from_headers(r.headers());
-                        let now = SystemTime::now();
                         // Status only: the body can echo the request, including the token.
                         let err = Error::Repo(format!("forge api returned http {code}"));
                         match pace::answer(code, &sig, now, self.retry.max_delay) {
@@ -605,6 +612,10 @@ mod tests {
             .to_string()
     }
 
+    fn date_in(secs: u64) -> String {
+        httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(secs))
+    }
+
     /// Two calls in a row against a scripted forge: does the first succeed, does the
     /// second, and how many requests reached the forge in all.
     #[rstest]
@@ -632,6 +643,11 @@ mod tests {
         "a 200 with quota left gates nothing",
         vec![(200, vec![("x-ratelimit-remaining", "1".into()), ("x-ratelimit-reset", reset_in(300))], "[]")],
         0, (true, true), 2
+    )]
+    #[case::positive_http_date_retry_after_gates_the_quota(
+        "a Retry-After given as an HTTP-date two minutes out gates like the seconds form",
+        vec![(429, vec![("Retry-After", date_in(120))], "{}")],
+        3, (false, false), 1
     )]
     #[case::adversarial_days_long_hint_is_capped_not_retried(
         "a days-long Retry-After is not slept on: the call fails and the quota is gated",
@@ -684,22 +700,61 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
-    /// The conditional-request cycle: an answer with an ETag is kept; the next GET sends
-    /// it as If-None-Match, and a 304 is answered from the cache.
+    /// The conditional-request cycle, three GETs of one path: the first answer (with an
+    /// ETag) is kept, the second GET sends it as If-None-Match and a 304 is answered
+    /// from the cache in the same shape as the first; does the third go out at all.
+    #[rstest]
+    #[case::positive_304_serves_the_cached_body(
+        "a 304 hands back the body the 200 carried",
+        vec![],
+        vec![],
+        None,
+        3
+    )]
+    #[case::corner_paginated_shape_kept(
+        "a cached page keeps its __items/__next_page shape on a 304",
+        vec![("Link", "<http://x/pulls?page=2>; rel=\"next\"".into())],
+        vec![],
+        Some(2),
+        3
+    )]
+    #[case::boundary_304_on_a_spent_quota_gates(
+        "a 304 that reports the quota spent holds the quota: the third GET is not sent",
+        vec![],
+        vec![("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset_in(300))],
+        None,
+        2
+    )]
     #[tokio::test]
-    async fn positive_etag_304_is_served_from_cache() {
+    async fn etag_304_cases(
+        #[case] desc: &str,
+        #[case] first_headers: Vec<(&'static str, String)>,
+        #[case] not_modified_headers: Vec<(&'static str, String)>,
+        #[case] next_page: Option<u64>,
+        #[case] sent: usize,
+    ) {
+        let mut headers = vec![("ETag", "\"v1\"".to_string())];
+        headers.extend(first_headers);
         let (base, seen) = spawn_scripted(vec![
-            (200, vec![("ETag", "\"v1\"".into())], "[{\"number\":7}]"),
-            (304, vec![], ""),
+            (200, headers, "[{\"number\":7}]"),
+            (304, not_modified_headers, ""),
         ]);
         let http = paced(base, "tok", 0, Arc::new(Pacer::new()));
         let first = http.get_json("pulls").await.unwrap();
         let second = http.get_json("pulls").await.unwrap();
-        assert_eq!(second, first, "the 304 returns the cached body");
+        assert_eq!(second, first, "{desc}: the 304 returns the cached body");
         assert_eq!(
-            *seen.lock().unwrap(),
-            vec![String::new(), "\"v1\"".to_string()]
+            second
+                .get("__next_page")
+                .and_then(serde_json::Value::as_u64),
+            next_page,
+            "{desc}: page shape"
         );
+        let third = http.get_json("pulls").await;
+        assert_eq!(third.is_ok(), sent == 3, "{desc}: third call {third:?}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), sent, "{desc}: requests sent");
+        assert_eq!(seen[..2], [String::new(), "\"v1\"".to_string()], "{desc}");
     }
 
     /// Another credential on the same API never sees the first credential's cached

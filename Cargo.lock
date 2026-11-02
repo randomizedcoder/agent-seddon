@@ -209,6 +209,7 @@ dependencies = [
  "agent-retry",
  "agent-testkit",
  "async-trait",
+ "httpdate",
  "jsonwebtoken",
  "prost",
  "reqwest",

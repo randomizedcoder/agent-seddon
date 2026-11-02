@@ -107,6 +107,10 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   GETs (a `304` is served from a bounded cache). A failing poll row backs off 60 s → 30 min.
   The PR list's head SHA rides on the trigger, so an unchanged PR ends `UpToDate` before any
   git fetch. This makes a 60 s `poll_secs` cheap.
+  Review round 1: the cache copies a body only on a `304` and evicts the least recently
+  used; a `304` reporting a spent quota holds it; docs name the poll as the re-driver of a
+  rate-limited webhook/Slack/`ReviewNow` review; tests for a cached page's shape and an
+  HTTP-date `Retry-After` end to end.
 
 ## Decisions of record
 
