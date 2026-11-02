@@ -11,7 +11,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | # | Title | Design | State | PR |
 |---|---|---|---|---|
 | 0 | Design directory | all | 🟡 | (this PR) |
-| 1 | Fix "Files changed: 0" on nixpkgs: target-branch base fetch, loud empty diff, forge file-list fallback | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1 | Fix "Files changed: 0" on nixpkgs: heads-only mirror refspec (root cause: `refs/pull/*` refetched in full each timeout, filled l2), target-branch base fetch, loud empty diff, forge file-list fallback | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1b | Work queues + worker pools: (i) in-process stage pools (fetch/ground/review/finish/index) with per-stage worker counts and per-repo/tenant caps; (ii) durable `FleetJobQueue` (memory + Postgres, SKIP LOCKED claim, leases, retries, coalescing); (iii) multi-process with affinity, graceful shutdown, portal stage view | [06](06-work-queue.md) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
