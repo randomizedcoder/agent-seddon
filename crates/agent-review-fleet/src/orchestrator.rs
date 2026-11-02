@@ -340,8 +340,9 @@ impl Drop for ReviewTask {
 /// off it, this prep runs **inline**. A slow or hostile forge that never responds would
 /// otherwise stall the whole fleet's trigger processing indefinitely. The timeout converts
 /// an unbounded hang into a bounded, logged failure; the trigger simply re-fires and retries
-/// cleanly (the worktree add is idempotent). Generous, so a real clone/fetch of a large repo
-/// still completes well within it.
+/// cleanly (the worktree add is idempotent). Generous for a PR head fetch. A mirror's first
+/// clone is far longer, so it runs in the background (agent-git
+/// `with_background_mirror_clone`) and never inside this bound.
 const PREP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Ceiling on the grounding timeout, whatever the engine reports: an operator's
@@ -729,7 +730,7 @@ impl FleetOrchestrator {
         };
         // Forge-friendly early dedup: the poller's PR list already named the head. When
         // that head has a live draft the PR hasn't moved, so answer `UpToDate` before any
-        // forge traffic (no mirror refresh, no head fetch) — an unchanged PR then costs one
+        // forge traffic (no base fetch, no head fetch) — an unchanged PR then costs one
         // list call per poll, not two git fetches. The hint is never trusted further: an
         // empty or different hint falls through to the fetch and the precise check below.
         if !trigger.head_sha.is_empty() && up_to_date(&prior, &trigger.head_sha) {
@@ -761,17 +762,11 @@ impl FleetOrchestrator {
             None => (self.repo.clone(), self.grounder.clone()),
         };
 
-        // Refresh the reused mirror's base refs first. The per-row mirror is long-lived
-        // and reused across reviews; `fetch_pr` below fetches only the PR *head* ref, so
-        // without this the diff **base** — the PR's target branch (e.g. `main`) — resolves
-        // to whatever the mirror last saw, inflating the review to every commit merged
-        // since (a single-file PR reads as the whole backlog). Fail-soft and
-        // PREP_TIMEOUT-bounded: a refresh hiccup must not kill the review — it only risks a
-        // slightly stale base — whereas the head fetch below stays fail-hard.
-        if let Err(e) = with_prep_timeout("mirror refresh", PREP_TIMEOUT, repo.fetch()).await {
-            tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
-                "fleet: mirror base-ref refresh failed; reviewing against the last-known base");
-        }
+        // No whole-mirror refresh here. The diff base (the PR's target branch) is fetched
+        // by itself, writing its branch ref, when grounding resolves the PR
+        // (`ReviewOrchestrator::resolve` → `RepoBackend::fetch_branch`). A `fetch --all`
+        // per review re-downloaded every ref of a large repo and, on nixpkgs, never
+        // finished inside PREP_TIMEOUT.
 
         // triggered → cloning: fetch the PR head (C9) and materialize a read-only
         // worktree at it. Both are fail-hard — a review must run against the real head.
@@ -2086,14 +2081,21 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    // desc: a normal review. expect: it runs with no whole-mirror `fetch` (the base
+    // branch alone is fetched during grounding, see agent-review
+    // `pr_base_branch_refreshed_before_diff`).
+    #[case::positive_no_whole_mirror_refresh(false)]
+    // desc: a repo whose `fetch` would fail. expect: never called, so the review runs.
+    #[case::negative_failing_fetch_never_reached(true)]
     #[tokio::test]
-    async fn positive_base_ref_refreshed_before_review() {
-        // desc: a normal review refreshes the reused mirror's base refs (RepoBackend::fetch)
-        // exactly once before it grounds/diffs. expect: fetch_calls == 1 — without this the
-        // diff base (the PR's target branch) resolves to the mirror's stale local ref and
-        // the review is inflated to every commit merged since the mirror was last fetched.
+    async fn review_does_not_refresh_the_whole_mirror(#[case] failing_fetch: bool) {
         let roster = seeded(&[row("web", true)]).await;
-        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let mut fixture = agent_testkit::FixtureRepo::new();
+        if failing_fetch {
+            fixture = fixture.with_failing_fetch();
+        }
+        let repo = Arc::new(fixture);
         let host = Arc::new(FakeHost::new(0));
         let o = orch(roster, repo.clone(), host.clone());
 
@@ -2108,43 +2110,8 @@ mod tests {
         .expect("handle ok");
         assert!(o.join("web", 42).await);
         assert_eq!(host.reviews_len(), 1, "the review ran");
-        assert_eq!(
-            repo.fetch_calls(),
-            1,
-            "the mirror base refs were refreshed once before the review"
-        );
-    }
-
-    #[tokio::test]
-    async fn negative_base_refresh_failure_does_not_break_the_review() {
-        // desc: the base-ref refresh (fetch) itself fails. expect: it is swallowed
-        // (best-effort) — the review still runs to completion against the last-known base,
-        // and the fetch was attempted (fetch_calls == 1) rather than skipped. The head
-        // fetch stays fail-hard; only this base refresh is fail-soft.
-        let roster = seeded(&[row("web", true)]).await;
-        let repo = Arc::new(agent_testkit::FixtureRepo::new().with_failing_fetch());
-        let host = Arc::new(FakeHost::new(0));
-        let o = orch(roster, repo.clone(), host.clone());
-
-        o.handle(FleetTrigger {
-            head_sha: String::new(),
-            session_id: "web".into(),
-            pr_number: 42,
-            requested_by: Vec::new(),
-            tenant: String::new(),
-        })
-        .await
-        .expect("handle ok despite a base-refresh failure");
-        assert!(
-            o.join("web", 42).await,
-            "task completes despite the fetch error"
-        );
-        assert_eq!(host.reviews_len(), 1, "the review still ran");
-        assert_eq!(
-            repo.fetch_calls(),
-            1,
-            "the refresh was attempted, not skipped"
-        );
+        assert_eq!(repo.fetch_calls(), 0, "no `fetch --all` on the review path");
+        assert_eq!(repo.fetch_pr_calls(), vec![42], "the PR head was fetched");
     }
 
     #[tokio::test]

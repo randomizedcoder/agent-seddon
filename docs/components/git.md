@@ -117,13 +117,43 @@ and returns the resolved head oid. The `--review <PR#>` path resolves that local
 ref first and fetches only when it is missing. An empty `pr_ref_template` makes
 `fetch_pr` a clear config error rather than a guess.
 
+**Base fetch (`fetch_branch`).** A review's diff base is the PR's target branch.
+`fetch_branch(name)` fetches that one branch with a full refspec,
+`+refs/heads/<name>:refs/heads/<name>`, so the branch ref itself is written. A bare
+`fetch origin <name>` only writes `FETCH_HEAD`. The review engine calls it while
+resolving a PR, best-effort, so the diff runs against today's base rather than
+whatever the mirror last saw. The name comes from the forge and is screened first: only
+`/`-separated `[A-Za-z0-9._-]` segments, none starting with `-` or `.` or ending in
+`.lock`, no `..`, at most 255 bytes. Without a mirror it does nothing, because in a
+working checkout `refs/heads/<name>` is the user's own branch.
+
 The read tools work against the current checkout's object database out of the
 box — no mirror required. Setting `auto_fetch_secs > 0` opts into the shared
-mirror: on start a background task bootstraps it with `git clone --mirror` (from
-`remote`, or the checkout's inferred `origin`) if absent, then fetches when it is
-older than the configured age. Worktrees and fetches prefer the mirror once it
-exists; reads always use the checkout. The whole flow is non-blocking — the loop
-starts immediately and the fetch runs off the request path.
+mirror: on start a background task bootstraps it (from `remote`, or the checkout's
+inferred `origin`) if absent, then fetches when it is older than the configured age.
+Worktrees and fetches prefer the mirror once it exists; reads always use the
+checkout. The whole flow is non-blocking — the loop starts immediately and the fetch
+runs off the request path.
+
+**Mirror shape.** A mirror holds branches and tags only (`MIRROR_REFSPECS`:
+`+refs/heads/*:refs/heads/*`, `+refs/tags/*:refs/tags/*`). It is not a
+`clone --mirror`, whose `+refs/*:refs/*` pulls every forge `refs/pull/*` ref; on
+nixpkgs that is about 12M objects. PR heads come one at a time from `fetch_pr`.
+The clone:
+
+1. runs `clone --bare` into `<mirror>.partial` under a 2-hour deadline;
+2. sets exactly those two refspecs;
+3. renames the staging dir onto the mirror path.
+
+A clone killed partway therefore never looks like a mirror. A mirror counts as
+ready only once it has a branch. A git dir with no branch, such as a clone from
+before this rule that was killed before writing its refs (its `HEAD` is still
+`refs/heads/.invalid`), is replaced on the next bootstrap. A path that is neither
+a git dir nor empty is never replaced. One clone runs per mirror path per process.
+`with_background_mirror_clone()` (set by the review fleet) clones in a background
+task, and `fetch` / `fetch_pr` / `fetch_branch` fail fast with "being cloned" until
+the clone is done. The fleet's review prep is bounded far below a large clone, and a
+clone cancelled at that bound would start over every time.
 
 ### Authenticated (private) clone/fetch
 

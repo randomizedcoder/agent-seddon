@@ -17,4 +17,4 @@ pub use paths::{default_mirror_dir, default_worktrees_dir, repo_root};
 #[cfg(feature = "git-cli")]
 mod cli;
 #[cfg(feature = "git-cli")]
-pub use cli::CliBackend;
+pub use cli::{CliBackend, MIRROR_REFSPECS};

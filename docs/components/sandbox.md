@@ -29,7 +29,11 @@ re-derive.
   child holds the descriptor between fork and exec (a tool writing a script as a
   subprocess starts; the campaign driver's parallel worker dispatch). A file still
   genuinely open for writing keeps failing and the error surfaces after the last
-  retry.
+  retry. Each command runs in its own process group. A timeout, a cancelled exec
+  future or a spawn-side error sends the whole group `SIGKILL`, not only the direct
+  child. A timed-out `git fetch` used to leave `git-remote-https` and `index-pack`
+  running, still writing `tmp_pack_*` files. A command that exits normally leaves the
+  group alone, so a deliberately backgrounded process survives.
 - **Impl crate:** [`agent-sandbox`](../../crates/agent-sandbox).
   - **`local`** (`sandbox-local`, default) — today's unconfined spawn, so selecting
     it changes nothing.

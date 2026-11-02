@@ -1423,6 +1423,19 @@ impl RepoBackend for MeteredRepo {
         }
         self.record("fetch", start, out)
     }
+    async fn fetch_branch(&self, branch: &str) -> Result<()> {
+        // Delegated explicitly (a default body would shadow the real backend), and
+        // timed under the shared repo-fetch histogram like `fetch_pr`.
+        let start = Instant::now();
+        let out = self
+            .inner
+            .fetch_branch(branch)
+            .instrument(self.span("fetch_branch"))
+            .await;
+        self.metrics
+            .observe_repo_fetch(&self.name, start.elapsed().as_secs_f64());
+        self.record("fetch_branch", start, out)
+    }
     async fn fetch_pr(&self, number: u64) -> Result<Revision> {
         // A trait method with a default body must be delegated explicitly here, or
         // this decorator would silently shadow the real backend with the no-op

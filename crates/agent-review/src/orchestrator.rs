@@ -356,6 +356,16 @@ impl ReviewOrchestrator {
                     Error::Config("no forge configured; cannot resolve a PR number".into())
                 })?;
                 let pr = forge.get_pr(*n).await?;
+                // Bring the base (the PR's target branch) up to date first, writing
+                // its branch ref, so the diff runs against today's base and not
+                // whatever the reused mirror last saw: a stale base turns a one-file
+                // PR into every commit merged since, and a base the mirror never had
+                // fails the diff outright. Best-effort: a failure only risks a stale
+                // base, and the name is validated by the backend (it is forge data).
+                if let Err(e) = self.repo.fetch_branch(&pr.target_branch).await {
+                    tracing::warn!(pr = n, error = %e,
+                        "review: refreshing the PR's base branch failed; diffing against the last-known base");
+                }
                 // A PullRequest carries only a branch name, never a head SHA, and
                 // the forge PR head ref (`refs/pull/<N>/head`, …) isn't in a
                 // default fetch — so on a fresh mirror `source_branch` never
@@ -668,6 +678,7 @@ fn repo_hash(gs: &GitState, root: &Path) -> String {
 mod tests {
     use super::*;
     use agent_core::{Oid, PullRequest};
+    use rstest::rstest;
     use std::sync::Mutex;
 
     /// A `RepoBackend` double for the PR-fetch path: the boring reads delegate to
@@ -710,6 +721,9 @@ mod tests {
         async fn fetch_pr(&self, number: u64) -> Result<Revision> {
             self.fetched.lock().unwrap().push(number);
             Ok(Revision::from(self.head_oid.clone()))
+        }
+        async fn fetch_branch(&self, branch: &str) -> Result<()> {
+            self.inner.fetch_branch(branch).await
         }
         async fn read_file(&self, rev: &Revision, path: &Path) -> Result<agent_core::BlobContent> {
             self.inner.read_file(rev, path).await
@@ -835,12 +849,47 @@ mod tests {
     }
 
     fn orchestrator(repo: Arc<dyn RepoBackend>) -> ReviewOrchestrator {
-        ReviewOrchestrator::new(
-            "/fixture",
-            repo,
-            None,
-            Some(Arc::new(FakeForge { pr: canned_pr() })),
-        )
+        orchestrator_for(repo, canned_pr())
+    }
+
+    fn orchestrator_for(repo: Arc<dyn RepoBackend>, pr: PullRequest) -> ReviewOrchestrator {
+        ReviewOrchestrator::new("/fixture", repo, None, Some(Arc::new(FakeForge { pr })))
+    }
+
+    /// Resolving a PR refreshes its target branch (the diff base) before the diff,
+    /// best-effort: a failed refresh still resolves, against the last-known base.
+    #[rstest]
+    // desc: a main-targeted PR. expect: `main` refreshed once, base = main.
+    #[case::positive_main_target_refreshed("main", false)]
+    // desc: a staging-targeted PR (nixpkgs). expect: `staging` refreshed, not main.
+    #[case::positive_staging_target_refreshed("staging", false)]
+    // desc: the refresh fails. expect: resolve still succeeds with the same base.
+    #[case::negative_refresh_failure_is_soft("main", true)]
+    // desc: a target branch with a `/`. expect: passed through as-is; the backend
+    // validates it (agent-git `safe_branch`).
+    #[case::corner_slashed_target_passed_to_backend("release/25.11", false)]
+    // desc: a hostile target name. expect: handed to the backend unchanged (which
+    // rejects it); resolve itself doesn't build a refspec from it.
+    #[case::adversarial_hostile_target_left_to_backend("x:refs/heads/main", true)]
+    #[tokio::test]
+    async fn pr_base_branch_refreshed_before_diff(#[case] target: &str, #[case] fail: bool) {
+        let mut inner = agent_testkit::FixtureRepo::new().with_branch("main", "0".repeat(40));
+        if fail {
+            inner = inner.with_failing_fetch();
+        }
+        let calls = inner.clone();
+        let repo = Arc::new(PrFakeRepo {
+            inner,
+            ..PrFakeRepo::new(true)
+        });
+        let mut pr = canned_pr();
+        pr.target_branch = target.into();
+        let r = orchestrator_for(repo, pr)
+            .resolve(&ReviewTarget::Pr(7))
+            .await
+            .expect("a refresh failure never fails resolve");
+        assert_eq!(calls.fetch_branch_calls(), vec![target.to_string()]);
+        assert_eq!(r.base.as_str(), target, "base is the PR target branch");
     }
 
     /// On a fresh mirror the PR head ref is absent, so the orchestrator fetches it

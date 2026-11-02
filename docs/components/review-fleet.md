@@ -217,7 +217,8 @@ given a roster row it returns a `FleetReviewCtx { repo, grounder }` bound to **t
 forge. The impl (`FleetReviewCtxFactory`, `agent-runtime`) resolves a confined per-row checkout under
 `<fleet_root>/<user>/<id>/` (`repo`/`mirror`/`worktrees`, `SessionKey::path_under` + `safe_segment`,
 fail-closed), derives the clone URL from `row.repo`/`backend`/`base_url`, builds a `CliBackend` (its
-remote = the clone URL, so the first `fetch_pr` bootstraps a bare mirror) with the per-backend PR-ref
+remote = the clone URL, so the first `fetch_pr` starts a background clone of a branches-and-tags
+mirror ([git](git.md); the row's reviews retry on later polls until it lands) with the per-backend PR-ref
 template (github `refs/pull/{n}/head`, gitlab `refs/merge-requests/{n}/head`; `[git] pr_ref_template`
 overrides), builds the row's forge via `build_session_forge`, and assembles a `ReviewOrchestrator`
 with the **same** `[review]` collector set as the in-loop path — only the repo/forge/root differ.
@@ -225,6 +226,14 @@ Built contexts are cached by `row.id` (one clone + engine per row, reused across
 wired only when a **local** review engine is configured **and** `[review_fleet] root` is set;
 `serve_fleet` prefers it when present and keeps the single grounder as the fail-soft fallback (a
 factory build error falls back to the process-global repo + grounder — the review still runs).
+
+**Only the base is fetched per review.** There is no whole-mirror `fetch --all` before a review.
+Grounding resolves the PR through the forge and fetches its target branch alone
+(`RepoBackend::fetch_branch`, a full `+refs/heads/<b>:refs/heads/<b>` refspec). The diff base is
+then current even for a `staging`-targeted nixpkgs PR, and a large repo never refetches every ref
+inside the review's prep timeout. If the diff still fails, the draft says `Files changed: unknown —
+the diff could not be computed (…)` and the brief tells the model the change is not empty, rather
+than both reading as "0 files".
 
 **Review session tools are rooted at the PR.** Grounding reads the worktree, and so must the
 model's own tools. The orchestrator passes a
@@ -378,7 +387,7 @@ The poll is built to be a **good citizen** of the forge (most of all GitHub):
   list reported (only a full 40/64-hex object id; anything else, such as Bitbucket's short
   hash, becomes empty). The trigger carries it, and the orchestrator reads the review history
   first: when the newest live draft is already for that head, the trigger ends as
-  `Handled::UpToDate` with **no mirror fetch and no PR fetch**. The hint is untrusted and only
+  `Handled::UpToDate` with **no base fetch and no PR fetch**. The hint is untrusted and only
   ever skips work; a stale or forged hint falls through to the precise check on the fetched
   head. So a steady-state poll of an unchanged repo is one list call per row. A trigger folded
   into a pending one that names a different head (a webhook names none) drops the hint, so

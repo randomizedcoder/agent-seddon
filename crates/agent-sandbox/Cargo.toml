@@ -15,11 +15,10 @@ license.workspace = true
 default = ["sandbox-local", "sandbox-nix"]
 sandbox-local = []
 sandbox-nix = []
-# The bwrap backend pulls the pure-Rust seccomp compiler + libc (arch-correct SYS_*
+# The bwrap backend pulls the pure-Rust seccomp compiler (with libc's arch-correct SYS_*
 # numbers + the anonymous memfd the BPF is passed to bwrap over) for the C23-3b tuned
-# syscall filter. Both compile ONLY under this opt-in feature — the default build /
-# `nix build .#agent` stays dependency-free.
-sandbox-bwrap = ["dep:seccompiler", "dep:libc"]
+# syscall filter. It compiles ONLY under this opt-in feature.
+sandbox-bwrap = ["dep:seccompiler"]
 # Injects a dhat global allocator for the allocation-budget leak test only.
 dhat-heap = ["dep:dhat"]
 
@@ -31,7 +30,10 @@ tracing.workspace = true
 dhat = { workspace = true, optional = true }
 # C23-3b seccomp filter — compiled only under `sandbox-bwrap` (see [features]).
 seccompiler = { workspace = true, optional = true }
-libc = { workspace = true, optional = true }
+# `killpg`: a timed-out or cancelled command is killed with its whole process group
+# (a `git fetch` leaves `git-remote-https` and `index-pack` running otherwise). Already
+# in the tree through tokio, so no new crate.
+libc = { workspace = true }
 
 [dev-dependencies]
 rstest.workspace = true

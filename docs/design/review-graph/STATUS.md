@@ -11,7 +11,8 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | # | Title | Design | State | PR |
 |---|---|---|---|---|
 | 0 | Design directory | all | ✅ | #681 (+ follow-ups #683) |
-| 1 | Fix "Files changed: 0" on nixpkgs: heads-only mirror refspec (root cause: `refs/pull/*` refetched in full each timeout, filled l2), target-branch base fetch, loud empty diff, forge file-list fallback | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1 | Fix "Files changed: 0" on nixpkgs: heads+tags mirror via an atomic staged `clone --bare` (a killed clone is replaced), background clone off the review path, target-branch base fetch (`fetch_branch`) instead of a per-review `fetch --all`, process-group kill on timeout, loud unknown change set | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | 🟡 | (this PR) |
+| 1c | Mirror upkeep: old-shape (`clone --mirror`) migration as a maintenance job, `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, forge file-list fallback for a failed diff | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1b | Work queues + worker pools: (i) in-process stage pools (fetch/ground/review/finish/index) with per-stage worker counts and per-repo/tenant caps; (ii) durable `FleetJobQueue` (memory + Postgres, SKIP LOCKED claim, leases, retries, coalescing); (iii) multi-process with affinity, graceful shutdown, portal stage view | [06](06-work-queue.md) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
@@ -30,3 +31,20 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
 
 - **2026-11-02** — Increment 0 opened. Wrote README (decisions, checklist → graph mapping,
   trade-offs, open questions) and 01–05. Grounded the anchors against main `e9c57b6f`. Line numbers are hints at that commit (main has since moved, e.g. `orchestrator.rs` by ~35–50 lines after #679/#680). Navigate by the symbol named beside each anchor, and each increment re-grounds the anchors it touches.
+- **2026-11-02** — Increment 1 opened. Re-grounded the root cause on l2: the nixpkgs mirror held
+  **no refs at all**, and its `HEAD` was still git's `refs/heads/.invalid` clone placeholder. The
+  first `clone --mirror` had been killed by the prep timeout before it wrote any ref, and
+  `mirror_ready()` (`HEAD` exists) called it ready. So it was never re-cloned, every PR's base
+  failed to resolve, the diff failed, and the draft read "Files changed: 0". Each review's
+  `fetch --all` then pulled `refs/pull/*` until it was killed, and `kill_on_drop` killed only
+  `git`, leaving `index-pack` writing `tmp_pack_*`. The fix:
+  - Mirrors are ready only with a branch.
+  - New mirrors are a staged `clone --bare` of heads and tags only, renamed into place when
+    complete and cloned in the background for the fleet (one per path, 2 h deadline).
+  - The base is fetched per review as one branch with a full refspec.
+  - The sandbox kills the whole process group on a timeout or cancel.
+  - A failed diff reads "unknown" in the draft and the brief.
+
+  Old-shape mirrors (agent-seddon, xtcp2 on l2) keep working: the base fetch uses an explicit
+  refspec, so their `mirror = true` config no longer matters on the review path. Their migration
+  moves to **1c**, with retention, the sweep, the size metric and the forge file-list fallback.
