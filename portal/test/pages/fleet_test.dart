@@ -846,7 +846,7 @@ void main() {
           // The wording never says "approve": this posts a comment, not a PR approval.
           expect(robot.textShown('Post review to PR #7?'), isTrue);
           expect(robot.textShown('does not approve the PR'), isTrue);
-          expect(robot.textShown('Approve'), isFalse);
+          expect(robot.textShown('Approve & post'), isFalse);
           await robot.confirmApprove();
           await robot.pumpUntil(() => robot.textShown('Posted'),
               reason: 'posted snack');
@@ -873,8 +873,9 @@ void main() {
           // It stays up to be read, and can be dismissed.
           await robot.tester.pump(const Duration(seconds: 10));
           expect(robot.textShown('Post failed'), isTrue);
-          expect(robot.textShown('Dismiss'), isTrue);
+          await robot.tester.tap(find.text('Dismiss'));
           await robot.settle();
+          expect(robot.textShown('Post failed'), isFalse);
 
         case 'positive_confirm_fires_approve':
           fake.listReviewsResponse = reviews([summary(id: 'r1')]);

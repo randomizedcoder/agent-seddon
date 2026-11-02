@@ -214,10 +214,14 @@ class _FleetPageState extends State<FleetPage> {
   /// stays long enough to read and has a Dismiss.
   void _snackFailure(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(
       content: Text(msg),
       duration: const Duration(seconds: 30),
-      action: SnackBarAction(label: 'Dismiss', onPressed: () {}),
+      action: SnackBarAction(
+        label: 'Dismiss',
+        onPressed: messenger.hideCurrentSnackBar,
+      ),
     ));
   }
 

@@ -159,7 +159,15 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   - **The server now** logs every failed post and counts it (`outcome="post_failed"`). It
     turns 401/403/404/422 into a `forge refused …` FAILED_PRECONDITION that names the fix.
   - **The portal** shows the server's message, and calls the action **Post review**. "Approve"
-    read as approving the PR, but the post is a comment-only review.
+    read as approving the PR, but the post is a comment-only review. A failure stays up until
+    **Dismiss**.
+  - **Fleet review round 1 fixes:** a rate-limited 403 (`rate limited for <n>s`, also after the
+    in-place retries run out) is no longer read as a credential problem; 401 says "refresh the
+    credential" rather than naming the App permission; the hint is worded for any forge; the
+    message wording lives in `agent-core` (`forge_http_error` / `forge_rate_limited` /
+    `forge_refusal_status`, pinned by a test) instead of being re-parsed from `agent-forge`'s
+    text; `post_with_lease` is table-tested for the commit, the release on failure, and the
+    held and committed leases that never reach the forge.
 
 ## Decisions of record
 

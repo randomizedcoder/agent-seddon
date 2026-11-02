@@ -316,9 +316,15 @@ lookup key, never a path.
 A failed post is logged (`approve: posting the review to the forge failed`, with the review id
 and PR) and counted (`agent_fleet_approvals_total{outcome="post_failed"}`). A refusal the operator
 must fix comes back as `FAILED_PRECONDITION` with a message that says what to do. The cases are
-401/403 (the credential can't write reviews: for a GitHub App, set **Pull requests** to *Read and
-write* and accept the new permissions on the installation), 404 (the PR isn't visible to it) and
-422 (the forge rejected the review). Other faults keep their status.
+401 (the credential was rejected: refresh it), 403 (it can't write reviews: on a GitHub App, set
+**Pull requests** to *Read and write* and accept the new permissions on the installation), 404
+(the PR isn't visible to it) and 422 (the forge rejected the review). Other faults keep their
+status. A rate-limited 403 is not a refusal: the forge client reports it as `rate limited for
+<n>s`, including when it runs out of in-place retries, so it is never read as a permission
+problem. The wording is shared through `agent_core::forge_http_error` /
+`forge_rate_limited` / `forge_refusal_status`, and a test there pins it. The post runs under the
+post lease in `post_with_lease`, which releases the lease when the post fails so a later
+approve can retry.
 
 The portal labels this action **Post review**, not "Approve": it posts a comment-only review
 (`event = COMMENT`) and never approves the PR or requests changes. The RPC and the

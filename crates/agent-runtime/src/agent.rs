@@ -692,31 +692,28 @@ fn record_fleet_approval(metrics: &Metrics, user: &str, repo: &str, outcome: &st
 }
 
 /// Turn a failed forge post into an error the approver can act on. The forge
-/// layer reports only `forge api returned http <code>` (never the body, which can
-/// echo the request), so the code is read back from that text. A refusal the
-/// operator must fix (credential, visibility, a PR the forge won't review) becomes
-/// a `forge refused …` error, which the gRPC bridge maps to FAILED_PRECONDITION.
-/// Anything else (a timeout, a 5xx) is returned unchanged.
+/// layer reports only the status (never the body, which can echo the request), and
+/// `agent_core::forge_refusal_status` reads it back. A refusal the operator must fix
+/// (credential, permission, visibility, a PR the forge won't review) becomes a
+/// `forge refused …` error, which the gRPC bridge maps to FAILED_PRECONDITION.
+/// Anything else (a rate limit, a timeout, a 5xx) is returned unchanged.
 #[cfg(all(feature = "review", feature = "fleet"))]
 fn post_failure(e: agent_core::Error, pr: u64) -> agent_core::Error {
-    let code = match &e {
-        agent_core::Error::Repo(m) => m
-            .strip_prefix("forge api returned http ")
-            .and_then(|rest| rest.get(..3))
-            .and_then(|c| c.parse::<u16>().ok()),
-        _ => None,
-    };
-    let why = match code {
-        Some(401 | 403) => {
-            "its credential can't write PR reviews. For a GitHub App, set \
-             Pull requests to Read and write in the App's permissions, then accept \
-             the new permissions on the installation"
-        }
-        Some(404) => "the PR or repo isn't visible to its credential",
-        Some(422) => "it rejected the review (the PR may be closed or locked)",
+    let (code, why) = match agent_core::forge_refusal_status(&e) {
+        Some(c @ 401) => (
+            c,
+            "its credential was rejected (expired or revoked), so refresh it",
+        ),
+        Some(c @ 403) => (
+            c,
+            "its credential can't write PR reviews. It needs write access to pull \
+             requests (on a GitHub App, set Pull requests to Read and write, then \
+             accept the new permissions on the installation)",
+        ),
+        Some(c @ 404) => (c, "the PR or repo isn't visible to its credential"),
+        Some(c @ 422) => (c, "it rejected the review (the PR may be closed or locked)"),
         _ => return e,
     };
-    let code = code.unwrap_or_default();
     agent_core::Error::Fleet(format!(
         "forge refused to post the review of PR #{pr} (http {code}): {why}"
     ))
@@ -805,6 +802,57 @@ async fn skip_with_lease(
     // Who decided, in the same column as an approval (S19).
     skipped.approved_by = skipped_by.unwrap_or_default().to_string();
     Ok((agent_core::SkipOutcome::Skipped, Some(skipped)))
+}
+
+/// What [`post_with_lease`] did with one approve's forge post.
+#[cfg(all(feature = "review", feature = "fleet"))]
+#[derive(Debug)]
+enum PostAttempt<T> {
+    /// Posted, and the lease committed (best-effort).
+    Posted(T),
+    /// Another approve posted, or is posting: nothing was sent.
+    Already,
+    /// The forge post failed: the lease is released so a later approve can retry, and
+    /// the error is the operator-facing one from [`post_failure`].
+    Failed(agent_core::Error),
+}
+
+/// Take `review_id`'s post lease, run `post`, then commit the lease, or release it when
+/// the post failed. The lease is acquired immediately before the (irreversible) post.
+#[cfg(all(feature = "review", feature = "fleet"))]
+async fn post_with_lease<T>(
+    lease: &dyn agent_core::FleetPostLease,
+    review_id: &str,
+    pr: u64,
+    post: impl std::future::Future<Output = agent_core::Result<T>>,
+) -> agent_core::Result<PostAttempt<T>> {
+    match lease.acquire(review_id).await? {
+        agent_core::PostLease::Acquired => {}
+        agent_core::PostLease::AlreadyPosted | agent_core::PostLease::Held => {
+            return Ok(PostAttempt::Already);
+        }
+    }
+    match post.await {
+        Ok(posted) => {
+            // Best-effort: a post that succeeded but whose commit fails still dedups (a
+            // leftover `held` lease makes the next approve stand down as AlreadyPosted),
+            // so a commit failure must not fail the (already-succeeded) approve.
+            if let Err(e) = lease.commit(review_id).await {
+                tracing::warn!(review_id, error = %e,
+                    "approve: committing the post lease failed after a successful post (soft)");
+            }
+            Ok(PostAttempt::Posted(posted))
+        }
+        Err(e) => {
+            tracing::warn!(review_id, pr, error = %e,
+                "approve: posting the review to the forge failed");
+            if let Err(re) = lease.release(review_id).await {
+                tracing::warn!(review_id, error = %re,
+                    "approve: releasing the post lease after a failed post failed (soft)");
+            }
+            Ok(PostAttempt::Failed(post_failure(e, pr)))
+        }
+    }
 }
 
 #[cfg(all(feature = "review", feature = "fleet"))]
@@ -920,29 +968,28 @@ impl agent_core::FleetApprover for EngineApprover {
             // funnel, so it CANNOT prevent a double post on its own: two concurrent approves,
             // or a re-approve inside the flush window, both see `drafted`. The lease is a
             // durable, read-your-writes, cross-process compare-and-set — exactly one caller
-            // acquires it and posts; the rest stand down. Acquired immediately BEFORE the
-            // (irreversible) forge post.
-            match self.post_lease.acquire(review_id).await? {
-                agent_core::PostLease::Acquired => {}
-                // Already posted, or another approve is mid-post — an idempotent no-op. Never
-                // post a second comment.
-                agent_core::PostLease::AlreadyPosted | agent_core::PostLease::Held => {
+            // acquires it and posts; the rest stand down.
+            //
+            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
+            // The future does nothing until `post_with_lease` awaits it, after the lease.
+            let post = forge.review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body);
+            let comment = match post_with_lease(
+                &*self.post_lease,
+                review_id,
+                record.pr_number,
+                post,
+            )
+            .await?
+            {
+                PostAttempt::Posted(c) => c,
+                // Already posted, or another approve is mid-post — an idempotent no-op.
+                // Never post a second comment.
+                PostAttempt::Already => {
                     sp.record("outcome", "already");
                     record_fleet_approval(&self.agent.metrics(), &row.user, &row.repo, "already");
                     return Ok(agent_core::ApproveOutcome::AlreadyPosted);
                 }
-            }
-
-            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
-            // On failure, RELEASE the held lease so a later approve can retry the post.
-            let comment = match forge
-                .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(review_id, pr = record.pr_number, error = %e,
-                        "approve: posting the review to the forge failed");
+                PostAttempt::Failed(e) => {
                     sp.record("outcome", "post_failed");
                     record_fleet_approval(
                         &self.agent.metrics(),
@@ -950,23 +997,9 @@ impl agent_core::FleetApprover for EngineApprover {
                         &row.repo,
                         "post_failed",
                     );
-                    let e = post_failure(e, record.pr_number);
-                    if let Err(re) = self.post_lease.release(review_id).await {
-                        tracing::warn!(review_id, error = %re,
-                            "approve: releasing the post lease after a failed post failed (soft)");
-                    }
                     return Err(e);
                 }
             };
-
-            // Commit the lease (held → posted): the durable idempotency key. Best-effort —
-            // a post that succeeded but whose commit fails still dedups (a leftover `held`
-            // lease makes the next approve stand down as AlreadyPosted), so a commit failure
-            // is never LESS safe; it must not fail the (already-succeeded) approve.
-            if let Err(e) = self.post_lease.commit(review_id).await {
-                tracing::warn!(review_id, error = %e,
-                    "approve: committing the post lease failed after a successful post (soft)");
-            }
 
             // Also persist status=posted through the history funnel — feeds the cheap
             // `plan_approve` early-out, the C16 head-oid dedup, and the operator's history.
@@ -8277,7 +8310,7 @@ mod tests {
         /// fix, and passes through unchanged otherwise.
         #[rstest]
         #[case::positive_read_only_app("forge api returned http 403", Some("Pull requests"))]
-        #[case::positive_bad_token("forge api returned http 401", Some("Read and write"))]
+        #[case::positive_bad_token("forge api returned http 401", Some("expired or revoked"))]
         #[case::positive_not_visible("forge api returned http 404", Some("isn't visible"))]
         #[case::positive_closed_pr("forge api returned http 422", Some("closed or locked"))]
         #[case::negative_server_error_unchanged("forge api returned http 502", None)]
@@ -8285,7 +8318,12 @@ mod tests {
             "forge api returned http 429: rate limited for 60s",
             None
         )]
+        #[case::negative_rate_limited_403_unchanged(
+            "forge api returned http 403: rate limited for 600s",
+            None
+        )]
         #[case::corner_timeout_unchanged("forge request failed: timed out", None)]
+        #[case::adversarial_four_digit_code("forge api returned http 4034", None)]
         #[case::adversarial_code_not_at_the_start("x forge api returned http 403", None)]
         #[case::adversarial_non_numeric_code("forge api returned http 4o3", None)]
         #[case::boundary_short_code("forge api returned http 40", None)]
@@ -8479,6 +8517,100 @@ mod tests {
                     SkipOutcome::Skipped,
                     "{description}: nothing persisted"
                 ),
+            }
+            let approve = lease.acquire("r-uuid").await.unwrap();
+            assert_eq!(
+                approve == PostLease::Acquired,
+                approve_can_post,
+                "{description}: a later approve's lease"
+            );
+        }
+
+        /// One approve's post under the lease. Each row: the lease's state before, what the
+        /// forge returns (None: not called), whether the forge was called, the expected
+        /// attempt, and whether a later approve could still take the lease.
+        #[rstest]
+        #[case::positive_posted_commits_the_lease(
+            "a successful post commits the lease, so no second post",
+            None,
+            Ok(()),
+            true,
+            "posted",
+            false
+        )]
+        #[case::negative_refused_post_releases_the_lease(
+            "a 403 refusal is explained and the lease is released for a retry",
+            None,
+            Err(403),
+            true,
+            "forge refused",
+            true
+        )]
+        #[case::negative_rate_limited_post_is_not_a_refusal(
+            "a rate-limited 403 passes through unchanged, and the lease is released",
+            None,
+            Err(0),
+            true,
+            "rate limited",
+            true
+        )]
+        #[case::corner_held_lease_never_calls_the_forge(
+            "another approve is mid-post: nothing is sent",
+            Some(false),
+            Ok(()),
+            false,
+            "already",
+            false
+        )]
+        #[case::boundary_committed_lease_never_calls_the_forge(
+            "already posted: nothing is sent",
+            Some(true),
+            Ok(()),
+            false,
+            "already",
+            false
+        )]
+        #[tokio::test]
+        async fn post_with_lease_cases(
+            #[case] description: &str,
+            #[case] before: Option<bool>, // None: no lease; Some(committed)
+            #[case] forge: Result<(), u16>, // Err(0): a rate limit
+            #[case] forge_called: bool,
+            #[case] expected: &str,
+            #[case] approve_can_post: bool,
+        ) {
+            use agent_core::{FleetPostLease, PostLease};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let lease = agent_review_fleet::MemoryPostLease::new();
+            if let Some(committed) = before {
+                assert_eq!(lease.acquire("r-uuid").await.unwrap(), PostLease::Acquired);
+                if committed {
+                    lease.commit("r-uuid").await.unwrap();
+                }
+            }
+            let called = AtomicBool::new(false);
+            let post = async {
+                called.store(true, Ordering::SeqCst);
+                match forge {
+                    Ok(()) => Ok(()),
+                    Err(0) => Err(agent_core::forge_rate_limited(403, 600)),
+                    Err(code) => Err(agent_core::forge_http_error(code)),
+                }
+            };
+            let got = post_with_lease(&lease, "r-uuid", 283, post).await.unwrap();
+            assert_eq!(called.load(Ordering::SeqCst), forge_called, "{description}");
+            match (&got, expected) {
+                (PostAttempt::Posted(()), "posted") | (PostAttempt::Already, "already") => {}
+                (PostAttempt::Failed(agent_core::Error::Fleet(m)), "forge refused") => {
+                    assert!(
+                        m.starts_with("forge refused") && m.contains("PR #283"),
+                        "{m}"
+                    );
+                }
+                (PostAttempt::Failed(agent_core::Error::Repo(m)), "rate limited") => {
+                    assert!(m.contains("rate limited for 600s"), "{m}");
+                }
+                _ => panic!("{description}: expected {expected}, got {got:?}"),
             }
             let approve = lease.acquire("r-uuid").await.unwrap();
             assert_eq!(
