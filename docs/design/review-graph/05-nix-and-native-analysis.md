@@ -35,10 +35,11 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     - **New mirrors** are made with `clone --bare` plus these two refspecs, not
       `clone --mirror`.
     - **Existing mirrors** are migrated at a refresh that finds the mirror still in the old
-      shape: `remote.origin.mirror` is set, a fetch refspec matches `refs/pull` or
-      `refs/*`, or **no** fetch refspec is configured. The last case is a run killed
-      inside step 2, between `--unset-all` and the `--add`s. A healthy mirror always has
-      exactly the two refspecs. The trigger is that detected state, never a missing marker file, so a
+      shape. Detection is one rule: `remote.origin.mirror` is set, **or** the configured
+      fetch refspec set is not exactly the two healthy refspecs (heads and tags). That
+      covers every partial state: `{}` (killed before the first `--add`), `{heads}`
+      (killed between the two `--add`s, where tags would otherwise go stale for good),
+      `{+refs/*:refs/*}`, any `refs/pull` refspec, and anything unexpected. The trigger is that detected state, never a missing marker file, so a
       mirror made by the new `clone --bare` path (which never has a marker) is never
       migrated. The steps run in this order, because the `refs/pull/*` objects are *reachable* and a
       repack alone keeps them:
@@ -67,8 +68,8 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          deleting refs that are already gone, a repack), so a run killed between any two
          steps converges on the next refresh. The
          `adversarial_migration_interrupted_is_idempotent` table kills a fixture
-         migration after step 1, inside step 2 (no refspec left), after step 2 and after
-         step 3, and checks each rerun
+         migration after step 1, inside step 2 before the first `--add` (no refspec),
+         between the two `--add`s (heads only), after step 2 and after step 3, and checks each rerun
          ends in the same refs and config as an uninterrupted run.
     - **`refs/fleet/pr/*` retention.** `fetch_pr` writes one ref per reviewed PR, and those
       refs keep their objects alive, which would be the same unbounded growth only slower.
@@ -205,10 +206,18 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
   - `--option max-call-depth` plus `ulimit -v`, and a wall-clock deadline. The
     increment-7 spike confirms the option name on the pinned nix, since it differs across
     nix versions and forks. An unknown `--option` fails the eval outright rather than
-    being ignored. So the collector probes once per nix version (`nix-instantiate --option
-    max-call-depth 1 --eval -E 1`) and caches the result. Without support it omits the
-    flag, and `ulimit -v` and the deadline are the bound. Row:
-    `corner_max_call_depth_unsupported_omitted_not_failed`.
+    being ignored, so the collector probes for support:
+    - **Probe.** `nix-instantiate --option max-call-depth 1000 --eval -E 1`, run *outside*
+      the sandbox at startup, so a sandbox fault can't masquerade as "unsupported".
+    - **Cache.** Keyed by the nix store path, kept in memory for the process's life.
+    - **Classification.** Only exit 0 means supported. Only an error naming the unknown
+      option means unsupported. Any other failure is `probe_failed`, which disables the
+      collector (it reports `skipped: probe failed`) rather than weakening the bound.
+    - **Without support.** The flag is omitted, `ulimit -v` and the deadline are the
+      bound, and `agent_review_nix_eval_option_omitted_total{option}` plus a warning log
+      make that visible.
+    - **Rows.** `corner_max_call_depth_unsupported_omitted_not_failed`,
+      `negative_probe_other_failure_skips_collector`.
 - **Attr selection.** Changed paths are mapped to attrs:
   - `pkgs/by-name/xx/<name>/` → `<name>`;
   - a `pkgs/top-level/all-packages.nix` hunk → its attr names.

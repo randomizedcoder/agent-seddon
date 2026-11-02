@@ -86,12 +86,24 @@ and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
   `admit_review` spends one slot from the lease. A document can have several splits, so
   the leases are all drawn from one per-PR budget of `max_parallel_steps`. The sum held
   across splits never exceeds it, and a second split whose reservation wouldn't fit waits
-  for the first join to settle. Row: `boundary_two_splits_share_one_budget`.
-- A split wider than the budget could never reserve, so the PR would wait forever. The
-  per-row validation (run once per row and document version, see *Where it hooks in*)
-  therefore rejects a document whose widest split exceeds the row's
-  `max_parallel_steps`, with a hint. Like any validation error, it falls back to the
-  single-session review. Row: `negative_split_wider_than_budget_rejected`.
+  for the first join to settle. Row: `boundary_two_sequential_splits_share_one_budget`.
+- **Legal multi-split shapes.** Splits are either *sequential*, where one split's join is
+  an ancestor of the next split, or *sibling*, where several splits feed the same join.
+  Nested splits (a split inside another split's branch) are rejected in pipeline
+  documents too, which carries the anchor rule over explicitly.
+- **Liveness rule.** A set of branches that must all be live before one join can settle
+  has to fit the budget at once. Otherwise a reservation waits on a join that can only
+  settle after it, and the PR stalls until the graph deadline. Per-row validation
+  therefore computes, for every join, the **sum** of the branch counts of the splits
+  feeding it. It rejects the document, with a hint, if any sum exceeds the row's
+  `max_parallel_steps`. This covers the single-wide-split case too. Sibling splits
+  reserve together, as one lease, at the first of them. Like any validation error, a
+  rejection falls back to the single-session review. Rows:
+  `negative_split_wider_than_budget_rejected`, `negative_sibling_splits_sum_over_budget_rejected`
+  (5 + 2 into one join at budget 5), `positive_sibling_splits_within_budget_one_lease`
+  (3 + 2 at budget 5) and `boundary_two_sequential_splits_share_one_budget`.
+- The validation cache key is (row id, document version, `max_parallel_steps`), so
+  lowering the setting re-validates a document that passed before.
 - The lease is dropped (RAII) when the join **settles**, so `assemble` and `condense`
   (`tools = none`, no session) don't pin idle slots.
 - When `reserve` fails, the PR waits in the `review` stage queue

@@ -23,8 +23,17 @@ nixpkgs reviewer wants a few lines, not a 30 KB report.
     "items": { "type": "string", "minLength": 1, "maxLength": 200 } } } }
 ```
 
-The model is untrusted, so the output is **validated and then clamped**, never trusted. The
-clamp:
+The model is untrusted, so the output is **validated and then clamped**, never trusted.
+Validation and clamping split the work:
+
+- **Validation** (`complete_structured`) enforces only the *structure*: an object with a
+  `bullets` array of strings and no extra fields. A structural failure means condense
+  failed.
+- The `maxItems` / `maxLength` sent in the schema tell the model the limits, but they are
+  **not** enforced as validation errors. Too many or too-long bullets are cut by the clamp,
+  which is why `boundary_ten_truncated_to_nine` truncates rather than fails.
+
+The clamp:
 
 - Keeps the first `max_bullets` bullets (default 9).
 - Replaces control characters and newlines with spaces and collapses whitespace.
@@ -155,6 +164,10 @@ For `post = both`:
   blocks, where a review quoting the tag will show `&lt;/details`. That is accepted, as
   the safe direction. Row: `adversarial_body_closes_details_early`, with the
   `</details >` and `</DETAILS>` variants.
+- **Order.** Escape first, then truncate. The escape lengthens the text (`</details` →
+  `&lt;/details`), so the budget is computed on the escaped body. The bullets, the
+  `<details><summary>` line, the truncation marker line and the closing `</details>` all
+  count against the budget.
 - **Size.** GitHub's comment limit is 65,536 characters, and the body is already capped
   at `MAX_DRAFT_BYTES` (64,000), so the combined comment can overflow. The full body inside
   `<details>` is truncated on a UTF-8 boundary, at a line break where possible, with a
@@ -187,10 +200,13 @@ The `condense()` clamp table, rstest with a description and an expected outcome 
 - `positive_five_bullets`
 - `positive_graph_max_bullets_five_honoured` (`CondenseParams { max_bullets: 5, .. }`
   keeps 5)
-- `boundary_max_bullets_zero_clamped_to_one`, `boundary_max_line_chars_250_clamped_to_200`
+- `boundary_max_bullets_zero_clamped_to_one`, `boundary_max_bullets_ten_clamped_to_nine`,
+  `boundary_max_line_chars_30_clamped_to_40`, `boundary_max_line_chars_250_clamped_to_200`
 - `adversarial_link_text_is_url_wrapped_after_rewrite` (`[http://evil](https://x)` ends
   as a code span, never a live URL)
 - `corner_url_in_code_span_not_double_wrapped`
+- `corner_unbalanced_backtick_url_still_wrapped` (an unmatched backtick opens no code span
+  in CommonMark, so the URL after it is still wrapped)
 - `boundary_nine_kept` / `boundary_ten_truncated_to_nine`
 - `boundary_200_chars` / `boundary_201_truncated`
 - `corner_multibyte_truncation`
