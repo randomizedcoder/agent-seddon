@@ -121,7 +121,7 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   the ETag cache; a `304` whose cache entry went while the request was out is re-sent
   once unconditionally instead of failing the call; the cache's 64 MiB bound is stated as
   wire bytes. Review round 4: the ETag cache is bounded per quota (64 entries) and in all
-  (1024 entries, 64 MiB wire), the heaviest quota evicting its own oldest, so a fleet
+  (1024 entries, 16 MiB wire; the parsed worst case, ~10x, is stated), the heaviest quota evicting its own oldest, so a fleet
   with more than 32 polled paths still hits and one tenant can't empty another's; cached
   bodies are shared (`Arc`); an identity-keyed quota's gate is checked before the token
   mint; the identity length-prefixes the tenant (no separator collisions); a 403 is a

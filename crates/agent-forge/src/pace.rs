@@ -59,9 +59,11 @@ pub const MAX_CACHED: usize = 1024;
 /// Largest response body (wire bytes) cached for a conditional request; a bigger one is
 /// not cached.
 pub const MAX_CACHED_BYTES: usize = 2 * 1024 * 1024;
-/// Most wire bytes cached across every quota. This bounds the bodies' *wire* size;
-/// the parsed values can take a small multiple of it on the heap.
-pub const MAX_CACHED_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+/// Most wire bytes cached across every quota. This bounds the bodies' *wire* size, not
+/// the heap: a parsed `serde_json::Value` of many small nodes can take ~10x its wire
+/// bytes, so the worst case a hostile forge can force is ~160 MiB resident. Real PR-list
+/// and PR pages are tens of KiB, so a full fleet poll tick stays in single-digit MiB.
+pub const MAX_CACHED_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 /// Longest `ETag` value kept and sent back.
 pub const MAX_ETAG_LEN: usize = 256;
 

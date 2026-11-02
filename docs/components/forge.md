@@ -126,10 +126,11 @@ asks it to:
   the cached body (shared, so storing and serving it are a pointer copy under the lock).
   The cache is keyed per quota and URL: at most 64 entries per quota, enough for a whole
   poll tick of one installation (that quota's least recently used is evicted first); at
-  most 1024 entries and 64 MiB of wire bytes in all, where the heaviest quota gives up
+  most 1024 entries and 16 MiB of wire bytes in all, where the heaviest quota gives up
   its own oldest entry, so a busy tenant can't evict another's. A body over 2 MiB on the
-  wire is not cached; the parsed bodies can take a small multiple of the wire bytes on
-  the heap. An ETag over 256 bytes or with non-printable bytes is not stored. A `304` to a GET sent with an ETag whose
+  wire is not cached. The bound is on wire bytes: a parsed body of many small JSON nodes
+  can take ~10x its wire size, so the worst a hostile forge can force is ~160 MiB of heap;
+  real PR pages are tens of KiB. An ETag over 256 bytes or with non-printable bytes is not stored. A `304` to a GET sent with an ETag whose
   entry went meanwhile (evicted or replaced) is re-sent once without `If-None-Match`; a
   `304` to a GET sent without one is an error, not an empty answer.
 
