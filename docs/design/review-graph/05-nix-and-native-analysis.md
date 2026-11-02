@@ -35,8 +35,10 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     - **New mirrors** are made with `clone --bare` plus these two refspecs, not
       `clone --mirror`.
     - **Existing mirrors** are migrated at a refresh that finds the mirror still in the old
-      shape: `remote.origin.mirror` is set, or a fetch refspec matches `refs/pull` or
-      `refs/*`. The trigger is that detected state, never a missing marker file, so a
+      shape: `remote.origin.mirror` is set, a fetch refspec matches `refs/pull` or
+      `refs/*`, or **no** fetch refspec is configured. The last case is a run killed
+      inside step 2, between `--unset-all` and the `--add`s. A healthy mirror always has
+      exactly the two refspecs. The trigger is that detected state, never a missing marker file, so a
       mirror made by the new `clone --bare` path (which never has a marker) is never
       migrated. The steps run in this order, because the `refs/pull/*` objects are *reachable* and a
       repack alone keeps them:
@@ -46,8 +48,8 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          success.
       2. `git config --unset-all remote.origin.fetch` (exit 5 counts as success, as in
          step 1), then two `git config --add remote.origin.fetch` calls, for
-         `'+refs/heads/*:refs/heads/*'` and `'+refs/tags/*:refs/tags/*'`. A rerun
-         therefore never leaves a duplicate refspec.
+         `'+refs/heads/*:refs/heads/*'` and `'+refs/tags/*:refs/tags/*'`. This is the
+         same shape a new mirror gets, so a rerun converges on it.
       3. Delete every ref outside `refs/heads/*`, `refs/tags/*` and the fleet's own
          `refs/fleet/pr/*` (those are pruned by the retention sweep below) with one
          batched `git update-ref --stdin`. `--prune` can't do
@@ -61,11 +63,12 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          flight can reach. To be safe anyway, the migration takes the row's mirror lock,
          the same one `fetch_pr` holds.
       5. Write a marker file. It is only a record for the operator, not the trigger.
-         Every step is idempotent (absent-key `--unset`, `--replace-all`, deleting refs
-         that are already gone, a repack), so a run killed between any two steps
-         converges on the next refresh. The
+         Every step is idempotent (absent-key `--unset` and `--unset-all`, then `--add`,
+         deleting refs that are already gone, a repack), so a run killed between any two
+         steps converges on the next refresh. The
          `adversarial_migration_interrupted_is_idempotent` table kills a fixture
-         migration after step 1, after step 2 and after step 3, and checks each rerun
+         migration after step 1, inside step 2 (no refspec left), after step 2 and after
+         step 3, and checks each rerun
          ends in the same refs and config as an uninterrupted run.
     - **`refs/fleet/pr/*` retention.** `fetch_pr` writes one ref per reviewed PR, and those
       refs keep their objects alive, which would be the same unbounded growth only slower.
@@ -142,7 +145,8 @@ the shellcheck collector only sees `.sh`/`.bash` files (`crates/agent-review/src
 This is a new `snippet` mode in `shellcheck.rs`. The existing collector's ban on inline
 `# shellcheck disable` comments carries over.
 
-**C/C++ suite** (`has_c`: `.c`, `.cc`, `.cpp`, `.cxx`, `.C`, `.h`, `.hh`, `.hpp`, `.hxx`, changed in the PR):
+**C/C++ suite** (`has_c`: `.c`, `.cc`, `.cpp`, `.cxx`, `.C`, `.h`, `.hh`, `.hpp`, `.hxx`, changed in the
+PR; the match is case-sensitive, so `.C` is C++ and `.c` is C, as compilers treat them):
 
 | Tool | Mode |
 |---|---|
@@ -200,8 +204,11 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
   - `-I nixpkgs=<worktree>` only, with `NIX_PATH` cleared
   - `--option max-call-depth` plus `ulimit -v`, and a wall-clock deadline. The
     increment-7 spike confirms the option name on the pinned nix, since it differs across
-    nix versions and forks. If it is missing, `ulimit -v` and the deadline are the
-    bound.
+    nix versions and forks. An unknown `--option` fails the eval outright rather than
+    being ignored. So the collector probes once per nix version (`nix-instantiate --option
+    max-call-depth 1 --eval -E 1`) and caches the result. Without support it omits the
+    flag, and `ulimit -v` and the deadline are the bound. Row:
+    `corner_max_call_depth_unsupported_omitted_not_failed`.
 - **Attr selection.** Changed paths are mapped to attrs:
   - `pkgs/by-name/xx/<name>/` → `<name>`;
   - a `pkgs/top-level/all-packages.nix` hunk → its attr names.

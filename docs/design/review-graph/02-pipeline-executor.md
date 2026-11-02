@@ -87,6 +87,11 @@ and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
   the leases are all drawn from one per-PR budget of `max_parallel_steps`. The sum held
   across splits never exceeds it, and a second split whose reservation wouldn't fit waits
   for the first join to settle. Row: `boundary_two_splits_share_one_budget`.
+- A split wider than the budget could never reserve, so the PR would wait forever. The
+  per-row validation (run once per row and document version, see *Where it hooks in*)
+  therefore rejects a document whose widest split exceeds the row's
+  `max_parallel_steps`, with a hint. Like any validation error, it falls back to the
+  single-session review. Row: `negative_split_wider_than_budget_rejected`.
 - The lease is dropped (RAII) when the join **settles**, so `assemble` and `condense`
   (`tools = none`, no session) don't pin idle slots.
 - When `reserve` fails, the PR waits in the `review` stage queue

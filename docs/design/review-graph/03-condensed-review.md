@@ -26,9 +26,10 @@ nixpkgs reviewer wants a few lines, not a 30 KB report.
 The model is untrusted, so the output is **validated and then clamped**, never trusted. The
 clamp:
 
-- Keeps the first 9 bullets.
+- Keeps the first `max_bullets` bullets (default 9).
 - Replaces control characters and newlines with spaces and collapses whitespace.
-- Truncates each bullet at 200 characters on a UTF-8 boundary, with `…`.
+- Truncates each bullet at `max_line_chars` characters (default 200) on a UTF-8 boundary,
+  with `…`.
 - Drops empty bullets.
 - Strips leading `-`/`*`/`#` so markdown can't nest.
 - Rewrites links to plain text, since the condensed text is posted to a forge. The order
@@ -37,7 +38,8 @@ clamp:
   - inline links and images (`[text](https://…)`, `![alt](https://…)`) become their
     text;
   - GFM autolinks (`<https://…>`) and bare `http(s)://` URLs are wrapped in a code span,
-    so they render inert;
+    so they render inert. A URL already inside a code span is skipped, so it is never
+    wrapped twice;
   - reference-style link definitions (`[x]: https://…`) are dropped;
   - raw HTML tags (`<img …>`, `<details>`, any `<tag …>`) are removed, keeping their
     text content. Some forges allow `<img>`, and others sanitise less than GitHub does.
@@ -75,8 +77,8 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
   bullets can exceed it. When that happens, the join keeps whole bullets only (never
   cutting mid-bullet), dropping from the end, which is the least important (must-fix
   comes first), and appends a `- …` marker line. Row:
-  `boundary_multibyte_bullets_over_4kib_keep_whole_bullets`. Status rows (supersede, skip, post) clone the record, so the field carries
-  over unchanged.
+  `boundary_multibyte_bullets_over_4kib_keep_whole_bullets`. Status rows (supersede,
+  skip, post) clone the record, so the field carries over unchanged.
 - **ClickHouse.** In `nix/clickhouse/schema.sql`, next to the `requested_by`/`approved_by`
   precedent at `:224-225`:
 
@@ -143,7 +145,22 @@ to a default.
 |---|---|
 | `full` | The full body (today's behaviour) |
 | `condensed` | The condensed bullets. If they are empty, it falls back to `full` and logs `post_fallback=condensed_empty` |
-| `both` | The full body is model output, and a `</details` in it (any case) would close the collapse early. So on this path every `</details` in the body is escaped to `&lt;/details`, with an `adversarial_body_closes_details_early` row. If the condensed bullets are empty, it posts the full body alone and logs `post_fallback=condensed_empty`, as for `condensed`. Otherwise it posts the condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
+| `both` | The condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>` (details below). With no condensed bullets, the full body alone, logging `post_fallback=condensed_empty` |
+
+For `post = both`:
+
+- **Escaping.** The full body is model output, and a `</details` in it would close the
+  collapse early. Every `</details`, in any case and followed by optional whitespace and
+  `>`, is escaped to `&lt;/details`. This includes occurrences inside code spans and
+  blocks, where a review quoting the tag will show `&lt;/details`. That is accepted, as
+  the safe direction. Row: `adversarial_body_closes_details_early`, with the
+  `</details >` and `</DETAILS>` variants.
+- **Size.** GitHub's comment limit is 65,536 characters, and the body is already capped
+  at `MAX_DRAFT_BYTES` (64,000), so the combined comment can overflow. The full body inside
+  `<details>` is truncated on a UTF-8 boundary, at a line break where possible, with a
+  "… truncated, see the draft" line, so the bullets and the closing tag always fit. The
+  limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row:
+  `boundary_both_at_comment_limit`.
 
 Nothing is posted without a human Approve. That rule is unchanged.
 
@@ -168,6 +185,12 @@ Nothing is posted without a human Approve. That rule is unchanged.
 The `condense()` clamp table, rstest with a description and an expected outcome per row:
 
 - `positive_five_bullets`
+- `positive_graph_max_bullets_five_honoured` (`CondenseParams { max_bullets: 5, .. }`
+  keeps 5)
+- `boundary_max_bullets_zero_clamped_to_one`, `boundary_max_line_chars_250_clamped_to_200`
+- `adversarial_link_text_is_url_wrapped_after_rewrite` (`[http://evil](https://x)` ends
+  as a code span, never a live URL)
+- `corner_url_in_code_span_not_double_wrapped`
 - `boundary_nine_kept` / `boundary_ten_truncated_to_nine`
 - `boundary_200_chars` / `boundary_201_truncated`
 - `corner_multibyte_truncation`
