@@ -76,8 +76,21 @@ A node never retries on its own. Provider retries stay in `agent-retry` and the 
 
 Every `readonly` step holds a session slot (`max_total` / `has_capacity` in `SessionManager`)
 for as long as it runs. A PR therefore takes up to `max_parallel_steps` slots, against 1
-today. The fleet's admission check reserves the PR's full step budget up front, so a PR
-never starts and then stalls halfway for lack of slots. `[review_fleet] max_concurrent`
+today. `SessionManager` has no reservation API today (only `admit_review` and the read-only
+`has_capacity_for`), so a check-then-admit would race: two PRs could each see 5 free of 8,
+and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
+
+- `SessionManager::reserve(n) -> Option<SlotLease>` atomically takes `n` slots in the same
+  CAS as `admit_review`, the `PoolMember::try_reserve` pattern from the pool TOCTOU fix.
+- The runner takes `n = ` the split's branch count (at most `max_parallel_steps`) **at the
+  split**, and each lens's `admit_review` spends one slot from the lease.
+- The lease is dropped (RAII) when the join **settles**, so `assemble` and `condense`
+  (`tools = none`, no session) don't pin idle slots.
+- When `reserve` fails, the PR waits in the `review` stage queue
+  ([06](06-work-queue.md)) rather than starting. It never starts and then stalls halfway.
+- Rows: `corner_two_prs_race_for_slots_one_waits`,
+  `positive_lease_released_at_join_before_assemble`,
+  `negative_reserve_fails_pr_waits_not_fallback`. `[review_fleet] max_concurrent`
 should be re-sized when a row opts in. The router's per-upstream capacity
 (`on_saturation`) still applies to each completion.
 

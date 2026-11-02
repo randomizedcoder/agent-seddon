@@ -31,8 +31,14 @@ clamp:
 - Truncates each bullet at 200 characters on a UTF-8 boundary, with `…`.
 - Drops empty bullets.
 - Strips leading `-`/`*`/`#` so markdown can't nest.
-- Rewrites inline links and images (`[text](https://…)`, `![alt](https://…)`) to their text, since the
-  condensed text is posted to a forge. Code spans are kept.
+- Rewrites links to plain text, since the condensed text is posted to a forge:
+  - inline links and images (`[text](https://…)`, `![alt](https://…)`) become their
+    text;
+  - GFM autolinks (`<https://…>`) and bare `http(s)://` URLs are wrapped in a code span,
+    so they render inert;
+  - reference-style link definitions (`[x]: https://…`) are dropped.
+
+  Code spans are kept.
 
 If nothing survives the clamp, condense counts as failed
 ([02](02-pipeline-executor.md#deadlines-failures-fallbacks)). The prompt is the new fragment
@@ -122,7 +128,7 @@ to a default.
 |---|---|
 | `full` | The full body (today's behaviour) |
 | `condensed` | The condensed bullets. If they are empty, it falls back to `full` and logs `post_fallback=condensed_empty` |
-| `both` | The condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`, capped at the forge comment limit |
+| `both` | The condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
 
 Nothing is posted without a human Approve. That rule is unchanged.
 
@@ -158,6 +164,8 @@ The `condense()` clamp table, rstest with a description and an expected outcome 
 - `adversarial_extra_fields_rejected`
 - `adversarial_markdown_link_stripped` (`"see [here](https://evil)"` → `"see here"`,
   and the same for an image)
+- `adversarial_autolink_stripped`, `adversarial_bare_url`,
+  `adversarial_reference_definition_dropped`
 
 There are also roster `post` cases (`adversarial_unknown_variant_rejected`), posting choice
 cases, and a ClickHouse row round-trip.

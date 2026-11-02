@@ -98,16 +98,20 @@ path handling.
 the shellcheck collector only sees `.sh`/`.bash` files (`crates/agent-review/src/shellcheck.rs:232`).
 
 1. `ast-grep` extracts indented strings bound to attributes matching `*Phase`, `pre*`,
-   `post*`, `*Hook`, `script`, `shellHook`. The pinned build (0.44.1, `nix/versions.nix`)
-   has the Nix grammar built in, so no extra grammar needs shipping. This was checked on
+   `post*`, `*Hook`, `script`, `shellHook`. `nix/versions.nix:137` pins it as
+   `pkgs.ast-grep`, which is 0.44.1 at the current nixpkgs lock (the version moves with
+   the lock, so increment 6 records it in a comment beside the pin). That build has the Nix
+   grammar built in, so no extra grammar needs shipping. This was checked on
    2026-11-02: a rule with `language: nix`, `kind: binding` and `has: {field: attrpath,
    regex: Phase$}` matched a `buildPhase = ''…${foo}…''` binding, with JSON output.
-2. Each `${…}` antiquotation becomes a placeholder variable, e.g. `"$__nix_1"`, so shellcheck
-   sees valid shell. Nix's `''$` escape becomes `$`.
+2. Each `${…}` antiquotation becomes a placeholder variable with a per-snippet random
+   prefix, e.g. `"$__nix_k3f9_1"`, so shellcheck sees valid shell, and a real variable in
+   the snippet can't collide with a placeholder and be silenced. Nix's `''$` escape becomes `$`.
 3. Run `shellcheck -s bash -f json` on each snippet with a line-offset map.
 4. Map each finding back to the `.nix` file and line. Drop codes that the placeholder
-   substitution caused, a fixed list: SC2154 on `__nix_*`, plus SC2034 only when the variable
-   is a placeholder.
+   substitution caused, a fixed list: SC2154 on that snippet's placeholders only, plus
+   SC2034 only when the variable is one of them. Row:
+   `corner_real_var_named_like_placeholder_still_reported`.
 
 This is a new `snippet` mode in `shellcheck.rs`. The existing collector's ban on inline
 `# shellcheck disable` comments carries over.
@@ -194,6 +198,13 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
   `--unshare-net` and the daemon socket (`/nix/var/nix/daemon-socket`) bound in, and to
   settle whether to use `--readonly-mode` for `--eval`-only runs. If the socket can't be made
   safe, the collector ships `--eval`-only, without `drvPath`.
+- **Store growth.** The `drvPath` leg writes `.drv` files through the daemon, so a hostile
+  package can grow the store even with `nix_eval_max_attrs = 10`, through huge attr values
+  or deep `--strict` forcing. The spike measures store growth on an adversarial fixture.
+  The collector then enforces `nix_eval_max_store_bytes` (default 256 MiB) by measuring
+  `nix path-info -S` over the new `.drv` closure and failing the leg when it is over.
+  Those `.drv`s are unrooted, so they go at the next store GC. Row:
+  `adversarial_drv_store_growth_capped`.
 
 **Output path.** The collector needs a new `ReviewFacts` slot, `nix_eval: Option<AnalysisReport>`
 (proto field 18 in `review.proto`). That means edits to `convert.rs`, the

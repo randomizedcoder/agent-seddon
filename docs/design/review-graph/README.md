@@ -79,6 +79,14 @@ untouched.
 | Focus | One prompt carries 8 concerns | One concern per step; assemble ranks across them |
 | Failure | All or nothing | A failed lens is recorded and skipped; a failed assemble falls back to the single-session review |
 
+**Why not a smaller intermediate step?** The orchestrator could simply fan out five lens
+sessions itself, with no new document kind. That would bring the latency win sooner. It is
+not done because the fan-out, join, fallback and capacity logic would then live in the
+orchestrator and need rebuilding in the graph later. Building it once as a pipeline document
+reuses graph validation, `GraphService.DescribeNodeTypes` and the portal's Graph tab. It
+also makes the lens set per-repo data (the nixpkgs graph) rather than code. The build order
+already lands value first: 1, 1b and 2 come before 3–4.
+
 The single-session path stays and is the default. A roster row opts in with `graph = "…"`,
 and clearing the field rolls back.
 

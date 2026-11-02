@@ -36,7 +36,14 @@ The job runs these steps in order, each fail-soft, with its own deadline:
    file).
 5. **Architecture overview.** A strong-model pass (`RouteRole::Summarize`, heavy tier) over
    the indexes. It covers entry points, modules and their roles, conventions, test style, and
-   build and CI. Every claim must cite `file:line`, and uncited claims are dropped. The output
+   build and CI. Every claim must cite `file:line`, and uncited claims are dropped **mechanically**:
+   - the overview is produced as structured JSON (`{sections:[{claim, citations:[file:line]}]}`
+     via `complete_structured`);
+   - each citation is `confine()`d and checked against the indexed tree (the file exists,
+     and the line is within its length);
+   - a claim left with no valid citation is removed before rendering.
+
+   Row: `adversarial_overview_fabricated_citation_dropped`. The output
    is capped at 16 KiB and stored at `knowledge/<base-sha>/overview.md`.
 
 **Manifest.** `knowledge/<base-sha>/manifest.json` records, per index: base sha, tool name
