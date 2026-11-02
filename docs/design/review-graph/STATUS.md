@@ -11,7 +11,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | # | Title | Design | State | PR |
 |---|---|---|---|---|
 | 0 | Design directory | all | 🟡 | (this PR) |
-| 1 | Fix "Files changed: 0" on nixpkgs: target-branch base fetch, loud empty diff, forge file-list fallback | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1 | Fix "Files changed: 0" on nixpkgs: target-branch base fetch, loud empty diff, forge file-list fallback; prep off the shared drain loop (per-row lock + global prep cap) so one slow repo can't stall the fleet | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |

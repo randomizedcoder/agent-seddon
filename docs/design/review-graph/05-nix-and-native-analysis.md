@@ -28,6 +28,17 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     cheap on a 3.6 GB mirror.
   - Fail **loud** when the diff is empty while the forge reports changed files. Use the
     forge's file list as the fallback changed set, and say so in the brief.
+- **One slow repo must not stall the fleet.** Today the trigger drain loop
+  (`crates/agent-cli/src/grpc_server.rs:1354`) `await`s `orch.handle(trigger)` one at a
+  time, and `handle` runs the whole prep inline (factory build, mirror refresh,
+  `fetch_pr`, worktree, grounding — `orchestrator.rs:592-862`); only the model review is
+  spawned (`:862`). A nixpkgs PR whose refresh and `fetch_pr` both time out holds every
+  other repo's trigger for up to 10 min (seen on l2, 2026-11-02, until the nixpkgs row
+  was paused). Fix: the drain loop spawns each trigger's prep as its own task, behind a
+  per-row lock (one repo still preps in order, sharing one mirror) and a global prep
+  semaphore (`[review_fleet] max_parallel_prep`, default 4). Test rows: a hung row's
+  trigger does not delay another row's; two triggers of one row still prep in order;
+  the semaphore caps concurrent preps.
 
 ## Nix static suite (increment 6)
 
