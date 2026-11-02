@@ -94,6 +94,8 @@ and clearing the field rolls back.
   use the indexes in every step.
 - [`05-nix-and-native-analysis.md`](05-nix-and-native-analysis.md) — nix static analysis,
   shellcheck on phase snippets, C/C++ analysis, and the sandboxed eval collector.
+- [`06-work-queue.md`](06-work-queue.md) — durable staged work queues and configurable
+  worker pools, so many repos with many PRs run in parallel and fairly, across processes.
 
 ## Non-goals
 
