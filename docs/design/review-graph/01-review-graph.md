@@ -79,10 +79,11 @@ the row's `max_parallel_steps`) needs the roster row, so it runs in
 - Every `tools = readonly` step is on a split's branch (a branch may be a chain of them).
   A lone readonly step is rejected. This is what keeps the slot leases deadlock-free
   ([02](02-pipeline-executor.md#capacity)).
-- Nested splits (a split inside another split's branch) are rejected. A branch is the
-  path from its split to the first join it reaches. A step that would belong to two
-  branches (its edges reach two different joins) is rejected. Any other arrangement of
-  splits is legal.
+- Nested splits (a split inside another split's branch) are rejected. A branch is a simple
+  chain from its split to its join: every node in it has exactly one in-edge and one
+  out-edge. Branches converging before the join, cross-branch edges, and a step reaching
+  two joins are all rejected ([02](02-pipeline-executor.md#capacity)). Any other
+  arrangement of splits is legal.
 - Param caps follow the existing schema conventions: sizes are bounded and names are
   checked. A fragment path that escapes `prompts/` is rejected.
 - Pipeline-only types inside an anchor document are rejected, and anchor types inside a

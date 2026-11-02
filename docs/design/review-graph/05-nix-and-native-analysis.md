@@ -37,9 +37,9 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     - **Existing mirrors** are migrated by an out-of-band **maintenance job**, not inside a
       review's refresh. A repack of the 61 GB mirror can't finish in the 300 s
       `PREP_TIMEOUT`, and a killed repack keeps no progress, so it would loop forever.
-      The job runs on the `index` worker pool ([06](06-work-queue.md)) with its own
-      deadline (`mirror_migration_deadline_secs`, default 7200) and the row's mirror
-      lock. Meanwhile reviews of that row keep using the mirror as it is: the base fetch
+      The job runs on its own `maintenance` pool (one worker per process, separate from
+      `index` so a two-hour repack doesn't hold up every row's indexing) with its own
+      deadline (`mirror_migration_deadline_secs`, default 7200). Meanwhile reviews of that row keep using the mirror as it is: the base fetch
       uses the full refspec from *Fix direction*, which works on either shape.
       `corner_migration_repack_exceeds_prep_timeout_converges` checks that a
       migration slower than `PREP_TIMEOUT` completes in the job and never inside a
@@ -77,13 +77,18 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          batched `git update-ref --stdin`. `--prune` can't do
          this: it only prunes refs that match the configured refspec, so stale
          `refs/pull/*` refs would survive the refspec change.
-      4. Remove `objects/pack/*.keep` and stale `tmp_pack_*` files, then run
-         `git repack -a -d` and `git prune --expire=now`. The prune is safe while
+      4. Remove `objects/pack/*.keep` and `tmp_pack_*` files older than `PREP_TIMEOUT`
+         (younger ones may belong to a fetch in progress), then run `git repack -a -d`
+         and `git prune --expire=2.hours.ago`. **Locking:** steps 1–3 take the row's
+         mirror lock, which `fetch_pr` and the `knowledge/` refresh also take, and they
+         finish in seconds. Step 4 runs **without** the lock. `git repack -a -d` is safe
+         alongside a fetch, and the prune grace period protects any object a concurrent
+         fetch has just written. So a row's PR fetches are never blocked for the length
+         of a repack. The prune is safe while
          reviews are in flight: their heads are under `refs/fleet/pr/<n>`, their bases
          under `refs/heads/*`, and `knowledge/` worktrees sit at a default-branch head.
          Step 3 keeps all of those, so the prune only drops objects that nothing in
-         flight can reach. To be safe anyway, the migration takes the row's mirror lock,
-         the same one `fetch_pr` and the `knowledge/` refresh hold. Increment 1 also
+         flight can reach, and the grace period covers what a concurrent fetch is writing. Increment 1 also
          confirms on the pinned git that `git prune` treats each linked worktree's
          `HEAD` and index as reachability roots, with a test row
          (`corner_prune_keeps_worktree_head_and_index`).
@@ -111,7 +116,10 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
       group (`fetch` → `remote-https` → `index-pack`).
     - Each refresh sweeps `tmp_pack_*` files older than `PREP_TIMEOUT` first.
     - `agent_fleet_mirror_bytes{tenant,repo}` reports the mirror's size. Over
-      `mirror_max_bytes` (default 20 GiB), the refresh is refused and logged.
+      `mirror_max_bytes` (default 20 GiB), the refresh is refused and logged. Old-shape
+      detection and queueing the migration job happen **first**, before the size check,
+      so an over-cap old-shape mirror (l2's 61 GB) still gets migrated rather than being
+      refused for ever. Row: `corner_over_cap_old_shape_mirror_still_queues_migration`.
     - A table test proves a timed-out fetch leaves no children and no `tmp_pack_*`. A
       second test runs the migration on a fixture mirror with `refs/pull/*` refs and
       checks that it shrinks.
@@ -244,7 +252,7 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
       nix findings, not the whole process lifetime.
     - **Classification.** Only exit 0 means supported. Only an error naming the unknown
       option means unsupported. The spike pins the exact message on the pinned nix, and
-      a misread fails closed. Every `probe_failed` increments
+      a misread never counts as "unsupported", only as `probe_failed`. Every `probe_failed` increments
       `agent_review_nix_eval_probe_failed_total`, so a nix upgrade that changes the
       message shows up as a metric rather than as findings quietly stopping. Any other
       failure is `probe_failed`. Until a retry succeeds, the collector reports `skipped:

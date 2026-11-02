@@ -7,8 +7,8 @@ nixpkgs reviewer wants a few lines, not a 30 KB report.
 
 | Rule | Value |
 |---|---|
-| Bullets | 1–9 (fewer than 10) |
-| Each bullet | One line: no `\n` or `\r`, at most 200 characters, trimmed, non-empty |
+| Bullets | 1–9 (fewer than 10; the default `max_bullets` is 9) |
+| Each bullet | One line: no `\n` or `\r`, at most `max_line_chars` characters (default 200), trimmed, non-empty |
 | Order | Must-fix first; then the key positives; then minor items in one bullet at most |
 | No must-fix | The first bullet says so ("No blocking issues found.") |
 | Content | Concrete and cited (`file:line` where it helps); no headings, no code blocks, no NixOS mention |
@@ -177,7 +177,9 @@ For `post = both`:
   replaced (with `&lt;`), so the rest of the tag is kept as text. Openings matter too: a
   nested collapse would make the wrapper's own `</details>` close the inner one. The
   escape also applies inside code spans and blocks, where a review quoting the tag shows
-  `&lt;details`. That is accepted, as the safe direction. Row:
+  `&lt;details`. That asymmetry with bare-URL wrapping (which skips code) is deliberate.
+  CommonMark suppresses HTML in code, but forges that sanitize less than GitHub may not
+  honour that, and an escape that also fires inside code is the safe direction. Row:
   `adversarial_body_closes_details_early`, with the `</details >`, `</DETAILS>`,
   `</details/>`, `</details />`, `</details foo="x">`, `</details foo>`, nested `<details>`,
   `<DETAILS>`, `<details/>` and (not escaped) `</detailsx>` variants. The same escape is

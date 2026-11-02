@@ -105,11 +105,20 @@ so a running branch waits on nothing but its own model calls and tools. Each of 
 bounded by `deadline_secs`. Every held slot is therefore returned in bounded time, and a
 waiting split always gets its slots eventually, whatever the graph's shape: sequential
 splits, sibling splits feeding one join, or independent split/join pairs converging
-further down. Waiting is serialization, never a stall. Here a **branch** is the set of
-nodes on a path from its split to the first join that path reaches, and that join ends
-it. A node can't belong to two branches. A step whose outgoing edges reach two different
-joins is rejected (`negative_branch_feeds_two_joins_rejected`), so "its join" is always
-defined. The only thing that could block for
+further down. Waiting is serialization, never a stall.
+
+Here a **branch** is a simple chain: it starts at a node with an in-edge from its split,
+and each node in it has exactly one in-edge (from the split or from the previous node in
+the chain) and one out-edge (to the next node, or to the join that ends it). This rules
+out every shape where branches share nodes or wait on each other:
+- branches converging before their join (`split → A → B → join` plus `split → B`);
+- cross-branch edges;
+- a step reaching two joins.
+
+All of these are rejected (`negative_branches_converge_before_join_rejected`,
+`negative_cross_branch_edge_rejected`, `negative_branch_feeds_two_joins_rejected`). So a
+node belongs to exactly one branch, and a running branch never waits on another
+branch. The only thing that could block for
 ever is a split wider than the whole budget. **Per-row validation** (run in
 `FleetReviewCtxFactory`, not in `validate.rs`, because it needs the row) rejects a document
 whose widest split exceeds the row's `max_parallel_steps`. The cache key is (row id,
@@ -145,7 +154,11 @@ worker count, and doesn't reserve slots.
 - `corner_split_waits_mid_graph_then_runs`
 - `boundary_graph_deadline_while_split_waits_for_slots`
 
-`[review_fleet] max_concurrent` should be re-sized when a row opts in. The router's
+`[review_fleet] max_concurrent` should be re-sized when a row opts in. A PR waiting
+mid-graph for slots still occupies its `review` stage worker
+([06](06-work-queue.md)), so `workers.review` should be at least
+`max_total / max_parallel_steps`. Otherwise the stage can fill up with PRs that are all
+waiting for slots while slots sit free. The router's
 per-upstream capacity (`on_saturation`) still applies to each completion.
 
 ## Observability
