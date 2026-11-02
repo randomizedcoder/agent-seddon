@@ -6793,6 +6793,63 @@ impl SkipOutcome {
     }
 }
 
+/// Most draft records one `ListReviews` returns, whatever `limit` asks for. The history
+/// stores clamp to it; `agent fleet skip` uses it to tell a full listing from a cut-off one.
+pub const MAX_DRAFT_ROWS: usize = 500;
+/// Most ids one `SkipReviews` call takes.
+pub const MAX_SKIP_BATCH: usize = 500;
+// A whole listing fits in one `SkipReviews` call, so "skip what was listed" is one call.
+const _: () = assert!(MAX_DRAFT_ROWS <= MAX_SKIP_BATCH);
+/// How many chars of an untrusted id or status an error message echoes (after escaping).
+pub const MAX_ECHO_CHARS: usize = 40;
+
+/// `s` escaped (as `{:?}` would) and then cut to [`MAX_ECHO_CHARS`] chars, in quotes: the
+/// form an error may echo untrusted text in. Escaping first keeps the bound true for
+/// non-ASCII and control chars, which escape to several chars each.
+pub fn echo_cut(s: &str) -> String {
+    let cut: String = s.escape_debug().take(MAX_ECHO_CHARS).collect();
+    format!("\"{cut}\"")
+}
+/// Longest review id `SkipReviews` accepts (ids are UUIDs, 36 chars).
+pub const MAX_REVIEW_ID_LEN: usize = 128;
+
+/// Whether `id` can be a review id: 1..=[`MAX_REVIEW_ID_LEN`] chars of `[A-Za-z0-9_-]`.
+/// Ids are only ever bound as query args, so this is a sanity bound on wire input, not
+/// the only guard.
+pub fn valid_review_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_REVIEW_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Check a `SkipReviews` id list and drop repeats, keeping the first occurrence's order.
+/// `Err` names the problem (echoing at most a cut of the bad id) when the list is empty,
+/// longer than [`MAX_SKIP_BATCH`], or holds an id [`valid_review_id`] rejects.
+pub fn skip_batch(ids: &[String]) -> std::result::Result<Vec<String>, String> {
+    if ids.is_empty() {
+        return Err("no review ids".into());
+    }
+    if ids.len() > MAX_SKIP_BATCH {
+        return Err(format!(
+            "{} review ids; at most {MAX_SKIP_BATCH} per call",
+            ids.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !valid_review_id(id) {
+            return Err(format!("not a review id: {}", echo_cut(id)));
+        }
+        if seen.insert(id.as_str()) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// Approves a persisted review draft and posts it to its forge (review-fleet C17, the
 /// approve→post tail). The approval gesture is the **only** path that posts — nothing is
 /// posted without an explicit `approve` call, and the model's own in-loop forge stays
@@ -6898,6 +6955,74 @@ mod tests {
         assert_eq!(got, expected, "{description}");
         if let Some(o) = got {
             assert_eq!(o.as_wire(), wire, "{description}: round-trips");
+        }
+    }
+
+    /// `SkipReviews` id checking: name, description, ids, expected (the deduplicated
+    /// list, or a fragment of the error).
+    #[rstest]
+    #[case::positive_uuids(
+        "two UUIDs pass through in order",
+        vec!["0f8e-11".into(), "a1b2-c3".into()],
+        Ok(vec!["0f8e-11".into(), "a1b2-c3".into()])
+    )]
+    #[case::positive_underscore("underscores are allowed", vec!["r_1".into()], Ok(vec!["r_1".into()]))]
+    #[case::corner_duplicates(
+        "a repeated id is kept once, at its first position",
+        vec!["b".into(), "a".into(), "b".into()],
+        Ok(vec!["b".into(), "a".into()])
+    )]
+    #[case::negative_empty_list("no ids is refused", vec![], Err("no review ids"))]
+    #[case::negative_empty_id("an empty id is refused", vec![String::new()], Err("not a review id"))]
+    #[case::boundary_batch_cap(
+        "exactly the cap is accepted (all repeats of one id)",
+        vec!["x".into(); MAX_SKIP_BATCH],
+        Ok(vec!["x".into()])
+    )]
+    #[case::boundary_batch_over_cap(
+        "one over the cap is refused, even if all repeats",
+        vec!["x".into(); MAX_SKIP_BATCH + 1],
+        Err("at most 500")
+    )]
+    #[case::boundary_id_len_cap(
+        "an id of exactly the length cap is accepted",
+        vec!["a".repeat(MAX_REVIEW_ID_LEN)],
+        Ok(vec!["a".repeat(MAX_REVIEW_ID_LEN)])
+    )]
+    #[case::adversarial_id_over_len(
+        "an id one over the length cap is refused",
+        vec!["a".repeat(MAX_REVIEW_ID_LEN + 1)],
+        Err("not a review id")
+    )]
+    #[case::adversarial_traversal("a path is not an id", vec!["../../etc".into()], Err("not a review id"))]
+    #[case::adversarial_sql("a quote is not an id", vec!["x' OR 1=1 --".into()], Err("not a review id"))]
+    #[case::adversarial_newline("a control char is not an id", vec!["a\nb".into()], Err("not a review id"))]
+    #[case::adversarial_unicode("a non-ASCII letter is not an id", vec!["ré".into()], Err("not a review id"))]
+    #[case::adversarial_escaping_unicode_stays_cut(
+        "an id of chars that escape long is still echoed within the cap",
+        vec!["\u{202e}".repeat(MAX_REVIEW_ID_LEN)],
+        Err("not a review id")
+    )]
+    #[case::adversarial_one_bad_spoils_all(
+        "one bad id rejects the whole list",
+        vec!["ok".into(), "b/ad".into()],
+        Err("not a review id")
+    )]
+    fn skip_batch_cases(
+        #[case] description: &str,
+        #[case] ids: Vec<String>,
+        #[case] expected: std::result::Result<Vec<String>, &str>,
+    ) {
+        match (skip_batch(&ids), expected) {
+            (Ok(got), Ok(want)) => assert_eq!(got, want, "{description}"),
+            (Err(e), Err(frag)) => {
+                assert!(e.contains(frag), "{description}: {e:?} lacks {frag:?}");
+                assert!(
+                    e.chars().count() <= "not a review id: ".len() + MAX_ECHO_CHARS + 2,
+                    "{description}: the error echoes a cut: {e:?}"
+                );
+            }
+            (got, want) => panic!("{description}: got {got:?}, want {want:?}"),
         }
     }
 

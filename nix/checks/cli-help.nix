@@ -46,6 +46,8 @@ pkgs.runCommand "agent-cli-help"
     require "campaign"
     require "repo <verb>"
     agent repo --help | grep -q "recover"
+    require "fleet <verb>"
+    agent fleet --help | grep -q "dry-run"
 
     # A representative slice of the per-seam gRPC surface (`<seam> = a|b|c|...`).
     # Not the full 28 — enough to catch a gross `flag_names()` regression without

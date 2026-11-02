@@ -116,8 +116,8 @@ class ReviewFleetServiceClient extends $grpc.Client {
   }
 
   /// Rewrite a draft's markdown body (C14, the portal's edit). Opt-in: needs the draft
-  /// editor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved` draft
-  /// is locked. This edits the local draft only — it never posts; posting stays the
+  /// editor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved`/`skipped`
+  /// draft is locked. This edits the local draft only — it never posts; posting stays the
   /// separate `Approve` gesture.
   $grpc.ResponseFuture<$0.UpdateReviewReply> updateReview(
     $0.UpdateReviewRequest request, {
@@ -134,6 +134,16 @@ class ReviewFleetServiceClient extends $grpc.Client {
     $grpc.CallOptions? options,
   }) {
     return $createUnaryCall(_$skipReview, request, options: options);
+  }
+
+  /// Skip many drafts at once (needs approve:review, like SkipReview). Each id goes
+  /// through the same skip as SkipReview — the shared post lease included — and gets
+  /// its own outcome. Opt-in like SkipReview; else UNIMPLEMENTED.
+  $grpc.ResponseFuture<$0.SkipReviewsReply> skipReviews(
+    $0.SkipReviewsRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$skipReviews, request, options: options);
   }
 
   /// Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the
@@ -201,6 +211,11 @@ class ReviewFleetServiceClient extends $grpc.Client {
           '/agent.v1.ReviewFleetService/SkipReview',
           ($0.SkipReviewRequest value) => value.writeToBuffer(),
           $0.SkipReviewReply.fromBuffer);
+  static final _$skipReviews =
+      $grpc.ClientMethod<$0.SkipReviewsRequest, $0.SkipReviewsReply>(
+          '/agent.v1.ReviewFleetService/SkipReviews',
+          ($0.SkipReviewsRequest value) => value.writeToBuffer(),
+          $0.SkipReviewsReply.fromBuffer);
   static final _$preflight =
       $grpc.ClientMethod<$0.PreflightRequest, $0.PreflightReply>(
           '/agent.v1.ReviewFleetService/Preflight',
@@ -294,6 +309,14 @@ abstract class ReviewFleetServiceBase extends $grpc.Service {
         false,
         ($core.List<$core.int> value) => $0.SkipReviewRequest.fromBuffer(value),
         ($0.SkipReviewReply value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.SkipReviewsRequest, $0.SkipReviewsReply>(
+        'SkipReviews',
+        skipReviews_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.SkipReviewsRequest.fromBuffer(value),
+        ($0.SkipReviewsReply value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.PreflightRequest, $0.PreflightReply>(
         'Preflight',
         preflight_Pre,
@@ -390,6 +413,14 @@ abstract class ReviewFleetServiceBase extends $grpc.Service {
 
   $async.Future<$0.SkipReviewReply> skipReview(
       $grpc.ServiceCall call, $0.SkipReviewRequest request);
+
+  $async.Future<$0.SkipReviewsReply> skipReviews_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.SkipReviewsRequest> $request) async {
+    return skipReviews($call, await $request);
+  }
+
+  $async.Future<$0.SkipReviewsReply> skipReviews(
+      $grpc.ServiceCall call, $0.SkipReviewsRequest request);
 
   $async.Future<$0.PreflightReply> preflight_Pre($grpc.ServiceCall $call,
       $async.Future<$0.PreflightRequest> $request) async {

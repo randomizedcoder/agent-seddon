@@ -3180,6 +3180,151 @@ async fn negative_fleet_skip_unsupported(#[case] description: &str, #[case] wire
     let (dial, _srv) = spawn(Transport::Tcp, router).await;
     let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
     assert!(client.skip_review("r-x").await.is_err(), "{description}");
+    assert!(
+        client.skip_reviews(&["r-x".into()]).await.is_err(),
+        "{description}: the bulk skip is opt-in the same way"
+    );
+}
+
+// ---- SkipReviews over the wire --------------------------------------------
+//
+// An approver whose skip outcome follows the id: `posted-*` was posted, `gone-*` doesn't
+// exist, `fail` is a store fault, anything else skips. It records every id it saw.
+struct BulkSkipApprover {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+#[async_trait]
+impl agent_core::FleetApprover for BulkSkipApprover {
+    async fn approve(
+        &self,
+        _review_id: &str,
+        _approved_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::ApproveOutcome> {
+        Ok(agent_core::ApproveOutcome::NotFound)
+    }
+    async fn skip(
+        &self,
+        review_id: &str,
+        _skipped_by: Option<&str>,
+    ) -> agent_core::Result<agent_core::SkipOutcome> {
+        self.seen.lock().unwrap().push(review_id.to_string());
+        if review_id == "fail" {
+            return Err(agent_core::Error::Fleet("history store unavailable".into()));
+        }
+        Ok(if review_id.starts_with("posted-") {
+            agent_core::SkipOutcome::AlreadyPosted
+        } else if review_id.starts_with("gone-") {
+            agent_core::SkipOutcome::NotFound
+        } else {
+            agent_core::SkipOutcome::Skipped
+        })
+    }
+}
+
+fn ids(v: &[&str]) -> Vec<String> {
+    v.iter().map(ToString::to_string).collect()
+}
+
+fn many_ids(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("r-{i}")).collect()
+}
+
+/// What a `SkipReviews` call should return.
+#[derive(Debug)]
+enum BulkExpect {
+    /// Exactly these results, in this order.
+    Results(Vec<(&'static str, agent_core::SkipOutcome)>),
+    /// This many results, every one `skipped`.
+    AllSkipped(usize),
+    /// The call fails.
+    Fails,
+}
+
+// Each id gets its own outcome in request order; a bad list is refused before any skip;
+// a fault stops the batch where it happened.
+#[rstest]
+#[case::positive_mixed_outcomes(
+    "each id reports its own outcome, in order",
+    ids(&["a", "posted-1", "gone-2"]),
+    BulkExpect::Results(vec![
+        ("a", agent_core::SkipOutcome::Skipped),
+        ("posted-1", agent_core::SkipOutcome::AlreadyPosted),
+        ("gone-2", agent_core::SkipOutcome::NotFound),
+    ]),
+    ids(&["a", "posted-1", "gone-2"])
+)]
+#[case::corner_duplicates_skipped_once(
+    "a repeated id is skipped once and reported once",
+    ids(&["a", "a"]),
+    BulkExpect::Results(vec![("a", agent_core::SkipOutcome::Skipped)]),
+    ids(&["a"])
+)]
+#[case::boundary_batch_cap(
+    "500 distinct ids are all skipped",
+    many_ids(agent_core::MAX_SKIP_BATCH),
+    BulkExpect::AllSkipped(agent_core::MAX_SKIP_BATCH),
+    many_ids(agent_core::MAX_SKIP_BATCH)
+)]
+#[case::boundary_over_cap(
+    "501 ids are refused before any skip",
+    many_ids(agent_core::MAX_SKIP_BATCH + 1),
+    BulkExpect::Fails,
+    vec![]
+)]
+#[case::negative_empty("no ids is refused", vec![], BulkExpect::Fails, vec![])]
+#[case::negative_fault_stops_the_batch(
+    "a store fault fails the call; ids before it were skipped, ids after it untouched",
+    ids(&["a", "fail", "b"]),
+    BulkExpect::Fails,
+    ids(&["a", "fail"])
+)]
+#[case::adversarial_one_bad_id(
+    "one malformed id rejects the whole list, so nothing is skipped",
+    ids(&["a", "../../heads/main"]),
+    BulkExpect::Fails,
+    vec![]
+)]
+#[case::adversarial_huge_id(
+    "an oversized id is refused",
+    vec!["a".repeat(10_000)],
+    BulkExpect::Fails,
+    vec![]
+)]
+#[tokio::test]
+async fn fleet_skip_reviews_cases(
+    #[case] description: &str,
+    #[case] request: Vec<String>,
+    #[case] expected: BulkExpect,
+    #[case] seen: Vec<String>,
+) {
+    let approver = Arc::new(BulkSkipApprover {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        fleet_client_router(approver.clone() as Arc<dyn agent_core::FleetApprover>),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let got = client.skip_reviews(&request).await;
+    match expected {
+        BulkExpect::Results(want) => {
+            let want: Vec<(String, agent_core::SkipOutcome)> =
+                want.into_iter().map(|(i, o)| (i.to_string(), o)).collect();
+            assert_eq!(got.unwrap(), want, "{description}");
+        }
+        BulkExpect::AllSkipped(n) => {
+            let got = got.unwrap();
+            assert_eq!(got.len(), n, "{description}");
+            assert!(
+                got.iter()
+                    .all(|(_, o)| *o == agent_core::SkipOutcome::Skipped),
+                "{description}"
+            );
+        }
+        BulkExpect::Fails => assert!(got.is_err(), "{description}: got {got:?}"),
+    }
+    assert_eq!(*approver.seen.lock().unwrap(), seen, "{description}");
 }
 
 // `exclude_status` crosses to the history as sent; more than 8 entries is refused before

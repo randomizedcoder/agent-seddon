@@ -4688,6 +4688,40 @@
         ]
       }
     },
+    "/v1/fleet/reviews:skip": {
+      "post": {
+        "summary": "Skip many drafts at once (needs approve:review, like SkipReview). Each id goes\nthrough the same skip as SkipReview — the shared post lease included — and gets\nits own outcome. Opt-in like SkipReview; else UNIMPLEMENTED.",
+        "operationId": "ReviewFleetService_SkipReviews",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.SkipReviewsReply"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "description": "Skip several drafts in one call (the portal's \"Skip all shown\", `agent fleet skip`).\nThe ids are explicit — the drafts the caller saw — never a server-side filter, so a\ndraft that arrives after the caller looked is never skipped by accident. 1..=500 ids,\neach 1..=128 chars of `[A-Za-z0-9_-]`; anything else rejects the whole request.\nDuplicates are skipped once.",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.SkipReviewsRequest"
+            }
+          }
+        ],
+        "tags": [
+          "ReviewFleetService"
+        ]
+      }
+    },
     "/v1/fleet/preflight": {
       "get": {
         "summary": "Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the\nfull `--serve-fleet` process (which has the config to build the probes); the\nbare control-plane endpoint returns UNIMPLEMENTED.",
@@ -11529,6 +11563,18 @@
       },
       "description": "Corners, borders, shadows."
     },
+    "agent.v1.SkipResult": {
+      "type": "object",
+      "properties": {
+        "reviewId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "description": "One id's outcome; `status` is a `SkipReviewReply.status` value."
+    },
     "agent.v1.SkipReviewReply": {
       "type": "object",
       "properties": {
@@ -11537,6 +11583,31 @@
         }
       },
       "description": "The outcome of a SkipReview. `status` is one of:\n  \"skipped\"         — the draft is now skipped.\n  \"already_skipped\" — idempotent no-op.\n  \"already_posted\"  — the draft was posted, or a post is in flight; nothing to skip.\n  \"not_found\"       — no persisted draft for this `review_id`."
+    },
+    "agent.v1.SkipReviewsReply": {
+      "type": "object",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/agent.v1.SkipResult"
+          }
+        }
+      },
+      "description": "One result per distinct requested id, in request order."
+    },
+    "agent.v1.SkipReviewsRequest": {
+      "type": "object",
+      "properties": {
+        "reviewIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Skip several drafts in one call (the portal's \"Skip all shown\", `agent fleet skip`).\nThe ids are explicit — the drafts the caller saw — never a server-side filter, so a\ndraft that arrives after the caller looked is never skipped by accident. 1..=500 ids,\neach 1..=128 chars of `[A-Za-z0-9_-]`; anything else rejects the whole request.\nDuplicates are skipped once."
     },
     "agent.v1.StatusResponse": {
       "type": "object",

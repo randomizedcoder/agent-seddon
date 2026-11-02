@@ -353,6 +353,47 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         super::run_scoped(key, work).await
     }
 
+    async fn skip_reviews(
+        &self,
+        request: Request<pb::SkipReviewsRequest>,
+    ) -> Result<Response<pb::SkipReviewsReply>, Status> {
+        // The same decision as SkipReview, many times over.
+        super::authz::require(
+            agent_core::Action::Approve,
+            agent_core::ResourceType::Review,
+        )?;
+        let key = super::identity_key(request.metadata());
+        let sp = span("fleet.skip_reviews", request.metadata());
+        let skipped_by = caller_label();
+        let Some(approver) = self.approver.clone() else {
+            return Err(Status::unimplemented(
+                "SkipReviews requires the fleet orchestrator with persisted history \
+                 (run `agent --serve-fleet` with `[telemetry]` enabled)",
+            ));
+        };
+        let ids = agent_core::skip_batch(&request.into_inner().review_ids)
+            .map_err(Status::invalid_argument)?;
+        let work = async move {
+            // One at a time, each through the single skip (post lease included). A genuine
+            // fault (the store is down) fails the call; the skips before it stand, and a
+            // retry reports them `already_skipped`.
+            let mut results = Vec::with_capacity(ids.len());
+            for review_id in ids {
+                let outcome = approver
+                    .skip(&review_id, skipped_by.as_deref())
+                    .await
+                    .map_err(|e| status_from_error(&e))?;
+                results.push(pb::SkipResult {
+                    review_id,
+                    status: outcome.as_wire().to_string(),
+                });
+            }
+            Ok(Response::new(pb::SkipReviewsReply { results }))
+        }
+        .instrument(sp);
+        super::run_scoped(key, work).await
+    }
+
     async fn preflight(
         &self,
         request: Request<pb::PreflightRequest>,

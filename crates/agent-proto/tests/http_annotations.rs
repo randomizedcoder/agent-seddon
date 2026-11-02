@@ -66,6 +66,13 @@ enum Expect {
     "ReviewFleetService.SkipReview",
     Expect::Routes(&[("POST", "/v1/fleet/reviews/{review_id}/skip")])
 )]
+// corner — the bulk skip is a custom verb on the collection, so it can't be read as
+// UpdateReview's `POST /v1/fleet/reviews/{review_id}` with review_id = "skip".
+#[case::corner_bulk_skip_is_a_custom_verb(
+    "bulk RPC ReviewFleetService.SkipReviews -> POST /v1/fleet/reviews:skip",
+    "ReviewFleetService.SkipReviews",
+    Expect::Routes(&[("POST", "/v1/fleet/reviews:skip")])
+)]
 // corner — a delete maps to the DELETE verb by id (a less common verb in the surface).
 #[case::corner_delete_maps_to_delete_verb(
     "ReviewFleetService.Delete -> DELETE /v1/fleet/sessions/{id}",

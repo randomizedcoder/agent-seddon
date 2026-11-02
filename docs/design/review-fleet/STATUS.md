@@ -85,6 +85,15 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
 > foundation for the [multi-tenancy track](../multi-tenancy/) (components C24/C25), tracked
 > there — not fleet increments 1–8.
 
+- **2026-11-01** — **Bulk skip.** `SkipReviews` skips up to 500 drafts by id in one call,
+  each through `SkipReview`'s path (post lease included); the ids are explicit so nothing
+  unseen is skipped. `agent fleet skip [--repo] [--status] [--dry-run] [--yes]` lists the
+  open drafts, asks, and skips them. Groundwork for the Fleet tab's Inbox/History split and
+  its "Skip all shown" button (next increment). Review round 3: repo names printed by the
+  CLI also have hidden and bidi controls replaced, so a reversed name can't mislead the
+  confirm; echoed ids are escaped before they are cut; the whole list → ask → skip flow is
+  tested against a fake fleet; a bad verb fails before the config is read; and a leading
+  `--tenant` is refused rather than ignored.
 - **2026-10-31** — **Fix: the NixOS fleet never made a per-repo checkout.** The per-row
   review factory is wired only when `[review] backend = "local"` and `[review_fleet] root`
   are both set. `nixosModules.agent-stack` set only the root, so every trigger on l2 since
