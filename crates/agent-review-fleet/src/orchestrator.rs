@@ -137,7 +137,16 @@ fn unscoped_key(session_id: &str, pr_number: u64) -> TriggerKey {
 /// every trigger folded into it (S19), handed to the popped trigger.
 #[derive(Default)]
 struct QueueShared {
-    pending: Mutex<HashMap<TriggerKey, Vec<String>>>,
+    pending: Mutex<HashMap<TriggerKey, Pending>>,
+}
+
+/// One queued trigger's fold state: who asked for it, and the head it was queued with.
+struct Pending {
+    requesters: Vec<String>,
+    /// The queued trigger's listed head, or `None` once a folded-in trigger named another
+    /// head (or none). The popped trigger then drops its hint and fetches the real head, so
+    /// a webhook folded into a poll trigger for a now-stale head can't read as up to date.
+    head_sha: Option<String>,
 }
 
 /// The producer half of the orchestrator's **bounded, coalescing** trigger queue,
@@ -193,10 +202,15 @@ impl TriggerSink for TriggerQueue {
         }
         let kt = trigger_key(&trigger);
         let mut pending = self.shared.pending.lock().expect("queue pending poisoned");
-        if let Some(requesters) = pending.get_mut(&kt) {
+        if let Some(p) = pending.get_mut(&kt) {
+            // The two triggers disagree on the head (a webhook names none): the hint is no
+            // longer trustworthy, so the popped trigger fetches.
+            if p.head_sha.as_deref() != Some(trigger.head_sha.as_str()) {
+                p.head_sha = None;
+            }
             // Folded into the pending review, but its requester is kept (S19): a second
             // person asking for the same PR is attributed, not silently dropped.
-            let dropped = merge_requesters(requesters, trigger.requested_by);
+            let dropped = merge_requesters(&mut p.requesters, trigger.requested_by);
             if dropped > 0 {
                 tracing::warn!(session_id = %trigger.session_id, pr = trigger.pr_number,
                     dropped, "fleet trigger requesters over the cap; extra names not recorded");
@@ -214,7 +228,13 @@ impl TriggerSink for TriggerQueue {
             ..trigger.clone()
         }) {
             Ok(()) => {
-                pending.insert(kt, requesters);
+                pending.insert(
+                    kt,
+                    Pending {
+                        requesters,
+                        head_sha: Some(trigger.head_sha),
+                    },
+                );
                 TriggerOutcome::Accepted
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -237,13 +257,18 @@ impl TriggerReceiver {
     /// [`TriggerQueue`] is dropped and the backlog is drained.
     pub async fn recv(&mut self) -> Option<FleetTrigger> {
         let mut trigger = self.rx.recv().await?;
-        trigger.requested_by = self
+        let p = self
             .shared
             .pending
             .lock()
             .expect("queue pending poisoned")
-            .remove(&trigger_key(&trigger))
-            .unwrap_or_default();
+            .remove(&trigger_key(&trigger));
+        if let Some(p) = p {
+            trigger.requested_by = p.requesters;
+            if p.head_sha.is_none() {
+                trigger.head_sha.clear();
+            }
+        }
         Some(trigger)
     }
 }
@@ -670,7 +695,22 @@ impl FleetOrchestrator {
             user: UserId::new(row.user.as_str()),
             session: encode_review_session_id(&row.id, &row.repo, pr),
         };
-        // C16 cross-round: consult the persisted history before doing any expensive work.
+        // CH1 backpressure: if the host has no free session slot right now, shed the trigger
+        // *before* the expensive fetch/worktree/ground prep — no forge round-trip, no
+        // worktree, and (crucially) no `status=failed` draft. The poller re-emits it next
+        // tick and it starts once a slot frees. Without this the whole prep ran only to fail
+        // inside `run_review` at the cap. An already-live key still fits (idempotent).
+        if !self.host.has_capacity(&key) {
+            tracing::debug!(session_id = %trigger.session_id, pr,
+                "fleet: host at capacity; shedding trigger before prep (retried next poll)");
+            if let Some(fm) = &fm {
+                fm.on_review("at_capacity");
+            }
+            return Ok(Handled::AtCapacity);
+        }
+
+        // C16 cross-round: consult the persisted history before doing any expensive work
+        // (after the shed, so a saturated host pays no history read for a trigger it drops).
         // Fail-soft — a read error means "no prior", so a review still runs (just uncorrelated).
         // The read is scoped to the row's owning org — the tenant its drafts are written
         // under (`key.user`). A single-operator fleet drains unscoped, and a tenant-scoped
@@ -699,20 +739,6 @@ impl FleetOrchestrator {
                 fm.on_review("uptodate");
             }
             return Ok(Handled::UpToDate);
-        }
-
-        // CH1 backpressure: if the host has no free session slot right now, shed the trigger
-        // *before* the expensive fetch/worktree/ground prep — no forge round-trip, no
-        // worktree, and (crucially) no `status=failed` draft. The poller re-emits it next
-        // tick and it starts once a slot frees. Without this the whole prep ran only to fail
-        // inside `run_review` at the cap. An already-live key still fits (idempotent).
-        if !self.host.has_capacity(&key) {
-            tracing::debug!(session_id = %trigger.session_id, pr,
-                "fleet: host at capacity; shedding trigger before prep (retried next poll)");
-            if let Some(fm) = &fm {
-                fm.on_review("at_capacity");
-            }
-            return Ok(Handled::AtCapacity);
         }
 
         // Resolve the per-row repo + grounder (multi-repo grounding). With a factory set,
@@ -2987,6 +3013,88 @@ mod tests {
             fetches,
             "{desc}: PR head fetches"
         );
+    }
+
+    /// desc: a trigger folded into a pending one keeps the listed-head hint only when both
+    /// name the same head; any disagreement (a webhook names none) drops it, so the popped
+    /// trigger fetches the real head. expect: the popped trigger's `head_sha`.
+    #[rstest]
+    #[case::positive_same_head_keeps_hint("two polls of one head keep it", "a", Some("a"), "a")]
+    #[case::boundary_lone_trigger_keeps_hint("nothing folded: the hint stands", "a", None, "a")]
+    #[case::negative_webhook_folded_into_poll(
+        "a webhook (no head) drops the poll's hint",
+        "a",
+        Some(""),
+        ""
+    )]
+    #[case::corner_poll_folded_into_webhook(
+        "a poll folded into a webhook stays unhinted",
+        "",
+        Some("a"),
+        ""
+    )]
+    #[case::corner_both_unhinted("two hintless triggers stay hintless", "", Some(""), "")]
+    #[case::adversarial_moved_head_drops_hint(
+        "a poll naming a newer head drops the stale one",
+        "a",
+        Some("b"),
+        ""
+    )]
+    #[tokio::test]
+    async fn coalesced_head_hint_cases(
+        #[case] desc: &str,
+        #[case] first: &str,
+        #[case] second: Option<&str>,
+        #[case] popped: &str,
+    ) {
+        let (q, mut rx) = TriggerQueue::channel(8);
+        let t = |head: &str| FleetTrigger {
+            head_sha: head.into(),
+            session_id: "web".into(),
+            pr_number: 42,
+            requested_by: Vec::new(),
+            tenant: String::new(),
+        };
+        assert_eq!(q.enqueue(t(first)), TriggerOutcome::Accepted, "{desc}");
+        if let Some(second) = second {
+            assert_eq!(q.enqueue(t(second)), TriggerOutcome::Coalesced, "{desc}");
+        }
+        assert_eq!(rx.recv().await.expect("popped").head_sha, popped, "{desc}");
+    }
+
+    #[tokio::test]
+    async fn adversarial_webhook_folded_into_stale_poll_is_reviewed() {
+        // desc: the poll lists PR 42 at an old head that already has a draft, then a push
+        // moves the PR and its webhook folds into that pending trigger. expect: the popped
+        // trigger fetches and reviews the new head, not `UpToDate` on the stale hint.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let stale = format!("old-{}", "a".repeat(40));
+        let history = FakeHistory::with_prior(PriorReview {
+            last_draft: Some(draft_rec(&stale, "drafted")),
+            open_items: vec![],
+        });
+        let o = orch(roster, repo.clone(), host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_history(history);
+        let (q, mut rx) = TriggerQueue::channel(8);
+        let t = |head: &str| FleetTrigger {
+            head_sha: head.into(),
+            session_id: "web".into(),
+            pr_number: 42,
+            requested_by: Vec::new(),
+            tenant: String::new(),
+        };
+        assert_eq!(q.enqueue(t(&stale)), TriggerOutcome::Accepted);
+        assert_eq!(q.enqueue(t("")), TriggerOutcome::Coalesced);
+        let got = o
+            .handle(rx.recv().await.expect("popped"))
+            .await
+            .expect("handle ok");
+        o.join("web", 42).await;
+        assert!(matches!(got, Handled::Reviewing { .. }), "got {got:?}");
+        assert_eq!(repo.fetch_pr_calls().len(), 1, "the new head was fetched");
     }
 
     /// desc: the C16 history read runs under a tenant, so a tenant-scoped (RLS) reader can

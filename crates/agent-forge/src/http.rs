@@ -617,42 +617,49 @@ mod tests {
     }
 
     /// Two calls in a row against a scripted forge: does the first succeed, does the
-    /// second, and how many requests reached the forge in all.
+    /// second, and how many requests reached the forge in all. With `shared`, the second
+    /// call goes through another client on the same pacer and credential (as production
+    /// clients share the process pacer).
     #[rstest]
     #[case::positive_long_retry_after_gates_the_quota(
         "a 429 asking for 2 minutes fails at once, and the next call is not sent",
         vec![(429, vec![("Retry-After", "120".into())], "{}")],
-        3, (false, false), 1
+        3, (false, false), 1, false
     )]
     #[case::positive_spent_quota_on_200_gates_until_reset(
         "a 200 that spends the quota is used, then nothing is sent until the reset",
         vec![(200, vec![("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset_in(300))], "[]")],
-        0, (true, false), 1
+        0, (true, false), 1, false
     )]
     #[case::positive_403_spent_quota_gates(
         "a 403 on a spent quota is a rate limit: no retry, no next call",
         vec![(403, vec![("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset_in(600))], "{}")],
-        3, (false, false), 1
+        3, (false, false), 1, false
     )]
     #[case::negative_plain_403_is_not_gated(
         "a plain 403 is a refusal: not retried, and the next call is still sent",
         vec![(403, vec![], "{}")],
-        3, (false, false), 2
+        3, (false, false), 2, false
     )]
     #[case::corner_quota_left_is_not_gated(
         "a 200 with quota left gates nothing",
         vec![(200, vec![("x-ratelimit-remaining", "1".into()), ("x-ratelimit-reset", reset_in(300))], "[]")],
-        0, (true, true), 2
+        0, (true, true), 2, false
     )]
     #[case::positive_http_date_retry_after_gates_the_quota(
         "a Retry-After given as an HTTP-date two minutes out gates like the seconds form",
         vec![(429, vec![("Retry-After", date_in(120))], "{}")],
-        3, (false, false), 1
+        3, (false, false), 1, false
     )]
     #[case::adversarial_days_long_hint_is_capped_not_retried(
         "a days-long Retry-After is not slept on: the call fails and the quota is gated",
         vec![(503, vec![("Retry-After", "999999999".into())], "{}")],
-        3, (false, false), 1
+        3, (false, false), 1, false
+    )]
+    #[case::adversarial_second_client_honours_the_gate(
+        "another client sharing the pacer sends nothing while the quota is held",
+        vec![(429, vec![("Retry-After", "120".into())], "{}"), (200, vec![], "[]")],
+        0, (false, false), 1, true
     )]
     #[tokio::test]
     async fn pacing_cases(
@@ -661,11 +668,15 @@ mod tests {
         #[case] retries: u32,
         #[case] ok: (bool, bool),
         #[case] sent: usize,
+        #[case] shared: bool,
     ) {
         let (base, seen) = spawn_scripted(script);
-        let http = paced(base, "tok", retries, Arc::new(Pacer::new()));
+        let pacer = Arc::new(Pacer::new());
+        let http = paced(base.clone(), "tok", retries, pacer.clone());
+        let shared_client = shared.then(|| paced(base, "tok", retries, pacer));
+        let other = shared_client.as_ref().unwrap_or(&http);
         let first = http.get_json("x").await;
-        let second = http.get_json("x").await;
+        let second = other.get_json("x").await;
         assert_eq!(
             (first.is_ok(), second.is_ok()),
             ok,

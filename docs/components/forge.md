@@ -107,6 +107,8 @@ asks it to:
   with "holding off another Ns" and sends nothing. A 2xx that reports
   `X-RateLimit-Remaining: 0` holds the quota until the reset too, so we stop before the
   forge has to refuse us. A `304` that reports the quota spent holds it the same way.
+  A hint-less 429 waits the 60 s default, so it too gives up the call and holds the
+  quota rather than retrying sooner than GitHub asks; its caller sees the error.
   A call that fails on a hold is not queued: the fleet's poll re-drives it (see
   [review-fleet.md](review-fleet.md)).
 - **A quota is `(api base, credential)`.** The credential is a keyed hash

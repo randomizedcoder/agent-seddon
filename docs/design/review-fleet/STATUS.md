@@ -111,6 +111,11 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   used; a `304` reporting a spent quota holds it; docs name the poll as the re-driver of a
   rate-limited webhook/Slack/`ReviewNow` review; tests for a cached page's shape and an
   HTTP-date `Retry-After` end to end.
+  Review round 2: a trigger folded into a pending one with a different (or no) head drops
+  the listed-head hint, so a webhook for a new push is never answered `UpToDate` on a stale
+  poll head; the capacity shed runs before the history read; a second client sharing the
+  pacer is tested to honour a held quota; the hint-less 429 → 60 s give-up is documented
+  as deliberate (GitHub's secondary-limit advice).
 
 ## Decisions of record
 

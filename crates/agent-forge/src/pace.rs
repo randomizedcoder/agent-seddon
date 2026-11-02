@@ -43,7 +43,9 @@ pub const MIN_WAIT: Duration = Duration::from_secs(1);
 /// the gate is simply set again if the forge is still refusing then.
 pub const MAX_WAIT: Duration = Duration::from_secs(15 * 60);
 /// The wait for a rate-limited answer that carries no usable hint: GitHub's documented
-/// "wait at least one minute" for a secondary rate limit.
+/// "wait at least one minute" for a secondary rate limit. It is longer than the inline
+/// retry ceiling on purpose, so a hint-less 429 gives the call up and holds the quota
+/// rather than retrying on a computed backoff sooner than the forge asked.
 pub const DEFAULT_LIMITED_WAIT: Duration = Duration::from_secs(60);
 /// Most quotas with a live gate held at once. Expired gates are pruned first; past this,
 /// the gate that expires soonest is dropped.

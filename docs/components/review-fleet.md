@@ -347,7 +347,10 @@ The poll is built to be a **good citizen** of the forge (most of all GitHub):
   first: when the newest live draft is already for that head, the trigger ends as
   `Handled::UpToDate` with **no mirror fetch and no PR fetch**. The hint is untrusted and only
   ever skips work; a stale or forged hint falls through to the precise check on the fetched
-  head. So a steady-state poll of an unchanged repo is one list call per row.
+  head. So a steady-state poll of an unchanged repo is one list call per row. A trigger folded
+  into a pending one that names a different head (a webhook names none) drops the hint, so
+  the popped trigger fetches: a push that lands while a poll trigger waits is reviewed now,
+  not on the next tick. A host at capacity sheds the trigger before the history read.
 - **Per-row backoff.** A row whose poll fails (forge error, rate limit, missing row) is skipped
   on later ticks for an exponentially growing, jittered wait: 60 s, 120 s, … capped at 30 min
   (`PollBackoff`, built on `agent-retry`). One success clears it. At most 4096 failing rows
