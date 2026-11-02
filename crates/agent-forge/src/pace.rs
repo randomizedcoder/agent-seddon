@@ -3,8 +3,8 @@
 //! A forge (GitHub above all) asks callers to slow down in three ways, and this module
 //! honours each one for every call that goes through [`crate::http::ForgeHttp`]:
 //!
-//! * **A rate-limited answer** (429, or a 403 that carries `Retry-After` or a zero
-//!   `x-ratelimit-remaining`, or a 5xx with `Retry-After`): wait as long as the forge
+//! * **A rate-limited answer** (429, or a 403 that carries a readable `Retry-After` or a
+//!   zero `x-ratelimit-remaining`, or a 5xx with a readable `Retry-After`): wait as long as the forge
 //!   says — `Retry-After` in either form, else the quota's reset time, else a minute
 //!   (GitHub's guidance for a secondary limit with no hint). [`limited_wait`].
 //! * **A spent quota on a good answer** (`x-ratelimit-remaining: 0` on a 200): the
@@ -114,8 +114,8 @@ pub fn clamp_wait(wait: Duration) -> Duration {
 
 /// How long to hold off after a response with status `code`, or `None` when the forge
 /// did not ask us to slow down. A rate-limited answer is a 429, a 403 carrying a
-/// readable `Retry-After` or a spent quota, or a 5xx carrying `Retry-After`. Its wait is
-/// `Retry-After` when readable, else the reset time of a spent quota, else
+/// readable `Retry-After` or a spent quota, or a 5xx carrying a readable `Retry-After`.
+/// Its wait is `Retry-After` when readable, else the reset time of a spent quota, else
 /// [`DEFAULT_LIMITED_WAIT`], always clamped by [`clamp_wait`]. A plain 403 (a
 /// permission refusal) and a 5xx without a hint are not rate limits.
 pub fn limited_wait(code: u16, sig: &Signals<'_>, now: SystemTime) -> Option<Duration> {
@@ -125,7 +125,8 @@ pub fn limited_wait(code: u16, sig: &Signals<'_>, now: SystemTime) -> Option<Dur
         // that decorates a real permission refusal with a junk `Retry-After` must not
         // gate a healthy credential.
         403 => sig.retry_after_wait(now).is_some() || sig.spent(),
-        500..=599 => sig.retry_after.is_some(),
+        // Same rule for a 5xx: a junk hint is computed backoff, not a quota-wide gate.
+        500..=599 => sig.retry_after_wait(now).is_some(),
         _ => false,
     };
     if !limited {
@@ -414,18 +415,30 @@ impl Pacer {
         quota: &Quota,
         path: &str,
         etag: &str,
-        body: Arc<serde_json::Value>,
+        body: &serde_json::Value,
         size: usize,
     ) {
         let key = (quota.clone(), path.to_string());
-        let mut cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.remove(&key);
-        if !usable_etag(etag) || size > MAX_CACHED_BYTES {
-            return;
+        let lock = || {
+            self.cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        // The stale entry goes even when the new answer isn't kept. An entry larger than
+        // the whole budget is refused outright: `make_room` would empty the cache and the
+        // insert would still overrun the bound.
+        {
+            let mut cache = lock();
+            cache.remove(&key);
+            if !usable_etag(etag) || size > MAX_CACHED_BYTES || size > cache.limits.bytes {
+                return;
+            }
         }
+        // Clone outside the lock every `ForgeHttp` shares, and only once the entry is
+        // known to be kept. A racing store of the same key is replaced below.
+        let body = Arc::new(body.clone());
+        let mut cache = lock();
+        cache.remove(&key);
         cache.make_room(quota, size);
         cache.clock += 1;
         let stamp = cache.clock;
@@ -577,6 +590,14 @@ mod tests {
         None,
         None
     )]
+    #[case::negative_503_junk_hint(
+        "a 503 whose Retry-After doesn't parse is computed backoff, not a quota gate",
+        503,
+        Some("soon-ish"),
+        None,
+        None,
+        None
+    )]
     #[case::negative_200("a 200 is not a limit", 200, Some("10"), None, None, None)]
     #[case::negative_404("a 404 is not a limit", 404, None, Some("0"), None, None)]
     #[case::boundary_zero_hint_floored(
@@ -659,6 +680,13 @@ mod tests {
         "a 502 with no hint backs off",
         502,
         None,
+        None,
+        Answer::Retry(None)
+    )]
+    #[case::negative_503_junk_hint_backs_off(
+        "a 503 whose Retry-After doesn't parse backs off instead of gating the quota",
+        503,
+        Some("soon-ish"),
         None,
         Answer::Retry(None)
     )]
@@ -977,7 +1005,7 @@ mod tests {
             &p.quota(base, "tok-a"),
             "repos/o/r/pulls",
             etag,
-            Arc::new(body.clone()),
+            &body,
             size,
         );
         let q = p.quota(base, reader);
@@ -995,8 +1023,8 @@ mod tests {
     fn corner_unusable_etag_drops_the_old_entry() {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        p.remember(&q, "x", "\"e1\"", Arc::new(serde_json::json!(1)), 1);
-        p.remember(&q, "x", "", Arc::new(serde_json::json!(2)), 1);
+        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
+        p.remember(&q, "x", "", &serde_json::json!(2), 1);
         assert_eq!(p.cached_etag(&q, "x"), None);
     }
 
@@ -1021,19 +1049,13 @@ mod tests {
         let p = Pacer::new();
         let q = p.quota("b", "t");
         for i in 0..MAX_CACHED_PER_QUOTA {
-            p.remember(
-                &q,
-                &format!("p{i}"),
-                "\"e\"",
-                Arc::new(serde_json::json!(i)),
-                1,
-            );
+            p.remember(&q, &format!("p{i}"), "\"e\"", &serde_json::json!(i), 1);
         }
         if let Some(path) = read {
             assert!(p.cached_etag(&q, path).is_some(), "{desc}");
         }
         let newest = format!("p{MAX_CACHED_PER_QUOTA}");
-        p.remember(&q, &newest, "\"e\"", Arc::new(serde_json::json!(0)), 1);
+        p.remember(&q, &newest, "\"e\"", &serde_json::json!(0), 1);
         assert_eq!(p.cached_len(), MAX_CACHED_PER_QUOTA, "{desc}");
         assert_eq!(p.cached_etag(&q, evicted), None, "{desc}: {evicted} went");
         assert!(
@@ -1053,7 +1075,7 @@ mod tests {
     fn cached_body_matches_the_tag(#[case] desc: &str, #[case] sent: &str, #[case] hit: bool) {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        p.remember(&q, "x", "\"e1\"", Arc::new(serde_json::json!(1)), 1);
+        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
         assert_eq!(p.cached_body(&q, "x", sent).is_some(), hit, "{desc}");
     }
 
@@ -1112,6 +1134,16 @@ mod tests {
             Step::Cached { who: "a", paths: 3, want: 2 },
         ]
     )]
+    #[case::adversarial_oversized_entry_refused_without_evicting(
+        "an entry larger than the whole byte budget is refused, and other quotas keep theirs",
+        Limits { per_quota: 50, entries: 50, bytes: 10 },
+        vec![
+            Step::Store { who: "b", paths: 1, size: 5 },
+            Step::Store { who: "a", paths: 1, size: 20 },
+            Step::Cached { who: "a", paths: 1, want: 0 },
+            Step::Cached { who: "b", paths: 1, want: 1 },
+        ]
+    )]
     #[case::boundary_byte_budget_exact_fit(
         "bodies that exactly fill the byte budget all stay",
         Limits { per_quota: 50, entries: 50, bytes: 100 },
@@ -1124,13 +1156,7 @@ mod tests {
                 Step::Store { who, paths, size } => {
                     let q = p.quota("b", who);
                     for i in 0..paths {
-                        p.remember(
-                            &q,
-                            &format!("p{i}"),
-                            "\"e\"",
-                            Arc::new(serde_json::json!(i)),
-                            size,
-                        );
+                        p.remember(&q, &format!("p{i}"), "\"e\"", &serde_json::json!(i), size);
                     }
                 }
                 Step::Cached { who, paths, want } => {

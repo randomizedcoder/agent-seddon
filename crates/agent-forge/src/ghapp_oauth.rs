@@ -495,6 +495,9 @@ fn classify(
             ) {
                 crate::pace::Answer::Use => agent_retry::Attempt::Done(r),
                 crate::pace::Answer::Retry(after) => agent_retry::Attempt::Retry { err, after },
+                // No pacer gate: each exchange is one user's click on a one-time code, so
+                // there is no later call on the same quota to hold back. The wait is in the
+                // error the portal shows.
                 crate::pace::Answer::GiveUp(wait) => {
                     agent_retry::Attempt::Fail(Error::Repo(format!(
                         "{what} returned http {code}: rate limited for {}s",
