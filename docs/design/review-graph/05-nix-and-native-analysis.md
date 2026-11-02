@@ -19,6 +19,22 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
 - On l2 (2026-11-01) the nixpkgs refresh **regularly hits the 300 s cap**: "mirror base-ref
   refresh failed; reviewing against the last-known base … exceeded the 300s fleet prep
   timeout".
+- **Root cause found on l2 (2026-11-02), when the disk filled.**
+  - The mirror is a `clone --mirror` (`crates/agent-git/src/cli.rs:239`), so its refspec is
+    `+refs/*:refs/*`. `fetch --prune --all` therefore pulls every `refs/pull/*` ref in
+    nixpkgs, about 11.7M objects (a ~2.9 GB pack).
+  - That never finishes inside 300 s, and killing it at the timeout leaves the refs
+    unwritten. The next attempt has nothing to negotiate from, so it downloads the whole
+    repo again.
+  - Result: the mirror grew to 61 GB of duplicate `.keep` packs plus orphaned `tmp_pack_*`
+    files, about 2.5 GB every 5 minutes, until the 1.7 TB root was full.
+  - The fix replaces the mirror refspec with heads only (`+refs/heads/*:refs/heads/*`,
+    no `refs/pull/*`). PR heads are already fetched one at a time by `fetch_pr`. The fix
+    also:
+    - kills the whole git process tree on timeout;
+    - adds a startup sweep for stale `tmp_pack_*` files;
+    - caps the mirror's size with a metric (`agent_fleet_mirror_bytes`);
+    - adds a one-off `git repack -a -d` for an existing bloated mirror.
 - Two hypotheses to reproduce, each with a table-test row:
   - **(a)** the target branch (e.g. `staging`) was never fetched into the mirror, so the
     base doesn't resolve and the diff comes out empty;
