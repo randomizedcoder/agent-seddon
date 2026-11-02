@@ -79,6 +79,7 @@ The per-increment design docs:
 - [`06-draft-persist-approve.md`](06-draft-persist-approve.md) — draft → persist → human approval
 - [`07-observability.md`](07-observability.md) — metrics + spans
 - [`08-child-sessions.md`](08-child-sessions.md) — child sessions (deferred)
+- Follow-on track: [review graph](../review-graph/README.md) — the review as a phased cognition graph, the condensed review, index when a repo is added, nix/C/C++ analysis
 
 A running build log sits in [`PROGRESS.md`](PROGRESS.md).
 
