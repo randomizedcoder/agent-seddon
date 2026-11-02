@@ -80,3 +80,15 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - Deferred to 1c: fail closed on a `.clone-lock` that isn't a regular file; a stronger
     reftable readiness signal (an empty `reftable/` doesn't separate a killed clone, since
     `git init` writes a table).
+
+  Fleet review round 4 fixes:
+  - A clone re-checks readiness after it claims the slot, so a clone that finished while
+    another waited is not repeated (`clone_rechecks_readiness_after_the_claim`).
+  - A crash between the staged clone and the swap is recovered: a finished `.partial` whose
+    refspecs match is moved into place instead of re-cloned; an unfinished one is re-cloned
+    (fixture tests for both).
+  - `docs/components/git.md` notes the refreshed base reaches the diff only when the root is
+    the mirror (the fleet shape).
+  - Auto-fetch logs "waits for the mirror clone" at info, not a "failed" warning.
+  - The `Skipped` arm of `change_unknown` is commented as unreachable today.
+  - Deferred to 1c: the fleet's 30 s re-poll while a mirror clones.

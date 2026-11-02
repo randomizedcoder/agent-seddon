@@ -412,7 +412,9 @@ impl CliBackend {
     /// Bootstrap the shared bare mirror if it is not ready yet: a branches-and-tags
     /// clone ([`MIRROR_REFSPECS`]), made in a staging dir and renamed into place only
     /// once it is complete, so a clone killed partway never looks ready. Returns `true`
-    /// if a clone was performed, `false` if the mirror was already present. Errs if a
+    /// if a clone was performed (or a finished one recovered), `false` if the mirror was
+    /// already present, including when another clone finished while this one waited
+    /// for the lock. Errs if a
     /// clone is needed but no remote is known, or one is already running.
     /// (Reads and worktrees work off the checkout's own object DB without one, so
     /// this is an opt-in optimization the runtime drives in the background.)
@@ -421,8 +423,7 @@ impl CliBackend {
             return Ok(false);
         }
         let slot = CloneSlot::claim(&self.mirror).ok_or_else(|| self.cloning_error())?;
-        self.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await?;
-        Ok(true)
+        self.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await
     }
 
     fn cloning_error(&self) -> Error {
@@ -433,12 +434,32 @@ impl CliBackend {
         ))
     }
 
-    /// Clone the mirror (the caller holds `_slot`). Steps:
+    /// Clone the mirror (the caller holds `_slot`). Returns `false` without cloning when
+    /// the mirror became ready while the caller waited for the slot (another process's
+    /// clone finished between its readiness check and its claim). Steps:
+    /// 0. If the mirror path is empty and `<mirror>.partial` is a finished clone (a crash
+    ///    between the two renames of step 3), rename it into place instead of cloning.
     /// 1. `clone --bare` into `<mirror>.partial`, cleared first (a killed run's leftovers).
     /// 2. Set exactly the [`MIRROR_REFSPECS`] (`clone --bare` writes no fetch refspec).
     /// 3. Move whatever is at the mirror path to `<mirror>.stale`, rename the staging
     ///    dir into place, and delete the stale one.
-    async fn clone_mirror(&self, _slot: CloneSlot, deadline_secs: u64) -> Result<()> {
+    async fn clone_mirror(&self, _slot: CloneSlot, deadline_secs: u64) -> Result<bool> {
+        if self.mirror_ready() {
+            return Ok(false);
+        }
+        let staging = sibling(&self.mirror, "partial");
+        let stale = sibling(&self.mirror, "stale");
+        if !self.mirror.exists() && self.staged_clone_finished(&staging).await {
+            tracing::warn!(mirror = %self.mirror.display(),
+                "git: recovering a finished clone left in .partial by a crash mid-swap");
+            std::fs::rename(&staging, &self.mirror).map_err(|e| {
+                Error::Repo(format!(
+                    "moving the recovered mirror into place failed: {e}"
+                ))
+            })?;
+            remove_tree(stale).await?;
+            return Ok(true);
+        }
         let remote = self.resolve_remote_url().await.ok_or_else(|| {
             Error::Repo("mirror bootstrap needs a remote (set [git] remote or an origin)".into())
         })?;
@@ -451,8 +472,6 @@ impl CliBackend {
             .to_path_buf();
         std::fs::create_dir_all(&parent)
             .map_err(|e| Error::Repo(format!("creating mirror parent failed: {e}")))?;
-        let staging = sibling(&self.mirror, "partial");
-        let stale = sibling(&self.mirror, "stale");
         remove_tree(staging.clone()).await?;
         if state == MirrorState::Incomplete {
             tracing::warn!(mirror = %self.mirror.display(),
@@ -498,7 +517,28 @@ impl CliBackend {
         }
         std::fs::rename(&staging, &self.mirror)
             .map_err(|e| Error::Repo(format!("moving the new mirror into place failed: {e}")))?;
-        remove_tree(stale).await
+        remove_tree(stale).await?;
+        Ok(true)
+    }
+
+    /// Whether `staging` holds a finished clone: ready by [`mirror_state`], and with
+    /// exactly the [`MIRROR_REFSPECS`] set, which `clone_mirror` writes only after the
+    /// clone itself succeeded. (A reftable dir reads ready mid-clone; the refspecs
+    /// don't.)
+    async fn staged_clone_finished(&self, staging: &Path) -> bool {
+        if mirror_state(staging) != MirrorState::Ready {
+            return false;
+        }
+        let Ok(specs) = self
+            .git_str(staging, &["config", "--get-all", "remote.origin.fetch"])
+            .await
+        else {
+            return false;
+        };
+        specs
+            .lines()
+            .map(str::trim)
+            .eq(MIRROR_REFSPECS.iter().copied())
     }
 
     /// Refuse to replace a mirror path that holds neither a git dir nor nothing (e.g. a
@@ -537,6 +577,11 @@ impl CliBackend {
             return Ok(());
         }
         if let Some(slot) = CloneSlot::claim(&self.mirror) {
+            // Another process's clone may have finished between the check above and
+            // the claim.
+            if self.mirror_ready() {
+                return Ok(());
+            }
             let backend = self.detached();
             // unscoped-spawn: a one-off mirror clone that outlives the review that asked
             // for it; it carries the backend's own token source, not a caller's.
@@ -544,7 +589,7 @@ impl CliBackend {
                 let mirror = backend.mirror.display().to_string();
                 tracing::info!(%mirror, "git: cloning the mirror in the background");
                 match backend.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await {
-                    Ok(()) => tracing::info!(%mirror, "git: mirror clone finished"),
+                    Ok(_) => tracing::info!(%mirror, "git: mirror clone finished"),
                     Err(e) => tracing::warn!(%mirror, error = %e,
                         "git: background mirror clone failed; the next fetch retries it"),
                 }
@@ -2561,6 +2606,35 @@ mod tests {
         };
         assert_eq!(fetch[2], cwd.to_string_lossy());
         assert_eq!(&fetch[3..], tail.as_slice());
+    }
+
+    /// The mirror's state when the slot is finally claimed: name, layout, whether the
+    /// clone reports `false` (nothing to do) without touching the (unreachable) remote.
+    #[rstest]
+    #[case::positive_ready_after_the_claim_is_not_recloned(Layout::Loose, true)]
+    #[case::corner_reftable_ready_after_the_claim(Layout::Reftable, true)]
+    #[case::negative_killed_clone_is_still_recloned(Layout::KilledClone, false)]
+    #[tokio::test]
+    async fn clone_rechecks_readiness_after_the_claim(
+        #[case] layout: Layout,
+        #[case] skipped: bool,
+    ) {
+        let work = agent_testkit::tempdir();
+        let mirror = work.join("mirror");
+        lay_out(&mirror, layout);
+        let b = CliBackend::new(
+            &mirror,
+            &mirror,
+            work.join("wt"),
+            work.join("no-such-remote").to_string_lossy().to_string(),
+        );
+        let slot = CloneSlot::claim(&mirror).expect("free slot");
+        let got = b.clone_mirror(slot, 30).await;
+        if skipped {
+            assert!(matches!(got, Ok(false)), "{got:?}");
+        } else {
+            assert!(got.is_err(), "a re-clone was attempted: {got:?}");
+        }
     }
 
     /// The clone claim is exclusive across processes too: a lock held on

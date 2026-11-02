@@ -221,6 +221,8 @@ pub fn change_unknown(facts: &ReviewFacts) -> Option<String> {
         .iter()
         .find(|c| c.collector == CHANGE_COLLECTOR)?;
     match run.status {
+        // `repo-change` has no `skipped` return today, so `Skipped` is unreachable. If a
+        // future change adds one, decide there whether the count must read as unknown.
         CollectStatus::Ok | CollectStatus::Skipped => None,
         CollectStatus::Partial | CollectStatus::Failed if run.reason.is_empty() => {
             Some(run.status.as_str().to_string())

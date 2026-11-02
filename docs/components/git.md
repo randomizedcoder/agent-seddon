@@ -127,6 +127,11 @@ whatever the mirror last saw. The name comes from the forge and is screened firs
 `.lock`, no `..`, at most 255 bytes. Without a mirror it does nothing, because in a
 working checkout `refs/heads/<name>` is the user's own branch.
 
+The refreshed branch reaches the diff only when the checkout root *is* the mirror,
+which is the fleet's shape (each review worktree is cut from the mirror). A split
+config, with a working checkout as root and a separate mirror, resolves the base in
+the checkout, so the diff sees whatever that checkout last fetched.
+
 `fetch_branch` is not on the wire yet: `GrpcRepo` (`[git] backend = "grpc"`) keeps the
 trait's default, which errs, so a review over the gRPC repo backend logs a warning and
 diffs against the base the remote server last fetched. The RPC is review-graph row 1c.

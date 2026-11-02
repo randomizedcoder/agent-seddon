@@ -728,3 +728,49 @@ async fn positive_inline_fetch_clones_the_mirror() {
     let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
     assert_eq!(main.len(), 40, "the mirror has main: {main}");
 }
+
+#[tokio::test]
+async fn positive_crash_mid_swap_recovers_the_staged_clone() {
+    // desc: a crash between the swap's two renames left the mirror path empty and a
+    // finished clone in `.partial`; the remote is gone since.
+    // expect: the finished clone is renamed into place, with no re-clone (which would
+    // fail, the remote being gone).
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap());
+    std::fs::rename(work.join("mirror"), work.join("mirror.partial")).unwrap();
+    std::fs::remove_dir_all(&source).unwrap();
+    assert!(b.ensure_mirror().await.unwrap(), "recovered");
+    assert!(!work.join("mirror.partial").exists());
+    let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(main.len(), 40, "the mirror has main: {main}");
+}
+
+#[tokio::test]
+async fn negative_unfinished_partial_is_recloned_not_recovered() {
+    // desc: `.partial` holds a clone whose refspecs were never set (killed between the
+    // clone and the config step), and the mirror path is empty.
+    // expect: it is not trusted; a fresh clone replaces it (a marker in it is gone).
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap());
+    let partial = work.join("mirror.partial");
+    std::fs::rename(work.join("mirror"), &partial).unwrap();
+    git(&partial, &["config", "--unset-all", "remote.origin.fetch"]);
+    std::fs::write(partial.join("marker"), "old").unwrap();
+    assert!(b.ensure_mirror().await.unwrap(), "re-cloned");
+    assert!(
+        !work.join("mirror").join("marker").exists(),
+        "a fresh clone"
+    );
+    let fetch = git_out(
+        &work.join("mirror"),
+        &["config", "--get-all", "remote.origin.fetch"],
+    );
+    assert_eq!(
+        fetch.lines().collect::<Vec<_>>(),
+        agent_git::MIRROR_REFSPECS
+    );
+}

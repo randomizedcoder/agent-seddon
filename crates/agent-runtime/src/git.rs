@@ -102,9 +102,18 @@ pub fn spawn_fetch(backend: Arc<dyn RepoBackend>, auto_fetch_secs: u64) {
         }
         match backend.fetch().await {
             Ok(st) => tracing::info!(worktrees = st.live_worktrees, "git mirror fetched"),
+            // A mirror still cloning in the background is expected, not a failure.
+            Err(e) if fetch_waits_on_clone(&e.to_string()) => {
+                tracing::info!(error = %e, "git auto-fetch waits for the mirror clone");
+            }
             Err(e) => tracing::warn!(error = %e, "git auto-fetch failed"),
         }
     });
+}
+
+/// True when a fetch error only says the mirror is still being cloned.
+fn fetch_waits_on_clone(err: &str) -> bool {
+    err.contains("is being cloned")
 }
 
 fn now_ms() -> u64 {
@@ -130,5 +139,19 @@ mod tests {
     #[case::adversarial_blank_root_is_unset(0, "   ", false)]
     fn mirror_clone_mode_cases(#[case] auto: u64, #[case] root: &str, #[case] background: bool) {
         assert_eq!(mirror_clones_in_background(auto, root), background);
+    }
+
+    /// Which auto-fetch errors log at info: name, error text, expected "waits on clone".
+    #[rstest]
+    #[case::positive_clone_in_progress(
+        "the mirror at /m is being cloned (a one-off, up to 7200s); retry later",
+        true
+    )]
+    #[case::negative_network_failure("git fetch: could not resolve host", false)]
+    #[case::corner_empty_error("", false)]
+    #[case::boundary_bare_phrase("is being cloned", true)]
+    #[case::adversarial_partial_phrase_is_a_failure("being clone", false)]
+    fn fetch_waits_on_clone_cases(#[case] err: &str, #[case] waits: bool) {
+        assert_eq!(fetch_waits_on_clone(err), waits);
     }
 }
