@@ -28,23 +28,30 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     repo again.
   - Result: the mirror grew to 61 GB of duplicate `.keep` packs plus orphaned `tmp_pack_*`
     files, about 2.5 GB every 5 minutes, until the 1.7 TB root was full.
-  - The fix makes the mirror heads only (`+refs/heads/*:refs/heads/*`, no `refs/pull/*`).
-    PR heads are already fetched one at a time by `fetch_pr`.
-    - **New mirrors** are made with `clone --bare` plus an explicit heads-only refspec,
-      not `clone --mirror`.
+  - The fix makes the mirror heads and tags only: `+refs/heads/*:refs/heads/*` and
+    `+refs/tags/*:refs/tags/*`, with no `refs/pull/*`. Tags are cheap and bounded, and
+    listing them in the refspec means `--prune` keeps them in step, so a deleted or moved
+    upstream tag doesn't linger. PR heads are already fetched one at a time by `fetch_pr`.
+    - **New mirrors** are made with `clone --bare` plus these two refspecs, not
+      `clone --mirror`.
     - **Existing mirrors** are migrated once, at the first refresh after the upgrade. The
       steps run in this order, because the `refs/pull/*` objects are *reachable* and a
       repack alone keeps them:
       1. `git config --unset remote.origin.mirror`. `mirror = true` implies `*:*` on
          fetch, so changing the refspec alone isn't enough.
-      2. `git config --replace-all remote.origin.fetch '+refs/heads/*:refs/heads/*'`.
+      2. `git config --replace-all remote.origin.fetch '+refs/heads/*:refs/heads/*'`,
+         then `git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'`.
       3. Delete every ref outside `refs/heads/*`, `refs/tags/*` and the fleet's own
          `refs/fleet/pr/*` with one batched `git update-ref --stdin`. `--prune` can't do
          this: it only prunes refs that match the configured refspec, so stale
          `refs/pull/*` refs would survive the refspec change.
       4. Remove `objects/pack/*.keep` and stale `tmp_pack_*` files, then run
          `git repack -a -d` and `git prune --expire=now`.
-      5. Record the migration in a marker file, so it runs once per mirror.
+      5. Record the migration in a marker file, so it runs once per mirror. Each step is
+         idempotent (`--replace-all`, deleting refs that are already gone, a repack), so
+         a run killed between steps simply runs again from step 1. The
+         `adversarial_migration_interrupted_is_idempotent` row kills a fixture
+         migration after step 2 and checks the rerun converges.
     - Every git subprocess runs in its own process group, and a timeout kills the whole
       group (`fetch` → `remote-https` → `index-pack`).
     - Each refresh sweeps `tmp_pack_*` files older than `PREP_TIMEOUT` first.
@@ -58,8 +65,14 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     base doesn't resolve and the diff comes out empty;
   - **(b)** a fetch that times out partway leaves no usable merge base.
 - Fix direction:
-  - Fetch exactly the target branch ref (`fetch origin <target>`), not `--all`, which is
-    cheap on a 3.6 GB mirror.
+  - Fetch exactly the target branch with a full refspec,
+    `git fetch origin +refs/heads/<target>:refs/heads/<target>`, not `--all`. A bare
+    `fetch origin <target>` only writes `FETCH_HEAD`, and updates the ref only when a
+    configured refspec happens to match, so on its own it would leave hypothesis (a)
+    unfixed: the fetch "succeeds" and the diff is still empty. `<target>` comes from the
+    forge, so it passes `safe_segment` first. A table row
+    (`positive_staging_target_base_written`) checks `refs/heads/staging` resolves after the
+    fetch.
   - Fail **loud** when the diff is empty while the forge reports changed files. Use the
     forge's file list as the fallback changed set, and say so in the brief.
 - **One slow repo must not stall the fleet.** Today all prep runs on one serial drain
@@ -197,6 +210,9 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
   - `corner_escaped_dollar`
   - `boundary_line_mapping`
   - `adversarial_nested_quotes`
+  - The ast-grep Nix-grammar rule is also a hermetic fixture inside `review-nix`. A
+    nixpkgs bump that drops the grammar fails the build instead of quietly emptying
+    the collector.
 - **Eval:**
   - `positive_by_name_attr_meta`
   - `negative_not_bwrap_skipped`

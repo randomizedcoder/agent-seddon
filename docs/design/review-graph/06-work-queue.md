@@ -74,7 +74,9 @@ lease_secs = 120              # a worker heartbeats every lease_secs / 3
 [review_fleet.queue.workers]  # per process
 fetch = 8
 ground = 4
-review = 16                   # defaults to [review_fleet] max_total when unset
+review = 16                   # unset: [review_fleet] max_total. Effective concurrency is
+                              # min(workers.review × max_parallel_steps, max_total): workers
+                              # never bypass SessionManager admission, they wait on it
 finish = 4
 index = 1
 [review_fleet.queue.fairness]
@@ -139,7 +141,11 @@ picked per deployment:
 `id`, `tenant`, `row_id`, `repo`, `pr`, `head_sha`, `stage`, `priority`, `state`
 (`ready|claimed|done|failed|superseded`), `attempts`, `claimed_by`, `lease_until_ms`,
 `affinity`, `pending_head_sha` (see *Coalescing*), `enqueued_at`, `updated_at`, `error`.
-Unique `(tenant, row_id, pr)` while live. Finished jobs are kept for a short window for the portal, then pruned.
+Unique `(tenant, row_id, pr)` while live, as a partial unique index
+`WHERE stage <> 'index' AND state IN ('ready','claimed')`. Index jobs have `pr = NULL`, and
+`NULL` never conflicts in a Postgres unique index. So they get their own partial unique index
+`(tenant, row_id) WHERE stage = 'index' AND state IN ('ready','claimed')`, with a
+`corner_two_index_triggers_one_job` test row. Finished jobs are kept for a short window for the portal, then pruned.
 Every field from a trigger is untrusted: ids pass `safe_segment`, numbers are clamped,
 `error` is length-capped.
 

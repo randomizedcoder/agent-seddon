@@ -36,14 +36,18 @@ empty or failed", so the drafter does not retry and stores `condensed = ""`.
    - its `inputs`, fenced as data ([01](01-review-graph.md#untrusted-data-between-nodes)).
 4. Joins reuse the join and timeout mechanics of `BranchingProvider`
    (`crates/agent-providers/src/branching.rs:448` onwards), extracted into a shared helper
-   rather than copied. The policy meaning differs, though, and is defined here:
-   - **`all`**: wait until every branch has *settled* (ok, failed or timed out), then
-     proceed with whatever succeeded. A failed lens never fails the join. The join fails
-     only when *no* branch succeeded, which is the "every lens fails" row below.
+   rather than copied. Pipeline joins have their own policy names, so a join copied from
+   an anchor document can't silently change meaning:
+   - **`all_settled`**: wait until every branch has *settled* (ok, failed or timed out),
+     then proceed with whatever succeeded. A failed lens never fails the join. The join
+     fails only when *no* branch succeeded, which is the "every lens fails" row below.
+     The validator rejects a bare `all` in a `kind: PIPELINE` document, where it would
+     be ambiguous.
    - **`any`**: proceed on the first success and cancel the rest.
    - **`quorum(k)`**: proceed once `k` branches succeeded; fail if fewer than `k` can.
 
-   `BranchingProvider`'s own `all`, where one failure fails the fork, is unchanged.
+   `BranchingProvider`'s own `all`, where one failure fails the fork, is unchanged and
+   stays the anchor-document spelling.
 
 ## How each node runs
 
@@ -59,7 +63,7 @@ review's session id, with a `node` label, so the history and the portal can show
 
 | Failure | Behaviour |
 |---|---|
-| A lens step errors or passes `deadline_secs` | The step is marked `failed` or `timed_out`. The join proceeds under `all` (fail-soft). `assemble` is told which lenses are missing, and the steps-taken list says so. |
+| A lens step errors or passes `deadline_secs` | The step is marked `failed` or `timed_out`. The join proceeds under `all_settled` (fail-soft). `assemble` is told which lenses are missing, and the steps-taken list says so. |
 | Every lens fails | Fall back to the single-session `run_review`. |
 | `assemble` fails | Fall back to the single-session `run_review`, so the draft is still written. |
 | `condense` fails or returns invalid output | The draft is written with no condensed text (`condensed = ""`), and the portal shows "no condensed version". Posting with `post = condensed` falls back to `full` and logs it. |
@@ -98,6 +102,8 @@ keys come from a validated document, so their cardinality is bounded.
   - `negative_cycle`, `negative_unreachable`, `negative_input_not_ancestor`
   - `boundary_five_lenses` / `boundary_six_lenses_rejected`
   - `corner_condense_absent`
+  - `negative_all_rejected_in_pipeline`: `policy: "all"` on a pipeline join is rejected
+    with a hint to use `all_settled`
   - `adversarial_fragment_traversal` (`../../etc/passwd`), `adversarial_huge_params`,
     `adversarial_anchor_type_in_pipeline`
 - **Runner:**
@@ -106,7 +112,7 @@ keys come from a validated document, so their cardinality is bounded.
   - `negative_invalid_document_falls_back`: a document that fails validation runs the
     single-session review, logs a warning and increments
     `agent_review_graph_fallback_total{reason="invalid_document"}`
-  - `corner_join_all_one_timeout_proceeds`: `all` with one timed-out lens still reaches
+  - `corner_join_all_settled_one_timeout_proceeds`: `all_settled` with one timed-out lens still reaches
     `assemble`
   - `boundary_deadline_no_budget_left_marks_failed`: the graph deadline with less than
     `min_fallback_secs` of budget left skips the fallback

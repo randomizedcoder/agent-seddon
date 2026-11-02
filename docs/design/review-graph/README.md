@@ -117,8 +117,11 @@ and clearing the field rolls back.
    `{full, bullets}`. Kept separate for now so condense can also run on the single-session
    path (increment 2) and on edited bodies.
 3. **Lens count above 5.** `MAX_SPLIT_BRANCHES = 5` (`crates/agent-core/src/lib.rs:2190`). A
-   nixpkgs lens would be a sixth step. Raise the cap for pipeline documents only, or fold
-   nixpkgs into `static`?
+   nixpkgs lens would be a sixth step. Options: raise the cap for pipeline documents only;
+   fold nixpkgs into `static`; or add a second `split` (say `lenses_nixpkgs`, 1–2
+   branches) feeding the same join. The validator already allows several splits between
+   the one source and one sink, so the third option needs neither cap changed. It is the
+   current lean.
 4. **Index size for nixpkgs.** Is path-scoped indexing (by-name, lib, nixos/modules) enough,
    or does the `objective` step need whole-tree search? Measure on l2.
 5. **Eval inside bwrap.** `nix-instantiate` needs the daemon socket. Does it work under

@@ -14,7 +14,7 @@ flowchart LR
   tests["tests + race/bench<br/>0005"]
   static["static analysis + shell<br/>0006"]
   security["security<br/>0007"]
-  join{{"join (all, fail-soft)"}}
+  join{{"join (all_settled, fail-soft)"}}
   assemble["assemble<br/>0003 + 0008<br/>heavy model"]
   condense["condense<br/>0009 · ≤9 bullets<br/>heavy model"]
   draft[("draft record<br/>body + condensed")]
@@ -52,8 +52,8 @@ flowchart LR
 | `assemble` | `fragments` (list), `provider`, `deadline_secs`, `inputs` | the full review markdown, capped at `MAX_DRAFT_BYTES` (`agent-review/src/lib.rs`) |
 | `condense` | `provider`, `max_bullets` (1–9), `max_line_chars` (40–200), `inputs` | `{bullets: [string]}` |
 
-The existing `split` and `join` types are reused with their policies (`all`/`any`/`quorum`,
-timeout). Each new type registers a schema row in `crates/agent-graph/src/schema.rs`, next to
+The existing `split` and `join` types are reused. A pipeline join takes `all_settled`/`any`/`quorum`
+plus a timeout; bare `all` stays the anchor spelling ([02](02-pipeline-executor.md#scheduling)). Each new type registers a schema row in `crates/agent-graph/src/schema.rs`, next to
 the nine existing types, so `GraphService.DescribeNodeTypes` and `Validate` (port 50082)
 cover it with no special case.
 
@@ -68,7 +68,10 @@ never mix. Validator rules for this kind (`crates/agent-graph/src/validate.rs`):
 - Every node is reachable from the source, and every `inputs` entry names an upstream node
   (an ancestor in the DAG).
 - A split has at most `MAX_SPLIT_BRANCHES` = 5 branches (`crates/agent-core/src/lib.rs:2190`),
-  and there are at most `MAX_ANCHOR_BRANCHES` = 8 lens steps in a document.
+  and there are at most `MAX_PIPELINE_LENS_STEPS` = 8 lens steps in a document (a new
+  constant next to `MAX_ANCHOR_BRANCHES`; same value, named for what it bounds). A
+  document may hold several `split` nodes, which is how a sixth lens fits
+  (README, open question 3).
 - Exactly one `assemble` and at most one `condense`.
 - Param caps follow the existing schema conventions: sizes are bounded and names are
   checked. A fragment path that escapes `prompts/` is rejected.
@@ -105,7 +108,7 @@ nodes { key: "objective" value { type: "review_step" type_version: 1
 # idiom (0004), tests (0005), static (0006), security (0007): same shape.
 nodes { key: "join"      value { type: "join"        type_version: 1
   params { object_value {
-    fields { key: "policy"       value { string_value: "all" } }
+    fields { key: "policy"       value { string_value: "all_settled" } }
     fields { key: "timeout_secs" value { number_value: 900 } } } } } }
 nodes { key: "assemble"  value { type: "assemble"    type_version: 1
   params { object_value {

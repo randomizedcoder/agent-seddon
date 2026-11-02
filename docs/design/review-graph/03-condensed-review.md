@@ -31,6 +31,8 @@ clamp:
 - Truncates each bullet at 200 characters on a UTF-8 boundary, with `…`.
 - Drops empty bullets.
 - Strips leading `-`/`*`/`#` so markdown can't nest.
+- Rewrites inline links and images (`[text](https://…)`, `![alt](https://…)`) to their text, since the
+  condensed text is posted to a forge. Code spans are kept.
 
 If nothing survives the clamp, condense counts as failed
 ([02](02-pipeline-executor.md#deadlines-failures-fallbacks)). The prompt is the new fragment
@@ -79,8 +81,14 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
     Absent means "leave it alone", and `""` means "clear it"; a plain proto3 `string` can't
     tell those apart. The existing `body = 2` stays a plain `string`, because changing
     its cardinality would trip `buf breaking`. So an edit that sends only
-    `condensed_body` must also resend the current `body`. The portal does this, since it
-    holds both texts.
+    `condensed_body` must also resend the current `body`. A stale resend could silently
+    revert another editor's save, so `UpdateReviewRequest` also gains
+    `expected_body_sha256 = 4`. That is the SHA-256 of the body the editor started from,
+    returned as `GetReviewReply.body_sha256 = 6`. The server compares it under the
+    draft's post lease and answers `status = "conflict"` on a mismatch, never
+    overwriting. Leaving it empty keeps today's last-writer-wins behaviour for older
+    clients. The portal always sends it. Rows: `adversarial_stale_body_resend_rejected`,
+    `positive_matching_sha_saves`, `corner_empty_sha_last_writer_wins`.
   - `GetReviewReply.condensed_stale = 5` and `UpdateReviewReply.condensed_stale = 2`
     (`bool`).
   - `ReviewDraftRecord.condensed_stale` (`#[serde(default)]`) plus a ClickHouse
@@ -148,6 +156,8 @@ The `condense()` clamp table, rstest with a description and an expected outcome 
 - `adversarial_markdown_heading_stripped`
 - `adversarial_huge_string` (1 MB → capped)
 - `adversarial_extra_fields_rejected`
+- `adversarial_markdown_link_stripped` (`"see [here](https://evil)"` → `"see here"`,
+  and the same for an image)
 
 There are also roster `post` cases (`adversarial_unknown_variant_rejected`), posting choice
 cases, and a ClickHouse row round-trip.
