@@ -3,8 +3,8 @@
 //! A forge (GitHub above all) asks callers to slow down in three ways, and this module
 //! honours each one for every call that goes through [`crate::http::ForgeHttp`]:
 //!
-//! * **A rate-limited answer** (429, or a 403 that carries `Retry-After` or a zero
-//!   `x-ratelimit-remaining`, or a 5xx with `Retry-After`): wait as long as the forge
+//! * **A rate-limited answer** (429, or a 403 that carries a readable `Retry-After` or a
+//!   zero `x-ratelimit-remaining`, or a 5xx with a readable `Retry-After`): wait as long as the forge
 //!   says — `Retry-After` in either form, else the quota's reset time, else a minute
 //!   (GitHub's guidance for a secondary limit with no hint). [`limited_wait`].
 //! * **A spent quota on a good answer** (`x-ratelimit-remaining: 0` on a 200): the
@@ -114,8 +114,8 @@ pub fn clamp_wait(wait: Duration) -> Duration {
 
 /// How long to hold off after a response with status `code`, or `None` when the forge
 /// did not ask us to slow down. A rate-limited answer is a 429, a 403 carrying a
-/// readable `Retry-After` or a spent quota, or a 5xx carrying a readable `Retry-After`. Its wait is
-/// `Retry-After` when readable, else the reset time of a spent quota, else
+/// readable `Retry-After` or a spent quota, or a 5xx carrying a readable `Retry-After`.
+/// Its wait is `Retry-After` when readable, else the reset time of a spent quota, else
 /// [`DEFAULT_LIMITED_WAIT`], always clamped by [`clamp_wait`]. A plain 403 (a
 /// permission refusal) and a 5xx without a hint are not rate limits.
 pub fn limited_wait(code: u16, sig: &Signals<'_>, now: SystemTime) -> Option<Duration> {
@@ -419,16 +419,26 @@ impl Pacer {
         size: usize,
     ) {
         let key = (quota.clone(), path.to_string());
-        let mut cache = self
-            .cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.remove(&key);
-        // An entry larger than the whole budget is refused outright: `make_room` would
-        // empty the cache and the insert would still overrun the bound.
-        if !usable_etag(etag) || size > MAX_CACHED_BYTES || size > cache.limits.bytes {
-            return;
+        let lock = || {
+            self.cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        // The stale entry goes even when the new answer isn't kept. An entry larger than
+        // the whole budget is refused outright: `make_room` would empty the cache and the
+        // insert would still overrun the bound.
+        {
+            let mut cache = lock();
+            cache.remove(&key);
+            if !usable_etag(etag) || size > MAX_CACHED_BYTES || size > cache.limits.bytes {
+                return;
+            }
         }
+        // Clone outside the lock every `ForgeHttp` shares, and only once the entry is
+        // known to be kept. A racing store of the same key is replaced below.
+        let body = Arc::new(body.clone());
+        let mut cache = lock();
+        cache.remove(&key);
         cache.make_room(quota, size);
         cache.clock += 1;
         let stamp = cache.clock;
@@ -437,8 +447,7 @@ impl Pacer {
             key,
             Cached {
                 etag: etag.to_string(),
-                // Cloned only once the entry is known to be kept.
-                body: Arc::new(body.clone()),
+                body,
                 size,
                 stamp,
             },
@@ -671,6 +680,13 @@ mod tests {
         "a 502 with no hint backs off",
         502,
         None,
+        None,
+        Answer::Retry(None)
+    )]
+    #[case::negative_503_junk_hint_backs_off(
+        "a 503 whose Retry-After doesn't parse backs off instead of gating the quota",
+        503,
+        Some("soon-ish"),
         None,
         Answer::Retry(None)
     )]
@@ -1116,6 +1132,16 @@ mod tests {
             Step::Store { who: "a", paths: 3, size: 30 },
             Step::Cached { who: "b", paths: 1, want: 1 },
             Step::Cached { who: "a", paths: 3, want: 2 },
+        ]
+    )]
+    #[case::adversarial_oversized_entry_refused_without_evicting(
+        "an entry larger than the whole byte budget is refused, and other quotas keep theirs",
+        Limits { per_quota: 50, entries: 50, bytes: 10 },
+        vec![
+            Step::Store { who: "b", paths: 1, size: 5 },
+            Step::Store { who: "a", paths: 1, size: 20 },
+            Step::Cached { who: "a", paths: 1, want: 0 },
+            Step::Cached { who: "b", paths: 1, want: 1 },
         ]
     )]
     #[case::boundary_byte_budget_exact_fit(

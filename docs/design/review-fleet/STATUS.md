@@ -148,7 +148,7 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   limit only when its `Retry-After` parses or the quota is spent. After merge (#679's
   last fleet draft): a 5xx is a limit only when its `Retry-After` parses, the same rule as
   a 403; a body is cloned into the cache only once it is known to be kept; an entry larger
-  than the whole byte budget is refused; the mint and OAuth paths state why they hold no
+  than the whole byte budget is refused (and the clone runs outside the shared cache lock); the mint and OAuth paths state why they hold no
   gate. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
   names it) so a webhook-first trigger gets the early `UpToDate` too; today it always
   fetches, which is only conservative.
