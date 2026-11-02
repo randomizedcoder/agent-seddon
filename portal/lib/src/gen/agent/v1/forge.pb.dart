@@ -140,6 +140,7 @@ class ForgePullRequest extends $pb.GeneratedMessage {
     $core.String? sourceBranch,
     $core.String? targetBranch,
     $core.bool? draft,
+    $core.String? headSha,
   }) {
     final result = create();
     if (number != null) result.number = number;
@@ -151,6 +152,7 @@ class ForgePullRequest extends $pb.GeneratedMessage {
     if (sourceBranch != null) result.sourceBranch = sourceBranch;
     if (targetBranch != null) result.targetBranch = targetBranch;
     if (draft != null) result.draft = draft;
+    if (headSha != null) result.headSha = headSha;
     return result;
   }
 
@@ -177,6 +179,7 @@ class ForgePullRequest extends $pb.GeneratedMessage {
     ..aOS(7, _omitFieldNames ? '' : 'sourceBranch')
     ..aOS(8, _omitFieldNames ? '' : 'targetBranch')
     ..aOB(9, _omitFieldNames ? '' : 'draft')
+    ..aOS(10, _omitFieldNames ? '' : 'headSha')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -280,6 +283,17 @@ class ForgePullRequest extends $pb.GeneratedMessage {
   $core.bool hasDraft() => $_has(8);
   @$pb.TagNumber(9)
   void clearDraft() => $_clearField(9);
+
+  /// The commit the head points at, as the forge reported it (full hex). Empty when the
+  /// forge gave none. A hint for skipping an already-reviewed head; never checked out.
+  @$pb.TagNumber(10)
+  $core.String get headSha => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set headSha($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasHeadSha() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearHeadSha() => $_clearField(10);
 }
 
 class ForgeComment extends $pb.GeneratedMessage {

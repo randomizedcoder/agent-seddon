@@ -256,6 +256,9 @@ tonic-health = "0.12"
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 hyper-util = "0.1"
+# RFC 9110 HTTP-date parsing for the date form of `Retry-After` (agent-retry). Already
+# in the tree via hyper; listed so the retry crate can read a date hint, not drop it.
+httpdate = "1"
 
 # OpenTelemetry — distributed tracing exported over OTLP/gRPC to the ClickStack
 # OTEL collector, layered onto `tracing` alongside the existing ClickHouse sink.

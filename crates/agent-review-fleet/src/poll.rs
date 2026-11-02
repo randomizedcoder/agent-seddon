@@ -17,11 +17,18 @@
 //!   fixed, bounded amount of downstream work.
 //!
 //! Dedup here is coarse — by PR number, via the queue's coalescing plus the
-//! orchestrator's per-`(session, pr)` in-flight guard. Precise head-oid re-review dedup
-//! (a PR whose head moved) is inc 6 (C14): `PullRequest` carries no head SHA, so the
-//! oid is only known post-checkout.
+//! orchestrator's per-`(session, pr)` in-flight guard. Each trigger also carries the head
+//! commit the PR list reported (`head_sha`), so the orchestrator answers `UpToDate` for a
+//! head that already has a draft **before** fetching anything: an unchanged PR costs the
+//! forge one list call per poll. A coalesced trigger keeps the first head it was queued
+//! with, so a head that moves while a trigger waits is picked up by the next poll.
+//!
+//! A row whose polls keep failing is backed off between ticks ([`PollBackoff`]).
 
 use agent_core::{FleetTrigger, Forge, Result, TriggerSink};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Hard cap on forge PR-list pages fetched in one poll tick. A forge response is
 /// attacker-controlled, so its `next_page` can never walk us past this many fetches.
@@ -79,6 +86,8 @@ pub async fn poll_session(
                 return Ok(report);
             }
             sink.enqueue(FleetTrigger {
+                // The listed head lets the orchestrator skip an unchanged PR unfetched.
+                head_sha: pr.head_sha.clone(),
                 session_id: session_id.to_string(),
                 pr_number: pr.number,
                 requested_by: Vec::new(),
@@ -95,6 +104,93 @@ pub async fn poll_session(
         }
     }
     Ok(report)
+}
+
+/// The first wait after a failed poll. Each further consecutive failure doubles it.
+pub const POLL_BACKOFF_BASE: Duration = Duration::from_secs(60);
+/// The longest wait between polls of a failing row.
+pub const POLL_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+/// Most failing poll jobs tracked at once (jobs are roster rows, so this is headroom).
+/// Past it, the job whose backoff ends soonest is forgotten.
+pub const MAX_BACKOFF_JOBS: usize = 4096;
+
+/// Backoff **between** forge polls. A job's regular cadence (`poll_secs`) keeps firing
+/// while the forge is failing or asking us to slow down, so each failure pushes that
+/// job's next poll out: `POLL_BACKOFF_BASE` doubling per consecutive failure, capped at
+/// `POLL_BACKOFF_MAX`, with equal jitter so many rows don't return in step. A clean poll
+/// clears it. The schedule is `agent_retry`'s, not a second implementation.
+///
+/// This is the across-ticks half; the forge client paces each request itself
+/// (`agent_forge` gates a quota on `Retry-After`/reset, and its failure lands here).
+#[derive(Default)]
+pub struct PollBackoff {
+    failing: Mutex<HashMap<String, Failing>>,
+}
+
+struct Failing {
+    failures: u32,
+    until: Instant,
+}
+
+impl PollBackoff {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn policy() -> agent_retry::RetryPolicy {
+        agent_retry::RetryPolicy::new(0)
+            .with_base_delay(POLL_BACKOFF_BASE)
+            .with_max_delay(POLL_BACKOFF_MAX)
+            .with_jitter(agent_retry::Jitter::Equal)
+    }
+
+    /// How much longer `job` must wait before it polls again, or `None` to poll now.
+    pub fn wait(&self, job: &str, now: Instant) -> Option<Duration> {
+        let failing = self
+            .failing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        failing
+            .get(job)
+            .and_then(|f| f.until.checked_duration_since(now))
+            .filter(|left| !left.is_zero())
+    }
+
+    /// Record a poll's outcome. A success clears the job; a failure pushes its next poll
+    /// out and returns the wait set. Jitter comes from `agent_retry::rand01`.
+    pub fn record(&self, job: &str, ok: bool, now: Instant) -> Option<Duration> {
+        self.record_with(job, ok, now, agent_retry::rand01())
+    }
+
+    /// [`Self::record`] with the jitter draw `rand01` ∈ `[0, 1)` supplied (tests).
+    pub fn record_with(&self, job: &str, ok: bool, now: Instant, rand01: f64) -> Option<Duration> {
+        let mut failing = self
+            .failing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ok {
+            failing.remove(job);
+            return None;
+        }
+        if !failing.contains_key(job) && failing.len() >= MAX_BACKOFF_JOBS {
+            if let Some(soonest) = failing
+                .iter()
+                .min_by_key(|(_, f)| f.until)
+                .map(|(k, _)| k.clone())
+            {
+                failing.remove(&soonest);
+            }
+        }
+        let entry = failing.entry(job.to_string()).or_insert(Failing {
+            failures: 0,
+            until: now,
+        });
+        // `delay(n)` is the wait after the (n+1)th consecutive failure.
+        let wait = Self::policy().delay(entry.failures, rand01);
+        entry.failures = entry.failures.saturating_add(1);
+        entry.until = now + wait;
+        Some(wait)
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +278,7 @@ mod tests {
             source_branch: String::new(),
             target_branch: String::new(),
             draft,
+            head_sha: String::new(),
         }
     }
 
@@ -354,5 +451,134 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// desc: each trigger carries the head its PR reported, so the orchestrator can
+    /// skip an unchanged PR without fetching. expect: the listed head, or empty when the
+    /// forge reported none.
+    #[rstest]
+    #[case::positive_head_is_handed_on("the listed head rides on the trigger", &"a".repeat(40))]
+    #[case::boundary_no_head_is_empty("no listed head leaves the hint empty", "")]
+    #[tokio::test]
+    async fn trigger_carries_the_listed_head(#[case] desc: &str, #[case] head: &str) {
+        let mut listed = pr(5, false);
+        listed.head_sha = head.to_string();
+        let forge = FakeForge::new(vec![page(vec![listed], None)], None);
+        let sink = RecordingSink::default();
+        poll_session(&forge, "acme", "sess", &sink, MAX_TRIGGERS_PER_TICK)
+            .await
+            .unwrap();
+        let got = sink.got.lock().unwrap();
+        assert_eq!(got[0].head_sha, head, "{desc}");
+    }
+
+    // ---- PollBackoff -----------------------------------------------------
+
+    fn mins(n: u64) -> Duration {
+        Duration::from_secs(n * 60)
+    }
+
+    /// The wait after each of `outcomes` (true = a clean poll), with the jitter draw
+    /// pinned at its top (`rand01` → 1, i.e. the full ceiling).
+    #[rstest]
+    #[case::positive_first_failure_waits_a_minute("one failure waits a minute", &[false], &[Some(mins(1))])]
+    #[case::positive_doubles_per_failure(
+        "consecutive failures double the wait",
+        &[false, false, false],
+        &[Some(mins(1)), Some(mins(2)), Some(mins(4))]
+    )]
+    #[case::positive_success_clears("a clean poll clears the backoff", &[false, false, true, false], &[Some(mins(1)), Some(mins(2)), None, Some(mins(1))])]
+    #[case::negative_success_sets_nothing("a clean poll sets no wait", &[true], &[None])]
+    #[case::boundary_capped_at_half_an_hour(
+        "the wait never passes half an hour",
+        &[false; 8],
+        &[Some(mins(1)), Some(mins(2)), Some(mins(4)), Some(mins(8)), Some(mins(16)), Some(mins(30)), Some(mins(30)), Some(mins(30))]
+    )]
+    fn poll_backoff_schedule_cases(
+        #[case] desc: &str,
+        #[case] outcomes: &[bool],
+        #[case] want: &[Option<Duration>],
+    ) {
+        let b = PollBackoff::new();
+        let t0 = Instant::now();
+        let got: Vec<_> = outcomes
+            .iter()
+            .map(|ok| {
+                b.record_with("job", *ok, t0, 0.999_999)
+                    .map(|d| Duration::from_secs((d.as_millis() as u64).div_ceil(1000)))
+            })
+            .collect();
+        assert_eq!(got, want, "{desc}");
+    }
+
+    /// Equal jitter keeps at least half the ceiling, so a failing row never comes back
+    /// sooner than half its wait.
+    #[rstest]
+    #[case::boundary_lowest_draw(
+        "the lowest draw waits half the ceiling",
+        0.0,
+        Duration::from_secs(30)
+    )]
+    #[case::corner_middle_draw("a middle draw waits three quarters", 0.5, Duration::from_secs(45))]
+    fn poll_backoff_jitter_floor(#[case] desc: &str, #[case] rand01: f64, #[case] want: Duration) {
+        let b = PollBackoff::new();
+        assert_eq!(
+            b.record_with("job", false, Instant::now(), rand01),
+            Some(want),
+            "{desc}"
+        );
+    }
+
+    /// A failing job is held until its wait has passed; other jobs are untouched.
+    #[test]
+    fn positive_wait_holds_then_releases_and_is_per_job() {
+        let b = PollBackoff::new();
+        let t0 = Instant::now();
+        let wait = b.record_with("acme/web", false, t0, 0.999_999).unwrap();
+        assert_eq!(
+            b.wait("acme/web", t0),
+            Some(wait),
+            "held right after the failure"
+        );
+        assert_eq!(b.wait("acme/api", t0), None, "another job is not held");
+        assert_eq!(
+            b.wait("acme/web", t0 + wait),
+            None,
+            "released once the wait has passed"
+        );
+    }
+
+    /// The map of failing jobs is bounded: past the cap the soonest-ending is forgotten.
+    #[test]
+    fn adversarial_failing_jobs_are_bounded() {
+        let b = PollBackoff::new();
+        let t0 = Instant::now();
+        for i in 0..MAX_BACKOFF_JOBS {
+            b.record_with(
+                &format!("j{i}"),
+                false,
+                t0 + Duration::from_millis(i as u64),
+                0.0,
+            );
+        }
+        b.record_with("newcomer", false, t0 + mins(1), 0.0);
+        assert_eq!(b.failing.lock().unwrap().len(), MAX_BACKOFF_JOBS);
+        assert!(
+            b.wait("newcomer", t0 + mins(1)).is_some(),
+            "the new job is tracked"
+        );
+        assert_eq!(b.wait("j0", t0), None, "the soonest-ending job made room");
+    }
+
+    /// Thousands of failures never overflow the counter or the wait.
+    #[test]
+    fn adversarial_endless_failures_stay_capped() {
+        let b = PollBackoff::new();
+        let t0 = Instant::now();
+        let mut last = None;
+        for _ in 0..10_000 {
+            last = b.record_with("job", false, t0, 0.999_999);
+        }
+        assert!(last.unwrap() <= POLL_BACKOFF_MAX);
     }
 }

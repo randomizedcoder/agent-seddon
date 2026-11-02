@@ -121,6 +121,21 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   with the cause, not `ok` with no findings; the race-bench check asserts the race was found and
   the bench ran, not just that each command was attempted; the runtime-PATH check's builder-only
   row uses a real binary and proves the builder sees it; `update_draft` locks skipped drafts.
+- **2026-11-01** — **Be a good citizen of the forge.** The forge client honours long
+  `Retry-After` and rate-limit reset hints (clamped to 15 min, not 20 s), holds a spent quota
+  per `(api base, credential hash)` instead of retrying into it, and sends `If-None-Match` on
+  GETs (a `304` is served from a bounded cache). A failing poll row backs off 60 s → 30 min.
+  The PR list's head SHA rides on the trigger, so an unchanged PR ends `UpToDate` before any
+  git fetch. This makes a 60 s `poll_secs` cheap.
+  Review round 1: the cache copies a body only on a `304` and evicts the least recently
+  used; a `304` reporting a spent quota holds it; docs name the poll as the re-driver of a
+  rate-limited webhook/Slack/`ReviewNow` review; tests for a cached page's shape and an
+  HTTP-date `Retry-After` end to end.
+  Review round 2: a trigger folded into a pending one with a different (or no) head drops
+  the listed-head hint, so a webhook for a new push is never answered `UpToDate` on a stale
+  poll head; the capacity shed runs before the history read; a second client sharing the
+  pacer is tested to honour a held quota; the hint-less 429 → 60 s give-up is documented
+  as deliberate (GitHub's secondary-limit advice).
 
 ## Decisions of record
 

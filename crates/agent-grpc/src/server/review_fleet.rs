@@ -267,6 +267,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
             // The caller's tenant (in scope here): the roster row was written under it, so
             // the fleet must resolve `session_id` there too (forge-auth F6).
             let outcome = triggers.enqueue(FleetTrigger {
+                head_sha: String::new(),
                 session_id: req.session_id,
                 pr_number: req.pr_number,
                 requested_by: requester.into_iter().collect(),

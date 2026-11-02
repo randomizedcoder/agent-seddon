@@ -46,6 +46,8 @@ ring = { workspace = true, optional = true }
 tokio.workspace = true
 rstest.workspace = true
 tiny_http.workspace = true
+# Format an HTTP-date Retry-After for the pacing table.
+httpdate.workspace = true
 # Reuse the embedded RSA test key + JWK (oidc module) to exercise the minter.
 agent-testkit = { workspace = true, features = ["oidc"] }
 

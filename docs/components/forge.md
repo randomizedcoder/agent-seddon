@@ -90,10 +90,39 @@ page number** and never follows the URL — a forge cannot redirect us off-platf
 
 ## Rate limits
 
-Handled by `agent-retry` (the canonical driver, honouring `Retry-After`). One
-platform quirk is encoded: a forge signals exhaustion with **403 plus
-`X-RateLimit-Remaining: 0`**, not only 429, so that combination is treated as
-retryable rather than as a permission failure.
+Every forge HTTP call goes through `agent-retry` and a process-wide **pacer**
+([`pace.rs`](../../crates/agent-forge/src/pace.rs)), so the fleet backs off when a forge
+asks it to:
+
+- **What counts as "slow down".** 429 always; **403** when it carries `Retry-After` or
+  `X-RateLimit-Remaining: 0` (GitHub's secondary and primary limits, not a permission
+  failure); a 5xx that carries `Retry-After`. The bare `RateLimit-*` names are read too.
+- **How long.** `Retry-After` (delta-seconds or an HTTP-date) wins; else the
+  `X-RateLimit-Reset` epoch time when the quota is spent; else 60 s (GitHub's advice for a
+  limit with no hint). The wait is clamped to **[1 s, 15 min]**, so a hostile or broken
+  header can neither spin us nor park us for a day.
+- **Short waits retry inline; long ones hold the quota.** A wait within the retry
+  policy's `max_delay` (20 s) is slept and retried. A longer one gives up this call and
+  **holds the quota** until the wait passes: every later call on that quota fails fast
+  with "holding off another Ns" and sends nothing. A 2xx that reports
+  `X-RateLimit-Remaining: 0` holds the quota until the reset too, so we stop before the
+  forge has to refuse us. A `304` that reports the quota spent holds it the same way.
+  A hint-less 429 waits the 60 s default, so it too gives up the call and holds the
+  quota rather than retrying sooner than GitHub asks; its caller sees the error.
+  A call that fails on a hold is not queued: the fleet's poll re-drives it (see
+  [review-fleet.md](review-fleet.md)).
+- **A quota is `(api base, credential)`.** The credential is a keyed hash
+  (per-process `RandomState`) of the token; the token itself is never kept. Two tenants
+  with different tokens never share a hold. The gate map holds at most 1024 quotas.
+- **Conditional GETs.** A GET whose earlier answer carried an `ETag` is re-sent with
+  `If-None-Match`; a `304` (which GitHub does not count against the quota) is answered from
+  the cached body, which is only copied out on a `304`. The cache is per quota and URL, at
+  most 32 entries of at most 2 MiB (least recently used evicted first), and
+  an ETag over 256 bytes or with non-printable bytes is not stored. A `304` with nothing
+  cached is an error, not an empty answer.
+
+The GitHub App token mint and the install-time OAuth calls use the same rules
+(`pace::answer`), so a rate-limited mint is not retried early either.
 
 ## Observability
 

@@ -209,6 +209,7 @@ dependencies = [
  "agent-retry",
  "agent-testkit",
  "async-trait",
+ "httpdate",
  "jsonwebtoken",
  "prost",
  "reqwest",
@@ -546,6 +547,7 @@ dependencies = [
 name = "agent-retry"
 version = "0.1.0"
 dependencies = [
+ "httpdate",
  "rstest",
  "tokio",
  "tracing",
@@ -575,6 +577,7 @@ dependencies = [
  "agent-config-store",
  "agent-core",
  "agent-metrics",
+ "agent-retry",
  "agent-testkit",
  "async-trait",
  "rstest",

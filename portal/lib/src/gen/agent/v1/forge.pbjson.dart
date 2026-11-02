@@ -100,6 +100,7 @@ const ForgePullRequest$json = {
     {'1': 'source_branch', '3': 7, '4': 1, '5': 9, '10': 'sourceBranch'},
     {'1': 'target_branch', '3': 8, '4': 1, '5': 9, '10': 'targetBranch'},
     {'1': 'draft', '3': 9, '4': 1, '5': 8, '10': 'draft'},
+    {'1': 'head_sha', '3': 10, '4': 1, '5': 9, '10': 'headSha'},
   ],
 };
 
@@ -109,7 +110,7 @@ final $typed_data.Uint8List forgePullRequestDescriptor = $convert.base64Decode(
     'gJUgV0aXRsZRISCgRib2R5GAMgASgJUgRib2R5EhQKBXN0YXRlGAQgASgJUgVzdGF0ZRIWCgZh'
     'dXRob3IYBSABKAlSBmF1dGhvchIQCgN1cmwYBiABKAlSA3VybBIjCg1zb3VyY2VfYnJhbmNoGA'
     'cgASgJUgxzb3VyY2VCcmFuY2gSIwoNdGFyZ2V0X2JyYW5jaBgIIAEoCVIMdGFyZ2V0QnJhbmNo'
-    'EhQKBWRyYWZ0GAkgASgIUgVkcmFmdA==');
+    'EhQKBWRyYWZ0GAkgASgIUgVkcmFmdBIZCghoZWFkX3NoYRgKIAEoCVIHaGVhZFNoYQ==');
 
 @$core.Deprecated('Use forgeCommentDescriptor instead')
 const ForgeComment$json = {

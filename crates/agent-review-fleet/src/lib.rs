@@ -35,7 +35,10 @@ pub use orchestrator::{
     TriggerReceiver,
 };
 pub mod poll;
-pub use poll::{poll_session, PollReport, MAX_POLL_PAGES, MAX_TRIGGERS_PER_TICK};
+pub use poll::{
+    poll_session, PollBackoff, PollReport, MAX_POLL_PAGES, MAX_TRIGGERS_PER_TICK,
+    POLL_BACKOFF_BASE, POLL_BACKOFF_MAX,
+};
 #[cfg(feature = "fleet-store")]
 pub mod store;
 pub mod webhook;

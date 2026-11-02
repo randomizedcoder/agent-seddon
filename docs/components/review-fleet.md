@@ -370,8 +370,34 @@ The **forge response is untrusted**: `next_page` is followed only when it strict
 and never past `MAX_POLL_PAGES` (10), and at most `MAX_TRIGGERS_PER_TICK` (64) triggers leave
 one tick, so a hostile paging chain or a PR flood is bounded. Dedup is coarse here (by PR
 number, via the queue's coalescing + the orchestrator's per-`(session, pr)` guard); precise
-head-oid re-review dedup lands in inc 6b (C16), resolving the head at fetch time rather than
-relying on `PullRequest` (which carries no head SHA).
+head-oid re-review dedup lands in inc 6b (C16), resolving the head at fetch time.
+
+The poll is built to be a **good citizen** of the forge (most of all GitHub):
+
+- **Listed-head dedup, before any git fetch.** `PullRequest.head_sha` carries the head the PR
+  list reported (only a full 40/64-hex object id; anything else, such as Bitbucket's short
+  hash, becomes empty). The trigger carries it, and the orchestrator reads the review history
+  first: when the newest live draft is already for that head, the trigger ends as
+  `Handled::UpToDate` with **no mirror fetch and no PR fetch**. The hint is untrusted and only
+  ever skips work; a stale or forged hint falls through to the precise check on the fetched
+  head. So a steady-state poll of an unchanged repo is one list call per row. A trigger folded
+  into a pending one that names a different head (a webhook names none) drops the hint, so
+  the popped trigger fetches: a push that lands while a poll trigger waits is reviewed now,
+  not on the next tick. A host at capacity sheds the trigger before the history read.
+- **Per-row backoff.** A row whose poll fails (forge error, rate limit, missing row) is skipped
+  on later ticks for an exponentially growing, jittered wait: 60 s, 120 s, … capped at 30 min
+  (`PollBackoff`, built on `agent-retry`). One success clears it. At most 4096 failing rows
+  are tracked.
+- **Forge-side pacing.** The forge client honours `Retry-After` / rate-limit reset hints, holds
+  a spent quota until it resets and sends conditional GETs. See
+  [forge.md § Rate limits](forge.md#rate-limits).
+- **Who re-drives a rate-limited review.** A forge wait longer than the retry policy's 20 s
+  `max_delay` is not slept on: the call fails and the quota is held. This applies to every
+  trigger source, so a webhook, Slack or `ReviewNow` review that hits a long limit fails
+  rather than sleeping through it. Nothing re-sends it immediately, and nothing should: the hold
+  is shared, so a sooner retry would only be refused. The poll is the re-driver. Every
+  enabled forge row is polled (webhooks never replace the poll), a PR with no draft for its head
+  is triggered again, and the first poll after the hold lifts picks it up.
 
 **Slack watch (C7, inc 4b)** is the second trigger source, in the new
 [`agent-slack`](../../crates/agent-slack) crate (shared with C18's outbound progress poster,

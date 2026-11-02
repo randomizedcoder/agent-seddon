@@ -181,6 +181,7 @@ mod tests {
                 source_branch: String::new(),
                 target_branch: String::new(),
                 draft: false,
+                head_sha: String::new(),
             })
         }
         async fn list_prs(&self, _page: u32) -> agent_core::Result<Page<PullRequest>> {
