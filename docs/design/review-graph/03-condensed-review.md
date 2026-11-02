@@ -165,20 +165,24 @@ to a default.
 For `post = both`:
 
 - **Escaping.** The full body is model output, and a `</details` in it would close the
-  collapse early. HTML5 ignores whitespace and a `/` before the `>` of an end tag, so
-  the match is case-insensitive `</details` followed by `[\s/]*>`, or by the end of input.
-  Only the leading `<` is replaced (with `&lt;`), so the tail (`details >`, `details/>`)
-  is kept as text. Every opening `<details` followed by `[\s/>]`, in any case, is
-  escaped the same way. HTML5 ignores the self-closing flag on a non-void element, so
-  `<details/>` opens a collapse too. A nested collapse could otherwise make the wrapper's own `</details>` close the
-  inner one. This includes occurrences inside code spans and blocks, where a review
-  quoting the tag will show `&lt;details`. That is accepted, as the safe direction.
-  Row: `adversarial_body_closes_details_early`, with the `</details >`, `</DETAILS>`,
-  `</details/>`, `</details />`, nested `<details>`, `<DETAILS>` and `<details/>`
-  variants. The same escape is applied to the joined condensed bullets, as defense in
-  depth on top of the clamp's tag removal, so neither half of the comment can open or
-  close the wrapper. Bare-URL wrapping skips fenced code blocks as well as code spans.
-  Row: `corner_url_in_code_block_not_wrapped`.
+  collapse early. One rule covers both tags. A case-insensitive `<details` or
+  `</details` is escaped when it is followed by whitespace, `/`, `>` or the end of input.
+  That is the HTML5 tag-name boundary, so the rule also catches:
+  - end tags with whitespace, a `/` or attributes (`</details >`, `</details/>`,
+    `</details foo="x">`), which HTML5 still parses as closing the element;
+  - self-closing openings (`<details/>`). HTML5 ignores the flag on a non-void element,
+    so these still open a collapse.
+
+  A different tag name such as `</detailsx>` doesn't match. Only the leading `<` is
+  replaced (with `&lt;`), so the rest of the tag is kept as text. Openings matter too: a
+  nested collapse would make the wrapper's own `</details>` close the inner one. The
+  escape also applies inside code spans and blocks, where a review quoting the tag shows
+  `&lt;details`. That is accepted, as the safe direction. Row:
+  `adversarial_body_closes_details_early`, with the `</details >`, `</DETAILS>`,
+  `</details/>`, `</details />`, `</details foo="x">`, `</details foo>`, nested `<details>`,
+  `<DETAILS>`, `<details/>` and (not escaped) `</detailsx>` variants. The same escape is
+  applied to the joined condensed bullets, as defense in depth on top of the clamp's tag
+  removal, so neither half of the comment can open or close the wrapper.
 - **Order.** Escape first, then truncate. The escape lengthens the text (`</details` →
   `&lt;/details`), so the budget is computed on the escaped body. The bullets, the
   `<details><summary>` line, the truncation marker line and the closing `</details>` all
@@ -220,7 +224,8 @@ The `condense()` clamp table, rstest with a description and an expected outcome 
 - `adversarial_link_text_is_url_wrapped_after_rewrite` (`[http://evil](https://x)` ends
   as a code span, never a live URL)
 - `corner_url_in_code_span_not_double_wrapped` (single- and double-backtick spans, since
-  CommonMark spans open with a backtick run of any length)
+  CommonMark spans open with a backtick run of any length), and
+  `corner_url_in_code_block_not_wrapped` (bare-URL wrapping skips fenced code blocks too)
 - `corner_unbalanced_backtick_url_still_wrapped` (an unmatched backtick opens no code span
   in CommonMark, so the URL after it is still wrapped)
 - `boundary_nine_kept` / `boundary_ten_truncated_to_nine`

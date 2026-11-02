@@ -79,69 +79,58 @@ Every `readonly` step holds a session slot (`max_total` / `has_capacity` in `Ses
 for as long as it runs. A PR therefore takes up to `max_parallel_steps` slots, against 1
 today. `SessionManager` has no reservation API today (only `admit_review` and the read-only
 `has_capacity_for`), so a check-then-admit would race: two PRs could each see 5 free of 8,
-and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
+and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one.
+
+**Mechanism.**
 
 - `SessionManager::reserve(n) -> Option<SlotLease>` atomically takes `n` slots in the same
   CAS as `admit_review`, the `PoolMember::try_reserve` pattern from the pool TOCTOU fix.
-- The runner takes `n = ` the split's branch count **at the split**, and each lens's
-  `admit_review` spends one slot from the lease. A document can have several splits, so
-  the leases are all drawn from one per-PR budget of `max_parallel_steps`. The sum held
-  across splits never exceeds it, and a second split whose reservation wouldn't fit waits
-  for the first join to settle. Row: `boundary_two_sequential_splits_share_one_budget`.
-- **Legal multi-split shapes.** Nested splits (a split inside another split's branch)
-  are rejected in pipeline documents too, which carries the anchor rule over
-  explicitly. Every other arrangement is legal: sequential splits (one split's join is
-  an ancestor of the next split), sibling splits (several splits feeding one join), and
-  independent split/join pairs that converge further down (on `assemble`, or on
-  different joins). The liveness rule below is what makes all of them safe. A split
-  that can't reserve is only ever waiting on a lease whose join *can* settle, so it is
-  serialized, never stalled.
-- **Liveness rule.** A set of branches that must all be live before one join can settle
-  has to fit the budget at once. Otherwise a reservation waits on a join that can only
-  settle after it, and the PR stalls until the graph deadline. Per-row validation
-  therefore computes, for every join, the number of **slot-holding** steps that feed it:
-  every branch of every split feeding it, **plus** every lone `tools = readonly` step
-  that is a direct predecessor of the join and sits under no split. It rejects the
-  document, with a hint, if any count exceeds the row's `max_parallel_steps`. This covers
-  the single-wide-split case too. "Feeding" means the join's direct predecessors and the
-  splits they hang from, not transitive ancestry through another join. A count that
-  spans an intermediate join is conservative: it can reject a document whose branches
-  are never live at once. That is safe, since a rejection only falls back to the
-  single-session review, and the hint names the join.
-- Lone readonly steps feeding a join are included in that join's lease, which is taken
-  when the first of its feeding steps becomes ready. So a finished split's slots can
-  never starve a sibling lens. Row: `negative_split_plus_lone_lens_over_budget_rejected`
-  (5 + 1 at budget 5).
-- **Where a readonly step may sit.** Every `tools = readonly` step must be either on a
-  split's branch (a branch may be a chain) or a direct predecessor of a join. A readonly
-  step anywhere else is rejected, with a hint to put the chain under a one-branch split.
-  An example is `ground → R → R2 → J`, where `R` is in no lease. This guarantees every
-  slot-holder is counted and leased, so no step ever waits for admission on a budget
-  held by a lease it is not part of. Rows: `negative_readonly_chain_into_join_rejected`,
-  `positive_one_branch_split_wraps_chain`.
-- **Cost of early leases.** A join's lease is taken when the first of its feeding steps
-  becomes ready, so for sibling splits, or a lone lens that becomes ready late, it can
-  hold `SessionManager` slots that aren't running yet. That never stalls the PR, because
-  the budget is per PR. It can briefly pin global slots that another PR could use. The
-  cost is bounded by one join's lease per PR, and accepted for the simpler,
-  deadlock-free rule. Independent split/join pairs that converge further down serialize
-  on the shared per-PR budget. Row: `positive_independent_splits_serialize_on_shared_budget`. Sibling splits
-  reserve together, as one lease, at the first of them. Like any validation error, a
-  rejection falls back to the single-session review. Rows:
-  `negative_split_wider_than_budget_rejected`, `negative_sibling_splits_sum_over_budget_rejected`
-  (5 + 2 into one join at budget 5), `positive_sibling_splits_within_budget_one_lease`
-  (3 + 2 at budget 5) and `boundary_two_sequential_splits_share_one_budget`.
-- The validation cache key is (row id, document version, `max_parallel_steps`), so
-  lowering the setting re-validates a document that passed before.
-- The lease is dropped (RAII) when the join **settles**, so `assemble` and `condense`
-  (`tools = none`, no session) don't pin idle slots.
-- When `reserve` fails, the PR waits in the `review` stage queue
-  ([06](06-work-queue.md)) rather than starting. It never starts and then stalls halfway.
-- Rows: `corner_two_prs_race_for_slots_one_waits`,
-  `positive_lease_released_at_join_before_assemble`,
-  `negative_reserve_fails_pr_waits_not_fallback`. `[review_fleet] max_concurrent`
-should be re-sized when a row opts in. The router's per-upstream capacity
-(`on_saturation`) still applies to each completion.
+- **One lease per split, taken when that split becomes ready**, with `n` equal to its branch
+  count, drawn from the PR's budget of `max_parallel_steps`. If it doesn't fit, the split
+  waits until enough slots come back.
+- **One slot per branch, returned when that branch settles.** A branch may be a chain of
+  readonly steps; the chain's steps run one after another on the branch's slot, checking
+  it out and back in, and the slot goes back to the PR budget (and to `SessionManager`)
+  as soon as the branch's last step settles, not when the join settles. So `assemble` and
+  `condense` (`tools = none`, no session) never hold a slot.
+- **Every `readonly` step is on a split's branch.** A lone readonly step anywhere else is
+  rejected, with a hint to wrap it in a one-branch split. This is document-only
+  validation (`validate.rs`).
+
+**Why this cannot deadlock.** A slot is only ever held by a running branch. A branch
+contains no split and no join (nested splits are rejected, and a branch ends at its join),
+so a running branch waits on nothing but its own model calls and tools. Each of those is
+bounded by `deadline_secs`. Every held slot is therefore returned in bounded time, and a
+waiting split always gets its slots eventually, whatever the graph's shape: sequential
+splits, sibling splits feeding one join, or independent split/join pairs converging
+further down. Waiting is serialization, never a stall. The only thing that could block for
+ever is a split wider than the whole budget. **Per-row validation** (run in
+`FleetReviewCtxFactory`, not in `validate.rs`, because it needs the row) rejects a document
+whose widest split exceeds the row's `max_parallel_steps`. The cache key is (row id,
+document version, `max_parallel_steps`), so lowering the setting re-validates.
+
+**Cost.** A split's lease is taken whole, so a split's slower branches keep their slots
+while faster ones have already returned theirs. Idle slots are bounded by one split's
+width. The upside is that no split ever starts with only some of its branches.
+
+**PR admission.** When the first split can't reserve because the global pool is full, the
+PR waits in the `review` stage queue ([06](06-work-queue.md)) rather than starting.
+
+**Rows.**
+
+- `negative_split_wider_than_budget_rejected`
+- `negative_lone_readonly_step_rejected` (`ground → R → R2 → join`)
+- `positive_one_branch_split_wraps_chain` (a two-step chain on one slot)
+- `positive_branch_slot_returned_at_branch_end_not_join`
+- `positive_sibling_splits_serialize` (5 + 2 into one join at budget 5: the second split
+  runs as the first one's branches finish)
+- `positive_independent_split_join_pairs_serialize` (the cross-join shape that deadlocked
+  under a join-scoped lease)
+- `corner_two_prs_race_for_slots_one_waits`
+- `negative_reserve_fails_pr_waits_not_fallback`
+
+`[review_fleet] max_concurrent` should be re-sized when a row opts in. The router's
+per-upstream capacity (`on_saturation`) still applies to each completion.
 
 ## Observability
 

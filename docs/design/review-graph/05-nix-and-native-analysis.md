@@ -38,7 +38,8 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
       shape. Detection checks the state that each step leaves behind, so a run killed
       after *any* step is seen again. The migration runs if any of these holds:
       - `remote.origin.mirror` is set (step 1 not done);
-      - the configured fetch refspec set is not exactly the two healthy refspecs (step 2
+      - the configured fetch refspec set is not exactly the two healthy refspecs, compared
+        as a set, so order doesn't matter (step 2
         not done). This covers `{}` (killed before the first `--add`), `{heads}` (killed
         between the two `--add`s, where tags would otherwise go stale for good),
         `{+refs/*:refs/*}`, any `refs/pull` refspec, and anything unexpected;
@@ -83,7 +84,8 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          steps converges on the next refresh. The
          `adversarial_migration_interrupted_is_idempotent` table kills a fixture
          migration after step 1, inside step 2 before the first `--add` (no refspec),
-         between the two `--add`s (heads only), after step 2, after step 3, and with
+         between the two `--add`s (heads only), with an unexpected extra refspec added by
+         hand, after step 2, after step 3, and with
          SIGKILL during the step-4 `repack` (aged leftovers, converging on a later
          refresh), and checks each rerun
          ends in the same refs and config as an uninterrupted run.
@@ -163,7 +165,9 @@ This is a new `snippet` mode in `shellcheck.rs`. The existing collector's ban on
 `# shellcheck disable` comments carries over.
 
 **C/C++ suite** (`has_c`: `.c`, `.cc`, `.cpp`, `.cxx`, `.C`, `.h`, `.hh`, `.hpp`, `.hxx`, changed in the
-PR; the match is case-sensitive, so `.C` is C++ and `.c` is C, as compilers treat them):
+PR). Matching is case-insensitive for every extension except the one ambiguous pair:
+`.C` is C++ and `.c` is C, as compilers treat them. So `.H`, `.CPP` and `.CXX` are
+matched too.:
 
 | Tool | Mode |
 |---|---|
@@ -225,18 +229,23 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
     being ignored, so the collector probes for support:
     - **Probe.** `nix-instantiate --option max-call-depth 1000 --eval -E 1`, run *outside*
       the sandbox at startup, so a sandbox fault can't masquerade as "unsupported".
-    - **Cache.** Keyed by the nix store path, kept in memory for the process's life.
+    - **Cache.** Keyed by the nix store path. Only definitive answers (supported,
+      unsupported) are cached for the process's life. A `probe_failed` is retried with
+      `agent-retry` backoff, so a startup blip (daemon socket, full disk) costs minutes of
+      nix findings, not the whole process lifetime.
     - **Classification.** Only exit 0 means supported. Only an error naming the unknown
       option means unsupported. The spike pins the exact message on the pinned nix, and
       a misread fails closed. Every `probe_failed` increments
       `agent_review_nix_eval_probe_failed_total`, so a nix upgrade that changes the
-      message shows up as a metric rather than as findings quietly stopping. Any other failure is `probe_failed`, which disables the
-      collector (it reports `skipped: probe failed`) rather than weakening the bound.
+      message shows up as a metric rather than as findings quietly stopping. Any other
+      failure is `probe_failed`. Until a retry succeeds, the collector reports `skipped:
+      probe failed` rather than weakening the bound.
     - **Without support.** The flag is omitted, `ulimit -v` and the deadline are the
       bound, and `agent_review_nix_eval_option_omitted_total{option}` plus a warning log
       make that visible.
     - **Rows.** `corner_max_call_depth_unsupported_omitted_not_failed`,
-      `negative_probe_other_failure_skips_collector`.
+      `negative_probe_other_failure_skips_collector`,
+      `positive_probe_failed_then_retry_succeeds`.
 - **Attr selection.** Changed paths are mapped to attrs:
   - `pkgs/by-name/xx/<name>/` → `<name>`;
   - a `pkgs/top-level/all-packages.nix` hunk → its attr names.

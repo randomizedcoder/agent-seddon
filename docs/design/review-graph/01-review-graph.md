@@ -60,7 +60,10 @@ cover it with no special case.
 ## The pipeline document kind
 
 A document declares `kind: PIPELINE`. Anchor documents stay the default, and the two kinds
-never mix. Validator rules for this kind (`crates/agent-graph/src/validate.rs`):
+never mix. The rules below are **document-only** and live in
+`crates/agent-graph/src/validate.rs`. The one **row-bound** rule (the widest split must fit
+the row's `max_parallel_steps`) needs the roster row, so it runs in
+`FleetReviewCtxFactory` ([02](02-pipeline-executor.md#capacity)).
 
 - The `MAIN` edges form a DAG with exactly one source (`ground`) and one sink: `condense`,
   or `assemble` when the document has no `condense`.
@@ -73,13 +76,11 @@ never mix. Validator rules for this kind (`crates/agent-graph/src/validate.rs`):
   document may hold several `split` nodes, which is how a sixth lens fits
   (README, open question 3).
 - Exactly one `assemble` and at most one `condense`.
-- Per row, the slot-holding steps feeding any one join (split branches plus lone
-  `readonly` steps) must fit the row's `max_parallel_steps`.
-- A `tools = readonly` step must be on a split's branch or a direct predecessor of a join
-  ([02](02-pipeline-executor.md#capacity)). Anywhere else it would hold a slot outside
-  every lease.
-  This is the liveness rule in [02](02-pipeline-executor.md#capacity), and it is checked
-  when the document is bound to a row, not in the document alone.
+- Every `tools = readonly` step is on a split's branch (a branch may be a chain of them).
+  A lone readonly step is rejected. This is what keeps the slot leases deadlock-free
+  ([02](02-pipeline-executor.md#capacity)).
+- Nested splits (a split inside another split's branch) are rejected. Any other
+  arrangement of splits is legal.
 - Param caps follow the existing schema conventions: sizes are bounded and names are
   checked. A fragment path that escapes `prompts/` is rejected.
 - Pipeline-only types inside an anchor document are rejected, and anchor types inside a
