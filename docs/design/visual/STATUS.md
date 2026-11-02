@@ -239,6 +239,14 @@ Playwright review).
   UTF-8 bytes, not characters. Layer B refuses to start on a stored theme, since Delete
   appearing is its proof of a save.
 
+### TN3270 green toned down (2026-11-02)
+
+- The TN3270 green was `#33FF33` (HSV 120°, 80 %, 100 %), which read as fluorescent on a
+  modern panel. It is now `#4CD94C` (120°, 65 %, 85 %): the same hue, still a phosphor
+  green, about 12:1 on black. Everything that used it changes with it: text, primary,
+  outline, success and the Launch/Settings rail tints. Turquoise, yellow and the
+  other 3279 colours are unchanged.
+
 ## Open questions
 
 - Font bundle size: the new families add about 2.3 MB of TTF (Inter's variable font alone

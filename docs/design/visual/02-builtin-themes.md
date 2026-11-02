@@ -58,20 +58,20 @@ description: "IBM 3270 green screen. Black, green, turquoise, white, red. Monosp
 author: "agent-seddon"
 dark {
   background: "#000000"   surface: "#0A0A0A"       surface_variant: "#000000"
-  on_surface: "#33FF33"   on_surface_variant: "#40E0D0"
-  primary: "#33FF33"      on_primary: "#000000"
+  on_surface: "#4CD94C"   on_surface_variant: "#40E0D0"
+  primary: "#4CD94C"      on_primary: "#000000"
   secondary: "#40E0D0"    on_secondary: "#000000"
-  outline: "#33FF33"      focus: "#FFFF00"
+  outline: "#4CD94C"      focus: "#FFFF00"
   error: "#FF5555"        on_error: "#000000"
   semantic {
-    success: "#33FF33" warning: "#FFFF00" info: "#7890F0" muted: "#7890F0"
+    success: "#4CD94C" warning: "#FFFF00" info: "#7890F0" muted: "#7890F0"
     code_background: "#000000" code_foreground: "#FFFFFF"
     # The rail icons in the seven colours of a 3279 colour display.
-    nav_tint { key: "launch" value: "#33FF33" }    nav_tint { key: "prompts" value: "#40E0D0" }
+    nav_tint { key: "launch" value: "#4CD94C" }    nav_tint { key: "prompts" value: "#40E0D0" }
     nav_tint { key: "graph" value: "#FF55FF" }     nav_tint { key: "agent" value: "#FFFF00" }
     nav_tint { key: "router" value: "#7890F0" }    nav_tint { key: "fleet" value: "#FF5555" }
     nav_tint { key: "forges" value: "#FFFFFF" }    nav_tint { key: "access" value: "#40E0D0" }
-    nav_tint { key: "settings" value: "#33FF33" }
+    nav_tint { key: "settings" value: "#4CD94C" }
   }
 }
 typography { body_family: "IBM3270" heading_family: "IBM3270" mono_family: "IBM3270" scale: 1.05 }

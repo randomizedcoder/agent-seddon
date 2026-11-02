@@ -10,10 +10,10 @@
     "onError": "#000000",
     "onPrimary": "#000000",
     "onSecondary": "#000000",
-    "onSurface": "#33FF33",
+    "onSurface": "#4CD94C",
     "onSurfaceVariant": "#40E0D0",
-    "outline": "#33FF33",
-    "primary": "#33FF33",
+    "outline": "#4CD94C",
+    "primary": "#4CD94C",
     "secondary": "#40E0D0",
     "semantic": {
       "codeBackground": "#000000",
@@ -26,12 +26,12 @@
         "fleet": "#FF5555",
         "forges": "#FFFFFF",
         "graph": "#FF55FF",
-        "launch": "#33FF33",
+        "launch": "#4CD94C",
         "prompts": "#40E0D0",
         "router": "#7890F0",
-        "settings": "#33FF33"
+        "settings": "#4CD94C"
       },
-      "success": "#33FF33",
+      "success": "#4CD94C",
       "warning": "#FFFF00"
     },
     "surface": "#0A0A0A",

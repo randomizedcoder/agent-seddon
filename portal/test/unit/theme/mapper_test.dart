@@ -52,7 +52,7 @@ void main() {
     ThemeCase('positive_tn3270', 'the green screen',
         (builtinTheme('tn3270'), Brightness.dark), (d) {
       expect(d.scaffoldBackgroundColor, const Color(0xFF000000));
-      expect(d.colorScheme.onSurface, const Color(0xFF33FF33));
+      expect(d.colorScheme.onSurface, const Color(0xFF4CD94C));
       expect(d.textTheme.bodyMedium!.fontFamily, 'IBM3270');
       expect(d.textTheme.titleLarge!.fontFamily, 'IBM3270');
       expect(radiusOf(d), 0);
