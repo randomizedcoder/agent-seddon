@@ -691,6 +691,37 @@ fn record_fleet_approval(metrics: &Metrics, user: &str, repo: &str, outcome: &st
     }
 }
 
+/// Turn a failed forge post into an error the approver can act on. The forge
+/// layer reports only `forge api returned http <code>` (never the body, which can
+/// echo the request), so the code is read back from that text. A refusal the
+/// operator must fix (credential, visibility, a PR the forge won't review) becomes
+/// a `forge refused …` error, which the gRPC bridge maps to FAILED_PRECONDITION.
+/// Anything else (a timeout, a 5xx) is returned unchanged.
+#[cfg(all(feature = "review", feature = "fleet"))]
+fn post_failure(e: agent_core::Error, pr: u64) -> agent_core::Error {
+    let code = match &e {
+        agent_core::Error::Repo(m) => m
+            .strip_prefix("forge api returned http ")
+            .and_then(|rest| rest.get(..3))
+            .and_then(|c| c.parse::<u16>().ok()),
+        _ => None,
+    };
+    let why = match code {
+        Some(401 | 403) => {
+            "its credential can't write PR reviews. For a GitHub App, set \
+             Pull requests to Read and write in the App's permissions, then accept \
+             the new permissions on the installation"
+        }
+        Some(404) => "the PR or repo isn't visible to its credential",
+        Some(422) => "it rejected the review (the PR may be closed or locked)",
+        _ => return e,
+    };
+    let code = code.unwrap_or_default();
+    agent_core::Error::Fleet(format!(
+        "forge refused to post the review of PR #{pr} (http {code}): {why}"
+    ))
+}
+
 #[cfg(all(feature = "review", feature = "fleet"))]
 fn plan_approve(
     record: Option<agent_core::ReviewDraftRecord>,
@@ -910,6 +941,16 @@ impl agent_core::FleetApprover for EngineApprover {
             {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::warn!(review_id, pr = record.pr_number, error = %e,
+                        "approve: posting the review to the forge failed");
+                    sp.record("outcome", "post_failed");
+                    record_fleet_approval(
+                        &self.agent.metrics(),
+                        &row.user,
+                        &row.repo,
+                        "post_failed",
+                    );
+                    let e = post_failure(e, record.pr_number);
                     if let Err(re) = self.post_lease.release(review_id).await {
                         tracing::warn!(review_id, error = %re,
                             "approve: releasing the post lease after a failed post failed (soft)");
@@ -8229,6 +8270,39 @@ mod tests {
                     assert_eq!(plan.row.id, "web", "resolves the repo's row → its forge");
                 }
                 other => panic!("expected Post, got {other:?}"),
+            }
+        }
+
+        /// A failed post becomes an actionable error for a refusal the operator must
+        /// fix, and passes through unchanged otherwise.
+        #[rstest]
+        #[case::positive_read_only_app("forge api returned http 403", Some("Pull requests"))]
+        #[case::positive_bad_token("forge api returned http 401", Some("Read and write"))]
+        #[case::positive_not_visible("forge api returned http 404", Some("isn't visible"))]
+        #[case::positive_closed_pr("forge api returned http 422", Some("closed or locked"))]
+        #[case::negative_server_error_unchanged("forge api returned http 502", None)]
+        #[case::negative_rate_limited_unchanged(
+            "forge api returned http 429: rate limited for 60s",
+            None
+        )]
+        #[case::corner_timeout_unchanged("forge request failed: timed out", None)]
+        #[case::adversarial_code_not_at_the_start("x forge api returned http 403", None)]
+        #[case::adversarial_non_numeric_code("forge api returned http 4o3", None)]
+        #[case::boundary_short_code("forge api returned http 40", None)]
+        fn post_failure_cases(#[case] msg: &str, #[case] hint: Option<&str>) {
+            let out = post_failure(agent_core::Error::Repo(msg.into()), 283);
+            match hint {
+                Some(h) => {
+                    let agent_core::Error::Fleet(m) = &out else {
+                        panic!("expected Fleet, got {out:?}");
+                    };
+                    assert!(m.starts_with("forge refused"), "{m}");
+                    assert!(m.contains("PR #283") && m.contains(h), "{m}");
+                }
+                None => assert!(
+                    matches!(&out, agent_core::Error::Repo(m) if m == msg),
+                    "unchanged: {out:?}"
+                ),
             }
         }
 

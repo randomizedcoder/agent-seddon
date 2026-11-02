@@ -843,11 +843,37 @@ void main() {
           await robot.selectReview('r1');
           await robot.openApprove();
           expect(robot.exists('fleet.approve.confirm'), isTrue);
+          // The wording never says "approve": this posts a comment, not a PR approval.
+          expect(robot.textShown('Post review to PR #7?'), isTrue);
+          expect(robot.textShown('does not approve the PR'), isTrue);
+          expect(robot.textShown('Approve'), isFalse);
           await robot.confirmApprove();
           await robot.pumpUntil(() => robot.textShown('Posted'),
               reason: 'posted snack');
           final call = robot.log.last(approveRpc);
           expect((call!.request as ApproveRequest).reviewId, 'r1');
+          await robot.settle();
+
+        case 'negative_post_refused_shows_reason':
+          fake.listReviewsResponse = reviews([summary(id: 'r1', pr: 283)]);
+          fake.getReviewResponse = body('# Body');
+          fake.failNext(
+              'Approve',
+              const GrpcError.failedPrecondition(
+                  'fleet: forge refused to post the review of PR #283 '
+                  '(http 403): its credential can\'t write PR reviews'));
+          await robot.load();
+          await robot.selectReview('r1');
+          await robot.openApprove();
+          await robot.confirmApprove();
+          await robot.pumpUntil(
+              () => robot.textShown('Post failed: fleet: forge refused'),
+              reason: 'refusal snack');
+          expect(robot.textShown("can't write PR reviews"), isTrue);
+          // It stays up to be read, and can be dismissed.
+          await robot.tester.pump(const Duration(seconds: 10));
+          expect(robot.textShown('Post failed'), isTrue);
+          expect(robot.textShown('Dismiss'), isTrue);
           await robot.settle();
 
         case 'positive_confirm_fires_approve':

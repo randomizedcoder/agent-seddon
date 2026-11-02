@@ -889,7 +889,7 @@ class _Sample extends StatelessWidget {
             const TextField(decoration: InputDecoration(labelText: 'Repo', hintText: 'owner/name')),
             const SizedBox(height: 12),
             Wrap(spacing: 8, runSpacing: 8, children: [
-              FilledButton(onPressed: () {}, child: const Text('Approve & post')),
+              FilledButton(onPressed: () {}, child: const Text('Post review')),
               OutlinedButton(onPressed: () {}, child: const Text('Skip')),
               TextButton(onPressed: () {}, child: const Text('Cancel')),
             ]),

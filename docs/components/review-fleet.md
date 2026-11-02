@@ -313,6 +313,17 @@ ordinary reply; only a genuine fault (forge post failed, the draft's repo has no
 unreadable `.md`) is a transport `Err`. `review_id` is untrusted wire input treated as an opaque
 lookup key, never a path.
 
+A failed post is logged (`approve: posting the review to the forge failed`, with the review id
+and PR) and counted (`agent_fleet_approvals_total{outcome="post_failed"}`). A refusal the operator
+must fix comes back as `FAILED_PRECONDITION` with a message that says what to do. The cases are
+401/403 (the credential can't write reviews: for a GitHub App, set **Pull requests** to *Read and
+write* and accept the new permissions on the installation), 404 (the PR isn't visible to it) and
+422 (the forge rejected the review). Other faults keep their status.
+
+The portal labels this action **Post review**, not "Approve": it posts a comment-only review
+(`event = COMMENT`) and never approves the PR or requests changes. The RPC and the
+`(approve, review)` permission keep their names.
+
 **Skip** (`ReviewFleetService.SkipReview(review_id)`, the same `(approve, review)` permission) is
 the other answer to a draft: it is never posted. Skip takes the same post lease as `Approve` and
 commits it, so an `Approve` racing it stands down even before the new row lands; a draft already

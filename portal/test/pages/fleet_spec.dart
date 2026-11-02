@@ -691,7 +691,14 @@ const fleetSpec = PageSpec('fleet', [
     elementId: 'fleet.detail.approve',
     caseClass: CaseClass.positive,
     name: 'approve_posts',
-    description: 'Approve → confirm fires Approve {reviewId}; posted snack',
+    description: 'Post review → confirm fires Approve {reviewId}; posted snack',
+    expectedRpc: 'agent.v1.ReviewFleetService/Approve',
+  ),
+  SpecRow(
+    elementId: 'fleet.approve.confirm',
+    caseClass: CaseClass.negative,
+    name: 'post_refused_shows_reason',
+    description: 'a forge refusal (FAILED_PRECONDITION) snacks the server reason',
     expectedRpc: 'agent.v1.ReviewFleetService/Approve',
   ),
   SpecRow(
