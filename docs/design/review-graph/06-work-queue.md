@@ -63,6 +63,7 @@ the next stage's job. Stages:
 | `review` | the review graph's LLM steps ([02](02-pipeline-executor.md)) | model capacity | `[review_fleet] max_total` (as today); the config below overrides it |
 | `finish` | assemble, condense, render, record the draft | model capacity (short) | 4 |
 | `index` | onboarding index / refresh ([04](04-repo-knowledge.md)) | CPU, disk | 1, low priority |
+| `maintenance` | one-off mirror migration and repack ([05](05-nix-and-native-analysis.md)) | disk I/O | 1, low priority, own deadline |
 
 Config:
 
@@ -74,11 +75,13 @@ lease_secs = 120              # a worker heartbeats every lease_secs / 3
 [review_fleet.queue.workers]  # per process
 fetch = 8
 ground = 4
-review = 16                   # unset: [review_fleet] max_total. Effective concurrency is
-                              # min(workers.review × max_parallel_steps, max_total): workers
-                              # never bypass SessionManager admission, they wait on it
+review = 16                   # an example override; unset = [review_fleet] max_total.
+                              # Effective concurrency is
+                              # min(workers.review × max_parallel_steps, max_total):
+                              # workers never bypass SessionManager admission
 finish = 4
 index = 1
+maintenance = 1               # one-off mirror migrations (05); hours-long, kept off `index`
 [review_fleet.queue.fairness]
 per_repo = 2                  # most jobs of one repo in flight per stage
 per_tenant = 8

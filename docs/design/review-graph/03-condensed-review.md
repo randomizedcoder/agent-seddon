@@ -7,8 +7,8 @@ nixpkgs reviewer wants a few lines, not a 30 KB report.
 
 | Rule | Value |
 |---|---|
-| Bullets | 1–9 (fewer than 10) |
-| Each bullet | One line: no `\n` or `\r`, at most 200 characters, trimmed, non-empty |
+| Bullets | 1–9 (fewer than 10; the default `max_bullets` is 9) |
+| Each bullet | One line: no `\n` or `\r`, at most `max_line_chars` characters (default 200), trimmed, non-empty |
 | Order | Must-fix first; then the key positives; then minor items in one bullet at most |
 | No must-fix | The first bullet says so ("No blocking issues found.") |
 | Content | Concrete and cited (`file:line` where it helps); no headings, no code blocks, no NixOS mention |
@@ -23,19 +23,35 @@ nixpkgs reviewer wants a few lines, not a 30 KB report.
     "items": { "type": "string", "minLength": 1, "maxLength": 200 } } } }
 ```
 
-The model is untrusted, so the output is **validated and then clamped**, never trusted. The
-clamp:
+The values shown are the defaults. `maxItems` and `maxLength` are generated from
+`CondenseParams` (below), never hard-coded.
 
-- Keeps the first 9 bullets.
+The model is untrusted, so the output is **validated and then clamped**, never trusted.
+Validation and clamping split the work:
+
+- **Validation** (`complete_structured`) enforces only the *structure*: an object with a
+  `bullets` array of strings and no extra fields. A structural failure means condense
+  failed.
+- The `maxItems` / `maxLength` sent in the schema tell the model the limits, but they are
+  **not** enforced as validation errors. Too many or too-long bullets are cut by the clamp,
+  which is why `boundary_ten_truncated_to_nine` truncates rather than fails.
+
+The clamp:
+
+- Keeps the first `max_bullets` bullets (default 9).
 - Replaces control characters and newlines with spaces and collapses whitespace.
-- Truncates each bullet at 200 characters on a UTF-8 boundary, with `…`.
+- Truncates each bullet at `max_line_chars` characters (default 200) on a UTF-8 boundary,
+  with `…`.
 - Drops empty bullets.
 - Strips leading `-`/`*`/`#` so markdown can't nest.
-- Rewrites links to plain text, since the condensed text is posted to a forge:
+- Rewrites links to plain text, since the condensed text is posted to a forge. The order
+  matters: inline links are rewritten first, then bare URLs are wrapped, because rewriting
+  `[http://evil](https://x)` produces a new bare URL.
   - inline links and images (`[text](https://…)`, `![alt](https://…)`) become their
     text;
   - GFM autolinks (`<https://…>`) and bare `http(s)://` URLs are wrapped in a code span,
-    so they render inert;
+    so they render inert. A URL already inside a code span is skipped, so it is never
+    wrapped twice;
   - reference-style link definitions (`[x]: https://…`) are dropped;
   - raw HTML tags (`<img …>`, `<details>`, any `<tag …>`) are removed, keeping their
     text content. Some forges allow `<img>`, and others sanitise less than GitHub does.
@@ -51,10 +67,14 @@ If nothing survives the clamp, condense counts as failed
 prefers the heavy tier, so condense uses the strong model and not the local one used for
 digest summaries. In the graph, the `condense` node's `provider` param overrides this.
 
-**One function, two callers.** `agent_review::condense(provider, full_markdown) ->
-Result<Vec<String>>` is called by:
+**One function, two callers.** `agent_review::condense(provider, full_markdown, params:
+CondenseParams) -> Result<Vec<String>>`. `CondenseParams { max_bullets, max_line_chars }`
+defaults to 9 and 200, and is clamped to 1–9 and 40–200. The JSON schema's `maxItems` and
+`maxLength`, and the clamp below, are generated from those params, so a graph's
+`max_bullets: 5` is honoured rather than ignored. The function is called by:
 
-- `EngineDrafter::draft` on the single-session path (increment 2), after `render_draft`
+- `EngineDrafter::draft` on the single-session path (increment 2), with
+  `CondenseParams::default()`, after `render_draft`
   (`crates/agent-runtime/src/agent.rs:569`) and before `record_draft` (`:600`);
 - the graph's `condense` node (increment 4).
 
@@ -65,8 +85,15 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
 
 - **Record.** `ReviewDraftRecord` (`crates/agent-core/src/lib.rs:6284`) gains
   `#[serde(default)] pub condensed: String`. It holds the bullets joined as `- …\n` lines,
-  capped at 4 KiB. Status rows (supersede, skip, post) clone the record, so the field carries
-  over unchanged.
+  capped at 4 KiB. The cap is in bytes and the bullet limit is in characters, so 9 CJK
+  bullets can exceed it. When that happens, the join keeps whole bullets only (never
+  cutting mid-bullet), dropping from the end, which is the least important (must-fix
+  comes first), and appends a `- …` marker line. Row:
+  `boundary_multibyte_bullets_over_4kib_keep_whole_bullets`. One bullet always survives:
+  with `max_line_chars` at most 200, a bullet is at most 200 × 4 bytes plus its marker,
+  about 800 bytes, well under 4 KiB. So the cap can never empty `condensed` and flip
+  posting to the `full` fallback. Status rows (supersede,
+  skip, post) clone the record, so the field carries over unchanged.
 - **ClickHouse.** In `nix/clickhouse/schema.sql`, next to the `requested_by`/`approved_by`
   precedent at `:224-225`:
 
@@ -133,7 +160,44 @@ to a default.
 |---|---|
 | `full` | The full body (today's behaviour) |
 | `condensed` | The condensed bullets. If they are empty, it falls back to `full` and logs `post_fallback=condensed_empty` |
-| `both` | If the condensed bullets are empty, it posts the full body alone and logs `post_fallback=condensed_empty`, as for `condensed`. Otherwise it posts the condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
+| `both` | The condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>` (details below). With no condensed bullets, the full body alone, logging `post_fallback=condensed_empty` |
+
+For `post = both`:
+
+- **Escaping.** The full body is model output, and a `</details` in it would close the
+  collapse early. One rule covers both tags. A case-insensitive `<details` or
+  `</details` is escaped when it is followed by whitespace, `/`, `>` or the end of input.
+  That is the HTML5 tag-name boundary, so the rule also catches:
+  - end tags with whitespace, a `/` or attributes (`</details >`, `</details/>`,
+    `</details foo="x">`), which HTML5 still parses as closing the element;
+  - self-closing openings (`<details/>`). HTML5 ignores the flag on a non-void element,
+    so these still open a collapse.
+
+  A different tag name such as `</detailsx>` doesn't match. Only the leading `<` is
+  replaced (with `&lt;`), so the rest of the tag is kept as text. Openings matter too: a
+  nested collapse would make the wrapper's own `</details>` close the inner one. The
+  escape also applies inside code spans and blocks, where a review quoting the tag shows
+  `&lt;details`. That asymmetry with bare-URL wrapping (which skips code) is deliberate.
+  CommonMark suppresses HTML in code, but forges that sanitize less than GitHub may not
+  honour that, and an escape that also fires inside code is the safe direction. Row:
+  `adversarial_body_closes_details_early`, with the `</details >`, `</DETAILS>`,
+  `</details/>`, `</details />`, `</details foo="x">`, `</details foo>`, nested `<details>`,
+  `<DETAILS>`, `<details/>` and (not escaped) `</detailsx>` variants. The same escape is
+  applied to the joined condensed bullets, as defense in depth on top of the clamp's tag
+  removal, so neither half of the comment can open or close the wrapper.
+- **Comments.** An unclosed `<!--` in the body would swallow the wrapper's closing
+  `</details>`. Every `<!--` is escaped to `&lt;!--` on this path as well. Row:
+  `adversarial_body_unclosed_html_comment`.
+- **Order.** Escape first, then truncate. The escape lengthens the text (`</details` →
+  `&lt;/details`), so the budget is computed on the escaped body. The bullets, the
+  `<details><summary>` line, the truncation marker line and the closing `</details>` all
+  count against the budget.
+- **Size.** GitHub's comment limit is 65,536 characters, and the body is already capped
+  at `MAX_DRAFT_BYTES` (64,000), so the combined comment can overflow. The full body inside
+  `<details>` is truncated on a UTF-8 boundary, at a line break where possible, with a
+  "… truncated, see the draft" line, so the bullets and the closing tag always fit. The
+  limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row:
+  `boundary_both_at_comment_limit`.
 
 Nothing is posted without a human Approve. That rule is unchanged.
 
@@ -158,6 +222,17 @@ Nothing is posted without a human Approve. That rule is unchanged.
 The `condense()` clamp table, rstest with a description and an expected outcome per row:
 
 - `positive_five_bullets`
+- `positive_graph_max_bullets_five_honoured` (`CondenseParams { max_bullets: 5, .. }`
+  keeps 5)
+- `boundary_max_bullets_zero_clamped_to_one`, `boundary_max_bullets_ten_clamped_to_nine`,
+  `boundary_max_line_chars_30_clamped_to_40`, `boundary_max_line_chars_250_clamped_to_200`
+- `adversarial_link_text_is_url_wrapped_after_rewrite` (`[http://evil](https://x)` ends
+  as a code span, never a live URL)
+- `corner_url_in_code_span_not_double_wrapped` (single- and double-backtick spans, since
+  CommonMark spans open with a backtick run of any length), and
+  `corner_url_in_code_block_not_wrapped` (bare-URL wrapping skips fenced code blocks too)
+- `corner_unbalanced_backtick_url_still_wrapped` (an unmatched backtick opens no code span
+  in CommonMark, so the URL after it is still wrapped)
 - `boundary_nine_kept` / `boundary_ten_truncated_to_nine`
 - `boundary_200_chars` / `boundary_201_truncated`
 - `corner_multibyte_truncation`
