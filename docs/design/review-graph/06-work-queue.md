@@ -101,7 +101,10 @@ A row can override `per_repo` (nixpkgs might get 4 fetches but 2 reviews).
   nullable `pending_head_sha` column on it. When a trigger arrives:
   - **No live job:** insert a `fetch` job for the new head.
   - **Live job queued (`ready`):** replace its `head_sha` in place and reset it to
-    `stage = fetch`. Same head: no-op.
+    `stage = fetch`. Same head: no-op. Resetting from a later stage (say a job queued at
+    `review` after `ground` finished) deliberately discards the grounded work, because a
+    new head invalidates it. Every stage output (worktree, brief, lens outputs) is keyed
+    by `head_sha`, so nothing from the old head can leak into the new one.
   - **Live job in flight (`claimed`):** set `pending_head_sha = <new head>`, last writer
     wins. The worker isn't interrupted.
 

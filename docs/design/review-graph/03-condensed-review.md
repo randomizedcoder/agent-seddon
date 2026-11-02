@@ -36,7 +36,9 @@ clamp:
     text;
   - GFM autolinks (`<https://…>`) and bare `http(s)://` URLs are wrapped in a code span,
     so they render inert;
-  - reference-style link definitions (`[x]: https://…`) are dropped.
+  - reference-style link definitions (`[x]: https://…`) are dropped;
+  - raw HTML tags (`<img …>`, `<details>`, any `<tag …>`) are removed, keeping their
+    text content. Some forges allow `<img>`, and others sanitise less than GitHub does.
 
   Code spans are kept.
 
@@ -93,7 +95,10 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
     returned as `GetReviewReply.body_sha256 = 6`. The server compares it under the
     draft's post lease and answers `status = "conflict"` on a mismatch, never
     overwriting. Leaving it empty keeps today's last-writer-wins behaviour for older
-    clients. The portal always sends it. Rows: `adversarial_stale_body_resend_rejected`,
+    clients. The portal always sends it. Two editors saving *different condensed texts* over
+    the same unchanged body still last-writer-win on `condensed_body`. That is deliberate:
+    the condensed text is derived and cheap to redo, and guarding it too would need a
+    second sha for little value. Rows: `adversarial_stale_body_resend_rejected`,
     `positive_matching_sha_saves`, `corner_empty_sha_last_writer_wins`.
   - `GetReviewReply.condensed_stale = 5` and `UpdateReviewReply.condensed_stale = 2`
     (`bool`).
@@ -128,7 +133,7 @@ to a default.
 |---|---|
 | `full` | The full body (today's behaviour) |
 | `condensed` | The condensed bullets. If they are empty, it falls back to `full` and logs `post_fallback=condensed_empty` |
-| `both` | The condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
+| `both` | If the condensed bullets are empty, it posts the full body alone and logs `post_fallback=condensed_empty`, as for `condensed`. Otherwise it posts the condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
 
 Nothing is posted without a human Approve. That rule is unchanged.
 
@@ -164,8 +169,9 @@ The `condense()` clamp table, rstest with a description and an expected outcome 
 - `adversarial_extra_fields_rejected`
 - `adversarial_markdown_link_stripped` (`"see [here](https://evil)"` → `"see here"`,
   and the same for an image)
-- `adversarial_autolink_stripped`, `adversarial_bare_url`,
+- `adversarial_html_tag_in_bullet` (`<img src=x onerror=…>` removed), `adversarial_autolink_stripped`, `adversarial_bare_url`,
   `adversarial_reference_definition_dropped`
 
 There are also roster `post` cases (`adversarial_unknown_variant_rejected`), posting choice
-cases, and a ClickHouse row round-trip.
+cases (including `corner_both_with_empty_condensed_posts_full`), and a ClickHouse row
+round-trip.

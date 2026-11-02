@@ -34,24 +34,41 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     upstream tag doesn't linger. PR heads are already fetched one at a time by `fetch_pr`.
     - **New mirrors** are made with `clone --bare` plus these two refspecs, not
       `clone --mirror`.
-    - **Existing mirrors** are migrated once, at the first refresh after the upgrade. The
-      steps run in this order, because the `refs/pull/*` objects are *reachable* and a
+    - **Existing mirrors** are migrated at a refresh that finds the mirror still in the old
+      shape: `remote.origin.mirror` is set, or a fetch refspec matches `refs/pull` or
+      `refs/*`. The trigger is that detected state, never a missing marker file, so a
+      mirror made by the new `clone --bare` path (which never has a marker) is never
+      migrated. The steps run in this order, because the `refs/pull/*` objects are *reachable* and a
       repack alone keeps them:
       1. `git config --unset remote.origin.mirror`. `mirror = true` implies `*:*` on
-         fetch, so changing the refspec alone isn't enough.
+         fetch, so changing the refspec alone isn't enough. The key may already be gone
+         after an interrupted run, and `--unset` then exits 5, so exit 5 counts as
+         success.
       2. `git config --replace-all remote.origin.fetch '+refs/heads/*:refs/heads/*'`,
          then `git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'`.
       3. Delete every ref outside `refs/heads/*`, `refs/tags/*` and the fleet's own
-         `refs/fleet/pr/*` with one batched `git update-ref --stdin`. `--prune` can't do
+         `refs/fleet/pr/*` (those are pruned by the retention sweep below) with one
+         batched `git update-ref --stdin`. `--prune` can't do
          this: it only prunes refs that match the configured refspec, so stale
          `refs/pull/*` refs would survive the refspec change.
       4. Remove `objects/pack/*.keep` and stale `tmp_pack_*` files, then run
          `git repack -a -d` and `git prune --expire=now`.
-      5. Record the migration in a marker file, so it runs once per mirror. Each step is
-         idempotent (`--replace-all`, deleting refs that are already gone, a repack), so
-         a run killed between steps simply runs again from step 1. The
-         `adversarial_migration_interrupted_is_idempotent` row kills a fixture
-         migration after step 2 and checks the rerun converges.
+      5. Write a marker file. It is only a record for the operator, not the trigger.
+         Every step is idempotent (absent-key `--unset`, `--replace-all`, deleting refs
+         that are already gone, a repack), so a run killed between any two steps
+         converges on the next refresh. The
+         `adversarial_migration_interrupted_is_idempotent` table kills a fixture
+         migration after step 1, after step 2 and after step 3, and checks each rerun
+         ends in the same refs and config as an uninterrupted run.
+    - **`refs/fleet/pr/*` retention.** `fetch_pr` writes one ref per reviewed PR, and those
+      refs keep their objects alive, which would be the same unbounded growth only slower.
+      The refresh sweep deletes `refs/fleet/pr/<n>` once:
+      - the PR is closed or merged (the poller already sees this), or
+      - the ref is older than `pr_ref_max_age_days` (default 14) with no review in flight.
+
+      Pruning (`git gc --auto --prune=…`) then drops the objects. In-flight reviews are
+      protected by the same refcount as `knowledge/` generations. Row:
+      `corner_closed_pr_ref_swept_in_flight_kept`.
     - Every git subprocess runs in its own process group, and a timeout kills the whole
       group (`fetch` → `remote-https` → `index-pack`).
     - Each refresh sweeps `tmp_pack_*` files older than `PREP_TIMEOUT` first.
@@ -105,8 +122,10 @@ the shellcheck collector only sees `.sh`/`.bash` files (`crates/agent-review/src
    2026-11-02: a rule with `language: nix`, `kind: binding` and `has: {field: attrpath,
    regex: Phase$}` matched a `buildPhase = ''…${foo}…''` binding, with JSON output.
 2. Each `${…}` antiquotation becomes a placeholder variable with a per-snippet random
-   prefix, e.g. `"$__nix_k3f9_1"`, so shellcheck sees valid shell, and a real variable in
-   the snippet can't collide with a placeholder and be silenced. Nix's `''$` escape becomes `$`.
+   prefix of 12 base-36 characters, e.g. `"$__nix_k3f9q2m8x1ab_1"`, so shellcheck sees
+   valid shell, and a real variable in the snippet can't collide with a placeholder and be
+   silenced. The prefix comes from a `PlaceholderPrefix` seam: random in production, and
+   fixed in tests so the collision row is deterministic. Nix's `''$` escape becomes `$`.
 3. Run `shellcheck -s bash -f json` on each snippet with a line-offset map.
 4. Map each finding back to the `.nix` file and line. Drop codes that the placeholder
    substitution caused, a fixed list: SC2154 on that snippet's placeholders only, plus
