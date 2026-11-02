@@ -23,6 +23,7 @@ void main() {
   const getRpc = 'agent.v1.ReviewFleetService/GetReview';
   const approveRpc = 'agent.v1.ReviewFleetService/Approve';
   const skipRpc = 'agent.v1.ReviewFleetService/SkipReview';
+  const skipManyRpc = 'agent.v1.ReviewFleetService/SkipReviews';
   const updateRpc = 'agent.v1.ReviewFleetService/UpdateReview';
   const reviewNowRpc = 'agent.v1.ReviewFleetService/ReviewNow';
   const setEnabledRpc = 'agent.v1.ReviewFleetService/SetEnabled';
@@ -73,6 +74,9 @@ void main() {
   ListReviewsReply reviews(List<ReviewSummary> rs) =>
       ListReviewsReply(reviews: rs);
   FleetSessionList roster(List<FleetSession> ss) => FleetSessionList(sessions: ss);
+  SkipReviewsReply skipped(List<String> ids) => SkipReviewsReply(results: [
+        for (final id in ids) SkipResult(reviewId: id, status: 'skipped'),
+      ]);
   GetReviewReply body(String b, {bool truncated = false}) =>
       GetReviewReply(body: b, truncated: truncated);
 
@@ -114,7 +118,8 @@ void main() {
           await robot.load();
           expect(robot.isListLoaded, isTrue);
           expect(robot.reviewItemCount, 0);
-          expect(robot.textShown('No review drafts match.'), isTrue);
+          expect(robot.textShown('Inbox empty: no drafts await a decision.'),
+              isTrue);
           await robot.settle();
 
         case 'corner_loading_shows_spinner':
@@ -208,30 +213,407 @@ void main() {
           expect((call!.request as ListReviewsRequest).status, 'approved');
           await robot.settle();
 
-        case 'boundary_default_hides_skipped':
+        case 'boundary_default_is_inbox':
           fake.listReviewsResponse = reviews([summary()]);
           await robot.load();
           final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
           expect(req.status, '');
-          expect(req.excludeStatus, ['skipped']);
+          expect(req.excludeStatus, ['posted', 'superseded', 'skipped']);
           await robot.settle();
 
-        case 'positive_show_skipped':
+        case 'positive_history_show_skipped':
           fake.listReviewsResponse = reviews([summary()]);
           await robot.load();
+          await robot.selectView('History');
           await robot.selectStatus('skipped');
           final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
           expect(req.status, 'skipped');
-          expect(req.excludeStatus, isEmpty);
+          expect(req.excludeStatus, ['drafted', 'approved']);
           await robot.settle();
 
-        case 'corner_all_includes_skipped':
+        case 'corner_history_all_finished':
           fake.listReviewsResponse = reviews([summary()]);
           await robot.load();
-          await robot.selectStatus('all');
+          await robot.selectView('History');
+          await robot.selectStatus('posted');
+          await robot.selectStatus('all finished');
           final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
           expect(req.status, '');
-          expect(req.excludeStatus, isEmpty);
+          expect(req.excludeStatus, ['drafted', 'approved']);
+          await robot.settle();
+
+        case 'corner_inbox_menu_offers_open_only':
+          fake.listReviewsResponse = reviews([summary()]);
+          await robot.load();
+          await robot.tap('fleet.filter.status');
+          await tester.pumpAndSettle();
+          bool offered(String t) =>
+              find.text(t, skipOffstage: false).hitTestable().evaluate().isNotEmpty;
+          expect(offered('approved'), isTrue);
+          for (final t in ['posted', 'skipped', 'superseded', 'all finished']) {
+            expect(offered(t), isFalse, reason: '$t is not an Inbox status');
+          }
+          await tester.tap(find.text('approved', skipOffstage: false).hitTestable());
+          await robot.settle();
+
+        // ── Inbox | History ───────────────────────────────────────────────────
+        case 'positive_history_lists_finished':
+          fake.listReviewsResponse = reviews([summary()]);
+          await robot.load();
+          await robot.selectView('History');
+          final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.status, '');
+          expect(req.excludeStatus, ['drafted', 'approved']);
+          await robot.settle();
+
+        case 'positive_history_is_read_only':
+          fake.listReviewsResponse =
+              reviews([summary(id: 'r1', status: 'superseded')]);
+          fake.getReviewResponse = body('# Old body');
+          await robot.load();
+          await robot.selectView('History');
+          await robot.selectReview('r1');
+          expect(robot.detailLoaded, isTrue);
+          expect(robot.exists('fleet.detail.approve'), isFalse);
+          expect(robot.exists('fleet.detail.skip'), isFalse);
+          expect(robot.segmentEnabled('Edit'), isFalse);
+          expect(robot.textShown('read-only (superseded)'), isTrue);
+          expect(robot.exists('fleet.skipAll'), isFalse);
+          await robot.settle();
+
+        case 'boundary_view_switch_resets_status':
+          fake.listReviewsResponse = reviews([summary()]);
+          await robot.load();
+          await robot.selectStatus('approved');
+          await robot.selectView('History');
+          final req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.status, '');
+          expect(robot.textShown('all finished'), isTrue);
+          await robot.settle();
+
+        case 'corner_repo_filter_shared_across_views':
+          fake.listReviewsResponse =
+              reviews([summary(repo: 'acme__widgets')]);
+          await robot.load();
+          await robot.selectRepo('acme/widgets');
+          await robot.selectView('History');
+          var req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.repo, 'acme__widgets');
+          await robot.selectView('Inbox');
+          req = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(req.repo, 'acme__widgets');
+          expect(req.excludeStatus, ['posted', 'superseded', 'skipped']);
+          await robot.settle();
+
+        // ── skip all shown ────────────────────────────────────────────────────
+        case 'positive_skip_all_sends_shown_ids':
+          fake.listReviewsResponse = reviews(
+              [summary(id: 'r1'), summary(id: 'r2'), summary(id: 'r3')]);
+          fake.skipReviewsResponse = skipped(['r1', 'r2', 'r3']);
+          await robot.load();
+          expect(robot.textShown('Skip all 3 shown'), isTrue);
+          final lists = robot.log.countOf(listRpc);
+          await robot.openSkipAll();
+          expect(robot.textShown('Skip all 3 shown drafts?'), isTrue);
+          await robot.confirmSkipAll();
+          final req = robot.log.last(skipManyRpc)!.request as SkipReviewsRequest;
+          expect(req.reviewIds, ['r1', 'r2', 'r3']);
+          await robot.pumpUntil(() => robot.textShown('3 skipped'),
+              reason: 'summary snack');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) > lists,
+              reason: 're-list after skip all');
+          await robot.settle();
+
+        case 'positive_confirm_fires_skip_reviews':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = skipped(['r1']);
+          await robot.load();
+          await robot.openSkipAll();
+          expect(robot.log.fired(skipManyRpc), isFalse);
+          await robot.confirmSkipAll();
+          expect(robot.log.countOf(skipManyRpc), 1);
+          await robot.settle();
+
+        case 'positive_skip_all_cancel_no_rpc':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          await robot.load();
+          await robot.openSkipAll();
+          await robot.cancelSkipAll();
+          expect(robot.exists('fleet.skipAll.confirm'), isFalse);
+          expect(robot.log.fired(skipManyRpc), isFalse);
+          await robot.settle();
+
+        case 'corner_skip_all_partial_outcomes_summary':
+          fake.listReviewsResponse = reviews(
+              [summary(id: 'r1'), summary(id: 'r2'), summary(id: 'r3')]);
+          fake.skipReviewsResponse = SkipReviewsReply(results: [
+            SkipResult(reviewId: 'r1', status: 'skipped'),
+            SkipResult(reviewId: 'r2', status: 'already_posted'),
+            SkipResult(reviewId: 'r3', status: 'skipped'),
+          ]);
+          await robot.load();
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          await robot.pumpUntil(
+              () => robot.textShown('2 skipped, 1 already posted'),
+              reason: 'mixed summary snack');
+          await robot.settle();
+
+        case 'corner_skip_all_hidden_when_empty':
+          fake.listReviewsResponse = reviews([]);
+          await robot.load();
+          expect(robot.exists('fleet.skipAll'), isFalse);
+          await robot.settle();
+
+        case 'boundary_skip_all_hidden_in_history':
+          fake.listReviewsResponse = reviews([summary(status: 'posted')]);
+          await robot.load();
+          expect(robot.exists('fleet.skipAll'), isTrue);
+          await robot.selectView('History');
+          expect(robot.reviewItemCount, 1);
+          expect(robot.exists('fleet.skipAll'), isFalse);
+          await robot.settle();
+
+        case 'negative_skip_all_without_approve_role_hidden':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          await robot.loadWith(
+              Capabilities.of(const ['read:review', 'read:fleet']));
+          expect(robot.reviewItemCount, 1);
+          expect(robot.exists('fleet.skipAll'), isFalse);
+          await robot.settle();
+
+        case 'negative_skip_all_error_snack':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.failNext(
+              'SkipReviews', const GrpcError.permissionDenied('no approve'));
+          await robot.load();
+          final lists = robot.log.countOf(listRpc);
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          await robot.pumpUntil(() => robot.textShown('Skip all failed'),
+              reason: 'error snack');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) > lists,
+              reason: 're-list after a failure');
+          await robot.settle();
+
+        case 'adversarial_skip_all_only_shown_ids':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = skipped(['r1']);
+          await robot.load();
+          // A new draft lands on the server after the list was drawn.
+          fake.listReviewsResponse =
+              reviews([summary(id: 'r1'), summary(id: 'r9-new')]);
+          await robot.openSkipAll();
+          expect(robot.textShown('Skip all 1 shown drafts?'), isTrue);
+          await robot.confirmSkipAll();
+          final req = robot.log.last(skipManyRpc)!.request as SkipReviewsRequest;
+          expect(req.reviewIds, ['r1']);
+          await robot.settle();
+
+        case 'adversarial_double_click_one_skip_all':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = skipped(['r1']);
+          await robot.load();
+          fake.responseDelay = const Duration(milliseconds: 200);
+          await robot.openSkipAll();
+          await robot.doubleConfirmSkipAll();
+          expect(robot.log.countOf(skipManyRpc), 1);
+          fake.responseDelay = Duration.zero;
+          await robot.unmountAndSettle();
+
+        case 'adversarial_skip_all_disabled_while_in_flight':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = skipped(['r1']);
+          await robot.load();
+          fake.responseDelay = const Duration(milliseconds: 300);
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          expect(robot.buttonEnabled('fleet.skipAll'), isFalse,
+              reason: 'disabled until the call returns');
+          expect(robot.log.countOf(skipManyRpc), 1);
+          fake.responseDelay = Duration.zero;
+          await robot.unmountAndSettle();
+
+        case 'corner_skip_all_at_cap_warns_older_remain':
+          fake.listReviewsResponse =
+              reviews([for (var i = 0; i < 500; i++) summary(id: 'r$i')]);
+          await robot.load();
+          await robot.openSkipAll();
+          expect(robot.textShown('Skip all 500 shown drafts?'), isTrue);
+          expect(
+              find
+                  .textContaining('Any that are stay in the Inbox')
+                  .evaluate()
+                  .isNotEmpty,
+              isTrue);
+          await robot.cancelSkipAll();
+          expect(robot.log.fired(skipManyRpc), isFalse);
+          await robot.settle();
+
+        case 'corner_skip_all_over_batch_splits_calls':
+          fake.listReviewsResponse =
+              reviews([for (var i = 0; i < 501; i++) summary(id: 'r$i')]);
+          fake.skipReviewsResponse = skipped(['x']);
+          await robot.load();
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          await robot.pumpUntil(() => robot.log.countOf(skipManyRpc) == 2,
+              reason: 'second batch');
+          final sizes = [
+            for (final c in robot.log.forMethod(skipManyRpc))
+              (c.request as SkipReviewsRequest).reviewIds.length
+          ];
+          expect(sizes, [500, 1]);
+          await robot.pumpUntil(() => robot.textShown('2 skipped'),
+              reason: 'one summed snack');
+          await robot.settle();
+
+        case 'corner_skip_all_confirm_names_repo':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'r1', repo: 'acme__widgets'),
+            summary(id: 'r2', repo: 'acme__widgets'),
+          ]);
+          fake.skipReviewsResponse = skipped(['r1', 'r2']);
+          await robot.load();
+          await robot.selectRepo('acme/widgets');
+          await robot.openSkipAll();
+          expect(
+              find
+                  .textContaining('listed in acme/widgets')
+                  .evaluate()
+                  .isNotEmpty,
+              isTrue);
+          await robot.confirmSkipAll();
+          final req = robot.log.last(skipManyRpc)!.request as SkipReviewsRequest;
+          expect(req.reviewIds, ['r1', 'r2']);
+          await robot.settle();
+
+        case 'corner_skip_all_with_status_filter':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'd1', status: 'drafted'),
+            summary(id: 'a1', status: 'approved'),
+          ]);
+          await robot.load();
+          fake.listReviewsResponse = reviews([summary(id: 'a1', status: 'approved')]);
+          await robot.selectStatus('approved');
+          final listReq = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(listReq.status, 'approved');
+          fake.skipReviewsResponse = skipped(['a1']);
+          await robot.openSkipAll();
+          expect(robot.textShown('Skip all 1 shown drafts?'), isTrue);
+          await robot.confirmSkipAll();
+          final req = robot.log.last(skipManyRpc)!.request as SkipReviewsRequest;
+          expect(req.reviewIds, ['a1'], reason: 'only the filtered ids');
+          await robot.settle();
+
+        case 'corner_skip_all_empty_reply_says_nothing':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = SkipReviewsReply();
+          await robot.load();
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          await robot.pumpUntil(() => robot.textShown('Nothing skipped.'),
+              reason: 'empty reply summary');
+          await robot.settle();
+
+        case 'adversarial_stale_view_reply_dropped':
+          final inbox = reviews([summary(id: 'inbox-1', pr: 111)]);
+          final history =
+              reviews([summary(id: 'hist-1', pr: 999, status: 'posted')]);
+          fake.listReviewsResponse = inbox;
+          await robot.load();
+          // History answers slowly; Inbox at once.
+          fake.listReviewsAnswer = (req) async {
+            if (req.excludeStatus.contains('drafted')) {
+              await Future<void>.delayed(const Duration(seconds: 2));
+              return history;
+            }
+            return inbox;
+          };
+          final before = robot.log.countOf(listRpc);
+          await robot.tapView('History');
+          await robot.tapView('Inbox');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) >= before + 2,
+              reason: 'both re-lists sent');
+          await robot.real(
+              () => Future<void>.delayed(const Duration(milliseconds: 2500)));
+          await robot.settle();
+          expect(
+              find.textContaining('PR #999').evaluate().isEmpty, isTrue,
+              reason: 'the stale History reply must not land under Inbox');
+          expect(find.textContaining('PR #111').evaluate().isNotEmpty, isTrue);
+          fake.listReviewsAnswer = null;
+
+        case 'adversarial_stale_view_error_dropped':
+          final inbox = reviews([summary(id: 'inbox-1', pr: 111)]);
+          fake.listReviewsResponse = inbox;
+          await robot.load();
+          // History fails slowly; Inbox answers at once.
+          fake.listReviewsAnswer = (req) async {
+            if (req.excludeStatus.contains('drafted')) {
+              await Future<void>.delayed(const Duration(seconds: 2));
+              throw const GrpcError.unavailable('history down');
+            }
+            return inbox;
+          };
+          final before = robot.log.countOf(listRpc);
+          await robot.tapView('History');
+          await robot.tapView('Inbox');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) >= before + 2,
+              reason: 'both re-lists sent');
+          await robot.real(
+              () => Future<void>.delayed(const Duration(milliseconds: 2500)));
+          await robot.settle();
+          expect(robot.exists('fleet.error.retry'), isFalse,
+              reason: 'the stale History error must not land under Inbox');
+          expect(find.textContaining('PR #111').evaluate().isNotEmpty, isTrue);
+          fake.listReviewsAnswer = null;
+
+        case 'corner_unknown_status_stays_in_inbox':
+          // A status the page doesn't know passes both views' exclude lists;
+          // History drops it, Inbox keeps it.
+          fake.listReviewsResponse = reviews([
+            summary(id: 'h1', pr: 21, status: 'posted'),
+            summary(id: 'u1', pr: 22, status: 'failed'),
+          ]);
+          await robot.load();
+          expect(find.textContaining('PR #22').evaluate().isNotEmpty, isTrue,
+              reason: 'Inbox shows the unknown status');
+          await robot.selectView('History');
+          expect(find.textContaining('PR #21').evaluate().isNotEmpty, isTrue);
+          expect(find.textContaining('PR #22').evaluate().isEmpty, isTrue,
+              reason: 'History lists only finished statuses');
+          await robot.settle();
+
+        case 'boundary_history_empty_says_none_finished':
+          fake.listReviewsResponse = reviews([]);
+          await robot.load();
+          await robot.selectView('History');
+          expect(robot.textShown('No finished drafts yet.'), isTrue);
+          expect(robot.textShown('Inbox empty: no drafts await a decision.'),
+              isFalse);
+          await robot.settle();
+
+        // ── list cap ──────────────────────────────────────────────────────────
+        case 'positive_capped_list_says_newest':
+          fake.listReviewsResponse =
+              reviews([for (var i = 0; i < 500; i++) summary(id: 'r$i')]);
+          await robot.load();
+          expect(robot.exists('fleet.list.capped'), isTrue);
+          expect(robot.textShown('Showing the newest 500; older ones may be hidden.'), isTrue);
+          fake.listReviewsResponse = reviews([
+            for (var i = 0; i < 500; i++) summary(id: 'h$i', status: 'posted')
+          ]);
+          await robot.selectView('History');
+          expect(robot.exists('fleet.list.capped'), isTrue,
+              reason: 'History says so too');
+          await robot.settle();
+
+        case 'boundary_under_cap_has_no_note':
+          fake.listReviewsResponse =
+              reviews([for (var i = 0; i < 499; i++) summary(id: 'r$i')]);
+          await robot.load();
+          expect(robot.exists('fleet.list.capped'), isFalse);
           await robot.settle();
 
         case 'positive_refresh_relists':

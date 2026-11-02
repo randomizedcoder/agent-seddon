@@ -52,6 +52,10 @@ class FakeReviewFleetService extends ReviewFleetServiceBase {
   /// `slow(delay)` script for the loading / in-flight rows.
   Duration responseDelay = Duration.zero;
 
+  /// When set, answers ListReviews per request (after [responseDelay]), so a row
+  /// can serve one view slowly and another at once.
+  Future<ListReviewsReply> Function(ListReviewsRequest)? listReviewsAnswer;
+
   /// Convenience: fail the next call to [method] with [e] (defaults to a
   /// realistic UNIMPLEMENTED from a bare-gateway fleet endpoint).
   void failNext(String method,
@@ -148,7 +152,7 @@ class FakeReviewFleetService extends ReviewFleetServiceBase {
       ServiceCall call, ListReviewsRequest request) async {
     _log.record('$_svc/ListReviews', request);
     await _guard('ListReviews');
-    return listReviewsResponse;
+    return listReviewsAnswer?.call(request) ?? listReviewsResponse;
   }
 
   @override

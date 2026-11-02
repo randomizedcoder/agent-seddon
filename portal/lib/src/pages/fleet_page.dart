@@ -16,7 +16,9 @@ import 'fleet_session_dialog.dart';
 /// (`ReviewNow`), the approver (`Approve`), and the persisted history the review
 /// RPCs read (`ListReviews`/`GetReview`).
 ///
-/// Two panes: a left master list of review drafts (filterable by repo/status),
+/// Two panes: a left master list of review drafts — the **Inbox** of drafts
+/// awaiting a decision, or the read-only **History** of finished ones —
+/// filterable by repo/status,
 /// with a collapsible **Sessions** strip above it (create/edit/delete,
 /// enable/disable, "Review now"); and a right detail pane that renders the selected draft's markdown
 /// body and offers **Approve & post** (the only outward-facing action, gated
@@ -44,24 +46,63 @@ class FleetPage extends StatefulWidget {
   State<FleetPage> createState() => _FleetPageState();
 }
 
-/// The draft-status filter. `active` (the default) is every status but
-/// `skipped`; `all` sends no filter at all.
-enum _StatusFilter { active, drafted, approved, posted, superseded, skipped, all }
+/// Which drafts the list shows. The **Inbox** (the default) holds the drafts
+/// that still need a decision: `drafted`, and `approved` (an approval whose
+/// post failed). **History** holds the finished ones — `posted`, `skipped`,
+/// `superseded` — read-only.
+enum _View { inbox, history }
 
-extension on _StatusFilter {
+extension on _View {
   String get label => switch (this) {
-        _StatusFilter.active => 'not skipped',
-        _StatusFilter.all => 'all',
-        _ => name,
+        _View.inbox => 'Inbox',
+        _View.history => 'History',
       };
 
-  /// The wire `status`: empty for the two catch-alls.
-  String get wire =>
-      this == _StatusFilter.active || this == _StatusFilter.all ? '' : name;
+  /// The wire `exclude_status`: everything the other view holds. The two
+  /// lists are not complements, so a status outside the five known ones would
+  /// pass both; [keeps] files such a row under Inbox only.
+  List<String> get exclude => switch (this) {
+        _View.inbox => const ['posted', 'superseded', 'skipped'],
+        _View.history => const ['drafted', 'approved'],
+      };
 
-  /// The wire `exclude_status`.
-  List<String> get exclude =>
-      this == _StatusFilter.active ? const ['skipped'] : const [];
+  /// The statuses the status menu offers ('' = all of this view's).
+  List<String> get statuses => switch (this) {
+        _View.inbox => const ['', 'drafted', 'approved'],
+        _View.history => const ['', 'posted', 'skipped', 'superseded'],
+      };
+
+  /// Whether a listed row belongs here. History is an allow-list of the
+  /// finished statuses; anything else (a status this page doesn't know yet)
+  /// stays in Inbox, where someone can act on it.
+  bool keeps(String status) => switch (this) {
+        _View.inbox => true,
+        _View.history => const ['posted', 'skipped', 'superseded'].contains(status),
+      };
+
+  String get allLabel => switch (this) {
+        _View.inbox => 'all open',
+        _View.history => 'all finished',
+      };
+}
+
+/// The most ids one SkipReviews call takes (`agent_core::MAX_SKIP_BATCH`).
+const _skipBatch = 500;
+
+/// The server's row cap on a listing (`MAX_DRAFT_ROWS`); a list this long may
+/// have been cut short.
+const _listCap = 500;
+
+/// A bulk skip's outcome counts as one line, e.g. "12 skipped, 1 already
+/// posted". An unknown status is shown as the server sent it.
+String _skipSummary(Map<String, int> counts) {
+  const order = ['skipped', 'already_skipped', 'already_posted', 'not_found'];
+  final keys = [
+    ...order.where(counts.containsKey),
+    ...(counts.keys.where((k) => !order.contains(k)).toList()..sort()),
+  ];
+  if (keys.isEmpty) return 'Nothing skipped.';
+  return keys.map((k) => '${counts[k]} ${k.replaceAll('_', ' ')}').join(', ');
 }
 
 /// A roster repo key (`owner__name`) as people write it.
@@ -73,9 +114,14 @@ class _FleetPageState extends State<FleetPage> {
   // Every repo seen in the roster or a listing, so the dropdown keeps its
   // choices while one repo is selected.
   final Set<String> _knownRepos = {};
-  _StatusFilter _status = _StatusFilter.active;
+  _View _view = _View.inbox;
+  // The status filter within the view: one of `_view.statuses`, '' for all.
+  String _status = '';
 
   List<ReviewSummary> _reviews = [];
+  /// Whether the last listing reached the server's row cap (older rows may be
+  /// hidden).
+  bool _capped = false;
   List<FleetSession> _sessions = [];
   // Forge cards for the session editor; null when they could not be listed.
   List<ForgeCard>? _cards;
@@ -84,6 +130,10 @@ class _FleetPageState extends State<FleetPage> {
   bool _loading = true;
   String? _error;
   bool _showSessions = false;
+  // A Skip all is in flight: its button is disabled, so a second can't start.
+  bool _skippingAll = false;
+  /// Bumped by each [_reload]; a reply from an older one is dropped.
+  int _reloadGen = 0;
 
   @override
   void initState() {
@@ -92,6 +142,9 @@ class _FleetPageState extends State<FleetPage> {
   }
 
   Future<void> _reload() async {
+    // Only the newest reload writes the page: a slower, older reply (say from
+    // a view switched away from) must not land under the current view.
+    final gen = ++_reloadGen;
     setState(() {
       _loading = true;
       _error = null;
@@ -99,8 +152,8 @@ class _FleetPageState extends State<FleetPage> {
     try {
       final req = ListReviewsRequest()
         ..repo = _repo
-        ..status = _status.wire
-        ..excludeStatus.addAll(_status.exclude)
+        ..status = _status
+        ..excludeStatus.addAll(_view.exclude)
         ..limit = 0; // 0 ⇒ the server's row cap
       // Roster + drafts in parallel; roster is best-effort (the strip is
       // secondary), so a roster failure doesn't blank the drafts list.
@@ -119,12 +172,16 @@ class _FleetPageState extends State<FleetPage> {
         cardsError = e is GrpcError ? (e.message ?? e.codeName) : 'unreachable';
         return null;
       });
-      final reviews = (await reviewsF).reviews.toList();
+      final view = _view;
+      final listed = (await reviewsF).reviews;
+      final reviews = listed.where((r) => view.keeps(r.status)).toList();
       final sessions = await sessionsF;
       final cards = await cardsF;
-      if (!mounted) return;
+      if (!mounted || gen != _reloadGen) return;
       setState(() {
         _reviews = reviews;
+        // The cap is on what the server sent, before [keeps] filtered it.
+        _capped = listed.length >= _listCap;
         _sessions = sessions;
         _knownRepos
           ..addAll(sessions.map((s) => s.repo))
@@ -140,7 +197,7 @@ class _FleetPageState extends State<FleetPage> {
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || gen != _reloadGen) return;
       setState(() {
         _error = '$e';
         _loading = false;
@@ -317,15 +374,15 @@ class _FleetPageState extends State<FleetPage> {
     }
   }
 
-  /// Skip a draft: it is never posted and leaves the default list.
+  /// Skip a draft: it is never posted and moves to History.
   Future<void> _skip(ReviewSummary r) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('Skip review of PR #${r.prNumber}?'),
         content: const Text(
-          'The draft is never posted, and is hidden unless the status filter '
-          'shows skipped drafts. A new commit on the PR gets a fresh review.',
+          'The draft is never posted, and moves to History. A new commit on '
+          'the PR gets a fresh review.',
         ),
         actions: [
           TextButton(
@@ -362,6 +419,67 @@ class _FleetPageState extends State<FleetPage> {
     } catch (e) {
       _snack('Skip failed: $e');
     }
+  }
+
+  /// Skip every draft the Inbox shows. The ids are the ones on screen when the
+  /// button is pressed — a draft that arrives later is never skipped by it.
+  Future<void> _skipAll() async {
+    final ids = [for (final r in _reviews) r.reviewId];
+    if (ids.isEmpty) return;
+    final where = _repo.isEmpty ? 'across all repos' : 'in ${_repoLabel(_repo)}';
+    // A full listing may have older drafts behind it, which this can't reach.
+    final capped = _capped;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Skip all ${ids.length} shown drafts?'),
+        content: Text(
+          'The ${ids.length} drafts listed $where are never posted. They move '
+          'to History. A new commit on a PR gets a fresh review.'
+          '${capped ? '\n\nThe list stops at $_listCap, so older drafts may be '
+              'hidden. Any that are stay in the Inbox; press Skip all again '
+              'for them.' : ''}',
+          key: const Key('fleet.skipAll.body'),
+        ),
+        actions: [
+          TextButton(
+            key: const Key('fleet.skipAll.cancel'),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('fleet.skipAll.confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Skip all'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || _skippingAll) return;
+    setState(() => _skippingAll = true);
+    final counts = <String, int>{};
+    try {
+      // Today this runs once: a listing is at most `MAX_DRAFT_ROWS`, which
+      // agent-core asserts is <= `MAX_SKIP_BATCH`. It batches anyway, so the
+      // page stays correct if the two caps ever diverge.
+      for (var i = 0; i < ids.length; i += _skipBatch) {
+        final reply = await widget.clients.fleet.skipReviews(
+          SkipReviewsRequest()
+            ..reviewIds.addAll(ids.skip(i).take(_skipBatch)),
+        );
+        for (final r in reply.results) {
+          counts[r.status] = (counts[r.status] ?? 0) + 1;
+        }
+      }
+      _snack(_skipSummary(counts));
+    } catch (e) {
+      _snack('Skip all failed: $e'
+          '${counts.isEmpty ? "" : " (after ${_skipSummary(counts)})"}');
+    } finally {
+      if (mounted) setState(() => _skippingAll = false);
+    }
+    if (!mounted) return;
+    await _reload();
   }
 
   @override
@@ -419,15 +537,34 @@ class _FleetPageState extends State<FleetPage> {
                     },
                   ),
                 ),
-                DropdownButton<_StatusFilter>(
+                SegmentedButton<_View>(
+                  key: const Key('fleet.view'),
+                  segments: [
+                    for (final v in _View.values)
+                      ButtonSegment(value: v, label: Text(v.label)),
+                  ],
+                  selected: {_view},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (s) {
+                    if (s.first == _view) return;
+                    setState(() {
+                      _view = s.first;
+                      _status = '';
+                      _selected = null;
+                    });
+                    _reload();
+                  },
+                ),
+                DropdownButton<String>(
                   key: const Key('fleet.filter.status'),
                   value: _status,
-                  items: _StatusFilter.values
-                      .map((s) => DropdownMenuItem(
-                            value: s,
-                            child: Text(s.label),
-                          ))
-                      .toList(),
+                  items: [
+                    for (final s in _view.statuses)
+                      DropdownMenuItem(
+                        value: s,
+                        child: Text(s.isEmpty ? _view.allLabel : s),
+                      ),
+                  ],
                   onChanged: (v) {
                     if (v == null) return;
                     setState(() => _status = v);
@@ -440,6 +577,18 @@ class _FleetPageState extends State<FleetPage> {
                   icon: const Icon(Icons.refresh, size: 18),
                   label: const Text('Refresh'),
                 ),
+                // Clear the Inbox in one go: skips exactly the drafts listed.
+                if (_view == _View.inbox &&
+                    !_loading &&
+                    _error == null &&
+                    _reviews.isNotEmpty &&
+                    CapabilityScope.of(context).can('approve', 'review'))
+                  OutlinedButton.icon(
+                    key: const Key('fleet.skipAll'),
+                    onPressed: _skippingAll ? null : _skipAll,
+                    icon: const Icon(Icons.block, size: 18),
+                    label: Text('Skip all ${_reviews.length} shown'),
+                  ),
               ],
             ),
           ),
@@ -470,6 +619,7 @@ class _FleetPageState extends State<FleetPage> {
                   key: ValueKey(_selected!.reviewId),
                   clients: widget.clients,
                   summary: _selected!,
+                  readOnly: _view == _View.history,
                   onApprove: () => _approve(_selected!),
                   onSkip: () => _skip(_selected!),
                 ),
@@ -483,12 +633,26 @@ class _FleetPageState extends State<FleetPage> {
       children: [
         _sessionsStrip(),
         const Divider(height: 1),
+        // The listing stops at the server's row cap; say so rather than let a
+        // full page pass for everything.
+        if (_capped)
+          Padding(
+            key: const Key('fleet.list.capped'),
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+            child: Text('Showing the newest $_listCap; older ones may be hidden.',
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
         Expanded(
           child: _reviews.isEmpty
-              ? const Center(
+              ? Center(
                   child: Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('No review drafts match.',
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                        _status.isNotEmpty
+                            ? 'No review drafts match.'
+                            : _view == _View.inbox
+                                ? 'Inbox empty: no drafts await a decision.'
+                                : 'No finished drafts yet.',
                         textAlign: TextAlign.center),
                   ),
                 )
@@ -635,12 +799,16 @@ enum _DetailMode { view, edit, preview }
 class _DraftDetail extends StatefulWidget {
   final PortalClients clients;
   final ReviewSummary summary;
+
+  /// History: the draft is shown, never edited, approved or skipped.
+  final bool readOnly;
   final VoidCallback onApprove;
   final VoidCallback onSkip;
   const _DraftDetail({
     super.key,
     required this.clients,
     required this.summary,
+    this.readOnly = false,
     required this.onApprove,
     required this.onSkip,
   });
@@ -665,6 +833,7 @@ class _DraftDetailState extends State<_DraftDetail> {
   /// A `posted`/`approved` draft can't be edited (matches the server's write
   /// gate — UpdateReview returns `locked`).
   bool get _locked =>
+      widget.readOnly ||
       widget.summary.status == 'posted' ||
       widget.summary.status == 'approved' ||
       widget.summary.status == 'skipped' ||
@@ -760,6 +929,9 @@ class _DraftDetailState extends State<_DraftDetail> {
     final r = widget.summary;
     final posted = r.status == 'posted';
     final skipped = r.status == 'skipped';
+    // History offers no actions at all.
+    final canAct =
+        !widget.readOnly && CapabilityScope.of(context).can('approve', 'review');
     // Approving posts the *persisted* body, so block it while there are unsaved
     // edits — the operator should Save first (edit → save → approve). Also block
     // when there's no readable body here (an unavailable/cross-root draft).
@@ -805,9 +977,7 @@ class _DraftDetailState extends State<_DraftDetail> {
               const SizedBox(width: 12),
               // Skip: never post this draft. Not offered once it is posted or
               // already skipped.
-              if (CapabilityScope.of(context).can('approve', 'review') &&
-                  !posted &&
-                  !skipped) ...[
+              if (canAct && !posted && !skipped) ...[
                 OutlinedButton.icon(
                   key: const Key('fleet.detail.skip'),
                   onPressed: _saving ? null : widget.onSkip,
@@ -816,7 +986,7 @@ class _DraftDetailState extends State<_DraftDetail> {
                 ),
                 const SizedBox(width: 8),
               ],
-              if (CapabilityScope.of(context).can('approve', 'review'))
+              if (canAct)
                 FilledButton.icon(
                   key: const Key('fleet.detail.approve'),
                   onPressed: canApprove ? widget.onApprove : null,
