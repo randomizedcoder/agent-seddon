@@ -145,7 +145,11 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   with more than 32 polled paths still hits and one tenant can't empty another's; cached
   bodies are shared (`Arc`); an identity-keyed quota's gate is checked before the token
   mint; the identity length-prefixes the tenant (no separator collisions); a 403 is a
-  limit only when its `Retry-After` parses or the quota is spent. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
+  limit only when its `Retry-After` parses or the quota is spent. After merge (#679's
+  last fleet draft): a 5xx is a limit only when its `Retry-After` parses, the same rule as
+  a 403; a body is cloned into the cache only once it is known to be kept; an entry larger
+  than the whole byte budget is refused; the mint and OAuth paths state why they hold no
+  gate. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
   names it) so a webhook-first trigger gets the early `UpToDate` too; today it always
   fetches, which is only conservative.
 

@@ -114,7 +114,7 @@ pub fn clamp_wait(wait: Duration) -> Duration {
 
 /// How long to hold off after a response with status `code`, or `None` when the forge
 /// did not ask us to slow down. A rate-limited answer is a 429, a 403 carrying a
-/// readable `Retry-After` or a spent quota, or a 5xx carrying `Retry-After`. Its wait is
+/// readable `Retry-After` or a spent quota, or a 5xx carrying a readable `Retry-After`. Its wait is
 /// `Retry-After` when readable, else the reset time of a spent quota, else
 /// [`DEFAULT_LIMITED_WAIT`], always clamped by [`clamp_wait`]. A plain 403 (a
 /// permission refusal) and a 5xx without a hint are not rate limits.
@@ -125,7 +125,8 @@ pub fn limited_wait(code: u16, sig: &Signals<'_>, now: SystemTime) -> Option<Dur
         // that decorates a real permission refusal with a junk `Retry-After` must not
         // gate a healthy credential.
         403 => sig.retry_after_wait(now).is_some() || sig.spent(),
-        500..=599 => sig.retry_after.is_some(),
+        // Same rule for a 5xx: a junk hint is computed backoff, not a quota-wide gate.
+        500..=599 => sig.retry_after_wait(now).is_some(),
         _ => false,
     };
     if !limited {
@@ -414,7 +415,7 @@ impl Pacer {
         quota: &Quota,
         path: &str,
         etag: &str,
-        body: Arc<serde_json::Value>,
+        body: &serde_json::Value,
         size: usize,
     ) {
         let key = (quota.clone(), path.to_string());
@@ -423,7 +424,9 @@ impl Pacer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.remove(&key);
-        if !usable_etag(etag) || size > MAX_CACHED_BYTES {
+        // An entry larger than the whole budget is refused outright: `make_room` would
+        // empty the cache and the insert would still overrun the bound.
+        if !usable_etag(etag) || size > MAX_CACHED_BYTES || size > cache.limits.bytes {
             return;
         }
         cache.make_room(quota, size);
@@ -434,7 +437,8 @@ impl Pacer {
             key,
             Cached {
                 etag: etag.to_string(),
-                body,
+                // Cloned only once the entry is known to be kept.
+                body: Arc::new(body.clone()),
                 size,
                 stamp,
             },
@@ -573,6 +577,14 @@ mod tests {
         "a 503 without a hint is a transient fault, not a limit",
         503,
         None,
+        None,
+        None,
+        None
+    )]
+    #[case::negative_503_junk_hint(
+        "a 503 whose Retry-After doesn't parse is computed backoff, not a quota gate",
+        503,
+        Some("soon-ish"),
         None,
         None,
         None
@@ -977,7 +989,7 @@ mod tests {
             &p.quota(base, "tok-a"),
             "repos/o/r/pulls",
             etag,
-            Arc::new(body.clone()),
+            &body,
             size,
         );
         let q = p.quota(base, reader);
@@ -995,8 +1007,8 @@ mod tests {
     fn corner_unusable_etag_drops_the_old_entry() {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        p.remember(&q, "x", "\"e1\"", Arc::new(serde_json::json!(1)), 1);
-        p.remember(&q, "x", "", Arc::new(serde_json::json!(2)), 1);
+        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
+        p.remember(&q, "x", "", &serde_json::json!(2), 1);
         assert_eq!(p.cached_etag(&q, "x"), None);
     }
 
@@ -1021,19 +1033,13 @@ mod tests {
         let p = Pacer::new();
         let q = p.quota("b", "t");
         for i in 0..MAX_CACHED_PER_QUOTA {
-            p.remember(
-                &q,
-                &format!("p{i}"),
-                "\"e\"",
-                Arc::new(serde_json::json!(i)),
-                1,
-            );
+            p.remember(&q, &format!("p{i}"), "\"e\"", &serde_json::json!(i), 1);
         }
         if let Some(path) = read {
             assert!(p.cached_etag(&q, path).is_some(), "{desc}");
         }
         let newest = format!("p{MAX_CACHED_PER_QUOTA}");
-        p.remember(&q, &newest, "\"e\"", Arc::new(serde_json::json!(0)), 1);
+        p.remember(&q, &newest, "\"e\"", &serde_json::json!(0), 1);
         assert_eq!(p.cached_len(), MAX_CACHED_PER_QUOTA, "{desc}");
         assert_eq!(p.cached_etag(&q, evicted), None, "{desc}: {evicted} went");
         assert!(
@@ -1053,7 +1059,7 @@ mod tests {
     fn cached_body_matches_the_tag(#[case] desc: &str, #[case] sent: &str, #[case] hit: bool) {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        p.remember(&q, "x", "\"e1\"", Arc::new(serde_json::json!(1)), 1);
+        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
         assert_eq!(p.cached_body(&q, "x", sent).is_some(), hit, "{desc}");
     }
 
@@ -1124,13 +1130,7 @@ mod tests {
                 Step::Store { who, paths, size } => {
                     let q = p.quota("b", who);
                     for i in 0..paths {
-                        p.remember(
-                            &q,
-                            &format!("p{i}"),
-                            "\"e\"",
-                            Arc::new(serde_json::json!(i)),
-                            size,
-                        );
+                        p.remember(&q, &format!("p{i}"), "\"e\"", &serde_json::json!(i), size);
                     }
                 }
                 Step::Cached { who, paths, want } => {

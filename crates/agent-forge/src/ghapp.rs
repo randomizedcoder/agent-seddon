@@ -253,6 +253,11 @@ impl InstallationTokenMinter {
                             crate::pace::Answer::Retry(after) => {
                                 agent_retry::Attempt::Retry { err, after }
                             }
+                            // No pacer gate here, unlike `ForgeHttp`: the mint signs with
+                            // the App JWT, which spends the App's own quota and rotates every
+                            // few minutes, so a gate keyed on it would not outlive a mint. The
+                            // caller fails with the forge's wait, and the poll's
+                            // `PollBackoff` spaces the retries.
                             crate::pace::Answer::GiveUp(wait) => {
                                 agent_retry::Attempt::Fail(Error::Repo(format!(
                                     "github app: {what} returned http {code}: rate limited for {}s",

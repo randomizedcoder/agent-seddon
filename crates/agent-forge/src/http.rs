@@ -317,8 +317,7 @@ impl ForgeHttp {
         // truncated body is never kept: it would be served as if whole.
         if get && bytes.len() <= MAX_BODY_BYTES {
             if let Some(etag) = etag {
-                self.pacer
-                    .remember(&quota, path, &etag, Arc::new(v.clone()), bytes.len());
+                self.pacer.remember(&quota, path, &etag, &v, bytes.len());
             }
         }
         Ok(v)
@@ -858,7 +857,7 @@ mod tests {
         let (base, seen) = spawn_scripted_with(script, move |i, base| {
             if let (1, Some(tag)) = (i, replace_with) {
                 let q = hook.quota_for(base, None, "tok");
-                hook.remember(&q, "pulls", tag, Arc::new(serde_json::json!(["other"])), 9);
+                hook.remember(&q, "pulls", tag, &serde_json::json!(["other"]), 9);
             }
         });
         let http = paced(base, "tok", 0, pacer);
