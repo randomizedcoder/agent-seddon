@@ -6800,8 +6800,16 @@ pub const MAX_DRAFT_ROWS: usize = 500;
 pub const MAX_SKIP_BATCH: usize = 500;
 // A whole listing fits in one `SkipReviews` call, so "skip what was listed" is one call.
 const _: () = assert!(MAX_DRAFT_ROWS <= MAX_SKIP_BATCH);
-/// How many chars of an untrusted id or status an error message echoes.
+/// How many chars of an untrusted id or status an error message echoes (after escaping).
 pub const MAX_ECHO_CHARS: usize = 40;
+
+/// `s` escaped (as `{:?}` would) and then cut to [`MAX_ECHO_CHARS`] chars, in quotes: the
+/// form an error may echo untrusted text in. Escaping first keeps the bound true for
+/// non-ASCII and control chars, which escape to several chars each.
+pub fn echo_cut(s: &str) -> String {
+    let cut: String = s.escape_debug().take(MAX_ECHO_CHARS).collect();
+    format!("\"{cut}\"")
+}
 /// Longest review id `SkipReviews` accepts (ids are UUIDs, 36 chars).
 pub const MAX_REVIEW_ID_LEN: usize = 128;
 
@@ -6833,8 +6841,7 @@ pub fn skip_batch(ids: &[String]) -> std::result::Result<Vec<String>, String> {
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         if !valid_review_id(id) {
-            let cut: String = id.chars().take(MAX_ECHO_CHARS).collect();
-            return Err(format!("not a review id: {cut:?}"));
+            return Err(format!("not a review id: {}", echo_cut(id)));
         }
         if seen.insert(id.as_str()) {
             out.push(id.clone());
@@ -6991,6 +6998,11 @@ mod tests {
     #[case::adversarial_sql("a quote is not an id", vec!["x' OR 1=1 --".into()], Err("not a review id"))]
     #[case::adversarial_newline("a control char is not an id", vec!["a\nb".into()], Err("not a review id"))]
     #[case::adversarial_unicode("a non-ASCII letter is not an id", vec!["ré".into()], Err("not a review id"))]
+    #[case::adversarial_escaping_unicode_stays_cut(
+        "an id of chars that escape long is still echoed within the cap",
+        vec!["\u{202e}".repeat(MAX_REVIEW_ID_LEN)],
+        Err("not a review id")
+    )]
     #[case::adversarial_one_bad_spoils_all(
         "one bad id rejects the whole list",
         vec!["ok".into(), "b/ad".into()],
@@ -7006,7 +7018,7 @@ mod tests {
             (Err(e), Err(frag)) => {
                 assert!(e.contains(frag), "{description}: {e:?} lacks {frag:?}");
                 assert!(
-                    e.len() < 120,
+                    e.chars().count() <= "not a review id: ".len() + MAX_ECHO_CHARS + 2,
                     "{description}: the error echoes a cut: {e:?}"
                 );
             }

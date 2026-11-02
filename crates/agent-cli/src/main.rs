@@ -86,17 +86,19 @@ async fn main() -> Result<()> {
         }
     }
 
-    // `agent fleet` / `agent fleet --help`: usage needs no config, so print it
-    // before one is required (here, not in the arg parser, which tests run in-process).
-    if let Mode::Fleet(args) = &mode {
-        if matches!(
-            agent_runtime::fleet_cli::parse(args),
-            Ok(agent_runtime::fleet_cli::FleetCmd::Help)
-        ) {
-            println!("{}", agent_runtime::fleet_cli::USAGE);
-            return Ok(());
-        }
-    }
+    // `agent fleet …` is parsed once, before the config is read: a bad verb fails as
+    // such, and usage needs no config (printed here, not in the arg parser, which tests
+    // run in-process).
+    let fleet_cmd = match &mode {
+        Mode::Fleet(args) => match agent_runtime::fleet_cli::parse(args)? {
+            agent_runtime::fleet_cli::FleetCmd::Help => {
+                println!("{}", agent_runtime::fleet_cli::USAGE);
+                return Ok(());
+            }
+            cmd => Some(cmd),
+        },
+        _ => None,
+    };
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
     // Parse with the ignored-key list in hand rather than letting `parse_config`
@@ -109,11 +111,8 @@ async fn main() -> Result<()> {
     // settings) can write edits back to the same file.
     config.source_path = Some(config_path.clone());
     agent_runtime::repo_index::validate(&config)?;
-    if let Mode::Fleet(args) = &mode {
-        println!(
-            "{}",
-            agent_runtime::fleet_cli::execute(&config, args).await?
-        );
+    if let Some(cmd) = fleet_cmd {
+        println!("{}", agent_runtime::fleet_cli::execute(&config, cmd).await?);
         return Ok(());
     }
     if let Mode::Repo(args) = &mode {
@@ -1516,6 +1515,11 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     } else if doctor {
         Mode::Doctor
     } else if let Some(f) = fleet_args {
+        // The fleet verbs act as the caller's own identity (the bearer's tenant); a
+        // `--tenant` would be silently ignored, so it is refused.
+        if tenant.is_some() {
+            anyhow::bail!("`fleet` takes no --tenant: it acts as the signed-in identity");
+        }
         Mode::Fleet(f)
     } else if let Some(mut r) = repo_args {
         if let Some(t) = tenant {
@@ -1829,6 +1833,24 @@ mod tests {
         };
         let want = want.map(|w| w.iter().map(ToString::to_string).collect::<Vec<_>>());
         assert_eq!(got, want, "{argv:?}");
+    }
+
+    // desc: a `--tenant` before `fleet` is refused, not silently dropped: the fleet
+    // verbs act as the signed-in identity. Other leading flags still bind.
+    #[rstest::rstest]
+    #[case::adversarial_tenant_refused("a leading --tenant is refused", &["--tenant", "acme", "fleet", "skip"], Err("takes no --tenant"))]
+    #[case::positive_no_tenant("no --tenant parses", &["fleet", "skip"], Ok(()))]
+    fn fleet_refuses_tenant(
+        #[case] description: &str,
+        #[case] argv: &[&str],
+        #[case] want: std::result::Result<(), &str>,
+    ) {
+        match (parse(argv), want) {
+            (Ok(a), Ok(())) => assert!(matches!(a.mode, Mode::Fleet(_)), "{description}"),
+            (Err(e), Err(frag)) => assert!(format!("{e:#}").contains(frag), "{description}: {e:#}"),
+            (Ok(_), Err(_)) => panic!("{description}: parsed, want refusal"),
+            (Err(e), Ok(())) => panic!("{description}: {e:#}"),
+        }
     }
 
     // desc: the `role = …` line of `--check-config`: no store prints `off`; a

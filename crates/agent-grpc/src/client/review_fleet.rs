@@ -86,7 +86,8 @@ impl GrpcFleet {
     }
 
     /// Skip several drafts in one call (at most [`agent_core::MAX_SKIP_BATCH`] ids; the
-    /// server rejects more). Returns each distinct id with its outcome, in request order.
+    /// server rejects more). Returns each distinct id with its outcome, in the server's reply
+    /// order.
     /// The reply must answer each distinct id exactly once ([`check_skip_results`]).
     pub async fn skip_reviews(
         &self,
@@ -289,11 +290,7 @@ fn check_skip_results(
     results: Vec<pb::SkipResult>,
 ) -> Result<Vec<(String, agent_core::SkipOutcome)>> {
     use std::collections::HashSet;
-    let cut = |s: &str| {
-        s.chars()
-            .take(agent_core::MAX_ECHO_CHARS)
-            .collect::<String>()
-    };
+    let cut = agent_core::echo_cut;
     let mut open: HashSet<&str> = asked.iter().map(String::as_str).collect();
     let mut out = Vec::with_capacity(results.len());
     for r in results {
@@ -303,14 +300,11 @@ fn check_skip_results(
             } else {
                 "a result for an id not asked for"
             };
-            return Err(Error::Fleet(format!(
-                "skip: {why}: {:?}",
-                cut(&r.review_id)
-            )));
+            return Err(Error::Fleet(format!("skip: {why}: {}", cut(&r.review_id))));
         }
         let outcome = agent_core::SkipOutcome::from_wire(&r.status).ok_or_else(|| {
             Error::Fleet(format!(
-                "skip: unrecognized status {:?} from server",
+                "skip: unrecognized status {} from server",
                 cut(&r.status)
             ))
         })?;
@@ -318,7 +312,7 @@ fn check_skip_results(
     }
     if let Some(missing) = open.iter().min() {
         return Err(Error::Fleet(format!(
-            "skip: no result for {:?} ({} unanswered)",
+            "skip: no result for {} ({} unanswered)",
             cut(missing),
             open.len()
         )));

@@ -52,17 +52,26 @@ const SKIPPABLE: [&str; 3] = [
     draft_status::SUPERSEDED,
 ];
 
-/// How many chars of a user token an error may echo.
-const ECHO_CHARS: usize = agent_core::MAX_ECHO_CHARS;
-
 fn echo(s: &str) -> String {
-    clean(&s.chars().take(ECHO_CHARS).collect::<String>())
+    clean(
+        &s.chars()
+            .take(agent_core::MAX_ECHO_CHARS)
+            .collect::<String>(),
+    )
 }
 
-/// `s` with every control character (ANSI escapes, newlines) replaced by `?`.
+/// `s` with every control character (ANSI escapes, newlines) and every hidden or bidi
+/// control (zero-width, overrides, isolates) replaced by `?`, so server text can neither
+/// drive the terminal nor reorder what the operator reads.
 fn clean(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| {
+            if c.is_control() || agent_core::is_hidden_control(c) {
+                '?'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -219,9 +228,28 @@ pub fn confirmed(input: &mut impl BufRead) -> Result<bool> {
 /// lease-guarded skips, one after another).
 const SKIP_DEADLINE: Duration = Duration::from_secs(300);
 
-/// Run `agent fleet …`, returning what to print.
-pub async fn execute(cfg: &Config, args: &[String]) -> Result<String> {
-    let a = match parse(args)? {
+/// The two `ReviewFleetService` calls `fleet skip` makes, so its whole flow can be
+/// driven by a fake in tests.
+#[async_trait::async_trait]
+pub trait SkipFleet {
+    async fn list(&self, filter: &ReviewDraftFilter) -> Result<Vec<ReviewDraftRecord>>;
+    async fn skip(&self, ids: &[String]) -> Result<Vec<(String, SkipOutcome)>>;
+}
+
+#[async_trait::async_trait]
+impl SkipFleet for agent_grpc::client::GrpcFleet {
+    async fn list(&self, filter: &ReviewDraftFilter) -> Result<Vec<ReviewDraftRecord>> {
+        Ok(self.list_reviews(filter).await?)
+    }
+    async fn skip(&self, ids: &[String]) -> Result<Vec<(String, SkipOutcome)>> {
+        Ok(self.skip_reviews(ids).await?)
+    }
+}
+
+/// Run a parsed `agent fleet …` verb against the configured fleet, returning what to
+/// print. Parse with [`parse`] first, so a bad verb fails before the config is needed.
+pub async fn execute(cfg: &Config, cmd: FleetCmd) -> Result<String> {
+    let a = match cmd {
         FleetCmd::Help => return Ok(USAGE.to_string()),
         FleetCmd::Skip(a) => a,
     };
@@ -232,8 +260,28 @@ pub async fn execute(cfg: &Config, args: &[String]) -> Result<String> {
         agent_grpc::constants::FLEET,
     );
     let client = agent_grpc::client::GrpcFleet::connect(&ep)?;
-    let rows = client
-        .list_reviews(&skip_filter(&a))
+    let mut stdout = std::io::stdout();
+    run_skip(
+        &client,
+        &a,
+        &mut std::io::stdin().lock(),
+        &mut stdout,
+        SKIP_DEADLINE,
+    )
+    .await
+}
+
+/// `fleet skip`: list, print, ask (on `prompt`, reading `input`), skip, tally. Only the
+/// ids it listed are sent.
+pub async fn run_skip(
+    fleet: &(impl SkipFleet + Sync),
+    a: &SkipArgs,
+    input: &mut impl BufRead,
+    prompt: &mut impl Write,
+    deadline: Duration,
+) -> Result<String> {
+    let rows = fleet
+        .list(&skip_filter(a))
         .await
         .context("listing review drafts")?;
     let targets = skip_targets(&rows);
@@ -251,29 +299,30 @@ pub async fn execute(cfg: &Config, args: &[String]) -> Result<String> {
         targets.len(),
         render(&rows, &targets)
     );
-    match step(&a, targets.len()) {
+    match step(a, targets.len()) {
         Step::Nothing => return Ok("no open review drafts to skip".into()),
         Step::DryRun => return Ok(format!("{listing}\n--dry-run: nothing skipped")),
         Step::Ask => {
-            print!(
+            write!(
+                prompt,
                 "{listing}\nSkip all {}? Type `yes` to continue: ",
                 targets.len()
-            );
-            std::io::stdout().flush()?;
-            if !confirmed(&mut std::io::stdin().lock())? {
+            )?;
+            prompt.flush()?;
+            if !confirmed(input)? {
                 return Ok("not confirmed: nothing skipped".into());
             }
         }
         Step::Skip => {}
     }
     // One call: a whole listing fits (MAX_DRAFT_ROWS <= MAX_SKIP_BATCH, asserted in agent-core).
-    let results = tokio::time::timeout(SKIP_DEADLINE, client.skip_reviews(&targets))
+    let results = tokio::time::timeout(deadline, fleet.skip(&targets))
         .await
         .map_err(|_| {
             anyhow::anyhow!(
                 "no answer from SkipReviews within {}s; some drafts may be skipped. \
                  Run `agent fleet skip --dry-run` to see what is left",
-                SKIP_DEADLINE.as_secs()
+                deadline.as_secs()
             )
         })?
         .context(
@@ -448,12 +497,31 @@ mod tests {
         "o/r?fake"
     )]
     #[case::positive_plain_repo("a plain repo prints as OWNER/NAME", "o__r", "o/r")]
+    #[case::adversarial_bidi_override_in_repo(
+        "a right-to-left override can't reverse what the operator reads",
+        "o__r\u{202e}evif",
+        "o/r?evif"
+    )]
+    #[case::adversarial_zero_width_in_repo(
+        "a zero-width space is shown, not hidden",
+        "o__r\u{200b}x",
+        "o/r?x"
+    )]
+    #[case::adversarial_bidi_isolate_in_repo(
+        "a bidi isolate is shown, not obeyed",
+        "o__\u{2066}r\u{2069}",
+        "o/?r?"
+    )]
     fn render_cleans(#[case] description: &str, #[case] repo: &str, #[case] shown: &str) {
         let mut r = row("a", "drafted");
         r.repo = repo.into();
         let out = render(&[r], &words(&["a"]));
         assert!(out.contains(shown), "{description}: {out:?}");
         assert!(!out.contains('\u{1b}'), "{description}");
+        assert!(
+            !out.chars().any(agent_core::is_hidden_control),
+            "{description}: {out:?}"
+        );
         assert_eq!(out.lines().count(), 1, "{description}");
     }
 
@@ -519,5 +587,111 @@ mod tests {
     fn confirmed_cases(#[case] description: &str, #[case] input: &str, #[case] expected: bool) {
         let mut r = std::io::Cursor::new(input.as_bytes());
         assert_eq!(confirmed(&mut r).unwrap(), expected, "{description}");
+    }
+
+    /// A fleet double: serves `rows` (or a list error), records each skip call, and
+    /// answers every asked id `skipped` after `delay`.
+    struct FakeFleet {
+        rows: Option<Vec<ReviewDraftRecord>>,
+        delay: Duration,
+        skipped: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SkipFleet for FakeFleet {
+        async fn list(&self, _: &ReviewDraftFilter) -> Result<Vec<ReviewDraftRecord>> {
+            self.rows.clone().context("fleet unreachable")
+        }
+        async fn skip(&self, ids: &[String]) -> Result<Vec<(String, SkipOutcome)>> {
+            self.skipped.lock().unwrap().push(ids.to_vec());
+            tokio::time::sleep(self.delay).await;
+            Ok(ids
+                .iter()
+                .map(|i| (i.clone(), SkipOutcome::Skipped))
+                .collect())
+        }
+    }
+
+    fn drafted(n: usize) -> Option<Vec<ReviewDraftRecord>> {
+        Some((0..n).map(|i| row(&format!("r{i}"), "drafted")).collect())
+    }
+
+    /// The whole `fleet skip` flow: description, listing, flags, typed answer, expected
+    /// output fragment (or error fragment), the skip calls' sizes, and whether a prompt
+    /// was shown.
+    #[rstest]
+    #[case::positive_confirmed_skips_the_listed(
+        "`yes` skips exactly the listed drafts",
+        drafted(2), args(false, false), "yes\n", Duration::ZERO, (Ok("2 skipped"), vec![2], true)
+    )]
+    #[case::negative_declined_skips_nothing(
+        "any other answer skips nothing",
+        drafted(2), args(false, false), "no\n", Duration::ZERO, (Ok("not confirmed"), vec![], true)
+    )]
+    #[case::negative_eof_skips_nothing(
+        "end of input is not a yes",
+        drafted(2), args(false, false), "", Duration::ZERO, (Ok("not confirmed"), vec![], true)
+    )]
+    #[case::positive_dry_run_calls_no_skip(
+        "--dry-run lists and stops",
+        drafted(3), args(true, false), "", Duration::ZERO, (Ok("--dry-run: nothing skipped"), vec![], false)
+    )]
+    #[case::boundary_nothing_open(
+        "an empty listing neither asks nor calls",
+        drafted(0), args(false, false), "yes\n", Duration::ZERO, (Ok("no open review drafts"), vec![], false)
+    )]
+    #[case::corner_full_page_notes_more(
+        "a full page skips it in one call and says more may follow",
+        drafted(agent_core::MAX_DRAFT_ROWS), args(false, true), "", Duration::ZERO,
+        (Ok("the listing stops at 500"), vec![agent_core::MAX_DRAFT_ROWS], false)
+    )]
+    #[case::negative_list_error(
+        "a listing failure is reported, nothing skipped",
+        None, args(false, true), "", Duration::ZERO, (Err("listing review drafts"), vec![], false)
+    )]
+    #[case::adversarial_stalled_skip_times_out(
+        "a fleet that never answers the skip is cut off at the deadline",
+        drafted(1), args(false, true), "", Duration::from_secs(3600),
+        (Err("no answer from SkipReviews"), vec![1], false)
+    )]
+    #[tokio::test(start_paused = true)]
+    async fn run_skip_cases(
+        #[case] description: &str,
+        #[case] rows: Option<Vec<ReviewDraftRecord>>,
+        #[case] a: SkipArgs,
+        #[case] typed: &str,
+        #[case] delay: Duration,
+        #[case] want: (std::result::Result<&str, &str>, Vec<usize>, bool),
+    ) {
+        let (expected, calls, asked) = want;
+        let fleet = FakeFleet {
+            rows,
+            delay,
+            skipped: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut prompt = Vec::new();
+        let got = run_skip(
+            &fleet,
+            &a,
+            &mut typed.as_bytes(),
+            &mut prompt,
+            Duration::from_secs(300),
+        )
+        .await;
+        match (got, expected) {
+            (Ok(out), Ok(frag)) => assert!(out.contains(frag), "{description}: {out:?}"),
+            (Err(e), Err(frag)) => {
+                assert!(format!("{e:#}").contains(frag), "{description}: {e:#}");
+            }
+            (got, want) => panic!("{description}: got {got:?}, want {want:?}"),
+        }
+        let sizes: Vec<usize> = fleet.skipped.lock().unwrap().iter().map(Vec::len).collect();
+        assert_eq!(sizes, calls, "{description}: skip calls");
+        let shown = String::from_utf8(prompt).unwrap();
+        assert_eq!(
+            shown.contains("Type `yes`"),
+            asked,
+            "{description}: {shown:?}"
+        );
     }
 }
