@@ -31,7 +31,9 @@ clamp:
 - Truncates each bullet at 200 characters on a UTF-8 boundary, with `…`.
 - Drops empty bullets.
 - Strips leading `-`/`*`/`#` so markdown can't nest.
-- Rewrites links to plain text, since the condensed text is posted to a forge:
+- Rewrites links to plain text, since the condensed text is posted to a forge. The order
+  matters: inline links are rewritten first, then bare URLs are wrapped, because rewriting
+  `[http://evil](https://x)` produces a new bare URL.
   - inline links and images (`[text](https://…)`, `![alt](https://…)`) become their
     text;
   - GFM autolinks (`<https://…>`) and bare `http(s)://` URLs are wrapped in a code span,
@@ -51,10 +53,14 @@ If nothing survives the clamp, condense counts as failed
 prefers the heavy tier, so condense uses the strong model and not the local one used for
 digest summaries. In the graph, the `condense` node's `provider` param overrides this.
 
-**One function, two callers.** `agent_review::condense(provider, full_markdown) ->
-Result<Vec<String>>` is called by:
+**One function, two callers.** `agent_review::condense(provider, full_markdown, params:
+CondenseParams) -> Result<Vec<String>>`. `CondenseParams { max_bullets, max_line_chars }`
+defaults to 9 and 200, and is clamped to 1–9 and 40–200. The JSON schema's `maxItems` and
+`maxLength`, and the clamp below, are generated from those params, so a graph's
+`max_bullets: 5` is honoured rather than ignored. The function is called by:
 
-- `EngineDrafter::draft` on the single-session path (increment 2), after `render_draft`
+- `EngineDrafter::draft` on the single-session path (increment 2), with
+  `CondenseParams::default()`, after `render_draft`
   (`crates/agent-runtime/src/agent.rs:569`) and before `record_draft` (`:600`);
 - the graph's `condense` node (increment 4).
 
@@ -65,7 +71,11 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
 
 - **Record.** `ReviewDraftRecord` (`crates/agent-core/src/lib.rs:6284`) gains
   `#[serde(default)] pub condensed: String`. It holds the bullets joined as `- …\n` lines,
-  capped at 4 KiB. Status rows (supersede, skip, post) clone the record, so the field carries
+  capped at 4 KiB. The cap is in bytes and the bullet limit is in characters, so 9 CJK
+  bullets can exceed it. When that happens, the join keeps whole bullets only (never
+  cutting mid-bullet), dropping from the end, which is the least important (must-fix
+  comes first), and appends a `- …` marker line. Row:
+  `boundary_multibyte_bullets_over_4kib_keep_whole_bullets`. Status rows (supersede, skip, post) clone the record, so the field carries
   over unchanged.
 - **ClickHouse.** In `nix/clickhouse/schema.sql`, next to the `requested_by`/`approved_by`
   precedent at `:224-225`:
@@ -133,7 +143,7 @@ to a default.
 |---|---|
 | `full` | The full body (today's behaviour) |
 | `condensed` | The condensed bullets. If they are empty, it falls back to `full` and logs `post_fallback=condensed_empty` |
-| `both` | If the condensed bullets are empty, it posts the full body alone and logs `post_fallback=condensed_empty`, as for `condensed`. Otherwise it posts the condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
+| `both` | The full body is model output, and a `</details` in it (any case) would close the collapse early. So on this path every `</details` in the body is escaped to `&lt;/details`, with an `adversarial_body_closes_details_early` row. If the condensed bullets are empty, it posts the full body alone and logs `post_fallback=condensed_empty`, as for `condensed`. Otherwise it posts the condensed bullets, then `<details><summary>Full review</summary>` + the full body + `</details>`. GitHub's comment limit is 65,536 characters, and the body is already capped at `MAX_DRAFT_BYTES` (64,000), so this can overflow. The full body inside `<details>` is truncated (on a UTF-8 boundary, at a line break where possible) with a "… truncated, see the draft" line, so the bullets and the closing tag always fit. The limit is a per-forge constant (`FORGE_COMMENT_MAX_CHARS`). Row: `boundary_both_at_comment_limit`. |
 
 Nothing is posted without a human Approve. That rule is unchanged.
 

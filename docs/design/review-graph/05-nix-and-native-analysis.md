@@ -44,15 +44,22 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          fetch, so changing the refspec alone isn't enough. The key may already be gone
          after an interrupted run, and `--unset` then exits 5, so exit 5 counts as
          success.
-      2. `git config --replace-all remote.origin.fetch '+refs/heads/*:refs/heads/*'`,
-         then `git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'`.
+      2. `git config --unset-all remote.origin.fetch` (exit 5 counts as success, as in
+         step 1), then two `git config --add remote.origin.fetch` calls, for
+         `'+refs/heads/*:refs/heads/*'` and `'+refs/tags/*:refs/tags/*'`. A rerun
+         therefore never leaves a duplicate refspec.
       3. Delete every ref outside `refs/heads/*`, `refs/tags/*` and the fleet's own
          `refs/fleet/pr/*` (those are pruned by the retention sweep below) with one
          batched `git update-ref --stdin`. `--prune` can't do
          this: it only prunes refs that match the configured refspec, so stale
          `refs/pull/*` refs would survive the refspec change.
       4. Remove `objects/pack/*.keep` and stale `tmp_pack_*` files, then run
-         `git repack -a -d` and `git prune --expire=now`.
+         `git repack -a -d` and `git prune --expire=now`. The prune is safe while
+         reviews are in flight: their heads are under `refs/fleet/pr/<n>`, their bases
+         under `refs/heads/*`, and `knowledge/` worktrees sit at a default-branch head.
+         Step 3 keeps all of those, so the prune only drops objects that nothing in
+         flight can reach. To be safe anyway, the migration takes the row's mirror lock,
+         the same one `fetch_pr` holds.
       5. Write a marker file. It is only a record for the operator, not the trigger.
          Every step is idempotent (absent-key `--unset`, `--replace-all`, deleting refs
          that are already gone, a repack), so a run killed between any two steps
@@ -135,7 +142,7 @@ the shellcheck collector only sees `.sh`/`.bash` files (`crates/agent-review/src
 This is a new `snippet` mode in `shellcheck.rs`. The existing collector's ban on inline
 `# shellcheck disable` comments carries over.
 
-**C/C++ suite** (`has_c`: `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, changed in the PR):
+**C/C++ suite** (`has_c`: `.c`, `.cc`, `.cpp`, `.cxx`, `.C`, `.h`, `.hh`, `.hpp`, `.hxx`, changed in the PR):
 
 | Tool | Mode |
 |---|---|
@@ -191,7 +198,10 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
   - `--option allow-unsafe-native-code-during-evaluation false`
   - `--option pure-eval true` where the attr path allows it
   - `-I nixpkgs=<worktree>` only, with `NIX_PATH` cleared
-  - `--option max-call-depth` plus `ulimit -v`, and a wall-clock deadline
+  - `--option max-call-depth` plus `ulimit -v`, and a wall-clock deadline. The
+    increment-7 spike confirms the option name on the pinned nix, since it differs across
+    nix versions and forks. If it is missing, `ulimit -v` and the deadline are the
+    bound.
 - **Attr selection.** Changed paths are mapped to attrs:
   - `pkgs/by-name/xx/<name>/` → `<name>`;
   - a `pkgs/top-level/all-packages.nix` hunk → its attr names.

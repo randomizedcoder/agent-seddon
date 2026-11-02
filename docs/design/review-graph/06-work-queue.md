@@ -74,9 +74,10 @@ lease_secs = 120              # a worker heartbeats every lease_secs / 3
 [review_fleet.queue.workers]  # per process
 fetch = 8
 ground = 4
-review = 16                   # unset: [review_fleet] max_total. Effective concurrency is
-                              # min(workers.review × max_parallel_steps, max_total): workers
-                              # never bypass SessionManager admission, they wait on it
+review = 16                   # an example override; unset = [review_fleet] max_total.
+                              # Effective concurrency is
+                              # min(workers.review × max_parallel_steps, max_total):
+                              # workers never bypass SessionManager admission
 finish = 4
 index = 1
 [review_fleet.queue.fairness]

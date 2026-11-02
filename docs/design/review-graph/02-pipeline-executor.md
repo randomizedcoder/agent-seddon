@@ -82,8 +82,11 @@ and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
 
 - `SessionManager::reserve(n) -> Option<SlotLease>` atomically takes `n` slots in the same
   CAS as `admit_review`, the `PoolMember::try_reserve` pattern from the pool TOCTOU fix.
-- The runner takes `n = ` the split's branch count (at most `max_parallel_steps`) **at the
-  split**, and each lens's `admit_review` spends one slot from the lease.
+- The runner takes `n = ` the split's branch count **at the split**, and each lens's
+  `admit_review` spends one slot from the lease. A document can have several splits, so
+  the leases are all drawn from one per-PR budget of `max_parallel_steps`. The sum held
+  across splits never exceeds it, and a second split whose reservation wouldn't fit waits
+  for the first join to settle. Row: `boundary_two_splits_share_one_budget`.
 - The lease is dropped (RAII) when the join **settles**, so `assemble` and `condense`
   (`tools = none`, no session) don't pin idle slots.
 - When `reserve` fails, the PR waits in the `review` stage queue
