@@ -89,9 +89,11 @@ and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one.
   count, drawn from the PR's budget of `max_parallel_steps`. If it doesn't fit, the split
   waits until enough slots come back.
 - **One slot per branch, returned when that branch settles.** A branch may be a chain of
-  readonly steps; the chain's steps run one after another on the branch's slot, checking
-  it out and back in, and the slot goes back to the PR budget (and to `SessionManager`)
-  as soon as the branch's last step settles, not when the join settles. So `assemble` and
+  readonly steps. The branch holds its slot **continuously**, in both the PR budget and
+  `SessionManager`, from its first step until its last step settles. A chain's next step
+  is admitted onto the slot the branch already holds, never re-acquired from the global
+  pool, so another PR can't take it between steps. The slot goes back as soon as the
+  branch's last step settles, not when the join settles. So `assemble` and
   `condense` (`tools = none`, no session) never hold a slot.
 - **Every `readonly` step is on a split's branch.** A lone readonly step anywhere else is
   rejected, with a hint to wrap it in a one-branch split. This is document-only
@@ -103,18 +105,29 @@ so a running branch waits on nothing but its own model calls and tools. Each of 
 bounded by `deadline_secs`. Every held slot is therefore returned in bounded time, and a
 waiting split always gets its slots eventually, whatever the graph's shape: sequential
 splits, sibling splits feeding one join, or independent split/join pairs converging
-further down. Waiting is serialization, never a stall. The only thing that could block for
+further down. Waiting is serialization, never a stall. Here a **branch** is the set of
+nodes on a path from its split to the first join that path reaches, and that join ends
+it. A node can't belong to two branches. A step whose outgoing edges reach two different
+joins is rejected (`negative_branch_feeds_two_joins_rejected`), so "its join" is always
+defined. The only thing that could block for
 ever is a split wider than the whole budget. **Per-row validation** (run in
 `FleetReviewCtxFactory`, not in `validate.rs`, because it needs the row) rejects a document
 whose widest split exceeds the row's `max_parallel_steps`. The cache key is (row id,
-document version, `max_parallel_steps`), so lowering the setting re-validates.
+document version, `max_parallel_steps`), so lowering the setting re-validates. In the
+common case of one setting per row, a document version compiles once.
 
 **Cost.** A split's lease is taken whole, so a split's slower branches keep their slots
 while faster ones have already returned theirs. Idle slots are bounded by one split's
 width. The upside is that no split ever starts with only some of its branches.
 
-**PR admission.** When the first split can't reserve because the global pool is full, the
-PR waits in the `review` stage queue ([06](06-work-queue.md)) rather than starting.
+**Waiting for slots.** A split that can't reserve waits **mid-graph**, after `ground`
+has run. The PR has already started, so it is the split that waits, and its wait counts
+against `graph_deadline_secs`. If the deadline passes while a split is still waiting (the
+global pool stayed saturated), the deadline row in *Deadlines, failures, fallbacks*
+applies as for in-flight steps: the waiting reservation is abandoned, nothing is held,
+and the budget rule decides between the single-session fallback and `failed: deadline`.
+The `review` stage queue in [06](06-work-queue.md) gates PR admission separately, by
+worker count, and doesn't reserve slots.
 
 **Rows.**
 
@@ -127,7 +140,10 @@ PR waits in the `review` stage queue ([06](06-work-queue.md)) rather than starti
 - `positive_independent_split_join_pairs_serialize` (the cross-join shape that deadlocked
   under a join-scoped lease)
 - `corner_two_prs_race_for_slots_one_waits`
-- `negative_reserve_fails_pr_waits_not_fallback`
+- `positive_chain_second_step_keeps_branch_slot` (another PR can't take the slot between
+  a chain's steps)
+- `corner_split_waits_mid_graph_then_runs`
+- `boundary_graph_deadline_while_split_waits_for_slots`
 
 `[review_fleet] max_concurrent` should be re-sized when a row opts in. The router's
 per-upstream capacity (`on_saturation`) still applies to each completion.

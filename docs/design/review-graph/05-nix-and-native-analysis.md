@@ -34,8 +34,17 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     upstream tag doesn't linger. PR heads are already fetched one at a time by `fetch_pr`.
     - **New mirrors** are made with `clone --bare` plus these two refspecs, not
       `clone --mirror`.
-    - **Existing mirrors** are migrated at a refresh that finds the mirror still in the old
-      shape. Detection checks the state that each step leaves behind, so a run killed
+    - **Existing mirrors** are migrated by an out-of-band **maintenance job**, not inside a
+      review's refresh. A repack of the 61 GB mirror can't finish in the 300 s
+      `PREP_TIMEOUT`, and a killed repack keeps no progress, so it would loop forever.
+      The job runs on the `index` worker pool ([06](06-work-queue.md)) with its own
+      deadline (`mirror_migration_deadline_secs`, default 7200) and the row's mirror
+      lock. Meanwhile reviews of that row keep using the mirror as it is: the base fetch
+      uses the full refspec from *Fix direction*, which works on either shape.
+      `corner_migration_repack_exceeds_prep_timeout_converges` checks that a
+      migration slower than `PREP_TIMEOUT` completes in the job and never inside a
+      refresh. A refresh that finds the mirror still in the old shape queues that job,
+      at most one per row. Detection checks the state that each step leaves behind, so a run killed
       after *any* step is seen again. The migration runs if any of these holds:
       - `remote.origin.mirror` is set (step 1 not done);
       - the configured fetch refspec set is not exactly the two healthy refspecs, compared
@@ -164,10 +173,10 @@ the shellcheck collector only sees `.sh`/`.bash` files (`crates/agent-review/src
 This is a new `snippet` mode in `shellcheck.rs`. The existing collector's ban on inline
 `# shellcheck disable` comments carries over.
 
-**C/C++ suite** (`has_c`: `.c`, `.cc`, `.cpp`, `.cxx`, `.C`, `.h`, `.hh`, `.hpp`, `.hxx`, changed in the
-PR). Matching is case-insensitive for every extension except the one ambiguous pair:
-`.C` is C++ and `.c` is C, as compilers treat them. So `.H`, `.CPP` and `.CXX` are
-matched too.:
+**C/C++ suite.** `has_c` is set when the PR changes a file ending in `.c`, `.cc`, `.cpp`,
+`.cxx`, `.C`, `.h`, `.hh`, `.hpp` or `.hxx`. Only `.c` and `.C` are matched case-sensitively
+(`.C` is C++, `.c` is C, as compilers treat them). Every other extension matches
+case-insensitively, so `.H`, `.CPP` and `.CXX` count too.
 
 | Tool | Mode |
 |---|---|
@@ -276,7 +285,16 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
   or deep `--strict` forcing. The spike measures store growth on an adversarial fixture.
   The collector then enforces `nix_eval_max_store_bytes` (default 256 MiB) by measuring
   `nix path-info -S` over the new `.drv` closure and failing the leg when it is over.
-  Those `.drv`s are unrooted, so they go at the next store GC. Row:
+  That check runs *after* the leg, so on its own it detects rather than prevents. The
+  preventive bounds are:
+  - the per-attr wall-clock deadline;
+  - `nix_eval_max_attrs`;
+  - `max-call-depth`, which limits how much a single evaluation can generate.
+
+  The accepted residual risk is what a hostile package can write within one deadline.
+  The recovery is that the `.drv`s are unrooted and go at the next store GC. The fleet
+  disk guard (`disk_min_free_pct`, [04](04-repo-knowledge.md)) pauses this collector
+  along with indexing when the disk is low. Row:
   `adversarial_drv_store_growth_capped`.
 
 **Output path.** The collector needs a new `ReviewFacts` slot, `nix_eval: Option<AnalysisReport>`

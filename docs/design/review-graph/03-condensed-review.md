@@ -183,6 +183,9 @@ For `post = both`:
   `<DETAILS>`, `<details/>` and (not escaped) `</detailsx>` variants. The same escape is
   applied to the joined condensed bullets, as defense in depth on top of the clamp's tag
   removal, so neither half of the comment can open or close the wrapper.
+- **Comments.** An unclosed `<!--` in the body would swallow the wrapper's closing
+  `</details>`. Every `<!--` is escaped to `&lt;!--` on this path as well. Row:
+  `adversarial_body_unclosed_html_comment`.
 - **Order.** Escape first, then truncate. The escape lengthens the text (`</details` →
   `&lt;/details`), so the budget is computed on the escaped body. The bullets, the
   `<details><summary>` line, the truncation marker line and the closing `</details>` all
