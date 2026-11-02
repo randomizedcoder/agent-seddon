@@ -45,7 +45,7 @@ pub struct ForgeHttp {
 /// One answered attempt: a fresh response, or a cached body for a `304 Not Modified`.
 enum Reply {
     Fresh(reqwest::Response),
-    Cached(serde_json::Value),
+    Cached(Arc<serde_json::Value>),
 }
 
 /// The error for a call refused by a held gate. It names the wait so a poll log says
@@ -165,6 +165,15 @@ impl ForgeHttp {
                 // can't take this branch again, so this runs at most twice.
                 let mut conditional = get;
                 loop {
+                    // A credential with a stable quota identity (a GitHub App
+                    // installation) is checked against its gate before the token is
+                    // resolved, so a held quota costs no mint at all.
+                    if let Some(identity) = self.token.quota_identity() {
+                        let quota = self.pacer.quota_for(&self.base, Some(&identity), "");
+                        if let Some(left) = self.pacer.blocked(&quota, Instant::now()) {
+                            return agent_retry::Attempt::Fail(held_off(left));
+                        }
+                    }
                     // An unresolvable credential (a failed mint) is not a forge answer to
                     // retry here; the minter retries its own call.
                     let (mut rb, quota) = match self.request(m.clone(), path).await {
@@ -172,6 +181,7 @@ impl ForgeHttp {
                         Err(e) => return agent_retry::Attempt::Fail(e),
                     };
                     // The forge asked this quota to slow down: send nothing until it said.
+                    // (Checked again here for a token-keyed quota, known only now.)
                     if let Some(left) = self.pacer.blocked(&quota, Instant::now()) {
                         return agent_retry::Attempt::Fail(held_off(left));
                     }
@@ -258,7 +268,8 @@ impl ForgeHttp {
         })
         .await?;
         let resp = match reply {
-            Reply::Cached(body) => return Ok(body),
+            // The cache keeps its copy; the caller gets its own.
+            Reply::Cached(body) => return Ok(Arc::unwrap_or_clone(body)),
             Reply::Fresh(r) => r,
         };
 
@@ -306,7 +317,8 @@ impl ForgeHttp {
         // truncated body is never kept: it would be served as if whole.
         if get && bytes.len() <= MAX_BODY_BYTES {
             if let Some(etag) = etag {
-                self.pacer.remember(&quota, path, &etag, &v, bytes.len());
+                self.pacer
+                    .remember(&quota, path, &etag, Arc::new(v.clone()), bytes.len());
             }
         }
         Ok(v)
@@ -846,7 +858,7 @@ mod tests {
         let (base, seen) = spawn_scripted_with(script, move |i, base| {
             if let (1, Some(tag)) = (i, replace_with) {
                 let q = hook.quota_for(base, None, "tok");
-                hook.remember(&q, "pulls", tag, &serde_json::json!(["other"]), 9);
+                hook.remember(&q, "pulls", tag, Arc::new(serde_json::json!(["other"])), 9);
             }
         });
         let http = paced(base, "tok", 0, pacer);
@@ -950,6 +962,64 @@ mod tests {
         let b = second.map(|s| ident(&base, &pacer, s));
         assert!(a.get_json("x").await.is_err(), "{desc}: the 429");
         let _ = b.as_ref().unwrap_or(&a).get_json("x").await;
+        assert_eq!(seen.lock().unwrap().len(), sent, "{desc}: requests sent");
+    }
+
+    /// A held gate is checked before the credential is resolved when the quota has a
+    /// stable identity, so a held installation costs no token mint; a token-keyed
+    /// quota has to read its token to know which gate applies.
+    #[rstest]
+    #[case::positive_identity_held_gate_mints_nothing(
+        "a held installation is turned away before any token read",
+        Some("t\nghapp:1"),
+        true,
+        Err("holding off"),
+        0
+    )]
+    #[case::negative_static_token_reads_to_find_its_gate(
+        "a static token is read once, then the gate turns the call away",
+        None,
+        true,
+        Err("holding off"),
+        1
+    )]
+    #[case::corner_identity_open_gate_reads_once(
+        "an open gate reads the token once and sends",
+        Some("t\nghapp:1"), false, Ok(()), 1
+    )]
+    #[tokio::test]
+    async fn gate_before_mint_cases(
+        #[case] desc: &str,
+        #[case] identity: Option<&'static str>,
+        #[case] held: bool,
+        #[case] want: std::result::Result<(), &str>,
+        #[case] reads: usize,
+    ) {
+        let (base, seen) = spawn_scripted(vec![(200, vec![], "[]")]);
+        let pacer = Arc::new(Pacer::new());
+        let src = Arc::new(IdentSource {
+            reads: Default::default(),
+            token: "ghs_x",
+            rotate: false,
+            identity,
+        });
+        if held {
+            let q = pacer.quota_for(&base, identity, "ghs_x");
+            pacer.hold(&q, Duration::from_secs(60), Instant::now());
+        }
+        let http = http_with(base, src.clone()).with_pacer(pacer);
+        let got = http.get_json("x").await;
+        match (&got, want) {
+            (Ok(_), Ok(())) => {}
+            (Err(e), Err(frag)) => assert!(e.to_string().contains(frag), "{desc}: {e}"),
+            _ => panic!("{desc}: got {got:?}, want {want:?}"),
+        }
+        assert_eq!(
+            src.reads.load(std::sync::atomic::Ordering::SeqCst),
+            reads,
+            "{desc}: token reads"
+        );
+        let sent = usize::from(want.is_ok());
         assert_eq!(seen.lock().unwrap().len(), sent, "{desc}: requests sent");
     }
 

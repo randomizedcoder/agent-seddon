@@ -50,12 +50,18 @@ pub const DEFAULT_LIMITED_WAIT: Duration = Duration::from_secs(60);
 /// Most quotas with a live gate held at once. Expired gates are pruned first; past this,
 /// the gate that expires soonest is dropped.
 pub const MAX_GATES: usize = 1024;
-/// Most cached `ETag` bodies held at once (the least recently stored is evicted).
-pub const MAX_CACHED: usize = 32;
+/// Most cached `ETag` bodies one quota (one credential at one forge) holds; past it
+/// that quota's least recently used entry is evicted. Sized above a fleet's polled
+/// paths per installation, so a whole poll tick stays cached between ticks.
+pub const MAX_CACHED_PER_QUOTA: usize = 64;
+/// Most cached `ETag` bodies held across every quota.
+pub const MAX_CACHED: usize = 1024;
 /// Largest response body (wire bytes) cached for a conditional request; a bigger one is
-/// not cached. With [`MAX_CACHED`] this bounds the cached wire bytes at 64 MiB; the
-/// parsed values can take a small multiple of that on the heap.
+/// not cached.
 pub const MAX_CACHED_BYTES: usize = 2 * 1024 * 1024;
+/// Most wire bytes cached across every quota. This bounds the bodies' *wire* size;
+/// the parsed values can take a small multiple of it on the heap.
+pub const MAX_CACHED_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// Longest `ETag` value kept and sent back.
 pub const MAX_ETAG_LEN: usize = 256;
 
@@ -105,15 +111,18 @@ pub fn clamp_wait(wait: Duration) -> Duration {
 }
 
 /// How long to hold off after a response with status `code`, or `None` when the forge
-/// did not ask us to slow down. A rate-limited answer is a 429, a 403 carrying
-/// `Retry-After` or a spent quota, or a 5xx carrying `Retry-After`. Its wait is
+/// did not ask us to slow down. A rate-limited answer is a 429, a 403 carrying a
+/// readable `Retry-After` or a spent quota, or a 5xx carrying `Retry-After`. Its wait is
 /// `Retry-After` when readable, else the reset time of a spent quota, else
 /// [`DEFAULT_LIMITED_WAIT`], always clamped by [`clamp_wait`]. A plain 403 (a
 /// permission refusal) and a 5xx without a hint are not rate limits.
 pub fn limited_wait(code: u16, sig: &Signals<'_>, now: SystemTime) -> Option<Duration> {
     let limited = match code {
         429 => true,
-        403 => sig.retry_after.is_some() || sig.spent(),
+        // A 403 is a limit only when its hint parses or the quota is spent: a proxy
+        // that decorates a real permission refusal with a junk `Retry-After` must not
+        // gate a healthy credential.
+        403 => sig.retry_after_wait(now).is_some() || sig.spent(),
         500..=599 => sig.retry_after.is_some(),
         _ => false,
     };
@@ -179,14 +188,94 @@ pub struct Quota {
 
 struct Cached {
     etag: String,
-    body: serde_json::Value,
+    // Shared, so storing and serving a body are a pointer copy under the lock.
+    body: Arc<serde_json::Value>,
+    size: usize,
     stamp: u64,
 }
 
-#[derive(Default)]
+/// How much the cache holds: per quota, in all, and in wire bytes.
+#[derive(Clone, Copy)]
+struct Limits {
+    per_quota: usize,
+    entries: usize,
+    bytes: usize,
+}
+
+const LIMITS: Limits = Limits {
+    per_quota: MAX_CACHED_PER_QUOTA,
+    entries: MAX_CACHED,
+    bytes: MAX_CACHED_TOTAL_BYTES,
+};
+
 struct Cache {
     entries: HashMap<(Quota, String), Cached>,
     clock: u64,
+    bytes: usize,
+    limits: Limits,
+}
+
+impl Cache {
+    fn new(limits: Limits) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            bytes: 0,
+            limits,
+        }
+    }
+
+    fn remove(&mut self, key: &(Quota, String)) {
+        if let Some(gone) = self.entries.remove(key) {
+            self.bytes -= gone.size;
+        }
+    }
+
+    /// Evict the least recently used entry among those `pick` selects.
+    fn evict_lru(&mut self, pick: impl Fn(&Quota) -> bool) {
+        if let Some(oldest) = self
+            .entries
+            .iter()
+            .filter(|((q, _), _)| pick(q))
+            .min_by_key(|(_, c)| c.stamp)
+            .map(|(k, _)| k.clone())
+        {
+            self.remove(&oldest);
+        }
+    }
+
+    /// The quota holding the most entries (or, `by_bytes`, the most bytes): under
+    /// global pressure the heaviest user gives up its own entries first, so a busy
+    /// quota can't empty another's.
+    fn heaviest(&self, by_bytes: bool) -> Option<Quota> {
+        let mut load: HashMap<&Quota, usize> = HashMap::new();
+        for ((q, _), c) in &self.entries {
+            *load.entry(q).or_default() += if by_bytes { c.size } else { 1 };
+        }
+        load.into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(q, _)| q.clone())
+    }
+
+    /// Make room for a new entry of `size` bytes on `quota`.
+    fn make_room(&mut self, quota: &Quota, size: usize) {
+        let mine = |c: &Cache| c.entries.keys().filter(|(q, _)| q == quota).count();
+        while !self.entries.is_empty() && mine(self) >= self.limits.per_quota {
+            self.evict_lru(|q| q == quota);
+        }
+        while !self.entries.is_empty() && self.entries.len() >= self.limits.entries {
+            let Some(heavy) = self.heaviest(false) else {
+                break;
+            };
+            self.evict_lru(|q| *q == heavy);
+        }
+        while !self.entries.is_empty() && self.bytes + size > self.limits.bytes {
+            let Some(heavy) = self.heaviest(true) else {
+                break;
+            };
+            self.evict_lru(|q| *q == heavy);
+        }
+    }
 }
 
 /// Rate-limit gates and conditional-request cache, shared by every [`ForgeHttp`] in the
@@ -208,10 +297,14 @@ impl Default for Pacer {
 
 impl Pacer {
     pub fn new() -> Self {
+        Self::with_limits(LIMITS)
+    }
+
+    fn with_limits(limits: Limits) -> Self {
         Self {
             keys: RandomState::new(),
             gates: Mutex::new(HashMap::new()),
-            cache: Mutex::new(Cache::default()),
+            cache: Mutex::new(Cache::new(limits)),
         }
     }
 
@@ -289,9 +382,14 @@ impl Pacer {
     }
 
     /// The cached body for a GET of `path` on `quota`, if its entry still carries
-    /// `etag` (the tag the `304` answered). Only read on a `304`, so a changed
-    /// resource never pays for a copy of the old body.
-    pub fn cached_body(&self, quota: &Quota, path: &str, etag: &str) -> Option<serde_json::Value> {
+    /// `etag` (the tag the `304` answered). Only read on a `304`; the body is shared,
+    /// so this is a pointer copy under the lock.
+    pub fn cached_body(
+        &self,
+        quota: &Quota,
+        path: &str,
+        etag: &str,
+    ) -> Option<Arc<serde_json::Value>> {
         let cache = self
             .cache
             .lock()
@@ -300,19 +398,21 @@ impl Pacer {
             .entries
             .get(&(quota.clone(), path.to_string()))
             .filter(|c| c.etag == etag)
-            .map(|c| c.body.clone())
+            .map(|c| Arc::clone(&c.body))
     }
 
     /// Keep `body` (whose wire size was `size` bytes) as the answer to a GET of `path`
     /// on `quota`, tagged `etag`. An unusable `etag` ([`usable_etag`]) or a body over
     /// [`MAX_CACHED_BYTES`] is not cached, and drops any older entry for that path.
-    /// Past [`MAX_CACHED`] entries the least recently used is evicted.
+    /// Past [`MAX_CACHED_PER_QUOTA`] entries this quota's least recently used is
+    /// evicted; past [`MAX_CACHED`] entries or [`MAX_CACHED_TOTAL_BYTES`] the heaviest
+    /// quota's least recently used is.
     pub fn remember(
         &self,
         quota: &Quota,
         path: &str,
         etag: &str,
-        body: &serde_json::Value,
+        body: Arc<serde_json::Value>,
         size: usize,
     ) {
         let key = (quota.clone(), path.to_string());
@@ -320,27 +420,20 @@ impl Pacer {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.remove(&key);
         if !usable_etag(etag) || size > MAX_CACHED_BYTES {
-            cache.entries.remove(&key);
             return;
         }
-        if !cache.entries.contains_key(&key) && cache.entries.len() >= MAX_CACHED {
-            if let Some(oldest) = cache
-                .entries
-                .iter()
-                .min_by_key(|(_, c)| c.stamp)
-                .map(|(k, _)| k.clone())
-            {
-                cache.entries.remove(&oldest);
-            }
-        }
+        cache.make_room(quota, size);
         cache.clock += 1;
         let stamp = cache.clock;
+        cache.bytes += size;
         cache.entries.insert(
             key,
             Cached {
                 etag: etag.to_string(),
-                body: body.clone(),
+                body,
+                size,
                 stamp,
             },
         );
@@ -457,6 +550,22 @@ mod tests {
         Some("4000"),
         None,
         None
+    )]
+    #[case::adversarial_403_junk_hint_not_a_limit(
+        "a 403 whose Retry-After doesn't parse, with quota left, is a refusal, not a limit",
+        403,
+        Some("soon-ish"),
+        Some("4000"),
+        None,
+        None
+    )]
+    #[case::corner_403_junk_hint_spent_is_a_limit(
+        "a junk Retry-After on a spent quota still waits for the reset",
+        403,
+        Some("soon-ish"),
+        Some("0"),
+        Some(reset_in(30)),
+        secs(30)
     )]
     #[case::negative_503_no_hint(
         "a 503 without a hint is a transient fault, not a limit",
@@ -866,7 +975,7 @@ mod tests {
             &p.quota(base, "tok-a"),
             "repos/o/r/pulls",
             etag,
-            &body,
+            Arc::new(body.clone()),
             size,
         );
         let q = p.quota(base, reader);
@@ -874,7 +983,7 @@ mod tests {
         assert_eq!(got.is_some(), hit, "{desc}");
         if let Some(e) = got {
             assert_eq!(e, etag, "{desc}");
-            assert_eq!(p.cached_body(&q, path, &e), Some(body), "{desc}");
+            assert_eq!(p.cached_body(&q, path, &e), Some(Arc::new(body)), "{desc}");
         }
     }
 
@@ -884,13 +993,13 @@ mod tests {
     fn corner_unusable_etag_drops_the_old_entry() {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
-        p.remember(&q, "x", "", &serde_json::json!(2), 1);
+        p.remember(&q, "x", "\"e1\"", Arc::new(serde_json::json!(1)), 1);
+        p.remember(&q, "x", "", Arc::new(serde_json::json!(2)), 1);
         assert_eq!(p.cached_etag(&q, "x"), None);
     }
 
-    /// Past MAX_CACHED entries the least recently used is evicted: a path read since
-    /// it was stored outlives one-off paths stored after it.
+    /// Past MAX_CACHED_PER_QUOTA entries the quota's least recently used is evicted: a
+    /// path read since it was stored outlives one-off paths stored after it.
     #[rstest]
     #[case::positive_untouched_oldest_goes(
         "with no reads, the first stored is the one evicted",
@@ -909,15 +1018,21 @@ mod tests {
     ) {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        for i in 0..MAX_CACHED {
-            p.remember(&q, &format!("p{i}"), "\"e\"", &serde_json::json!(i), 1);
+        for i in 0..MAX_CACHED_PER_QUOTA {
+            p.remember(
+                &q,
+                &format!("p{i}"),
+                "\"e\"",
+                Arc::new(serde_json::json!(i)),
+                1,
+            );
         }
         if let Some(path) = read {
             assert!(p.cached_etag(&q, path).is_some(), "{desc}");
         }
-        let newest = format!("p{MAX_CACHED}");
-        p.remember(&q, &newest, "\"e\"", &serde_json::json!(0), 1);
-        assert_eq!(p.cached_len(), MAX_CACHED, "{desc}");
+        let newest = format!("p{MAX_CACHED_PER_QUOTA}");
+        p.remember(&q, &newest, "\"e\"", Arc::new(serde_json::json!(0)), 1);
+        assert_eq!(p.cached_len(), MAX_CACHED_PER_QUOTA, "{desc}");
         assert_eq!(p.cached_etag(&q, evicted), None, "{desc}: {evicted} went");
         assert!(
             p.cached_etag(&q, &newest).is_some(),
@@ -936,7 +1051,102 @@ mod tests {
     fn cached_body_matches_the_tag(#[case] desc: &str, #[case] sent: &str, #[case] hit: bool) {
         let p = Pacer::new();
         let q = p.quota("b", "t");
-        p.remember(&q, "x", "\"e1\"", &serde_json::json!(1), 1);
+        p.remember(&q, "x", "\"e1\"", Arc::new(serde_json::json!(1)), 1);
         assert_eq!(p.cached_body(&q, "x", sent).is_some(), hit, "{desc}");
+    }
+
+    /// One step of a cache-scale scenario: store `paths` paths on quota `who` (each of
+    /// `size` wire bytes), or check how many of them are still cached.
+    #[derive(Clone, Copy)]
+    enum Step {
+        Store {
+            who: &'static str,
+            paths: usize,
+            size: usize,
+        },
+        Cached {
+            who: &'static str,
+            paths: usize,
+            want: usize,
+        },
+    }
+
+    /// The cache's bounds act per quota first: a fleet polling many paths on one
+    /// installation keeps them all between ticks, and a busy quota pays for its own
+    /// overflow rather than evicting another's entries.
+    #[rstest]
+    #[case::positive_many_paths_one_quota_all_hit(
+        "50 polled paths on one installation are all cached for the next tick",
+        LIMITS,
+        vec![Step::Store { who: "a", paths: 50, size: 10 }, Step::Cached { who: "a", paths: 50, want: 50 }]
+    )]
+    #[case::corner_per_quota_cap_evicts_own_lru(
+        "past its own cap a quota evicts its own oldest, not another quota's",
+        Limits { per_quota: 4, entries: 100, bytes: 1 << 20 },
+        vec![
+            Step::Store { who: "b", paths: 2, size: 10 },
+            Step::Store { who: "a", paths: 6, size: 10 },
+            Step::Cached { who: "a", paths: 6, want: 4 },
+            Step::Cached { who: "b", paths: 2, want: 2 },
+        ]
+    )]
+    #[case::adversarial_busy_quota_spares_others(
+        "a quota flooding the global entry cap evicts its own entries, never another's",
+        Limits { per_quota: 50, entries: 10, bytes: 1 << 20 },
+        vec![
+            Step::Store { who: "b", paths: 2, size: 10 },
+            Step::Store { who: "a", paths: 30, size: 10 },
+            Step::Cached { who: "b", paths: 2, want: 2 },
+            Step::Cached { who: "a", paths: 30, want: 8 },
+        ]
+    )]
+    #[case::boundary_byte_budget_evicts(
+        "the global wire-byte budget evicts the heaviest quota's oldest to fit",
+        Limits { per_quota: 50, entries: 50, bytes: 100 },
+        vec![
+            Step::Store { who: "b", paths: 1, size: 30 },
+            Step::Store { who: "a", paths: 3, size: 30 },
+            Step::Cached { who: "b", paths: 1, want: 1 },
+            Step::Cached { who: "a", paths: 3, want: 2 },
+        ]
+    )]
+    #[case::boundary_byte_budget_exact_fit(
+        "bodies that exactly fill the byte budget all stay",
+        Limits { per_quota: 50, entries: 50, bytes: 100 },
+        vec![Step::Store { who: "a", paths: 4, size: 25 }, Step::Cached { who: "a", paths: 4, want: 4 }]
+    )]
+    fn cache_scale_cases(#[case] desc: &str, #[case] limits: Limits, #[case] steps: Vec<Step>) {
+        let p = Pacer::with_limits(limits);
+        for step in steps {
+            match step {
+                Step::Store { who, paths, size } => {
+                    let q = p.quota("b", who);
+                    for i in 0..paths {
+                        p.remember(
+                            &q,
+                            &format!("p{i}"),
+                            "\"e\"",
+                            Arc::new(serde_json::json!(i)),
+                            size,
+                        );
+                    }
+                }
+                Step::Cached { who, paths, want } => {
+                    let q = p.quota("b", who);
+                    let got = (0..paths)
+                        .filter(|i| p.cached_etag(&q, &format!("p{i}")).is_some())
+                        .count();
+                    assert_eq!(got, want, "{desc}: quota {who}");
+                }
+            }
+        }
+        let cache = p.cache.lock().unwrap();
+        assert!(cache.entries.len() <= limits.entries, "{desc}: entry cap");
+        assert!(cache.bytes <= limits.bytes, "{desc}: byte budget");
+        assert_eq!(
+            cache.bytes,
+            cache.entries.values().map(|c| c.size).sum::<usize>(),
+            "{desc}: byte count tracks the entries"
+        );
     }
 }

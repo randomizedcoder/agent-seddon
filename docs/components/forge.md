@@ -94,9 +94,10 @@ Every forge HTTP call goes through `agent-retry` and a process-wide **pacer**
 ([`pace.rs`](../../crates/agent-forge/src/pace.rs)), so the fleet backs off when a forge
 asks it to:
 
-- **What counts as "slow down".** 429 always; **403** when it carries `Retry-After` or
-  `X-RateLimit-Remaining: 0` (GitHub's secondary and primary limits, not a permission
-  failure); a 5xx that carries `Retry-After`. The bare `RateLimit-*` names are read too.
+- **What counts as "slow down".** 429 always; **403** when it carries a `Retry-After`
+  that parses or `X-RateLimit-Remaining: 0` (GitHub's secondary and primary limits, not a
+  permission failure; a junk `Retry-After` on a 403 with quota left is a refusal, so a
+  decorating proxy can't gate a healthy credential); a 5xx that carries `Retry-After`. The bare `RateLimit-*` names are read too.
 - **How long.** `Retry-After` (delta-seconds or an HTTP-date) wins; else the
   `X-RateLimit-Reset` epoch time when the quota is spent; else 60 s (GitHub's advice for a
   limit with no hint). The wait is clamped to **[1 s, 15 min]**, so a hostile or broken
@@ -117,13 +118,18 @@ asks it to:
   names it instead (`TokenSource::quota_identity`): a GitHub App source names its tenant
   and `ghapp:<installation>` ref, since GitHub limits the installation while its token
   rotates hourly, so a held gate and the cached ETags survive the rotation. That identity
-  is hashed the same way, apart from tokens. The gate map holds at most 1024 quotas.
+  (the tenant length-prefixed, so no two pairs spell the same one) is hashed the same way,
+  apart from tokens, and is checked against its gate **before** the token is resolved, so
+  a held installation costs no mint. The gate map holds at most 1024 quotas.
 - **Conditional GETs.** A GET whose earlier answer carried an `ETag` is re-sent with
   `If-None-Match`; a `304` (which GitHub does not count against the quota) is answered from
-  the cached body, which is only copied out on a `304`. The cache is per quota and URL, at
-  most 32 entries of at most 2 MiB on the wire (least recently used evicted first; the
-  parsed bodies can take a small multiple of that on the heap), and an ETag over 256 bytes
-  or with non-printable bytes is not stored. A `304` to a GET sent with an ETag whose
+  the cached body (shared, so storing and serving it are a pointer copy under the lock).
+  The cache is keyed per quota and URL: at most 64 entries per quota, enough for a whole
+  poll tick of one installation (that quota's least recently used is evicted first); at
+  most 1024 entries and 64 MiB of wire bytes in all, where the heaviest quota gives up
+  its own oldest entry, so a busy tenant can't evict another's. A body over 2 MiB on the
+  wire is not cached; the parsed bodies can take a small multiple of the wire bytes on
+  the heap. An ETag over 256 bytes or with non-printable bytes is not stored. A `304` to a GET sent with an ETag whose
   entry went meanwhile (evicted or replaced) is re-sent once without `If-None-Match`; a
   `304` to a GET sent without one is an error, not an empty answer.
 

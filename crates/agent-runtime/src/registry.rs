@@ -1653,9 +1653,15 @@ impl agent_core::TokenSource for MintedToken {
     }
 
     /// GitHub limits an installation, not each hourly token: the tenant and its
-    /// `ghapp:<installation>` ref name the quota across rotations.
+    /// `ghapp:<installation>` ref name the quota across rotations. The tenant is
+    /// length-prefixed, so no pair of strings can spell another pair's identity.
     fn quota_identity(&self) -> Option<String> {
-        Some(format!("{}\n{}", self.tenant, self.token_ref))
+        Some(format!(
+            "{}:{}{}",
+            self.tenant.len(),
+            self.tenant,
+            self.token_ref
+        ))
     }
 }
 
@@ -2316,24 +2322,46 @@ mod tests {
     }
 
     /// The App-token source names its quota by tenant + installation ref (stable across
-    /// the hourly rotation, distinct per installation and tenant); a plain secret has
-    /// no identity, so its token stays the quota.
+    /// the hourly rotation, distinct per installation and tenant, and never spelled by
+    /// another pair); a plain secret has no identity, so its token stays the quota.
     #[cfg(feature = "fleet")]
     #[rstest]
-    #[case::positive_installation_named("acme", "ghapp:42", Some("acme\nghapp:42"))]
-    #[case::negative_other_installation("acme", "ghapp:43", Some("acme\nghapp:43"))]
-    #[case::adversarial_other_tenant_same_installation("evil", "ghapp:42", Some("evil\nghapp:42"))]
+    #[case::positive_same_installation_same_quota(
+        "the same tenant and installation are one quota",
+        ("acme", "ghapp:42"), ("acme", "ghapp:42"), true
+    )]
+    #[case::negative_other_installation(
+        "another installation is another quota",
+        ("acme", "ghapp:42"), ("acme", "ghapp:43"), false
+    )]
+    #[case::adversarial_other_tenant_same_installation(
+        "another tenant naming the same installation is another quota",
+        ("acme", "ghapp:42"), ("evil", "ghapp:42"), false
+    )]
+    #[case::adversarial_separator_collision(
+        "a newline moved between the halves doesn't collide",
+        ("a\nb", "c"), ("a", "b\nc"), false
+    )]
+    #[case::corner_boundary_shift(
+        "a character moved across the boundary doesn't collide",
+        ("ab", "c"), ("a", "bc"), false
+    )]
     fn minted_token_quota_identity(
-        #[case] tenant: &str,
-        #[case] token_ref: &str,
-        #[case] want: Option<&str>,
+        #[case] desc: &str,
+        #[case] a: (&str, &str),
+        #[case] b: (&str, &str),
+        #[case] same: bool,
     ) {
         use agent_core::TokenSource;
-        let src = MintedToken {
-            tenant: tenant.to_string(),
-            token_ref: token_ref.to_string(),
+        let id = |(tenant, token_ref): (&str, &str)| {
+            MintedToken {
+                tenant: tenant.to_string(),
+                token_ref: token_ref.to_string(),
+            }
+            .quota_identity()
+            .expect("an App token has an identity")
         };
-        assert_eq!(src.quota_identity().as_deref(), want);
+        assert_eq!(id(a) == id(b), same, "{desc}: {:?} vs {:?}", id(a), id(b));
         assert_eq!(
             agent_core::Secret::new("ghs_x").quota_identity(),
             None,

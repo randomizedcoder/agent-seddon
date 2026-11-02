@@ -120,7 +120,12 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   (`TokenSource::quota_identity`), so the hourly token rotation keeps the held gate and
   the ETag cache; a `304` whose cache entry went while the request was out is re-sent
   once unconditionally instead of failing the call; the cache's 64 MiB bound is stated as
-  wire bytes. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
+  wire bytes. Review round 4: the ETag cache is bounded per quota (64 entries) and in all
+  (1024 entries, 64 MiB wire), the heaviest quota evicting its own oldest, so a fleet
+  with more than 32 polled paths still hits and one tenant can't empty another's; cached
+  bodies are shared (`Arc`); an identity-keyed quota's gate is checked before the token
+  mint; the identity length-prefixes the tenant (no separator collisions); a 403 is a
+  limit only when its `Retry-After` parses or the quota is spent. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
   names it) so a webhook-first trigger gets the early `UpToDate` too; today it always
   fetches, which is only conservative.
 
