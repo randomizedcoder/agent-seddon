@@ -443,12 +443,7 @@ impl CliBackend {
             Error::Repo("mirror bootstrap needs a remote (set [git] remote or an origin)".into())
         })?;
         let state = mirror_state(&self.mirror);
-        if state == MirrorState::Absent && !replaceable_non_git(&self.mirror) {
-            return Err(Error::Repo(format!(
-                "the mirror path {} holds something that is not a git mirror; not replacing it",
-                self.mirror.display()
-            )));
-        }
+        self.refuse_foreign_mirror_path()?;
         let parent = self
             .mirror
             .parent()
@@ -488,6 +483,14 @@ impl CliBackend {
                 .await?;
         }
 
+        // Checked again: the clone can take hours, and something may have been put at
+        // the mirror path meanwhile.
+        if let Err(e) = self.refuse_foreign_mirror_path() {
+            if let Err(re) = remove_tree(staging).await {
+                tracing::warn!(error = %re, "git: removing a refused clone's staging dir failed");
+            }
+            return Err(e);
+        }
         remove_tree(stale.clone()).await?;
         if self.mirror.exists() {
             std::fs::rename(&self.mirror, &stale)
@@ -496,6 +499,18 @@ impl CliBackend {
         std::fs::rename(&staging, &self.mirror)
             .map_err(|e| Error::Repo(format!("moving the new mirror into place failed: {e}")))?;
         remove_tree(stale).await
+    }
+
+    /// Refuse to replace a mirror path that holds neither a git dir nor nothing (e.g. a
+    /// checkout configured as the mirror).
+    fn refuse_foreign_mirror_path(&self) -> Result<()> {
+        if mirror_state(&self.mirror) == MirrorState::Absent && !replaceable_non_git(&self.mirror) {
+            return Err(Error::Repo(format!(
+                "the mirror path {} holds something that is not a git mirror; not replacing it",
+                self.mirror.display()
+            )));
+        }
+        Ok(())
     }
 
     /// Make sure the mirror exists before a fetch. Without a remote there is nothing

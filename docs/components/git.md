@@ -170,14 +170,17 @@ process dies.
 (`fetch --prune --no-tags <remote> MIRROR_REFSPECS`), so a mirror made by older code
 (`clone --mirror`, config `+refs/*:refs/*`) never pulls `refs/pull/*` either. Without
 a mirror it is the checkout's own `fetch --prune --all`.
-`with_background_mirror_clone()` (set by the review fleet) clones in a background
-task, and `fetch` / `fetch_pr` / `fetch_branch` fail fast with "being cloned" until
-the clone is done. The fleet's review prep is bounded far below a large clone, and a
-clone cancelled at that bound would start over every time. Without it (the CLI), the
-clone runs inline inside the fetch that needed it, under the 600 s guard, so an
-interactive caller waits no longer than before; a failed clone is logged and the
-fetch goes on without the mirror. The `auto_fetch_secs` bootstrap is already a
-background task and gets the 2-hour deadline.
+`with_background_mirror_clone()` clones in a background task (2-hour deadline), and
+`fetch` / `fetch_pr` / `fetch_branch` fail fast with "being cloned" until the clone is
+done; reads and worktrees use the checkout meanwhile. It is set for every per-repo fleet
+backend, and by `build_repo` whenever the mirror is managed off the request path:
+`auto_fetch_secs > 0` (the `spawn_fetch` upkeep) or a `[review_fleet] root` (a
+single-repo fleet). A large clone can't finish in 600 s, and one killed there would
+start over from nothing on every attempt. Otherwise (a plain CLI with no auto-fetch)
+the clone runs inline inside the fetch that needed it, under the 600 s guard, so an
+interactive caller waits no longer than before; a failed clone is logged and the fetch
+goes on without the mirror. The swap re-checks the mirror path just before the
+rename, so nothing put there during a long clone is replaced unless it is a git dir.
 
 ### Authenticated (private) clone/fetch
 

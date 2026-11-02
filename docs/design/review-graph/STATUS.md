@@ -68,3 +68,15 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - Fixture tests: a leftover `.partial` is cleared by the next clone; an inline fetch clones.
   - The rest of round 2's lower-priority items (off-path refresh, `.stale` recovery,
     `safe_branch` parity) → 1c.
+
+  Fleet review round 3 fixes:
+  - `build_repo` sets the background clone when `auto_fetch_secs > 0` or a `[review_fleet] root`
+    is set, so the `spawn_fetch` bootstrap and a single-repo fleet get the 2 h background clone
+    rather than a 600 s inline one that would restart forever (round 2's doc claimed this
+    already held; it didn't). Table test `mirror_clone_mode_cases`.
+  - The swap re-checks the mirror path before the rename (a long clone's TOCTOU).
+  - `repo-change`'s only partial is a failed diff; the invariant is commented where it is
+    returned.
+  - Deferred to 1c: fail closed on a `.clone-lock` that isn't a regular file; a stronger
+    reftable readiness signal (an empty `reftable/` doesn't separate a killed clone, since
+    `git init` writes a table).
