@@ -20,9 +20,10 @@ The orchestrator picks the entry point from the roster row:
   A bad document never blocks reviews.
 
 The drafter is unchanged except that `DraftRequest` (`crates/agent-core/src/lib.rs:6421`)
-gains `condensed: Option<Vec<String>>`. When it is `None`, `EngineDrafter::draft` runs the
-shared `agent_review::condense()` itself (increment 2). The single-session path therefore
-gets a condensed review too.
+gains `condensed: Option<Vec<String>>`. `None` means "not computed", so
+`EngineDrafter::draft` runs the shared `agent_review::condense()` itself (increment 2), and
+the single-session path gets a condensed review too. `Some(vec![])` means "computed and
+empty or failed", so the drafter does not retry and stores `condensed = ""`.
 
 ## Scheduling
 
@@ -33,9 +34,16 @@ gets a condensed review too.
    - its fragment(s),
    - the brief (the shared prefix, so the provider's prompt cache is reused across the lenses),
    - its `inputs`, fenced as data ([01](01-review-graph.md#untrusted-data-between-nodes)).
-4. Joins reuse the policy semantics of `BranchingProvider` (`all`/`any`/`quorum(k)` plus a
-   timeout, `crates/agent-providers/src/branching.rs:448` onwards). The join and timeout
-   logic is extracted into a shared helper rather than copied.
+4. Joins reuse the join and timeout mechanics of `BranchingProvider`
+   (`crates/agent-providers/src/branching.rs:448` onwards), extracted into a shared helper
+   rather than copied. The policy meaning differs, though, and is defined here:
+   - **`all`**: wait until every branch has *settled* (ok, failed or timed out), then
+     proceed with whatever succeeded. A failed lens never fails the join. The join fails
+     only when *no* branch succeeded, which is the "every lens fails" row below.
+   - **`any`**: proceed on the first success and cancel the rest.
+   - **`quorum(k)`**: proceed once `k` branches succeeded; fail if fewer than `k` can.
+
+   `BranchingProvider`'s own `all`, where one failure fails the fork, is unchanged.
 
 ## How each node runs
 
@@ -55,7 +63,7 @@ review's session id, with a `node` label, so the history and the portal can show
 | Every lens fails | Fall back to the single-session `run_review`. |
 | `assemble` fails | Fall back to the single-session `run_review`, so the draft is still written. |
 | `condense` fails or returns invalid output | The draft is written with no condensed text (`condensed = ""`), and the portal shows "no condensed version". Posting with `post = condensed` falls back to `full` and logs it. |
-| Whole-graph deadline (`graph_deadline_secs`, default 1800) | In-flight steps are cancelled (sessions dropped, `JoinSet::abort_all`), then the review falls back to the single-session path. |
+| Whole-graph deadline (`graph_deadline_secs`, default 1800) | In-flight steps are cancelled (sessions dropped, `JoinSet::abort_all`). The single-session fallback runs only if the PR's overall review budget (`review_budget_secs`, default 2700) leaves at least `min_fallback_secs` (default 600). Otherwise the PR is marked `failed: deadline` and the next push retries it. This keeps the worst case from doubling the wall clock. |
 | Shed: no capacity | Same as today: the trigger is shed before any step starts (`orchestrator.rs`, the capacity check). |
 
 A node never retries on its own. Provider retries stay in `agent-retry` and the router.
@@ -95,6 +103,15 @@ keys come from a validated document, so their cardinality is bounded.
 - **Runner:**
   - `positive_parallel_lenses_overlap` (with fake providers that sleep, wall time < sum)
   - `negative_lens_fails_assemble_still_runs`
+  - `negative_invalid_document_falls_back`: a document that fails validation runs the
+    single-session review, logs a warning and increments
+    `agent_review_graph_fallback_total{reason="invalid_document"}`
+  - `corner_join_all_one_timeout_proceeds`: `all` with one timed-out lens still reaches
+    `assemble`
+  - `boundary_deadline_no_budget_left_marks_failed`: the graph deadline with less than
+    `min_fallback_secs` of budget left skips the fallback
+  - `corner_condensed_some_empty_not_retried`: `Some(vec![])` stores `""` and does not
+    run `condense()` again
   - `negative_assemble_fails_falls_back`
   - `boundary_graph_deadline`
   - `corner_quorum_join`

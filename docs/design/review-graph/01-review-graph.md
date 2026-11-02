@@ -62,7 +62,8 @@ cover it with no special case.
 A document declares `kind: PIPELINE`. Anchor documents stay the default, and the two kinds
 never mix. Validator rules for this kind (`crates/agent-graph/src/validate.rs`):
 
-- The `MAIN` edges form a DAG with exactly one source (`ground`) and one sink (`condense`).
+- The `MAIN` edges form a DAG with exactly one source (`ground`) and one sink: `condense`,
+  or `assemble` when the document has no `condense`.
   A cycle is rejected.
 - Every node is reachable from the source, and every `inputs` entry names an upstream node
   (an ancestor in the DAG).

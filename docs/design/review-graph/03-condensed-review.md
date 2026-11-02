@@ -75,7 +75,16 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
   additive, so `buf breaking` passes:
   - `ReviewSummary.has_condensed = 14` (`bool`, so the list can show a marker without the text).
   - `GetReviewReply.condensed_body = 4`.
-  - `UpdateReviewRequest.condensed_body`. It is optional, so an edit can set either text.
+  - `UpdateReviewRequest.condensed_body = 3` gets explicit presence (proto3 `optional`).
+    Absent means "leave it alone", and `""` means "clear it"; a plain proto3 `string` can't
+    tell those apart. The existing `body = 2` stays a plain `string`, because changing
+    its cardinality would trip `buf breaking`. So an edit that sends only
+    `condensed_body` must also resend the current `body`. The portal does this, since it
+    holds both texts.
+  - `GetReviewReply.condensed_stale = 5` and `UpdateReviewReply.condensed_stale = 2`
+    (`bool`).
+  - `ReviewDraftRecord.condensed_stale` (`#[serde(default)]`) plus a ClickHouse
+    `condensed_stale UInt8 DEFAULT 0` column, so the flag survives a reload.
   - Then `nix run .#gen-dart` (keeping only the intended files) and `nix run .#gen-openapi`.
 
 ## Editing
@@ -118,7 +127,11 @@ Nothing is posted without a human Approve. That rule is unchanged.
   (`fleet.session.post`).
 - Spec rows: `positive_condensed_tab_shows_bullets`, `corner_no_condensed_says_so`,
   `positive_edit_condensed_saves`, `negative_history_condensed_read_only`,
-  `positive_roster_post_choice_round_trips`.
+  `positive_roster_post_choice_round_trips`, `positive_edit_full_body_marks_condensed_stale`
+  (the server sets `condensed_stale`, it survives a reload, and the portal shows the
+  notice), `corner_edit_condensed_only_leaves_stale_clear`,
+  `corner_absent_condensed_body_unchanged` and `corner_empty_condensed_body_clears` (both
+  presence rows).
 - A Playwright contact sheet against the offline fake.
 
 ## Tests (increment 2)

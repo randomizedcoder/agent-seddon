@@ -60,7 +60,7 @@ the next stage's job. Stages:
 |---|---|---|---|
 | `fetch` | mirror refresh of the target ref, `fetch_pr`, worktree | network / forge rate limit | 8 |
 | `ground` | collectors and analyzers (the brief) | CPU, disk | 4 (≈ cores / analyzer parallelism) |
-| `review` | the review graph's LLM steps ([02](02-pipeline-executor.md)) | model capacity | `max_total` (as today) |
+| `review` | the review graph's LLM steps ([02](02-pipeline-executor.md)) | model capacity | `[review_fleet] max_total` (as today); the config below overrides it |
 | `finish` | assemble, condense, render, record the draft | model capacity (short) | 4 |
 | `index` | onboarding index / refresh ([04](04-repo-knowledge.md)) | CPU, disk | 1, low priority |
 
@@ -74,7 +74,7 @@ lease_secs = 120              # a worker heartbeats every lease_secs / 3
 [review_fleet.queue.workers]  # per process
 fetch = 8
 ground = 4
-review = 16
+review = 16                   # defaults to [review_fleet] max_total when unset
 finish = 4
 index = 1
 [review_fleet.queue.fairness]
@@ -95,9 +95,19 @@ A row can override `per_repo` (nixpkgs might get 4 fetches but 2 reviews).
   the `per_repo` / `per_tenant` caps are skipped, not blocked on.
 - **Priority**: `ReviewNow` > webhook > poll > index refresh. A small or new PR can be
   boosted later; not in the first cut.
-- **Coalescing**: the queue keeps one live job per `(row, pr, stage)`. A newer head
-  replaces a queued job's head in place; an in-flight job whose head is now stale is
-  marked `superseded` when it finishes, and its next stage is not enqueued.
+- **Coalescing**: the queue keeps one live job per `(row, pr)` across all stages, plus a
+  nullable `pending_head_sha` column on it. When a trigger arrives:
+  - **No live job:** insert a `fetch` job for the new head.
+  - **Live job queued (`ready`):** replace its `head_sha` in place and reset it to
+    `stage = fetch`. Same head: no-op.
+  - **Live job in flight (`claimed`):** set `pending_head_sha = <new head>`, last writer
+    wins. The worker isn't interrupted.
+
+  When a worker finishes a stage, in the same transaction that would enqueue the next
+  stage, it checks `pending_head_sha`. If it is set, the finished job is marked
+  `superseded` and a fresh `fetch` job for the pending head is enqueued (with
+  `pending_head_sha` cleared), so the newer push is never lost. A lease that expires while
+  `pending_head_sha` is set restarts at `fetch` with the pending head.
 
 ## Locality
 
@@ -128,8 +138,8 @@ picked per deployment:
 `fleet_jobs` (Postgres, via the config store like the roster and the post lease):
 `id`, `tenant`, `row_id`, `repo`, `pr`, `head_sha`, `stage`, `priority`, `state`
 (`ready|claimed|done|failed|superseded`), `attempts`, `claimed_by`, `lease_until_ms`,
-`affinity`, `enqueued_at`, `updated_at`, `error`. Unique `(tenant, row_id, pr, stage)`
-while live. Finished jobs are kept for a short window for the portal, then pruned.
+`affinity`, `pending_head_sha` (see *Coalescing*), `enqueued_at`, `updated_at`, `error`.
+Unique `(tenant, row_id, pr)` while live. Finished jobs are kept for a short window for the portal, then pruned.
 Every field from a trigger is untrusted: ids pass `safe_segment`, numbers are clamped,
 `error` is length-capped.
 
@@ -154,7 +164,10 @@ This becomes increment **1b**, after the nixpkgs fetch fix (1):
 - **1b-iii.** Multi-process: affinity, graceful shutdown, k8s replicas; portal stage view.
 
 Test tables (rstest, four classes + adversarial): a hung repo doesn't delay another; the
-per-repo cap holds under a 1,000-PR burst; a newer head supersedes a queued job; a dead
+per-repo cap holds under a 1,000-PR burst; a newer head supersedes a queued job; a newer head arriving while a stage is in flight is
+recorded in `pending_head_sha` and becomes a fresh `fetch` job when the stage ends (never lost);
+over the high-water mark, poll triggers for that repo are dropped while webhook and `ReviewNow`
+triggers still enqueue; a dead
 worker's lease lapses and another worker finishes the job; two processes never claim the
 same job; max attempts ends in `failed`; adversarial ids and huge PR numbers rejected.
 

@@ -88,6 +88,17 @@ Status is visible in three places:
 - **Limits per index:** `index_max_bytes` (default 2 GiB), `index_max_files` (default 200k)
   and `index_deadline_secs` (default 1800). A capped index is marked `partial` in the
   manifest, never silently truncated.
+- **Fleet-wide disk budget.** The worst case is `index_max_bytes` × 2 generations per
+  row, so 4 GiB a row and 400 GiB for 100 rows, plus each row's mirror (capped by
+  `mirror_max_bytes`, [05](05-nix-and-native-analysis.md)). Real indexes are far smaller.
+  For example, a Go or Rust repo of this size is tens of MiB. Even so:
+  - `[review_fleet] knowledge_max_bytes` (default 100 GiB) bounds the total.
+  - Over the budget, GC drops the older generation of the least recently reviewed rows
+    first, then marks the largest rows `partial`.
+  - Below `disk_min_free_pct` (default 10 %) on the fleet root's filesystem, indexing
+    pauses. Reviews continue.
+  - `agent_fleet_knowledge_bytes{tenant,repo}` and a disk-free gauge make this visible.
+    l2's disk filling up on 2026-11-02 is why this guard is here.
 - **nixpkgs** (40k+ packages, a 3.6 GB mirror) uses **path-scoped indexing**. A row-level
   `index_paths` allowlist (`pkgs/by-name`, `pkgs/top-level`, `lib`, `nixos/modules`,
   `pkgs/build-support`) is `confine()`d to the worktree; `..` or an absolute path is rejected.
@@ -139,6 +150,10 @@ becomes a cache of their output. That avoids a second knowledge store.
   - `negative_step_fails_status_failed_last_good_serves`
   - `boundary_index_max_files_marks_partial`
   - `corner_review_before_ready_does_not_wait`
+  - `positive_wait_for_index_waited_then_used`: with `wait_for_index_secs` set, the job
+    finishes inside the wait and the brief has the index context
+  - `boundary_wait_for_index_timeout_proceeds`: the wait expires, so the review proceeds
+    with "index pending"
   - `corner_base_moved_marks_stale_incremental`
   - `adversarial_index_paths_traversal_rejected`
   - `adversarial_other_tenant_index_unreachable`

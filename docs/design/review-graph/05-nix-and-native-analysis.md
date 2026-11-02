@@ -28,13 +28,31 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     repo again.
   - Result: the mirror grew to 61 GB of duplicate `.keep` packs plus orphaned `tmp_pack_*`
     files, about 2.5 GB every 5 minutes, until the 1.7 TB root was full.
-  - The fix replaces the mirror refspec with heads only (`+refs/heads/*:refs/heads/*`,
-    no `refs/pull/*`). PR heads are already fetched one at a time by `fetch_pr`. The fix
-    also:
-    - kills the whole git process tree on timeout;
-    - adds a startup sweep for stale `tmp_pack_*` files;
-    - caps the mirror's size with a metric (`agent_fleet_mirror_bytes`);
-    - adds a one-off `git repack -a -d` for an existing bloated mirror.
+  - The fix makes the mirror heads only (`+refs/heads/*:refs/heads/*`, no `refs/pull/*`).
+    PR heads are already fetched one at a time by `fetch_pr`.
+    - **New mirrors** are made with `clone --bare` plus an explicit heads-only refspec,
+      not `clone --mirror`.
+    - **Existing mirrors** are migrated once, at the first refresh after the upgrade. The
+      steps run in this order, because the `refs/pull/*` objects are *reachable* and a
+      repack alone keeps them:
+      1. `git config --unset remote.origin.mirror`. `mirror = true` implies `*:*` on
+         fetch, so changing the refspec alone isn't enough.
+      2. `git config --replace-all remote.origin.fetch '+refs/heads/*:refs/heads/*'`.
+      3. Delete every ref outside `refs/heads/*`, `refs/tags/*` and the fleet's own
+         `refs/fleet/pr/*` with one batched `git update-ref --stdin`. `--prune` can't do
+         this: it only prunes refs that match the configured refspec, so stale
+         `refs/pull/*` refs would survive the refspec change.
+      4. Remove `objects/pack/*.keep` and stale `tmp_pack_*` files, then run
+         `git repack -a -d` and `git prune --expire=now`.
+      5. Record the migration in a marker file, so it runs once per mirror.
+    - Every git subprocess runs in its own process group, and a timeout kills the whole
+      group (`fetch` → `remote-https` → `index-pack`).
+    - Each refresh sweeps `tmp_pack_*` files older than `PREP_TIMEOUT` first.
+    - `agent_fleet_mirror_bytes{tenant,repo}` reports the mirror's size. Over
+      `mirror_max_bytes` (default 20 GiB), the refresh is refused and logged.
+    - A table test proves a timed-out fetch leaves no children and no `tmp_pack_*`. A
+      second test runs the migration on a fixture mirror with `refs/pull/*` refs and
+      checks that it shrinks.
 - Two hypotheses to reproduce, each with a table-test row:
   - **(a)** the target branch (e.g. `staging`) was never fetched into the mirror, so the
     base doesn't resolve and the diff comes out empty;
@@ -66,9 +84,11 @@ path handling.
 **Phase-snippet shellcheck.** Build logic sits in `''…''` strings inside `.nix` files, and
 the shellcheck collector only sees `.sh`/`.bash` files (`crates/agent-review/src/shellcheck.rs:232`).
 
-1. `ast-grep` with the tree-sitter-nix grammar (already on the runtime PATH) extracts
-   indented strings bound to attributes matching `*Phase`, `pre*`, `post*`, `*Hook`,
-   `script`, `shellHook`.
+1. `ast-grep` extracts indented strings bound to attributes matching `*Phase`, `pre*`,
+   `post*`, `*Hook`, `script`, `shellHook`. The pinned build (0.44.1, `nix/versions.nix`)
+   has the Nix grammar built in, so no extra grammar needs shipping. This was checked on
+   2026-11-02: a rule with `language: nix`, `kind: binding` and `has: {field: attrpath,
+   regex: Phase$}` matched a `buildPhase = ''…${foo}…''` binding, with JSON output.
 2. Each `${…}` antiquotation becomes a placeholder variable, e.g. `"$__nix_1"`, so shellcheck
    sees valid shell. Nix's `''$` escape becomes `$`.
 3. Run `shellcheck -s bash -f json` on each snippet with a line-offset map.
@@ -144,7 +164,16 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
 - **What runs per attr:**
   - `--eval --strict -A <attr>.meta` (license, maintainers, platforms present?);
   - `-A <attr>.drvPath` (does it evaluate?);
-  - `nixpkgs-hammering <attr>` (its eval-based checks).
+  - `nixpkgs-hammering <attr>` (its eval-based checks). It runs its own evaluations, so
+    it gets the same restrictions:
+    - it runs in the same bwrap sandbox;
+    - `NIX_CONFIG` carries the same options (`restrict-eval`,
+      `allow-import-from-derivation = false`,
+      `allow-unsafe-native-code-during-evaluation = false`, `pure-eval`);
+    - `NIX_PATH` is cleared.
+
+    An adversarial row (`adversarial_hammering_ifd_blocked`) proves an IFD in the
+    package fails under hammering too.
   
   The output is parsed into `AnalysisFinding`s.
 - **Daemon socket (spike first).** `.drvPath` writes `.drv` files through the nix daemon. The
