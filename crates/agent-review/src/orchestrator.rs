@@ -830,6 +830,7 @@ mod tests {
             source_branch: "feature".into(),
             target_branch: "main".into(),
             draft: false,
+            head_sha: String::new(),
         }
     }
 

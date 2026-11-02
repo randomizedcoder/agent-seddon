@@ -1651,6 +1651,18 @@ impl agent_core::TokenSource for MintedToken {
             .await
             .map_err(|e| agent_core::Error::Repo(format!("{e:#}")))
     }
+
+    /// GitHub limits an installation, not each hourly token: the tenant and its
+    /// `ghapp:<installation>` ref name the quota across rotations. The tenant is
+    /// length-prefixed, so no pair of strings can spell another pair's identity.
+    fn quota_identity(&self) -> Option<String> {
+        Some(format!(
+            "{}:{}{}",
+            self.tenant.len(),
+            self.tenant,
+            self.token_ref
+        ))
+    }
 }
 
 /// The **sync** reconcile pre-check (review-fleet C5; forge-auth F2): can this row's
@@ -2307,5 +2319,53 @@ mod tests {
             let port = rx.recv().unwrap();
             format!("http://127.0.0.1:{port}")
         }
+    }
+
+    /// The App-token source names its quota by tenant + installation ref (stable across
+    /// the hourly rotation, distinct per installation and tenant, and never spelled by
+    /// another pair); a plain secret has no identity, so its token stays the quota.
+    #[cfg(feature = "fleet")]
+    #[rstest]
+    #[case::positive_same_installation_same_quota(
+        "the same tenant and installation are one quota",
+        ("acme", "ghapp:42"), ("acme", "ghapp:42"), true
+    )]
+    #[case::negative_other_installation(
+        "another installation is another quota",
+        ("acme", "ghapp:42"), ("acme", "ghapp:43"), false
+    )]
+    #[case::adversarial_other_tenant_same_installation(
+        "another tenant naming the same installation is another quota",
+        ("acme", "ghapp:42"), ("evil", "ghapp:42"), false
+    )]
+    #[case::adversarial_separator_collision(
+        "a newline moved between the halves doesn't collide",
+        ("a\nb", "c"), ("a", "b\nc"), false
+    )]
+    #[case::corner_boundary_shift(
+        "a character moved across the boundary doesn't collide",
+        ("ab", "c"), ("a", "bc"), false
+    )]
+    fn minted_token_quota_identity(
+        #[case] desc: &str,
+        #[case] a: (&str, &str),
+        #[case] b: (&str, &str),
+        #[case] same: bool,
+    ) {
+        use agent_core::TokenSource;
+        let id = |(tenant, token_ref): (&str, &str)| {
+            MintedToken {
+                tenant: tenant.to_string(),
+                token_ref: token_ref.to_string(),
+            }
+            .quota_identity()
+            .expect("an App token has an identity")
+        };
+        assert_eq!(id(a) == id(b), same, "{desc}: {:?} vs {:?}", id(a), id(b));
+        assert_eq!(
+            agent_core::Secret::new("ghs_x").quota_identity(),
+            None,
+            "a static secret keys on its token"
+        );
     }
 }

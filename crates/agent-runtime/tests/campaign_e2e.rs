@@ -142,6 +142,7 @@ impl FakeForge {
             source_branch: req.source_branch.clone(),
             target_branch: req.target_branch.clone(),
             draft: req.draft,
+            head_sha: String::new(),
         }
     }
 }

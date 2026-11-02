@@ -1536,6 +1536,8 @@ fn spawn_forge_poll(
     let scheduler = sync.scheduler();
     let roster = sync.roster();
     let forge_registry = sync.forge_registry();
+    // One backoff per process: a row whose polls fail waits longer before the next.
+    let backoff = Arc::new(agent_review_fleet::PollBackoff::new());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(FLEET_POLL_TICK_SECS));
         loop {
@@ -1543,6 +1545,7 @@ fn spawn_forge_poll(
             let roster = roster.clone();
             let sink = sink.clone();
             let forge_registry = forge_registry.clone();
+            let backoff = backoff.clone();
             scheduler
                 .tick_with(move |goal| {
                     crate::fleet_sync::poll_job(
@@ -1550,6 +1553,7 @@ fn spawn_forge_poll(
                         roster.clone(),
                         forge_registry.clone(),
                         sink.clone(),
+                        backoff.clone(),
                     )
                 })
                 .await;

@@ -29,7 +29,9 @@ are how these bugs creep back in.
   cap.
 - **Server backoff hints win.** A server that tells us how long to wait is obeyed
   (clamped to `max_delay` so a hostile/misconfigured server can't pin us):
-  - **HTTP** `Retry-After` — `agent_retry::http::parse_retry_after`.
+  - **HTTP** `Retry-After` — `agent_retry::http::parse_retry_after`, which reads both
+    forms (delta-seconds and an HTTP-date; a date in the past means "now"). Its sibling
+    `parse_reset_at` reads an epoch-seconds reset time such as `X-RateLimit-Reset`.
   - **gRPC** `grpc-retry-pushback-ms` — `agent_retry::grpc::parse_pushback`, which
     also understands the `-1` "do not retry" sentinel.
 - **Correct classification** — only genuinely transient failures retry:

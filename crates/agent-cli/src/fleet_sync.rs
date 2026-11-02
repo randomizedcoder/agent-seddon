@@ -305,17 +305,26 @@ struct TenantPass {
 
 /// Poll one job's row: under its tenant's scope, re-read the row, build its forge (inline
 /// or by card) and emit a trigger per open non-draft PR, each stamped with the tenant.
+/// A row whose last polls failed is skipped until its `backoff` wait has passed, so a
+/// failing or rate-limiting forge is not asked again at the row's full cadence.
 pub(crate) async fn poll_job(
     goal: String,
     roster: Arc<dyn FleetRegistry>,
     forge_registry: Option<Arc<dyn ForgeRegistry>>,
     sink: Arc<dyn TriggerSink>,
+    backoff: Arc<agent_review_fleet::PollBackoff>,
 ) -> agent_core::Result<String> {
     let Some((tenant, id)) = parse_job_goal(&goal) else {
         return Err(agent_core::Error::Scheduler(
             "malformed fleet poll job".into(),
         ));
     };
+    if let Some(left) = backoff.wait(&goal, std::time::Instant::now()) {
+        return Ok(format!(
+            "skipped {goal}: backing off another {}s after failed polls",
+            left.as_secs().max(1)
+        ));
+    }
     let work = async {
         let row = roster
             .get(id)
@@ -344,9 +353,14 @@ pub(crate) async fn poll_job(
             None => Ok(format!("polled {goal}: no forge configured")),
         }
     };
-    in_tenant(tenant, work)
+    let result = in_tenant(tenant, work)
         .await
-        .unwrap_or_else(|| Err(agent_core::Error::Scheduler("invalid fleet tenant".into())))
+        .unwrap_or_else(|| Err(agent_core::Error::Scheduler("invalid fleet tenant".into())));
+    if let Some(wait) = backoff.record(&goal, result.is_ok(), std::time::Instant::now()) {
+        tracing::warn!(job = %goal, wait_secs = wait.as_secs(),
+            "fleet: forge poll failed; backing off before the next poll of this row");
+    }
+    result
 }
 
 #[cfg(test)]
@@ -687,9 +701,39 @@ mod tests {
     async fn negative_malformed_poll_job_refused() {
         let roster: Arc<dyn FleetRegistry> = Arc::new(TenantRoster::default());
         let (queue, _rx) = agent_review_fleet::TriggerQueue::channel_for(4, true);
-        let err = poll_job("../x".into(), roster, None, queue)
+        let backoff = Arc::new(agent_review_fleet::PollBackoff::new());
+        let err = poll_job("../x".into(), roster, None, queue, backoff.clone())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("malformed"));
+        assert_eq!(
+            backoff.wait("../x", std::time::Instant::now()),
+            None,
+            "a refused job name is not tracked"
+        );
+    }
+
+    /// A row whose poll fails is backed off: the next fire is skipped without reading
+    /// the roster or the forge, and says why.
+    #[tokio::test]
+    async fn positive_failed_poll_backs_off_the_row() {
+        let roster: Arc<dyn FleetRegistry> = Arc::new(TenantRoster::default());
+        let (queue, _rx) = agent_review_fleet::TriggerQueue::channel_for(4, true);
+        let backoff = Arc::new(agent_review_fleet::PollBackoff::new());
+        let goal = job_goal("acme", "missing-row");
+        let first = poll_job(
+            goal.clone(),
+            roster.clone(),
+            None,
+            queue.clone(),
+            backoff.clone(),
+        )
+        .await;
+        assert!(first.is_err(), "an unknown row fails the poll: {first:?}");
+        let second = poll_job(goal.clone(), roster, None, queue, backoff.clone())
+            .await
+            .expect("a backed-off row is skipped, not failed");
+        assert!(second.starts_with("skipped"), "{second}");
+        assert!(backoff.wait(&goal, std::time::Instant::now()).is_some());
     }
 }

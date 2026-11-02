@@ -39,6 +39,7 @@ fn pr(number: u64) -> PullRequest {
         source_branch: "feat".into(),
         target_branch: "main".into(),
         draft: false,
+        head_sha: "c0ffee".repeat(6) + "c0ff",
     }
 }
 
@@ -114,6 +115,11 @@ async fn positive_reads_round_trip(#[case] transport: Transport) {
     assert_eq!(got.number, 7);
     assert_eq!(got.target_branch, "main");
     assert!(!got.draft);
+    assert_eq!(
+        got.head_sha,
+        pr(7).head_sha,
+        "the head commit crosses the wire"
+    );
 
     // `next_page` must survive as an Option — `Some(1)` and `None` are what a
     // caller paginates on, and flattening them would loop or stop early.

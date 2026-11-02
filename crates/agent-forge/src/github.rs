@@ -1,6 +1,6 @@
 //! GitHub REST backend.
 
-use crate::http::{n, nested, s, take_page, ForgeHttp};
+use crate::http::{n, nested, object_id, s, take_page, ForgeHttp};
 use agent_core::{
     Comment, CreatePrRequest, Forge, Issue, Page, PullRequest, Result, ReviewVerdict,
 };
@@ -61,6 +61,7 @@ fn to_pr(v: &serde_json::Value) -> PullRequest {
             .get("draft")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        head_sha: object_id(&nested(v, "head", "sha")),
     }
 }
 

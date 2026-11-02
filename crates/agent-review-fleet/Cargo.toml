@@ -26,6 +26,8 @@ fleet-store-postgres = ["fleet-store", "agent-config-store/config-store-postgres
 agent-core.workspace = true
 # Per-tenant + per-repo fleet metrics (the C19 families + the `FleetMetrics` recorder).
 agent-metrics.workspace = true
+# The one backoff schedule, for a forge poll that keeps failing.
+agent-retry.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 # The shared transactional config store the `fleet-store` backend persists onto

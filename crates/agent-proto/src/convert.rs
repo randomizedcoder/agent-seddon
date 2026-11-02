@@ -1866,6 +1866,7 @@ impl From<agent_core::PullRequest> for pb::ForgePullRequest {
             source_branch: p.source_branch,
             target_branch: p.target_branch,
             draft: p.draft,
+            head_sha: p.head_sha,
         }
     }
 }
@@ -1882,6 +1883,7 @@ impl From<pb::ForgePullRequest> for agent_core::PullRequest {
             source_branch: p.source_branch,
             target_branch: p.target_branch,
             draft: p.draft,
+            head_sha: p.head_sha,
         }
     }
 }

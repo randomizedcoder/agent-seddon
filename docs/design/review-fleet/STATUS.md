@@ -121,6 +121,33 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   with the cause, not `ok` with no findings; the race-bench check asserts the race was found and
   the bench ran, not just that each command was attempted; the runtime-PATH check's builder-only
   row uses a real binary and proves the builder sees it; `update_draft` locks skipped drafts.
+- **2026-11-01** — **Be a good citizen of the forge.** The forge client honours long
+  `Retry-After` and rate-limit reset hints (clamped to 15 min, not 20 s), holds a spent quota
+  per `(api base, credential hash)` instead of retrying into it, and sends `If-None-Match` on
+  GETs (a `304` is served from a bounded cache). A failing poll row backs off 60 s → 30 min.
+  The PR list's head SHA rides on the trigger, so an unchanged PR ends `UpToDate` before any
+  git fetch. This makes a 60 s `poll_secs` cheap.
+  Review round 1: the cache copies a body only on a `304` and evicts the least recently
+  used; a `304` reporting a spent quota holds it; docs name the poll as the re-driver of a
+  rate-limited webhook/Slack/`ReviewNow` review; tests for a cached page's shape and an
+  HTTP-date `Retry-After` end to end.
+  Review round 2: a trigger folded into a pending one with a different (or no) head drops
+  the listed-head hint, so a webhook for a new push is never answered `UpToDate` on a stale
+  poll head; the capacity shed runs before the history read; a second client sharing the
+  pacer is tested to honour a held quota; the hint-less 429 → 60 s give-up is documented
+  as deliberate (GitHub's secondary-limit advice).
+  Review round 3: a GitHub App credential keys its quota on the tenant + installation ref
+  (`TokenSource::quota_identity`), so the hourly token rotation keeps the held gate and
+  the ETag cache; a `304` whose cache entry went while the request was out is re-sent
+  once unconditionally instead of failing the call; the cache's 64 MiB bound is stated as
+  wire bytes. Review round 4: the ETag cache is bounded per quota (64 entries) and in all
+  (1024 entries, 16 MiB wire; the parsed worst case, ~10x, is stated), the heaviest quota evicting its own oldest, so a fleet
+  with more than 32 polled paths still hits and one tenant can't empty another's; cached
+  bodies are shared (`Arc`); an identity-keyed quota's gate is checked before the token
+  mint; the identity length-prefixes the tenant (no separator collisions); a 403 is a
+  limit only when its `Retry-After` parses or the quota is spent. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
+  names it) so a webhook-first trigger gets the early `UpToDate` too; today it always
+  fetches, which is only conservative.
 
 ## Decisions of record
 

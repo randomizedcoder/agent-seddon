@@ -110,6 +110,9 @@ message ForgePullRequest {
   string source_branch = 7;
   string target_branch = 8;
   bool draft = 9;
+  // The commit the head points at, as the forge reported it (full hex). Empty when the
+  // forge gave none. A hint for skipping an already-reviewed head; never checked out.
+  string head_sha = 10;
 }
 
 message ForgeComment {

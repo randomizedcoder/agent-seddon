@@ -310,6 +310,7 @@ mod tests {
             source_branch: "f".into(),
             target_branch: "main".into(),
             draft: false,
+            head_sha: String::new(),
         }
     }
 

@@ -239,28 +239,27 @@ impl InstallationTokenMinter {
                 match req.send().await {
                     Ok(r) => {
                         let code = r.status().as_u16();
-                        // A forge signals exhaustion with 403 + a zero remaining header,
-                        // not only 429 — treat that as retryable too.
-                        let rate_limited = code == 403
-                            && r.headers()
-                                .get("x-ratelimit-remaining")
-                                .and_then(|v| v.to_str().ok())
-                                == Some("0");
-                        if agent_retry::http::retryable_status(code) || rate_limited {
-                            let after = r
-                                .headers()
-                                .get(reqwest::header::RETRY_AFTER)
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(agent_retry::http::parse_retry_after);
-                            return agent_retry::Attempt::Retry {
-                                // Status only — the body can echo the JWT.
-                                err: Error::Repo(format!(
-                                    "github app: {what} returned http {code}"
-                                )),
-                                after,
-                            };
+                        // Status only — the body can echo the JWT.
+                        let err = Error::Repo(format!("github app: {what} returned http {code}"));
+                        // Slow down exactly as the forge client does (crate::pace): never
+                        // retry sooner than a rate-limited answer asked.
+                        match crate::pace::answer(
+                            code,
+                            &crate::pace::Signals::from_headers(r.headers()),
+                            std::time::SystemTime::now(),
+                            self.retry.max_delay,
+                        ) {
+                            crate::pace::Answer::Use => agent_retry::Attempt::Done(r),
+                            crate::pace::Answer::Retry(after) => {
+                                agent_retry::Attempt::Retry { err, after }
+                            }
+                            crate::pace::Answer::GiveUp(wait) => {
+                                agent_retry::Attempt::Fail(Error::Repo(format!(
+                                    "github app: {what} returned http {code}: rate limited for {}s",
+                                    wait.as_secs()
+                                )))
+                            }
                         }
-                        agent_retry::Attempt::Done(r)
                     }
                     Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
                         err: Error::Repo(format!("github app: {what} request failed: {e}")),
@@ -453,7 +452,9 @@ mod tests {
     #[case::negative_403_forbidden_fails_closed(&[(403, false)], false, 1)]
     #[case::negative_500_then_200_retries_then_succeeds(&[(500, false), (201, false)], true, 2)]
     #[case::negative_500_exhausts_retries_fails_closed(&[(500, false)], false, 4)]
-    #[case::corner_403_rate_limited_retries_then_succeeds(&[(403, true), (201, false)], true, 2)]
+    // A spent quota with no reset time is GitHub's "wait at least a minute": longer than
+    // the retry policy may wait, so the mint gives up rather than knocking again early.
+    #[case::corner_403_rate_limited_gives_up_not_retried_early(&[(403, true), (201, false)], false, 1)]
     #[tokio::test]
     async fn mint_status_sequences(
         #[case] script: &[(u16, bool)],

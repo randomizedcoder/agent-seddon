@@ -284,7 +284,11 @@ impl UserInstallationAccess {
                     .post(&url)
                     .header(reqwest::header::ACCEPT, "application/json")
                     .json(&body);
-                classify(req.send().await, "github app oauth: token exchange")
+                classify(
+                    req.send().await,
+                    "github app oauth: token exchange",
+                    self.retry.max_delay,
+                )
             }
         })
         .await?;
@@ -426,7 +430,7 @@ impl UserInstallationAccess {
                     )
                     .header(reqwest::header::ACCEPT, "application/vnd.github+json")
                     .header("X-GitHub-Api-Version", "2022-11-28");
-                classify(req.send().await, &label)
+                classify(req.send().await, &label, self.retry.max_delay)
             }
         })
         .await?;
@@ -468,34 +472,36 @@ fn echoed_id(v: Option<&serde_json::Value>) -> Option<String> {
     .filter(|id| valid_installation_id(id))
 }
 
-/// Shared retry classification (mirrors [`crate::http`] / [`crate::ghapp`] verbatim):
-/// 429/5xx + a rate-limited 403 retry honouring `Retry-After`; timeout/connect retry;
-/// everything else is `Done`/`Fail`. Only a status code ever reaches an error — a
-/// response body can echo the request, including a secret.
+/// Shared retry classification, the same as [`crate::http`] / [`crate::ghapp`] via
+/// [`crate::pace::answer`]: a rate-limited answer is retried after the forge's wait when
+/// it fits in `max_inline`, and given up on otherwise (never retried early); 429/5xx
+/// without a hint and timeout/connect retry on backoff; everything else is
+/// `Done`/`Fail`. Only a status code ever reaches an error — a response body can echo
+/// the request, including a secret.
 fn classify(
     result: reqwest::Result<reqwest::Response>,
     what: &str,
+    max_inline: std::time::Duration,
 ) -> agent_retry::Attempt<reqwest::Response, Error> {
     match result {
         Ok(r) => {
             let code = r.status().as_u16();
-            let rate_limited = code == 403
-                && r.headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    == Some("0");
-            if agent_retry::http::retryable_status(code) || rate_limited {
-                let after = r
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(agent_retry::http::parse_retry_after);
-                return agent_retry::Attempt::Retry {
-                    err: Error::Repo(format!("{what} returned http {code}")),
-                    after,
-                };
+            let err = Error::Repo(format!("{what} returned http {code}"));
+            match crate::pace::answer(
+                code,
+                &crate::pace::Signals::from_headers(r.headers()),
+                std::time::SystemTime::now(),
+                max_inline,
+            ) {
+                crate::pace::Answer::Use => agent_retry::Attempt::Done(r),
+                crate::pace::Answer::Retry(after) => agent_retry::Attempt::Retry { err, after },
+                crate::pace::Answer::GiveUp(wait) => {
+                    agent_retry::Attempt::Fail(Error::Repo(format!(
+                        "{what} returned http {code}: rate limited for {}s",
+                        wait.as_secs()
+                    )))
+                }
             }
-            agent_retry::Attempt::Done(r)
         }
         Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
             err: Error::Repo(format!("{what} request failed: {e}")),

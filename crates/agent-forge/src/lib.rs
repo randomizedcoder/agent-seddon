@@ -9,6 +9,7 @@
 
 mod http;
 mod kind;
+mod pace;
 
 #[cfg(feature = "forge-bitbucket")]
 mod bitbucket;

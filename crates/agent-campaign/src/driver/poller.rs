@@ -265,6 +265,7 @@ mod tests {
             source_branch: format!("campaign/leaf-{number}"),
             target_branch: "main".into(),
             draft: false,
+            head_sha: String::new(),
         }
     }
 

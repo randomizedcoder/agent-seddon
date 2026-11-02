@@ -3440,6 +3440,12 @@ pub struct FleetTrigger {
     /// the Slack watcher and an unauthenticated server. Coalesced triggers merge theirs
     /// ([`merge_requesters`]). Attribution only: the review still runs as the fleet.
     pub requested_by: Vec<String>,
+    /// The PR head commit as the forge's PR list reported it ([`PullRequest::head_sha`]),
+    /// or empty when the producer doesn't know it (Slack, `ReviewNow`). A hint only: when
+    /// that head already has a live draft, the orchestrator answers `UpToDate` before any
+    /// fetch, so an unchanged PR costs the forge nothing per poll. When it is empty, or
+    /// the head moved, the orchestrator fetches and dedups on the real head as before.
+    pub head_sha: String,
 }
 
 /// Whether a [`FleetTrigger`] was queued or folded into one already pending.
@@ -4113,6 +4119,11 @@ pub struct PullRequest {
     pub source_branch: String,
     pub target_branch: String,
     pub draft: bool,
+    /// The commit the PR's head points at, as the forge reported it (a full hex object
+    /// id). Empty when the forge gave none. Untrusted: a hint the fleet uses to skip a
+    /// head it already reviewed **before** fetching it, never a ref it checks out.
+    #[serde(default)]
+    pub head_sha: String,
 }
 
 /// An issue, optionally with its comment thread (for context import).

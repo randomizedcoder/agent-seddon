@@ -7977,6 +7977,10 @@
         },
         "draft": {
           "type": "boolean"
+        },
+        "headSha": {
+          "type": "string",
+          "description": "The commit the head points at, as the forge reported it (full hex). Empty when the\nforge gave none. A hint for skipping an already-reviewed head; never checked out."
         }
       }
     },

@@ -90,10 +90,52 @@ page number** and never follows the URL — a forge cannot redirect us off-platf
 
 ## Rate limits
 
-Handled by `agent-retry` (the canonical driver, honouring `Retry-After`). One
-platform quirk is encoded: a forge signals exhaustion with **403 plus
-`X-RateLimit-Remaining: 0`**, not only 429, so that combination is treated as
-retryable rather than as a permission failure.
+Every forge HTTP call goes through `agent-retry` and a process-wide **pacer**
+([`pace.rs`](../../crates/agent-forge/src/pace.rs)), so the fleet backs off when a forge
+asks it to:
+
+- **What counts as "slow down".** 429 always; **403** when it carries a `Retry-After`
+  that parses or `X-RateLimit-Remaining: 0` (GitHub's secondary and primary limits, not a
+  permission failure; a junk `Retry-After` on a 403 with quota left is a refusal, so a
+  decorating proxy can't gate a healthy credential); a 5xx that carries `Retry-After`. The bare `RateLimit-*` names are read too.
+- **How long.** `Retry-After` (delta-seconds or an HTTP-date) wins; else the
+  `X-RateLimit-Reset` epoch time when the quota is spent; else 60 s (GitHub's advice for a
+  limit with no hint). The wait is clamped to **[1 s, 15 min]**, so a hostile or broken
+  header can neither spin us nor park us for a day.
+- **Short waits retry inline; long ones hold the quota.** A wait within the retry
+  policy's `max_delay` (20 s) is slept and retried. A longer one gives up this call and
+  **holds the quota** until the wait passes: every later call on that quota fails fast
+  with "holding off another Ns" and sends nothing. A 2xx that reports
+  `X-RateLimit-Remaining: 0` holds the quota until the reset too, so we stop before the
+  forge has to refuse us. A `304` that reports the quota spent holds it the same way.
+  A hint-less 429 waits the 60 s default, so it too gives up the call and holds the
+  quota rather than retrying sooner than GitHub asks; its caller sees the error.
+  A call that fails on a hold is not queued: the fleet's poll re-drives it (see
+  [review-fleet.md](review-fleet.md)).
+- **A quota is `(api base, credential)`.** The credential is a keyed hash
+  (per-process `RandomState`) of the token; the token itself is never kept. Two tenants
+  with different tokens never share a hold. A credential whose quota outlives its token
+  names it instead (`TokenSource::quota_identity`): a GitHub App source names its tenant
+  and `ghapp:<installation>` ref, since GitHub limits the installation while its token
+  rotates hourly, so a held gate and the cached ETags survive the rotation. That identity
+  (the tenant length-prefixed, so no two pairs spell the same one) is hashed the same way,
+  apart from tokens, and is checked against its gate **before** the token is resolved, so
+  a held installation costs no mint. The gate map holds at most 1024 quotas.
+- **Conditional GETs.** A GET whose earlier answer carried an `ETag` is re-sent with
+  `If-None-Match`; a `304` (which GitHub does not count against the quota) is answered from
+  the cached body (shared, so storing and serving it are a pointer copy under the lock).
+  The cache is keyed per quota and URL: at most 64 entries per quota, enough for a whole
+  poll tick of one installation (that quota's least recently used is evicted first); at
+  most 1024 entries and 16 MiB of wire bytes in all, where the heaviest quota gives up
+  its own oldest entry, so a busy tenant can't evict another's. A body over 2 MiB on the
+  wire is not cached. The bound is on wire bytes: a parsed body of many small JSON nodes
+  can take ~10x its wire size, so the worst a hostile forge can force is ~160 MiB of heap;
+  real PR pages are tens of KiB. An ETag over 256 bytes or with non-printable bytes is not stored. A `304` to a GET sent with an ETag whose
+  entry went meanwhile (evicted or replaced) is re-sent once without `If-None-Match`; a
+  `304` to a GET sent without one is an error, not an empty answer.
+
+The GitHub App token mint and the install-time OAuth calls use the same rules
+(`pace::answer`), so a rate-limited mint is not retried early either.
 
 ## Observability
 
