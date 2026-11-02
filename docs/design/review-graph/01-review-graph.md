@@ -73,7 +73,8 @@ never mix. Validator rules for this kind (`crates/agent-graph/src/validate.rs`):
   document may hold several `split` nodes, which is how a sixth lens fits
   (README, open question 3).
 - Exactly one `assemble` and at most one `condense`.
-- Per row, the branches feeding any one join must fit the row's `max_parallel_steps`.
+- Per row, the slot-holding steps feeding any one join (split branches plus lone
+  `readonly` steps) must fit the row's `max_parallel_steps`.
   This is the liveness rule in [02](02-pipeline-executor.md#capacity), and it is checked
   when the document is bound to a row, not in the document alone.
 - Param caps follow the existing schema conventions: sizes are bounded and names are

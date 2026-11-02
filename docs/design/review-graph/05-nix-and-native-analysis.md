@@ -35,13 +35,22 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
     - **New mirrors** are made with `clone --bare` plus these two refspecs, not
       `clone --mirror`.
     - **Existing mirrors** are migrated at a refresh that finds the mirror still in the old
-      shape. Detection is one rule: `remote.origin.mirror` is set, **or** the configured
-      fetch refspec set is not exactly the two healthy refspecs (heads and tags). That
-      covers every partial state: `{}` (killed before the first `--add`), `{heads}`
-      (killed between the two `--add`s, where tags would otherwise go stale for good),
-      `{+refs/*:refs/*}`, any `refs/pull` refspec, and anything unexpected. The trigger is that detected state, never a missing marker file, so a
-      mirror made by the new `clone --bare` path (which never has a marker) is never
-      migrated. The steps run in this order, because the `refs/pull/*` objects are *reachable* and a
+      shape. Detection checks the state that each step leaves behind, so a run killed
+      after *any* step is seen again. The migration runs if any of these holds:
+      - `remote.origin.mirror` is set (step 1 not done);
+      - the configured fetch refspec set is not exactly the two healthy refspecs (step 2
+        not done). This covers `{}` (killed before the first `--add`), `{heads}` (killed
+        between the two `--add`s, where tags would otherwise go stale for good),
+        `{+refs/*:refs/*}`, any `refs/pull` refspec, and anything unexpected;
+      - any ref exists outside `refs/heads/*`, `refs/tags/*` and `refs/fleet/pr/*` (step 3
+        not done), found with one `git for-each-ref` that stops at the first match;
+      - any `objects/pack/*.keep` or `tmp_pack_*` older than `PREP_TIMEOUT` is present
+        (step 4 not done).
+
+      The trigger is that detected state, never a missing marker file, so a mirror made
+      by the new `clone --bare` path (which never has a marker) is never migrated. Each
+      check is cheap enough to run on every refresh. The steps run in this order,
+      because the `refs/pull/*` objects are *reachable* and a
       repack alone keeps them:
       1. `git config --unset remote.origin.mirror`. `mirror = true` implies `*:*` on
          fetch, so changing the refspec alone isn't enough. The key may already be gone
@@ -62,7 +71,10 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          under `refs/heads/*`, and `knowledge/` worktrees sit at a default-branch head.
          Step 3 keeps all of those, so the prune only drops objects that nothing in
          flight can reach. To be safe anyway, the migration takes the row's mirror lock,
-         the same one `fetch_pr` holds.
+         the same one `fetch_pr` and the `knowledge/` refresh hold. Increment 1 also
+         confirms on the pinned git that `git prune` treats each linked worktree's
+         `HEAD` and index as reachability roots, with a test row
+         (`corner_prune_keeps_worktree_head_and_index`).
       5. Write a marker file. It is only a record for the operator, not the trigger.
          Every step is idempotent (absent-key `--unset` and `--unset-all`, then `--add`,
          deleting refs that are already gone, a repack), so a run killed between any two
@@ -211,7 +223,8 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
       the sandbox at startup, so a sandbox fault can't masquerade as "unsupported".
     - **Cache.** Keyed by the nix store path, kept in memory for the process's life.
     - **Classification.** Only exit 0 means supported. Only an error naming the unknown
-      option means unsupported. Any other failure is `probe_failed`, which disables the
+      option means unsupported. The spike pins the exact message on the pinned nix, and
+      a misread fails closed. Any other failure is `probe_failed`, which disables the
       collector (it reports `skipped: probe failed`) rather than weakening the bound.
     - **Without support.** The flag is omitted, `ulimit -v` and the deadline are the
       bound, and `agent_review_nix_eval_option_omitted_total{option}` plus a warning log

@@ -23,6 +23,9 @@ nixpkgs reviewer wants a few lines, not a 30 KB report.
     "items": { "type": "string", "minLength": 1, "maxLength": 200 } } } }
 ```
 
+The values shown are the defaults. `maxItems` and `maxLength` are generated from
+`CondenseParams` (below), never hard-coded.
+
 The model is untrusted, so the output is **validated and then clamped**, never trusted.
 Validation and clamping split the work:
 
@@ -86,7 +89,10 @@ It runs on the **narrative** (the model's review), not on the grounded-facts app
   bullets can exceed it. When that happens, the join keeps whole bullets only (never
   cutting mid-bullet), dropping from the end, which is the least important (must-fix
   comes first), and appends a `- …` marker line. Row:
-  `boundary_multibyte_bullets_over_4kib_keep_whole_bullets`. Status rows (supersede,
+  `boundary_multibyte_bullets_over_4kib_keep_whole_bullets`. One bullet always survives:
+  with `max_line_chars` at most 200, a bullet is at most 200 × 4 bytes plus its marker,
+  about 800 bytes, well under 4 KiB. So the cap can never empty `condensed` and flip
+  posting to the `full` fallback. Status rows (supersede,
   skip, post) clone the record, so the field carries over unchanged.
 - **ClickHouse.** In `nix/clickhouse/schema.sql`, next to the `requested_by`/`approved_by`
   precedent at `:224-225`:
@@ -159,11 +165,15 @@ to a default.
 For `post = both`:
 
 - **Escaping.** The full body is model output, and a `</details` in it would close the
-  collapse early. Every `</details`, in any case and followed by optional whitespace and
-  `>`, is escaped to `&lt;/details`. This includes occurrences inside code spans and
-  blocks, where a review quoting the tag will show `&lt;/details`. That is accepted, as
-  the safe direction. Row: `adversarial_body_closes_details_early`, with the
-  `</details >` and `</DETAILS>` variants.
+  collapse early. HTML5 ignores whitespace and a `/` before the `>` of an end tag, so
+  the match is case-insensitive `</details` followed by `[\s/]*>`, or by the end of input.
+  Only the leading `<` is replaced (with `&lt;`), so the tail (`details >`, `details/>`)
+  is kept as text. Every opening `<details` (with `[\s>]` after it) is escaped the same
+  way. A nested collapse could otherwise make the wrapper's own `</details>` close the
+  inner one. This includes occurrences inside code spans and blocks, where a review
+  quoting the tag will show `&lt;details`. That is accepted, as the safe direction.
+  Row: `adversarial_body_closes_details_early`, with the `</details >`, `</DETAILS>`,
+  `</details/>`, `</details />` and nested-`<details>` variants.
 - **Order.** Escape first, then truncate. The escape lengthens the text (`</details` →
   `&lt;/details`), so the budget is computed on the escaped body. The bullets, the
   `<details><summary>` line, the truncation marker line and the closing `</details>` all
@@ -204,7 +214,8 @@ The `condense()` clamp table, rstest with a description and an expected outcome 
   `boundary_max_line_chars_30_clamped_to_40`, `boundary_max_line_chars_250_clamped_to_200`
 - `adversarial_link_text_is_url_wrapped_after_rewrite` (`[http://evil](https://x)` ends
   as a code span, never a live URL)
-- `corner_url_in_code_span_not_double_wrapped`
+- `corner_url_in_code_span_not_double_wrapped` (single- and double-backtick spans, since
+  CommonMark spans open with a backtick run of any length)
 - `corner_unbalanced_backtick_url_still_wrapped` (an unmatched backtick opens no code span
   in CommonMark, so the URL after it is still wrapped)
 - `boundary_nine_kept` / `boundary_ten_truncated_to_nine`

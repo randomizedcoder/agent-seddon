@@ -14,7 +14,8 @@ The orchestrator picks the entry point from the roster row:
 
 - `row.graph` empty → `run_review` (today's behaviour, and the rollback).
 - `row.graph = "<name>"` → load `config/cognition/<name>.textproto`, a `safe_segment` name.
-  It is compiled and validated **once per row and per document version** and cached beside
+  It is compiled and validated **once per (row, document version, `max_parallel_steps`)**
+  (see *Capacity*) and cached beside
   the row's context in `FleetReviewCtxFactory` (`crates/agent-runtime/src/fleet_review.rs`).
   A validation error turns into a single-session review plus a warning log and a metric.
   A bad document never blocks reviews.
@@ -87,16 +88,30 @@ and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
   the leases are all drawn from one per-PR budget of `max_parallel_steps`. The sum held
   across splits never exceeds it, and a second split whose reservation wouldn't fit waits
   for the first join to settle. Row: `boundary_two_sequential_splits_share_one_budget`.
-- **Legal multi-split shapes.** Splits are either *sequential*, where one split's join is
-  an ancestor of the next split, or *sibling*, where several splits feed the same join.
-  Nested splits (a split inside another split's branch) are rejected in pipeline
-  documents too, which carries the anchor rule over explicitly.
+- **Legal multi-split shapes.** Nested splits (a split inside another split's branch)
+  are rejected in pipeline documents too, which carries the anchor rule over
+  explicitly. Every other arrangement is legal: sequential splits (one split's join is
+  an ancestor of the next split), sibling splits (several splits feeding one join), and
+  independent split/join pairs that converge further down (on `assemble`, or on
+  different joins). The liveness rule below is what makes all of them safe. A split
+  that can't reserve is only ever waiting on a lease whose join *can* settle, so it is
+  serialized, never stalled.
 - **Liveness rule.** A set of branches that must all be live before one join can settle
   has to fit the budget at once. Otherwise a reservation waits on a join that can only
   settle after it, and the PR stalls until the graph deadline. Per-row validation
-  therefore computes, for every join, the **sum** of the branch counts of the splits
-  feeding it. It rejects the document, with a hint, if any sum exceeds the row's
-  `max_parallel_steps`. This covers the single-wide-split case too. Sibling splits
+  therefore computes, for every join, the number of **slot-holding** steps that feed it:
+  every branch of every split feeding it, **plus** every lone `tools = readonly` step
+  that is a direct predecessor of the join and sits under no split. It rejects the
+  document, with a hint, if any count exceeds the row's `max_parallel_steps`. This covers
+  the single-wide-split case too. "Feeding" means the join's direct predecessors and the
+  splits they hang from, not transitive ancestry through another join. A count that
+  spans an intermediate join is conservative: it can reject a document whose branches
+  are never live at once. That is safe, since a rejection only falls back to the
+  single-session review, and the hint names the join.
+- Lone readonly steps feeding a join are included in that join's lease, which is taken
+  when the first of its feeding steps becomes ready. So a finished split's slots can
+  never starve a sibling lens. Row: `negative_split_plus_lone_lens_over_budget_rejected`
+  (5 + 1 at budget 5). Sibling splits
   reserve together, as one lease, at the first of them. Like any validation error, a
   rejection falls back to the single-session review. Rows:
   `negative_split_wider_than_budget_rejected`, `negative_sibling_splits_sum_over_budget_rejected`
