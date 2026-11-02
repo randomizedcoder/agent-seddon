@@ -82,12 +82,12 @@ accessibility { focus_ring_width: 2 }
 
 | Pair | Ratio |
 |---|---|
-| green text on black | 15.5:1 |
+| green text on black | 11.3:1 |
 | turquoise labels on black | 12.8:1 |
 | blue (info, muted) on black | 7.1:1 |
 | red errors on black | 6.7:1 |
 | pink (Graph rail icon) on black | 8.0:1 |
-| black on green (primary buttons) | 15.5:1 |
+| black on green (primary buttons) | 11.3:1 |
 
 The 3270 colours carry meaning: turquoise for labels (protected fields), green for
 values and input (unprotected), white for emphasis (intensified), red for errors, yellow
