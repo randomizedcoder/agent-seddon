@@ -66,9 +66,9 @@ pub fn build_repo(
 }
 
 /// When `auto_fetch_secs > 0`, spawn a detached task that brings the shared mirror
-/// up to date (bootstrapping it with `git clone --mirror` on first run) if it is
-/// older than the configured age. Non-blocking: reads serve the checkout's object
-/// DB meanwhile. A no-op when auto-fetch is disabled.
+/// up to date (bootstrapping it with a branches-and-tags `git clone --bare` on first
+/// run) if it is older than the configured age. Non-blocking: reads serve the
+/// checkout's object DB meanwhile. A no-op when auto-fetch is disabled.
 pub fn spawn_fetch(backend: Arc<dyn RepoBackend>, auto_fetch_secs: u64) {
     if auto_fetch_secs == 0 {
         return;

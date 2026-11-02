@@ -699,3 +699,32 @@ async fn negative_failed_clone_leaves_no_partial() {
     assert!(!work.join("mirror.partial").exists());
     assert!(!work.join("mirror").exists());
 }
+
+#[tokio::test]
+async fn corner_leftover_partial_is_cleared_by_the_next_clone() {
+    // desc: a killed new-flow clone left `<mirror>.partial` behind.
+    // expect: the next clone clears it, finishes, and leaves no staging dir.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let partial = work.join("mirror.partial");
+    std::fs::create_dir_all(partial.join("objects")).unwrap();
+    std::fs::write(partial.join("HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap(), "cloned");
+    assert!(!partial.exists(), "the leftover staging dir is gone");
+    let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(main.len(), 40, "the mirror has main: {main}");
+}
+
+#[tokio::test]
+async fn positive_inline_fetch_clones_the_mirror() {
+    // desc: a backend without the background clone (the CLI path) fetches with no
+    // mirror yet. expect: the clone runs inline, under the ordinary git guard, and the
+    // fetch succeeds against the new mirror.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    b.fetch().await.unwrap();
+    let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(main.len(), 40, "the mirror has main: {main}");
+}

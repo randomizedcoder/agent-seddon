@@ -37,7 +37,9 @@ const GIT_TIMEOUT_SECS: u64 = 600;
 /// Deadline for the one-off `clone` that creates a mirror. A heads-and-tags clone of
 /// nixpkgs is several GB, far past [`GIT_TIMEOUT_SECS`], and a clone killed at its
 /// deadline keeps nothing, so a deadline it can't meet would retry for ever. The fleet
-/// runs it off the review path ([`CliBackend::with_background_mirror_clone`]).
+/// runs it off the review path ([`CliBackend::with_background_mirror_clone`]). A clone
+/// made inline, inside the `fetch` that needed it, keeps [`GIT_TIMEOUT_SECS`], so an
+/// interactive caller waits no longer than it did before.
 const MIRROR_CLONE_TIMEOUT_SECS: u64 = 7200;
 
 /// The mirror's fetch refspecs: branches and tags, nothing else. `clone --mirror`
@@ -419,7 +421,7 @@ impl CliBackend {
             return Ok(false);
         }
         let slot = CloneSlot::claim(&self.mirror).ok_or_else(|| self.cloning_error())?;
-        self.clone_mirror(slot).await?;
+        self.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await?;
         Ok(true)
     }
 
@@ -436,7 +438,7 @@ impl CliBackend {
     /// 2. Set exactly the [`MIRROR_REFSPECS`] (`clone --bare` writes no fetch refspec).
     /// 3. Move whatever is at the mirror path to `<mirror>.stale`, rename the staging
     ///    dir into place, and delete the stale one.
-    async fn clone_mirror(&self, _slot: CloneSlot) -> Result<()> {
+    async fn clone_mirror(&self, _slot: CloneSlot, deadline_secs: u64) -> Result<()> {
         let remote = self.resolve_remote_url().await.ok_or_else(|| {
             Error::Repo("mirror bootstrap needs a remote (set [git] remote or an origin)".into())
         })?;
@@ -467,7 +469,7 @@ impl CliBackend {
             .git_run(
                 &parent,
                 &["clone", "--bare", &remote, &staging_s],
-                MIRROR_CLONE_TIMEOUT_SECS,
+                deadline_secs,
             )
             .await
         {
@@ -499,14 +501,21 @@ impl CliBackend {
     /// Make sure the mirror exists before a fetch. Without a remote there is nothing
     /// to clone, and the fetch runs on the checkout as before. Without
     /// [`with_background_mirror_clone`](Self::with_background_mirror_clone) the clone
-    /// runs here, best-effort. With it, a background task clones (one per mirror path)
-    /// and this errs until the mirror is ready.
+    /// runs here, best-effort, under the ordinary [`GIT_TIMEOUT_SECS`] guard (a failure
+    /// is logged and the fetch goes on without the mirror). With it, a background task
+    /// clones (one per mirror path, under [`MIRROR_CLONE_TIMEOUT_SECS`]) and this errs
+    /// until the mirror is ready.
     async fn prepare_mirror(&self) -> Result<()> {
         if self.mirror_ready() {
             return Ok(());
         }
         if !self.background_clone {
-            let _ = self.ensure_mirror().await;
+            if let Some(slot) = CloneSlot::claim(&self.mirror) {
+                if let Err(e) = self.clone_mirror(slot, GIT_TIMEOUT_SECS).await {
+                    tracing::warn!(mirror = %self.mirror.display(), error = %e,
+                        "git: inline mirror clone failed; fetching without the mirror");
+                }
+            }
             return Ok(());
         }
         if self.resolve_remote_url().await.is_none() {
@@ -519,7 +528,7 @@ impl CliBackend {
             tokio::spawn(async move {
                 let mirror = backend.mirror.display().to_string();
                 tracing::info!(%mirror, "git: cloning the mirror in the background");
-                match backend.clone_mirror(slot).await {
+                match backend.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await {
                     Ok(()) => tracing::info!(%mirror, "git: mirror clone finished"),
                     Err(e) => tracing::warn!(%mirror, error = %e,
                         "git: background mirror clone failed; the next fetch retries it"),

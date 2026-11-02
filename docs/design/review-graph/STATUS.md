@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 0 | Design directory | all | ✅ | #681 (+ follow-ups #683) |
 | 1 | Fix "Files changed: 0" on nixpkgs: heads+tags mirror via an atomic staged `clone --bare` (a killed clone is replaced), background clone off the review path, target-branch base fetch (`fetch_branch`) instead of a per-review `fetch --all`, process-group kill on timeout, loud unknown change set | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | 🟡 | (this PR) |
-| 1c | Mirror upkeep: old-shape (`clone --mirror`) migration as a maintenance job, `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, forge file-list fallback for a failed diff, a `FetchBranch` RPC for `GrpcRepo` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1c | Mirror upkeep: old-shape (`clone --mirror`) migration as a maintenance job, `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, forge file-list fallback for a failed diff, a `FetchBranch` RPC for `GrpcRepo`, an off-path refresh of tags and non-target branches, recovering `<mirror>.stale` after a crash mid-swap, `safe_branch` parity with `git check-ref-format` (e.g. a trailing `.`) | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1b | Work queues + worker pools: (i) in-process stage pools (fetch/ground/review/finish/index) with per-stage worker counts and per-repo/tenant caps; (ii) durable `FleetJobQueue` (memory + Postgres, SKIP LOCKED claim, leases, retries, coalescing); (iii) multi-process with affinity, graceful shutdown, portal stage view | [06](06-work-queue.md) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
@@ -58,3 +58,13 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - The collector name is shared.
 
   `GrpcRepo` has no `FetchBranch` RPC yet (it warns per review and leaves the base as is) → 1c.
+
+  Fleet review round 2 fixes:
+  - An inline clone (the CLI, without the background clone) keeps the 600 s git guard instead of
+    the 2 h one, and a failed inline clone is logged rather than dropped.
+  - The reftable shortcut is checked against git 2.55 (a finished clone's `HEAD` file is the stub)
+    and its limit documented: only a pre-staging reftable mirror killed partway could read ready.
+  - The `GrpcRepo` gap is documented in `docs/components/git.md`.
+  - Fixture tests: a leftover `.partial` is cleared by the next clone; an inline fetch clones.
+  - The rest of round 2's lower-priority items (off-path refresh, `.stale` recovery,
+    `safe_branch` parity) → 1c.

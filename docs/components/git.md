@@ -127,6 +127,10 @@ whatever the mirror last saw. The name comes from the forge and is screened firs
 `.lock`, no `..`, at most 255 bytes. Without a mirror it does nothing, because in a
 working checkout `refs/heads/<name>` is the user's own branch.
 
+`fetch_branch` is not on the wire yet: `GrpcRepo` (`[git] backend = "grpc"`) keeps the
+trait's default, which errs, so a review over the gRPC repo backend logs a warning and
+diffs against the base the remote server last fetched. The RPC is review-graph row 1c.
+
 The read tools work against the current checkout's object database out of the
 box — no mirror required. Setting `auto_fetch_secs > 0` opts into the shared
 mirror: on start a background task bootstraps it (from `remote`, or the checkout's
@@ -141,7 +145,9 @@ runs off the request path.
 nixpkgs that is about 12M objects. PR heads come one at a time from `fetch_pr`.
 The clone:
 
-1. runs `clone --bare` into `<mirror>.partial` under a 2-hour deadline;
+1. runs `clone --bare` into `<mirror>.partial` (clearing a killed run's leftover dir
+   first) under a 2-hour deadline when it runs in the background, or the ordinary
+   600 s git guard when it runs inline;
 2. sets exactly those two refspecs;
 3. renames the staging dir onto the mirror path.
 
@@ -150,7 +156,10 @@ A clone killed partway therefore never looks like a mirror. Readiness is read fr
 the real `HEAD` only once the refs are in. A git dir whose `HEAD` is still the
 placeholder (a clone from before this rule, killed partway) is replaced on the next
 bootstrap. A finished clone of an empty repo is ready, so it is not re-cloned on
-every call. A reftable repo is always ready, since its `HEAD` file is a stub. Refs are
+every call. A reftable repo is always ready, since its `HEAD` file is a stub even
+when the clone finished (checked against git 2.55). So a killed clone into a
+reftable mirror from before the staging rule would read as ready; a new clone can't
+be, because it is renamed into place only once complete. Refs are
 never scanned, because a misread there would delete a good mirror. A path that is
 neither a git dir nor empty is never replaced, and a failed clone removes its
 `.partial` dir. One clone runs per mirror path, across processes too: the claim
@@ -164,7 +173,11 @@ a mirror it is the checkout's own `fetch --prune --all`.
 `with_background_mirror_clone()` (set by the review fleet) clones in a background
 task, and `fetch` / `fetch_pr` / `fetch_branch` fail fast with "being cloned" until
 the clone is done. The fleet's review prep is bounded far below a large clone, and a
-clone cancelled at that bound would start over every time.
+clone cancelled at that bound would start over every time. Without it (the CLI), the
+clone runs inline inside the fetch that needed it, under the 600 s guard, so an
+interactive caller waits no longer than before; a failed clone is logged and the
+fetch goes on without the mirror. The `auto_fetch_secs` bootstrap is already a
+background task and gets the 2-hour deadline.
 
 ### Authenticated (private) clone/fetch
 
