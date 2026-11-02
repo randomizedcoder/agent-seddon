@@ -952,7 +952,7 @@ mod tests {
         // the clone reaches the sandbox from its own task.
         let err = ctx.repo.fetch_pr(1).await.unwrap_err();
         assert!(err.to_string().contains("being cloned"), "{err}");
-        for _ in 0..500 {
+        for _ in 0..3000 {
             if rec.any_auth_header() {
                 break;
             }

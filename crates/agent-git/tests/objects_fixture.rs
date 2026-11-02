@@ -645,3 +645,57 @@ async fn adversarial_killed_clone_is_replaced() {
         "ready now: no second clone"
     );
 }
+
+#[tokio::test]
+async fn adversarial_old_shape_mirror_fetch_skips_pull_refs() {
+    // desc: a mirror made by the old code (`clone --mirror`, config `+refs/*:refs/*`,
+    // `mirror = true`); upstream then gains a commit on main and a new PR ref.
+    // expect: `fetch` moves main but does not bring the new `refs/pull/*`.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let mirror = work.join("mirror");
+    git(
+        &work,
+        &[
+            "clone",
+            "-q",
+            "--mirror",
+            &source.to_string_lossy(),
+            "mirror",
+        ],
+    );
+    let new_main = commit_on(&source, "main", "c.txt");
+    git(&source, &["update-ref", "refs/pull/2/head", &new_main]);
+
+    let b = fleet_backend(&source, &work);
+    b.fetch().await.unwrap();
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/main"]),
+        new_main
+    );
+    let refs = git_out(&mirror, &["for-each-ref", "--format=%(refname)"]);
+    assert!(!refs.contains("refs/pull/2/head"), "{refs}");
+}
+
+#[tokio::test]
+async fn boundary_empty_repo_is_cloned_once() {
+    // desc: the remote is an empty repo, so the finished mirror has no branch.
+    // expect: one clone, then the mirror counts as ready (no clone per call).
+    let source = tempdir();
+    git(&source, &["init", "-q", "-b", "main"]);
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap(), "first call clones");
+    assert!(!b.ensure_mirror().await.unwrap(), "no second clone");
+}
+
+#[tokio::test]
+async fn negative_failed_clone_leaves_no_partial() {
+    // desc: the remote does not exist, so the clone fails.
+    // expect: an error, and no `.partial` staging dir left behind.
+    let work = tempdir();
+    let b = fleet_backend(&work.join("no-such-repo"), &work);
+    assert!(b.ensure_mirror().await.is_err());
+    assert!(!work.join("mirror.partial").exists());
+    assert!(!work.join("mirror").exists());
+}

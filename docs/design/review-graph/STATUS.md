@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 0 | Design directory | all | ✅ | #681 (+ follow-ups #683) |
 | 1 | Fix "Files changed: 0" on nixpkgs: heads+tags mirror via an atomic staged `clone --bare` (a killed clone is replaced), background clone off the review path, target-branch base fetch (`fetch_branch`) instead of a per-review `fetch --all`, process-group kill on timeout, loud unknown change set | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | 🟡 | (this PR) |
-| 1c | Mirror upkeep: old-shape (`clone --mirror`) migration as a maintenance job, `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, forge file-list fallback for a failed diff | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1c | Mirror upkeep: old-shape (`clone --mirror`) migration as a maintenance job, `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, forge file-list fallback for a failed diff, a `FetchBranch` RPC for `GrpcRepo` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1b | Work queues + worker pools: (i) in-process stage pools (fetch/ground/review/finish/index) with per-stage worker counts and per-repo/tenant caps; (ii) durable `FleetJobQueue` (memory + Postgres, SKIP LOCKED claim, leases, retries, coalescing); (iii) multi-process with affinity, graceful shutdown, portal stage view | [06](06-work-queue.md) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
@@ -45,6 +45,16 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - The sandbox kills the whole process group on a timeout or cancel.
   - A failed diff reads "unknown" in the draft and the brief.
 
-  Old-shape mirrors (agent-seddon, xtcp2 on l2) keep working: the base fetch uses an explicit
-  refspec, so their `mirror = true` config no longer matters on the review path. Their migration
-  moves to **1c**, with retention, the sweep, the size metric and the forge file-list fallback.
+  Old-shape mirrors (agent-seddon, xtcp2 on l2) keep working: the base fetch and `fetch` pass
+  explicit refspecs, so their `+refs/*:refs/*` config is never used. Removing the `refs/pull/*`
+  they already hold moves to **1c**, with retention, the sweep, the size metric and the forge
+  file-list fallback.
+
+  Fleet review round 1 fixes:
+  - Readiness reads `HEAD` only, so a cloned empty repo is ready and a deep ref can't delete a mirror.
+  - A cross-process `<mirror>.clone-lock`.
+  - A failed clone removes `.partial`.
+  - `fetch_branch` logs when there is no mirror.
+  - The collector name is shared.
+
+  `GrpcRepo` has no `FetchBranch` RPC yet (it warns per review and leaves the base as is) → 1c.

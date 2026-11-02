@@ -18,10 +18,15 @@ const MAX_COMMITS: usize = 10;
 
 pub(crate) struct RepoChangeCollector;
 
+impl RepoChangeCollector {
+    /// The collector's name, which the draft renderer keys "files changed: unknown" on.
+    pub(crate) const NAME: &'static str = "repo-change";
+}
+
 #[async_trait::async_trait]
 impl FactCollector for RepoChangeCollector {
     fn name(&self) -> &'static str {
-        "repo-change"
+        Self::NAME
     }
 
     async fn collect(&self, ctx: &CollectCtx) -> CollectorOutput {

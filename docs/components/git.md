@@ -145,11 +145,22 @@ The clone:
 2. sets exactly those two refspecs;
 3. renames the staging dir onto the mirror path.
 
-A clone killed partway therefore never looks like a mirror. A mirror counts as
-ready only once it has a branch. A git dir with no branch, such as a clone from
-before this rule that was killed before writing its refs (its `HEAD` is still
-`refs/heads/.invalid`), is replaced on the next bootstrap. A path that is neither
-a git dir nor empty is never replaced. One clone runs per mirror path per process.
+A clone killed partway therefore never looks like a mirror. Readiness is read from
+`HEAD` alone: `git clone` writes the placeholder `ref: refs/heads/.invalid` first and
+the real `HEAD` only once the refs are in. A git dir whose `HEAD` is still the
+placeholder (a clone from before this rule, killed partway) is replaced on the next
+bootstrap. A finished clone of an empty repo is ready, so it is not re-cloned on
+every call. A reftable repo is always ready, since its `HEAD` file is a stub. Refs are
+never scanned, because a misread there would delete a good mirror. A path that is
+neither a git dir nor empty is never replaced, and a failed clone removes its
+`.partial` dir. One clone runs per mirror path, across processes too: the claim
+holds an exclusive lock on `<mirror>.clone-lock`, which the OS releases if the
+process dies.
+
+`fetch` on a mirror passes the two refspecs on the command line
+(`fetch --prune --no-tags <remote> MIRROR_REFSPECS`), so a mirror made by older code
+(`clone --mirror`, config `+refs/*:refs/*`) never pulls `refs/pull/*` either. Without
+a mirror it is the checkout's own `fetch --prune --all`.
 `with_background_mirror_clone()` (set by the review fleet) clones in a background
 task, and `fetch` / `fetch_pr` / `fetch_branch` fail fast with "being cloned" until
 the clone is done. The fleet's review prep is bounded far below a large clone, and a

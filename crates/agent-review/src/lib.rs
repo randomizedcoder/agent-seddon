@@ -206,8 +206,8 @@ pub fn redact(s: &str) -> String {
     out
 }
 
-/// Name of the collector that computes the change set (`repo_facts.rs`).
-const CHANGE_COLLECTOR: &str = "repo-change";
+/// Name of the collector that computes the change set.
+const CHANGE_COLLECTOR: &str = repo_facts::RepoChangeCollector::NAME;
 
 /// Why the changed-file list is unknown, when it is: the change-set collector ran but
 /// did not finish cleanly (its diff failed, it failed outright, or it ran out of time).
@@ -922,7 +922,7 @@ mod draft_tests {
         let mut f = facts();
         if let Some((status, reason)) = change {
             f.meta.collectors.push(CollectorStatus {
-                collector: "repo-change".into(),
+                collector: CHANGE_COLLECTOR.into(),
                 status,
                 reason: reason.into(),
                 duration_ms: 1,

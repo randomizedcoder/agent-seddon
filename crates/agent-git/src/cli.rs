@@ -97,52 +97,30 @@ pub struct CliBackend {
 enum MirrorState {
     /// Not a git dir (nothing there, or something else).
     Absent,
-    /// A git dir with no branch: a clone killed before it wrote its refs (its `HEAD`
-    /// is still [`CLONE_PLACEHOLDER_HEAD`]), or a clone of an empty repo.
+    /// A clone killed before it finished: `git clone` writes the placeholder `HEAD`
+    /// ([`CLONE_PLACEHOLDER_HEAD`]) first and the real one only once the refs are in.
     Incomplete,
-    /// A git dir with at least one branch.
+    /// A finished git dir, including the clone of an empty repo (no branch, real
+    /// `HEAD`), which must not be re-cloned on every call.
     Ready,
 }
 
-/// Classify the mirror path. Only the presence of files is checked, so this is cheap
-/// enough for every call.
+/// Classify the mirror path from `HEAD` alone, so this is cheap enough for every
+/// call. Refs are never scanned: a misread there would delete a good mirror.
 fn mirror_state(dir: &Path) -> MirrorState {
     let head = dir.join("HEAD");
     if !head.is_file() && !dir.join("objects").is_dir() {
         return MirrorState::Absent;
     }
-    let placeholder = std::fs::read_to_string(&head)
-        .map(|h| h.trim() == CLONE_PLACEHOLDER_HEAD)
-        .unwrap_or(true);
-    if placeholder || !has_branch(dir) {
-        MirrorState::Incomplete
-    } else {
-        MirrorState::Ready
+    // A reftable repo keeps its real HEAD in the tables; its `HEAD` file is always
+    // the placeholder stub, so it says nothing about a finished clone.
+    if dir.join("reftable").is_dir() {
+        return MirrorState::Ready;
     }
-}
-
-/// Whether a git dir has a branch: a loose ref under `refs/heads/`, one in
-/// `packed-refs`, or a reftable store (whose refs can't be read as files).
-fn has_branch(dir: &Path) -> bool {
-    let packed = std::fs::read_to_string(dir.join("packed-refs")).is_ok_and(|p| {
-        p.lines()
-            .filter_map(|l| l.split_once(' '))
-            .any(|(_, name)| name.starts_with("refs/heads/"))
-    });
-    packed || dir.join("reftable").is_dir() || has_file_under(&dir.join("refs/heads"), 16)
-}
-
-/// Whether `dir` holds a regular file within `depth` levels (a branch named `a/b`
-/// is the file `refs/heads/a/b`).
-fn has_file_under(dir: &Path, depth: u32) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.flatten().any(|e| match e.file_type() {
-        Ok(t) if t.is_file() => true,
-        Ok(t) if t.is_dir() && depth > 0 => has_file_under(&e.path(), depth - 1),
-        _ => false,
-    })
+    match std::fs::read_to_string(&head) {
+        Ok(h) if h.trim() != CLONE_PLACEHOLDER_HEAD => MirrorState::Ready,
+        _ => MirrorState::Incomplete,
+    }
 }
 
 /// Whether a path that is not a recognised git dir may be moved aside to make room
@@ -188,18 +166,57 @@ async fn remove_tree(path: PathBuf) -> Result<()> {
 /// mirror (a rebuilt review context) never clone into the same staging dir.
 static CLONING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Mutex::default);
 
-/// The claim on one mirror path's clone; released on drop.
-struct CloneSlot(PathBuf);
+/// The claim on one mirror path's clone; released on drop. It is held in this
+/// process ([`CLONING`]) and, across processes sharing the mirror (a fleet and a CLI
+/// review), by an exclusive lock on `<mirror>.clone-lock`, which the OS drops if the
+/// process dies.
+struct CloneSlot {
+    mirror: PathBuf,
+    _lock: Option<std::fs::File>,
+}
 
 impl CloneSlot {
-    /// Claim `mirror`, or `None` when a clone of it is already running.
+    /// Claim `mirror`, or `None` when a clone of it is already running here or in
+    /// another process.
     fn claim(mirror: &Path) -> Option<Self> {
         let mut cloning = CLONING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cloning
-            .insert(mirror.to_path_buf())
-            .then(|| Self(mirror.to_path_buf()))
+        if !cloning.insert(mirror.to_path_buf()) {
+            return None;
+        }
+        let lock = match Self::lock_file(mirror) {
+            Ok(lock) => Some(lock),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                cloning.remove(mirror);
+                return None;
+            }
+            // A lock file that can't be made (a read-only parent) still leaves the
+            // in-process claim, and the clone itself reports the real error.
+            Err(std::fs::TryLockError::Error(e)) => {
+                tracing::warn!(mirror = %mirror.display(), error = %e,
+                    "git: no cross-process clone lock; claiming in this process only");
+                None
+            }
+        };
+        Some(Self {
+            mirror: mirror.to_path_buf(),
+            _lock: lock,
+        })
+    }
+
+    fn lock_file(mirror: &Path) -> std::result::Result<std::fs::File, std::fs::TryLockError> {
+        if let Some(parent) = mirror.parent() {
+            std::fs::create_dir_all(parent).map_err(std::fs::TryLockError::Error)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sibling(mirror, "clone-lock"))
+            .map_err(std::fs::TryLockError::Error)?;
+        file.try_lock()?;
+        Ok(file)
     }
 }
 
@@ -208,7 +225,7 @@ impl Drop for CloneSlot {
         CLONING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.0);
+            .remove(&self.mirror);
     }
 }
 
@@ -446,12 +463,20 @@ impl CliBackend {
         }
 
         let staging_s = staging.to_string_lossy().into_owned();
-        self.git_run(
-            &parent,
-            &["clone", "--bare", &remote, &staging_s],
-            MIRROR_CLONE_TIMEOUT_SECS,
-        )
-        .await?;
+        if let Err(e) = self
+            .git_run(
+                &parent,
+                &["clone", "--bare", &remote, &staging_s],
+                MIRROR_CLONE_TIMEOUT_SECS,
+            )
+            .await
+        {
+            // Don't leave a partial clone on disk until some later attempt.
+            if let Err(re) = remove_tree(staging).await {
+                tracing::warn!(error = %re, "git: removing a failed clone's staging dir failed");
+            }
+            return Err(e);
+        }
         // `--unset-all` exits 5 when the key is absent, which is the normal case here.
         let _ = self
             .git_str(&staging, &["config", "--unset-all", "remote.origin.fetch"])
@@ -1138,8 +1163,18 @@ impl RepoBackend for CliBackend {
         // Bootstrap the shared mirror on first fetch when a remote is known (see
         // `prepare_mirror`); a missing remote still lets the fetch run on the checkout.
         self.prepare_mirror().await?;
-        let base = self.base().to_path_buf();
-        self.git_str(&base, &["fetch", "--prune", "--all"]).await?;
+        if self.mirror_ready() {
+            // The refspecs are passed explicitly, so a mirror made by older code (a
+            // `clone --mirror`, whose config says `+refs/*:refs/*`) still fetches only
+            // branches and tags, never every `refs/pull/*`. `--prune` then prunes only
+            // within those namespaces.
+            let mut args = vec!["fetch", "--prune", "--no-tags", self.remote_name()];
+            args.extend(MIRROR_REFSPECS);
+            self.git_str(&self.mirror, &args).await?;
+        } else {
+            self.git_str(&self.root, &["fetch", "--prune", "--all"])
+                .await?;
+        }
         self.status().await
     }
 
@@ -1157,6 +1192,8 @@ impl RepoBackend for CliBackend {
         // Only a mirror is refreshed. In a working checkout `refs/heads/<b>` is the
         // user's own branch, and a forced fetch into it would overwrite local work.
         if !self.mirror_ready() {
+            tracing::info!(branch, root = %self.root.display(),
+                "git: no mirror, so the base branch is not refreshed (a checkout's branches are the user's)");
             return Ok(());
         }
         // A full refspec, so the branch ref itself is written. A bare `fetch origin <b>`
@@ -2184,10 +2221,14 @@ mod tests {
         EmptyDir,
         /// A clone killed before it wrote refs: placeholder HEAD, objects, no refs.
         KilledClone,
-        /// A real HEAD but no branch anywhere.
-        NoBranch,
+        /// A finished clone of an empty repo: a real HEAD but no branch anywhere.
+        EmptyRepo,
+        /// Objects but no HEAD file (a dir git never finished setting up).
+        Headless,
         Loose,
         Nested,
+        /// A loose branch nested deeper than any sane ref walk would go.
+        DeepNested,
         Packed,
         Reftable,
     }
@@ -2203,7 +2244,7 @@ mod tests {
                 mk("refs/heads");
                 put("HEAD", "ref: refs/heads/.invalid\n");
             }
-            Layout::NoBranch => {
+            Layout::EmptyRepo => {
                 mk("objects");
                 mk("refs/heads");
                 put("HEAD", "ref: refs/heads/main\n");
@@ -2222,6 +2263,13 @@ mod tests {
                     "# pack-refs with: peeled fully-peeled sorted\n0000 refs/heads/master\n",
                 );
             }
+            Layout::Headless => mk("objects/pack"),
+            Layout::DeepNested => {
+                let deep = format!("refs/heads/{}", vec!["d"; 40].join("/"));
+                mk(&deep);
+                put("HEAD", "ref: refs/heads/main\n");
+                put(&format!("{deep}/tip"), "0\n");
+            }
             Layout::Reftable => {
                 mk("reftable");
                 put("HEAD", "ref: refs/heads/.invalid\n");
@@ -2239,8 +2287,10 @@ mod tests {
     #[case::negative_nothing_is_absent(Layout::Nothing, MirrorState::Absent)]
     #[case::negative_empty_dir_is_absent(Layout::EmptyDir, MirrorState::Absent)]
     #[case::adversarial_killed_clone_is_incomplete(Layout::KilledClone, MirrorState::Incomplete)]
-    #[case::boundary_no_branch_is_incomplete(Layout::NoBranch, MirrorState::Incomplete)]
-    #[case::corner_placeholder_head_wins_over_reftable(Layout::Reftable, MirrorState::Incomplete)]
+    #[case::adversarial_headless_objects_is_incomplete(Layout::Headless, MirrorState::Incomplete)]
+    #[case::boundary_cloned_empty_repo_is_ready(Layout::EmptyRepo, MirrorState::Ready)]
+    #[case::corner_reftable_stub_head_is_ready(Layout::Reftable, MirrorState::Ready)]
+    #[case::corner_deeply_nested_branch_is_ready(Layout::DeepNested, MirrorState::Ready)]
     fn mirror_state_cases(#[case] layout: Layout, #[case] want: MirrorState) {
         let dir = agent_testkit::tempdir().join("mirror");
         lay_out(&dir, layout);
@@ -2455,5 +2505,58 @@ mod tests {
             "{:?}",
             rec.all_argvs()
         );
+    }
+
+    /// `fetch` on a ready mirror passes the heads/tags refspecs itself, so an old
+    /// `clone --mirror` (config `+refs/*:refs/*`) never pulls `refs/pull/*`; without a
+    /// mirror it is the checkout's own `fetch --all`, as before.
+    #[rstest]
+    #[case::positive_mirror_gets_explicit_refspecs(true)]
+    #[case::negative_checkout_keeps_its_own_config(false)]
+    #[tokio::test]
+    async fn fetch_refspecs_are_explicit_on_a_mirror(#[case] mirror_ready: bool) {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let dir = agent_testkit::tempdir();
+        let (root, mirror) = (dir.join("root"), dir.join("mirror"));
+        if mirror_ready {
+            make_ready(&mirror);
+        }
+        let b = CliBackend::new(&root, &mirror, dir.join("wt"), "").with_sandbox(rec.clone());
+        let _ = b.fetch().await;
+        let fetch = rec
+            .all_argvs()
+            .into_iter()
+            .find(|a| a[3] == "fetch")
+            .expect("a fetch ran");
+        let (cwd, tail): (&Path, Vec<&str>) = if mirror_ready {
+            let mut t = vec!["fetch", "--prune", "--no-tags", "origin"];
+            t.extend(MIRROR_REFSPECS);
+            (&mirror, t)
+        } else {
+            (&root, vec!["fetch", "--prune", "--all"])
+        };
+        assert_eq!(fetch[2], cwd.to_string_lossy());
+        assert_eq!(&fetch[3..], tail.as_slice());
+    }
+
+    /// The clone claim is exclusive across processes too: a lock held on
+    /// `<mirror>.clone-lock` by another open file (as another process would) refuses
+    /// the claim, and releasing it allows one.
+    #[rstest]
+    #[case::adversarial_lock_held_elsewhere(true, false)]
+    #[case::positive_lock_free(false, true)]
+    fn clone_slot_honours_the_cross_process_lock(#[case] held: bool, #[case] claimed: bool) {
+        let mirror = agent_testkit::tempdir().join("m").join("mirror");
+        let other = held.then(|| {
+            std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(sibling(&mirror, "clone-lock")).unwrap();
+            f.try_lock().unwrap();
+            f
+        });
+        let slot = CloneSlot::claim(&mirror);
+        assert_eq!(slot.is_some(), claimed);
+        drop(slot);
+        drop(other);
+        assert!(CloneSlot::claim(&mirror).is_some(), "free once released");
     }
 }
