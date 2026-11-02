@@ -111,7 +111,21 @@ and the second PR's lenses would then hit `TotalLimit`. Increment 4 adds one:
 - Lone readonly steps feeding a join are included in that join's lease, which is taken
   when the first of its feeding steps becomes ready. So a finished split's slots can
   never starve a sibling lens. Row: `negative_split_plus_lone_lens_over_budget_rejected`
-  (5 + 1 at budget 5). Sibling splits
+  (5 + 1 at budget 5).
+- **Where a readonly step may sit.** Every `tools = readonly` step must be either on a
+  split's branch (a branch may be a chain) or a direct predecessor of a join. A readonly
+  step anywhere else is rejected, with a hint to put the chain under a one-branch split.
+  An example is `ground → R → R2 → J`, where `R` is in no lease. This guarantees every
+  slot-holder is counted and leased, so no step ever waits for admission on a budget
+  held by a lease it is not part of. Rows: `negative_readonly_chain_into_join_rejected`,
+  `positive_one_branch_split_wraps_chain`.
+- **Cost of early leases.** A join's lease is taken when the first of its feeding steps
+  becomes ready, so for sibling splits, or a lone lens that becomes ready late, it can
+  hold `SessionManager` slots that aren't running yet. That never stalls the PR, because
+  the budget is per PR. It can briefly pin global slots that another PR could use. The
+  cost is bounded by one join's lease per PR, and accepted for the simpler,
+  deadlock-free rule. Independent split/join pairs that converge further down serialize
+  on the shared per-PR budget. Row: `positive_independent_splits_serialize_on_shared_budget`. Sibling splits
   reserve together, as one lease, at the first of them. Like any validation error, a
   rejection falls back to the single-session review. Rows:
   `negative_split_wider_than_budget_rejected`, `negative_sibling_splits_sum_over_budget_rejected`

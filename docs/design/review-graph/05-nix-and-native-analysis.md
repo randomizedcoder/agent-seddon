@@ -45,7 +45,9 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
       - any ref exists outside `refs/heads/*`, `refs/tags/*` and `refs/fleet/pr/*` (step 3
         not done), found with one `git for-each-ref` that stops at the first match;
       - any `objects/pack/*.keep` or `tmp_pack_*` older than `PREP_TIMEOUT` is present
-        (step 4 not done).
+        (step 4 not done). A leftover younger than that is caught on a later refresh,
+        once it ages past it, so step 4 converges *eventually* rather than on the very
+        next refresh.
 
       The trigger is that detected state, never a missing marker file, so a mirror made
       by the new `clone --bare` path (which never has a marker) is never migrated. Each
@@ -81,7 +83,9 @@ Every new collector keys off the changed-file list, so this is fixed first. The 
          steps converges on the next refresh. The
          `adversarial_migration_interrupted_is_idempotent` table kills a fixture
          migration after step 1, inside step 2 before the first `--add` (no refspec),
-         between the two `--add`s (heads only), after step 2 and after step 3, and checks each rerun
+         between the two `--add`s (heads only), after step 2, after step 3, and with
+         SIGKILL during the step-4 `repack` (aged leftovers, converging on a later
+         refresh), and checks each rerun
          ends in the same refs and config as an uninterrupted run.
     - **`refs/fleet/pr/*` retention.** `fetch_pr` writes one ref per reviewed PR, and those
       refs keep their objects alive, which would be the same unbounded growth only slower.
@@ -224,7 +228,9 @@ run with `NetworkPolicy::Off` (`crates/agent-review/src/gochecks.rs:158`).
     - **Cache.** Keyed by the nix store path, kept in memory for the process's life.
     - **Classification.** Only exit 0 means supported. Only an error naming the unknown
       option means unsupported. The spike pins the exact message on the pinned nix, and
-      a misread fails closed. Any other failure is `probe_failed`, which disables the
+      a misread fails closed. Every `probe_failed` increments
+      `agent_review_nix_eval_probe_failed_total`, so a nix upgrade that changes the
+      message shows up as a metric rather than as findings quietly stopping. Any other failure is `probe_failed`, which disables the
       collector (it reports `skipped: probe failed`) rather than weakening the bound.
     - **Without support.** The flag is omitted, `ulimit -v` and the deadline are the
       bound, and `agent_review_nix_eval_option_omitted_total{option}` plus a warning log

@@ -75,6 +75,9 @@ never mix. Validator rules for this kind (`crates/agent-graph/src/validate.rs`):
 - Exactly one `assemble` and at most one `condense`.
 - Per row, the slot-holding steps feeding any one join (split branches plus lone
   `readonly` steps) must fit the row's `max_parallel_steps`.
+- A `tools = readonly` step must be on a split's branch or a direct predecessor of a join
+  ([02](02-pipeline-executor.md#capacity)). Anywhere else it would hold a slot outside
+  every lease.
   This is the liveness rule in [02](02-pipeline-executor.md#capacity), and it is checked
   when the document is bound to a row, not in the document alone.
 - Param caps follow the existing schema conventions: sizes are bounded and names are

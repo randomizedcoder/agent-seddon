@@ -168,12 +168,17 @@ For `post = both`:
   collapse early. HTML5 ignores whitespace and a `/` before the `>` of an end tag, so
   the match is case-insensitive `</details` followed by `[\s/]*>`, or by the end of input.
   Only the leading `<` is replaced (with `&lt;`), so the tail (`details >`, `details/>`)
-  is kept as text. Every opening `<details` (with `[\s>]` after it) is escaped the same
-  way. A nested collapse could otherwise make the wrapper's own `</details>` close the
+  is kept as text. Every opening `<details` followed by `[\s/>]`, in any case, is
+  escaped the same way. HTML5 ignores the self-closing flag on a non-void element, so
+  `<details/>` opens a collapse too. A nested collapse could otherwise make the wrapper's own `</details>` close the
   inner one. This includes occurrences inside code spans and blocks, where a review
   quoting the tag will show `&lt;details`. That is accepted, as the safe direction.
   Row: `adversarial_body_closes_details_early`, with the `</details >`, `</DETAILS>`,
-  `</details/>`, `</details />` and nested-`<details>` variants.
+  `</details/>`, `</details />`, nested `<details>`, `<DETAILS>` and `<details/>`
+  variants. The same escape is applied to the joined condensed bullets, as defense in
+  depth on top of the clamp's tag removal, so neither half of the comment can open or
+  close the wrapper. Bare-URL wrapping skips fenced code blocks as well as code spans.
+  Row: `corner_url_in_code_block_not_wrapped`.
 - **Order.** Escape first, then truncate. The escape lengthens the text (`</details` →
   `&lt;/details`), so the budget is computed on the escaped body. The bullets, the
   `<details><summary>` line, the truncation marker line and the closing `</details>` all
