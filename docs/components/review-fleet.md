@@ -337,8 +337,24 @@ The **forge response is untrusted**: `next_page` is followed only when it strict
 and never past `MAX_POLL_PAGES` (10), and at most `MAX_TRIGGERS_PER_TICK` (64) triggers leave
 one tick, so a hostile paging chain or a PR flood is bounded. Dedup is coarse here (by PR
 number, via the queue's coalescing + the orchestrator's per-`(session, pr)` guard); precise
-head-oid re-review dedup lands in inc 6b (C16), resolving the head at fetch time rather than
-relying on `PullRequest` (which carries no head SHA).
+head-oid re-review dedup lands in inc 6b (C16), resolving the head at fetch time.
+
+The poll is built to be a **good citizen** of the forge (most of all GitHub):
+
+- **Listed-head dedup, before any git fetch.** `PullRequest.head_sha` carries the head the PR
+  list reported (only a full 40/64-hex object id; anything else, such as Bitbucket's short
+  hash, becomes empty). The trigger carries it, and the orchestrator reads the review history
+  first: when the newest live draft is already for that head, the trigger ends as
+  `Handled::UpToDate` with **no mirror fetch and no PR fetch**. The hint is untrusted and only
+  ever skips work; a stale or forged hint falls through to the precise check on the fetched
+  head. So a steady-state poll of an unchanged repo is one list call per row.
+- **Per-row backoff.** A row whose poll fails (forge error, rate limit, missing row) is skipped
+  on later ticks for an exponentially growing, jittered wait: 60 s, 120 s, … capped at 30 min
+  (`PollBackoff`, built on `agent-retry`). One success clears it. At most 4096 failing rows
+  are tracked.
+- **Forge-side pacing.** The forge client honours `Retry-After` / rate-limit reset hints, holds
+  a spent quota until it resets and sends conditional GETs. See
+  [forge.md § Rate limits](forge.md#rate-limits).
 
 **Slack watch (C7, inc 4b)** is the second trigger source, in the new
 [`agent-slack`](../../crates/agent-slack) crate (shared with C18's outbound progress poster,

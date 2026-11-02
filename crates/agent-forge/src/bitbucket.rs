@@ -19,7 +19,7 @@
 //! Bitbucket Server / Data Center (self-hosted) has a different URL layout and is
 //! out of scope; this targets Bitbucket Cloud.
 
-use crate::http::{n, s, ForgeHttp};
+use crate::http::{n, object_id, s, ForgeHttp};
 use agent_core::{
     Comment, CreatePrRequest, Forge, Issue, Page, PullRequest, Result, ReviewVerdict,
 };
@@ -129,6 +129,9 @@ fn to_pr(v: &serde_json::Value) -> PullRequest {
         target_branch: dig(v, &["destination", "branch", "name"]),
         // Bitbucket Cloud has no draft-PR flag.
         draft: false,
+        // Bitbucket reports an abbreviated hash, which `object_id` drops: the fleet then
+        // fetches the head to learn it, as before.
+        head_sha: object_id(&dig(v, &["source", "commit", "hash"])),
     }
 }
 

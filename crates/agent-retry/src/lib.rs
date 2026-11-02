@@ -205,8 +205,10 @@ async fn backoff_wait(policy: &RetryPolicy, attempt: u32, after: Option<Duration
 
 /// A fast, non-cryptographic PRNG for jitter (xorshift64, thread-local, seeded
 /// from the clock). Jitter needs spread, not unpredictability, so this avoids a
-/// `rand` dependency in a foundational crate. Returns a value in `[0, 1)`.
-fn rand01() -> f64 {
+/// `rand` dependency in a foundational crate. Returns a value in `[0, 1)`. Public so
+/// a caller that schedules its own next attempt (a poll that backs off between
+/// ticks) feeds [`RetryPolicy::delay`] the same randomness.
+pub fn rand01() -> f64 {
     use std::cell::Cell;
     thread_local! {
         static STATE: Cell<u64> = Cell::new(seed());

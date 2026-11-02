@@ -13,6 +13,8 @@ license.workspace = true
 # `tokio::time::sleep` for the backoff wait (the runtime is already tokio).
 tokio = { workspace = true }
 tracing.workspace = true
+# The date form of `Retry-After` (`Wed, 21 Oct 2015 07:28:00 GMT`).
+httpdate.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

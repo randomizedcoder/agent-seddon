@@ -101,6 +101,12 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   with the cause, not `ok` with no findings; the race-bench check asserts the race was found and
   the bench ran, not just that each command was attempted; the runtime-PATH check's builder-only
   row uses a real binary and proves the builder sees it; `update_draft` locks skipped drafts.
+- **2026-11-01** — **Be a good citizen of the forge.** The forge client honours long
+  `Retry-After` and rate-limit reset hints (clamped to 15 min, not 20 s), holds a spent quota
+  per `(api base, credential hash)` instead of retrying into it, and sends `If-None-Match` on
+  GETs (a `304` is served from a bounded cache). A failing poll row backs off 60 s → 30 min.
+  The PR list's head SHA rides on the trigger, so an unchanged PR ends `UpToDate` before any
+  git fetch. This makes a 60 s `poll_secs` cheap.
 
 ## Decisions of record
 
