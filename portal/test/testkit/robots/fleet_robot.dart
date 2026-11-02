@@ -204,6 +204,13 @@ class FleetRobot extends Robot {
     await pumpUntil(() => !showsSpinner, reason: 'view re-list');
   }
 
+  /// Tap a view segment without waiting for its re-list (for overlap rows).
+  Future<void> tapView(String label) async {
+    await tester.tap(find.descendant(
+        of: byKey('fleet.view'), matching: find.text(label)));
+    await tester.pump();
+  }
+
   // ── skip all shown ──────────────────────────────────────────────────────────
   Future<void> openSkipAll() async {
     await tester.tap(byKey('fleet.skipAll'));

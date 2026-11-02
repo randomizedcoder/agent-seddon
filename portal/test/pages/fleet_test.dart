@@ -442,13 +442,79 @@ void main() {
           expect(robot.textShown('Skip all 500 shown drafts?'), isTrue);
           expect(
               find
-                  .textContaining('Older drafts stay in the Inbox')
+                  .textContaining('Any older drafts stay in the Inbox')
                   .evaluate()
                   .isNotEmpty,
               isTrue);
           await robot.cancelSkipAll();
           expect(robot.log.fired(skipManyRpc), isFalse);
           await robot.settle();
+
+        case 'corner_skip_all_over_batch_splits_calls':
+          fake.listReviewsResponse =
+              reviews([for (var i = 0; i < 501; i++) summary(id: 'r$i')]);
+          fake.skipReviewsResponse = skipped(['x']);
+          await robot.load();
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          await robot.pumpUntil(() => robot.log.countOf(skipManyRpc) == 2,
+              reason: 'second batch');
+          final sizes = [
+            for (final c in robot.log.forMethod(skipManyRpc))
+              (c.request as SkipReviewsRequest).reviewIds.length
+          ];
+          expect(sizes, [500, 1]);
+          await robot.pumpUntil(() => robot.textShown('2 skipped'),
+              reason: 'one summed snack');
+          await robot.settle();
+
+        case 'corner_skip_all_confirm_names_repo':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'r1', repo: 'acme__widgets'),
+            summary(id: 'r2', repo: 'acme__widgets'),
+          ]);
+          fake.skipReviewsResponse = skipped(['r1', 'r2']);
+          await robot.load();
+          await robot.selectRepo('acme/widgets');
+          await robot.openSkipAll();
+          expect(
+              find
+                  .textContaining('listed in acme/widgets')
+                  .evaluate()
+                  .isNotEmpty,
+              isTrue);
+          await robot.confirmSkipAll();
+          final req = robot.log.last(skipManyRpc)!.request as SkipReviewsRequest;
+          expect(req.reviewIds, ['r1', 'r2']);
+          await robot.settle();
+
+        case 'adversarial_stale_view_reply_dropped':
+          final inbox = reviews([summary(id: 'inbox-1', pr: 111)]);
+          final history =
+              reviews([summary(id: 'hist-1', pr: 999, status: 'posted')]);
+          fake.listReviewsResponse = inbox;
+          await robot.load();
+          // History answers slowly; Inbox at once.
+          fake.listReviewsAnswer = (req) async {
+            if (req.excludeStatus.contains('drafted')) {
+              await Future<void>.delayed(const Duration(seconds: 2));
+              return history;
+            }
+            return inbox;
+          };
+          final before = robot.log.countOf(listRpc);
+          await robot.tapView('History');
+          await robot.tapView('Inbox');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) >= before + 2,
+              reason: 'both re-lists sent');
+          await robot.real(
+              () => Future<void>.delayed(const Duration(milliseconds: 2500)));
+          await robot.settle();
+          expect(
+              find.textContaining('PR #999').evaluate().isEmpty, isTrue,
+              reason: 'the stale History reply must not land under Inbox');
+          expect(find.textContaining('PR #111').evaluate().isNotEmpty, isTrue);
+          fake.listReviewsAnswer = null;
 
         case 'boundary_history_empty_says_none_finished':
           fake.listReviewsResponse = reviews([]);

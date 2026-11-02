@@ -250,6 +250,30 @@ const fleetSpec = PageSpec('fleet', [
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_over_batch_splits_calls',
+    description: 'more ids than one SkipReviews takes go out as two calls '
+        '(500 + 1), summed into one snack',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_confirm_names_repo',
+    description: 'with a repo filter the confirm names that repo and only its '
+        'listed ids are sent',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.adversarial,
+    name: 'stale_view_reply_dropped',
+    description: 'a slow History reply arriving after a switch back to Inbox '
+        'is dropped, so History rows never show under Inbox',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
     elementId: 'fleet.view',
     caseClass: CaseClass.boundary,
     name: 'history_empty_says_none_finished',

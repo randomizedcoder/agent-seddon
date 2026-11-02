@@ -119,6 +119,8 @@ class _FleetPageState extends State<FleetPage> {
   bool _showSessions = false;
   // A Skip all is in flight: its button is disabled, so a second can't start.
   bool _skippingAll = false;
+  /// Bumped by each [_reload]; a reply from an older one is dropped.
+  int _reloadGen = 0;
 
   @override
   void initState() {
@@ -127,6 +129,9 @@ class _FleetPageState extends State<FleetPage> {
   }
 
   Future<void> _reload() async {
+    // Only the newest reload writes the page: a slower, older reply (say from
+    // a view switched away from) must not land under the current view.
+    final gen = ++_reloadGen;
     setState(() {
       _loading = true;
       _error = null;
@@ -157,7 +162,7 @@ class _FleetPageState extends State<FleetPage> {
       final reviews = (await reviewsF).reviews.toList();
       final sessions = await sessionsF;
       final cards = await cardsF;
-      if (!mounted) return;
+      if (!mounted || gen != _reloadGen) return;
       setState(() {
         _reviews = reviews;
         _sessions = sessions;
@@ -175,7 +180,7 @@ class _FleetPageState extends State<FleetPage> {
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || gen != _reloadGen) return;
       setState(() {
         _error = '$e';
         _loading = false;
@@ -414,8 +419,8 @@ class _FleetPageState extends State<FleetPage> {
         content: Text(
           'The ${ids.length} drafts listed $where are never posted. They move '
           'to History. A new commit on a PR gets a fresh review.'
-          '${capped ? '\n\nOnly the newest $_listCap are listed. Older drafts '
-              'stay in the Inbox; press Skip all again for them.' : ''}',
+          '${capped ? '\n\nOnly the newest $_listCap are listed. Any older '
+              'drafts stay in the Inbox; press Skip all again for them.' : ''}',
           key: const Key('fleet.skipAll.body'),
         ),
         actions: [
@@ -455,6 +460,7 @@ class _FleetPageState extends State<FleetPage> {
     } finally {
       if (mounted) setState(() => _skippingAll = false);
     }
+    if (!mounted) return;
     await _reload();
   }
 
