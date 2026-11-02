@@ -88,6 +88,35 @@ pub enum Error {
     RepoGraph(String),
 }
 
+/// The wording of a forge HTTP failure, shared by the forge clients that write it and
+/// the approver that reads the status back ([`forge_refusal_status`]). Only the status
+/// goes in, never the body, which can echo the request (and its token).
+const FORGE_HTTP_PREFIX: &str = "forge api returned http ";
+
+/// A forge reply that refused the request with `code`.
+pub fn forge_http_error(code: u16) -> Error {
+    Error::Repo(format!("{FORGE_HTTP_PREFIX}{code}"))
+}
+
+/// A forge reply that was rate limited, with the wait it asked for.
+pub fn forge_rate_limited(code: u16, wait_secs: u64) -> Error {
+    Error::Repo(format!(
+        "{FORGE_HTTP_PREFIX}{code}: rate limited for {wait_secs}s"
+    ))
+}
+
+/// The status of a plain forge refusal made by [`forge_http_error`]. `None` for any
+/// other error, a rate limit included, so a rate-limited 403 is never read as a
+/// permission problem.
+pub fn forge_refusal_status(e: &Error) -> Option<u16> {
+    let Error::Repo(m) = e else { return None };
+    let code = m.strip_prefix(FORGE_HTTP_PREFIX)?;
+    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    code.parse().ok()
+}
+
 // The shared message vocabulary — see message.rs (re-exported below).
 mod message;
 pub use message::*;
@@ -6938,6 +6967,38 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use rstest::rstest;
+
+    /// Reading a forge refusal's status back: name, the error, expected status.
+    #[rstest]
+    #[case::positive_refusal_round_trips(forge_http_error(403), Some(403))]
+    #[case::positive_not_found_round_trips(forge_http_error(404), Some(404))]
+    #[case::negative_rate_limit_is_not_a_refusal(forge_rate_limited(403, 600), None)]
+    #[case::negative_other_variant(Error::Fleet("forge api returned http 403".into()), None)]
+    #[case::corner_request_failure(Error::Repo("forge request failed: timed out".into()), None)]
+    #[case::adversarial_prefix_not_at_the_start(
+        Error::Repo("x forge api returned http 403".into()),
+        None
+    )]
+    #[case::adversarial_four_digits(Error::Repo("forge api returned http 4034".into()), None)]
+    #[case::adversarial_non_numeric(Error::Repo("forge api returned http 4o3".into()), None)]
+    #[case::adversarial_trailing_text(Error::Repo("forge api returned http 403 ok".into()), None)]
+    #[case::boundary_two_digits(Error::Repo("forge api returned http 40".into()), None)]
+    fn forge_refusal_status_cases(#[case] e: Error, #[case] want: Option<u16>) {
+        assert_eq!(forge_refusal_status(&e), want, "{e}");
+    }
+
+    /// The wording the forge clients emit is exactly what the reader parses.
+    #[test]
+    fn forge_error_wording_is_pinned() {
+        assert_eq!(
+            forge_http_error(403).to_string(),
+            "repo error: forge api returned http 403"
+        );
+        assert_eq!(
+            forge_rate_limited(429, 60).to_string(),
+            "repo error: forge api returned http 429: rate limited for 60s"
+        );
+    }
 
     /// `SkipReviewReply.status` parsing: name, description, wire text, expected outcome.
     #[rstest]

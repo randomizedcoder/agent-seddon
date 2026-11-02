@@ -21,7 +21,7 @@ import 'fleet_session_dialog.dart';
 /// filterable by repo/status,
 /// with a collapsible **Sessions** strip above it (create/edit/delete,
 /// enable/disable, "Review now"); and a right detail pane that renders the selected draft's markdown
-/// body and offers **Approve & post** (the only outward-facing action, gated
+/// body and offers **Post review** (the only outward-facing action, gated
 /// behind a confirm dialog). Editing the body is increment 4.
 ///
 /// Controls follow the signed-in user's permissions ([CapabilityScope],
@@ -210,6 +210,21 @@ class _FleetPageState extends State<FleetPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  /// A failure the operator has to act on: the message says what to fix, so it
+  /// stays long enough to read and has a Dismiss.
+  void _snackFailure(String msg) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(
+      content: Text(msg),
+      duration: const Duration(seconds: 30),
+      action: SnackBarAction(
+        label: 'Dismiss',
+        onPressed: messenger.hideCurrentSnackBar,
+      ),
+    ));
+  }
+
   Future<void> _toggleEnable(FleetSession s, bool enabled) async {
     try {
       await widget.clients.fleet.setEnabled(
@@ -332,10 +347,11 @@ class _FleetPageState extends State<FleetPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Approve & post review of PR #${r.prNumber}?'),
+        title: Text('Post review to PR #${r.prNumber}?'),
         content: const Text(
-          'This posts the review to the forge. This is outward-facing and '
-          'cannot be taken back.',
+          'This posts the draft to the forge as a comment-only review. It '
+          'does not approve the PR or request changes. It is outward-facing '
+          'and cannot be taken back.',
         ),
         actions: [
           TextButton(
@@ -346,7 +362,7 @@ class _FleetPageState extends State<FleetPage> {
           FilledButton(
             key: const Key('fleet.approve.confirm'),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Approve & post'),
+            child: const Text('Post review'),
           ),
         ],
       ),
@@ -366,11 +382,14 @@ class _FleetPageState extends State<FleetPage> {
         case 'skipped':
           _snack('This draft was skipped; nothing posted.');
         default:
-          _snack('Approve: ${reply.status}');
+          _snack('Post: ${reply.status}');
       }
       await _reload();
+    } on GrpcError catch (e) {
+      // The server says why (e.g. the forge credential can't write reviews).
+      _snackFailure('Post failed: ${e.message ?? e.codeName}');
     } catch (e) {
-      _snack('Approve failed: $e');
+      _snackFailure('Post failed: $e');
     }
   }
 
@@ -793,7 +812,7 @@ enum _DetailMode { view, edit, preview }
 
 /// The right detail pane: fetches the selected draft's body (GetReview) and
 /// renders it as markdown, with an Edit/Preview toggle (Save → UpdateReview) and
-/// an Approve & post action. Keyed by review_id so selecting a different draft
+/// a Post review action. Keyed by review_id so selecting a different draft
 /// rebuilds it fresh. A `posted`/`approved` draft is locked — editing is
 /// disabled and the server would reject a write anyway (UpdateReview → locked).
 class _DraftDetail extends StatefulWidget {
@@ -995,7 +1014,7 @@ class _DraftDetailState extends State<_DraftDetail> {
                       ? 'Posted'
                       : skipped
                           ? 'Skipped'
-                          : 'Approve & post'),
+                          : 'Post review'),
                 ),
             ],
           ),

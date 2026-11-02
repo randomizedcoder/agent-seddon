@@ -16,7 +16,7 @@
 //! * **Bodies are bounded** — the payload is remote-controlled.
 
 use crate::pace::{self, Pacer, Quota, Signals};
-use agent_core::{Error, Result, TokenSource};
+use agent_core::{forge_http_error, forge_rate_limited, Error, Result, TokenSource};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -223,27 +223,28 @@ impl ForgeHttp {
                                 }
                             }
                             // Status only: the body can echo the request, including the token.
-                            let err = Error::Repo(format!("forge api returned http {code}"));
+                            // A rate limit says so, so its 403 never reads as a refusal.
                             match pace::answer(code, &sig, now, self.retry.max_delay) {
                                 // A short wait is retried in place, after exactly that wait,
                                 // and gates the quota meanwhile for every other caller.
                                 pace::Answer::Retry(Some(wait)) => {
                                     self.pacer.hold(&quota, wait, Instant::now());
                                     agent_retry::Attempt::Retry {
-                                        err,
+                                        err: forge_rate_limited(code, wait.as_secs()),
                                         after: Some(wait),
                                     }
                                 }
-                                pace::Answer::Retry(None) => {
-                                    agent_retry::Attempt::Retry { err, after: None }
-                                }
+                                pace::Answer::Retry(None) => agent_retry::Attempt::Retry {
+                                    err: forge_http_error(code),
+                                    after: None,
+                                },
                                 // A longer one fails now; the gate turns away later calls.
                                 pace::Answer::GiveUp(wait) => {
                                     self.pacer.hold(&quota, wait, Instant::now());
-                                    agent_retry::Attempt::Fail(Error::Repo(format!(
-                                        "forge api returned http {code}: rate limited for {}s",
-                                        wait.as_secs()
-                                    )))
+                                    agent_retry::Attempt::Fail(forge_rate_limited(
+                                        code,
+                                        wait.as_secs(),
+                                    ))
                                 }
                                 pace::Answer::Use => {
                                     // Accepted, but the quota is spent: the next call would be
@@ -298,10 +299,7 @@ impl ForgeHttp {
             .await
             .map_err(|e| Error::Repo(format!("reading forge response: {e}")))?;
         if !status.is_success() {
-            return Err(Error::Repo(format!(
-                "forge api returned http {}",
-                status.as_u16()
-            )));
+            return Err(forge_http_error(status.as_u16()));
         }
         let cut = bytes.len().min(MAX_BODY_BYTES);
         let text = String::from_utf8_lossy(&bytes[..cut]);

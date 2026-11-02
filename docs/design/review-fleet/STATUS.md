@@ -152,6 +152,22 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   gate. Follow-up: the webhook could carry the PR's head SHA (GitHub's payload
   names it) so a webhook-first trigger gets the early `UpToDate` too; today it always
   fetches, which is only conservative.
+- **2026-11-02 — a failed post says why; the button says "Post review".**
+  - **The failure:** the first Approve on l2 (xtcp2 #283) failed because the GitHub App
+    install is read-only (`pull_requests: read`). The 403 reached the portal as a bare
+    INTERNAL `repo: forge api returned http 403`, and nothing was logged.
+  - **The server now** logs every failed post and counts it (`outcome="post_failed"`). It
+    turns 401/403/404/422 into a `forge refused …` FAILED_PRECONDITION that names the fix.
+  - **The portal** shows the server's message, and calls the action **Post review**. "Approve"
+    read as approving the PR, but the post is a comment-only review. A failure stays up until
+    **Dismiss**.
+  - **Fleet review round 1 fixes:** a rate-limited 403 (`rate limited for <n>s`, also after the
+    in-place retries run out) is no longer read as a credential problem; 401 says "refresh the
+    credential" rather than naming the App permission; the hint is worded for any forge; the
+    message wording lives in `agent-core` (`forge_http_error` / `forge_rate_limited` /
+    `forge_refusal_status`, pinned by a test) instead of being re-parsed from `agent-forge`'s
+    text; `post_with_lease` is table-tested for the commit, the release on failure, and the
+    held and committed leases that never reach the forge.
 
 ## Decisions of record
 

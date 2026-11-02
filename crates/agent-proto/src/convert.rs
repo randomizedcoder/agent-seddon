@@ -199,6 +199,11 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Fleet(m) if m.starts_with("not found") => {
             tonic::Status::not_found(format!("fleet: {m}"))
         }
+        // The forge refused an approved post (a read-only credential, a closed PR):
+        // the request was fine, the system isn't in a state to do it yet.
+        Error::Fleet(m) if m.starts_with("forge refused") => {
+            tonic::Status::failed_precondition(format!("fleet: {m}"))
+        }
         Error::Fleet(m) => tonic::Status::invalid_argument(format!("fleet: {m}")),
         // The campaign seam renders its typed `CampaignError` into this string
         // (`Display` prefixes, `agent_core::campaign`): a missing row is NotFound, a
@@ -5721,6 +5726,27 @@ mod tests {
     #[case::not_found(agent_core::Error::Registry("not found: upstream `x`".into()), tonic::Code::NotFound)]
     #[case::bad_card(agent_core::Error::Registry("upstream id `..` is not a path-safe segment".into()), tonic::Code::InvalidArgument)]
     fn registry_error_status_mapping(#[case] err: agent_core::Error, #[case] code: tonic::Code) {
+        assert_eq!(status_from_error(&err).code(), code);
+    }
+
+    /// A forge refusal of an approved post is FAILED_PRECONDITION (fix the credential,
+    /// then retry); the other fleet errors keep their mapping.
+    #[rstest]
+    #[case::positive_forge_refused(
+        "forge refused to post the review of PR #1 (http 403): …",
+        tonic::Code::FailedPrecondition
+    )]
+    #[case::negative_not_found("not found: review `x`", tonic::Code::NotFound)]
+    #[case::negative_bad_row(
+        "row id `..` is not a path-safe segment",
+        tonic::Code::InvalidArgument
+    )]
+    #[case::adversarial_prefix_not_at_start(
+        "row `forge refused` is invalid",
+        tonic::Code::InvalidArgument
+    )]
+    fn fleet_error_status_mapping(#[case] msg: &str, #[case] code: tonic::Code) {
+        let err = agent_core::Error::Fleet(msg.into());
         assert_eq!(status_from_error(&err).code(), code);
     }
 
