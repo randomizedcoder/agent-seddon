@@ -442,7 +442,7 @@ void main() {
           expect(robot.textShown('Skip all 500 shown drafts?'), isTrue);
           expect(
               find
-                  .textContaining('Any older drafts stay in the Inbox')
+                  .textContaining('Any that are stay in the Inbox')
                   .evaluate()
                   .isNotEmpty,
               isTrue);
@@ -488,6 +488,34 @@ void main() {
           expect(req.reviewIds, ['r1', 'r2']);
           await robot.settle();
 
+        case 'corner_skip_all_with_status_filter':
+          fake.listReviewsResponse = reviews([
+            summary(id: 'd1', status: 'drafted'),
+            summary(id: 'a1', status: 'approved'),
+          ]);
+          await robot.load();
+          fake.listReviewsResponse = reviews([summary(id: 'a1', status: 'approved')]);
+          await robot.selectStatus('approved');
+          final listReq = robot.log.last(listRpc)!.request as ListReviewsRequest;
+          expect(listReq.status, 'approved');
+          fake.skipReviewsResponse = skipped(['a1']);
+          await robot.openSkipAll();
+          expect(robot.textShown('Skip all 1 shown drafts?'), isTrue);
+          await robot.confirmSkipAll();
+          final req = robot.log.last(skipManyRpc)!.request as SkipReviewsRequest;
+          expect(req.reviewIds, ['a1'], reason: 'only the filtered ids');
+          await robot.settle();
+
+        case 'corner_skip_all_empty_reply_says_nothing':
+          fake.listReviewsResponse = reviews([summary(id: 'r1')]);
+          fake.skipReviewsResponse = SkipReviewsReply();
+          await robot.load();
+          await robot.openSkipAll();
+          await robot.confirmSkipAll();
+          await robot.pumpUntil(() => robot.textShown('Nothing skipped.'),
+              reason: 'empty reply summary');
+          await robot.settle();
+
         case 'adversarial_stale_view_reply_dropped':
           final inbox = reviews([summary(id: 'inbox-1', pr: 111)]);
           final history =
@@ -516,6 +544,47 @@ void main() {
           expect(find.textContaining('PR #111').evaluate().isNotEmpty, isTrue);
           fake.listReviewsAnswer = null;
 
+        case 'adversarial_stale_view_error_dropped':
+          final inbox = reviews([summary(id: 'inbox-1', pr: 111)]);
+          fake.listReviewsResponse = inbox;
+          await robot.load();
+          // History fails slowly; Inbox answers at once.
+          fake.listReviewsAnswer = (req) async {
+            if (req.excludeStatus.contains('drafted')) {
+              await Future<void>.delayed(const Duration(seconds: 2));
+              throw const GrpcError.unavailable('history down');
+            }
+            return inbox;
+          };
+          final before = robot.log.countOf(listRpc);
+          await robot.tapView('History');
+          await robot.tapView('Inbox');
+          await robot.pumpUntil(() => robot.log.countOf(listRpc) >= before + 2,
+              reason: 'both re-lists sent');
+          await robot.real(
+              () => Future<void>.delayed(const Duration(milliseconds: 2500)));
+          await robot.settle();
+          expect(robot.exists('fleet.error.retry'), isFalse,
+              reason: 'the stale History error must not land under Inbox');
+          expect(find.textContaining('PR #111').evaluate().isNotEmpty, isTrue);
+          fake.listReviewsAnswer = null;
+
+        case 'corner_unknown_status_stays_in_inbox':
+          // A status the page doesn't know passes both views' exclude lists;
+          // History drops it, Inbox keeps it.
+          fake.listReviewsResponse = reviews([
+            summary(id: 'h1', pr: 21, status: 'posted'),
+            summary(id: 'u1', pr: 22, status: 'failed'),
+          ]);
+          await robot.load();
+          expect(find.textContaining('PR #22').evaluate().isNotEmpty, isTrue,
+              reason: 'Inbox shows the unknown status');
+          await robot.selectView('History');
+          expect(find.textContaining('PR #21').evaluate().isNotEmpty, isTrue);
+          expect(find.textContaining('PR #22').evaluate().isEmpty, isTrue,
+              reason: 'History lists only finished statuses');
+          await robot.settle();
+
         case 'boundary_history_empty_says_none_finished':
           fake.listReviewsResponse = reviews([]);
           await robot.load();
@@ -531,7 +600,10 @@ void main() {
               reviews([for (var i = 0; i < 500; i++) summary(id: 'r$i')]);
           await robot.load();
           expect(robot.exists('fleet.list.capped'), isTrue);
-          expect(robot.textShown('Showing the newest 500.'), isTrue);
+          expect(robot.textShown('Showing the newest 500; older ones may be hidden.'), isTrue);
+          fake.listReviewsResponse = reviews([
+            for (var i = 0; i < 500; i++) summary(id: 'h$i', status: 'posted')
+          ]);
           await robot.selectView('History');
           expect(robot.exists('fleet.list.capped'), isTrue,
               reason: 'History says so too');

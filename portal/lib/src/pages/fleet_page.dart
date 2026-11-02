@@ -58,7 +58,9 @@ extension on _View {
         _View.history => 'History',
       };
 
-  /// The wire `exclude_status`: everything the other view holds.
+  /// The wire `exclude_status`: everything the other view holds. The two
+  /// lists are not complements, so a status outside the five known ones would
+  /// pass both; [keeps] files such a row under Inbox only.
   List<String> get exclude => switch (this) {
         _View.inbox => const ['posted', 'superseded', 'skipped'],
         _View.history => const ['drafted', 'approved'],
@@ -68,6 +70,14 @@ extension on _View {
   List<String> get statuses => switch (this) {
         _View.inbox => const ['', 'drafted', 'approved'],
         _View.history => const ['', 'posted', 'skipped', 'superseded'],
+      };
+
+  /// Whether a listed row belongs here. History is an allow-list of the
+  /// finished statuses; anything else (a status this page doesn't know yet)
+  /// stays in Inbox, where someone can act on it.
+  bool keeps(String status) => switch (this) {
+        _View.inbox => true,
+        _View.history => const ['posted', 'skipped', 'superseded'].contains(status),
       };
 
   String get allLabel => switch (this) {
@@ -109,6 +119,9 @@ class _FleetPageState extends State<FleetPage> {
   String _status = '';
 
   List<ReviewSummary> _reviews = [];
+  /// Whether the last listing reached the server's row cap (older rows may be
+  /// hidden).
+  bool _capped = false;
   List<FleetSession> _sessions = [];
   // Forge cards for the session editor; null when they could not be listed.
   List<ForgeCard>? _cards;
@@ -159,12 +172,16 @@ class _FleetPageState extends State<FleetPage> {
         cardsError = e is GrpcError ? (e.message ?? e.codeName) : 'unreachable';
         return null;
       });
-      final reviews = (await reviewsF).reviews.toList();
+      final view = _view;
+      final listed = (await reviewsF).reviews;
+      final reviews = listed.where((r) => view.keeps(r.status)).toList();
       final sessions = await sessionsF;
       final cards = await cardsF;
       if (!mounted || gen != _reloadGen) return;
       setState(() {
         _reviews = reviews;
+        // The cap is on what the server sent, before [keeps] filtered it.
+        _capped = listed.length >= _listCap;
         _sessions = sessions;
         _knownRepos
           ..addAll(sessions.map((s) => s.repo))
@@ -411,7 +428,7 @@ class _FleetPageState extends State<FleetPage> {
     if (ids.isEmpty) return;
     final where = _repo.isEmpty ? 'across all repos' : 'in ${_repoLabel(_repo)}';
     // A full listing may have older drafts behind it, which this can't reach.
-    final capped = _reviews.length >= _listCap;
+    final capped = _capped;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -419,8 +436,9 @@ class _FleetPageState extends State<FleetPage> {
         content: Text(
           'The ${ids.length} drafts listed $where are never posted. They move '
           'to History. A new commit on a PR gets a fresh review.'
-          '${capped ? '\n\nOnly the newest $_listCap are listed. Any older '
-              'drafts stay in the Inbox; press Skip all again for them.' : ''}',
+          '${capped ? '\n\nThe list stops at $_listCap, so older drafts may be '
+              'hidden. Any that are stay in the Inbox; press Skip all again '
+              'for them.' : ''}',
           key: const Key('fleet.skipAll.body'),
         ),
         actions: [
@@ -617,11 +635,11 @@ class _FleetPageState extends State<FleetPage> {
         const Divider(height: 1),
         // The listing stops at the server's row cap; say so rather than let a
         // full page pass for everything.
-        if (_reviews.length >= _listCap)
+        if (_capped)
           Padding(
             key: const Key('fleet.list.capped'),
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
-            child: Text('Showing the newest $_listCap.',
+            child: Text('Showing the newest $_listCap; older ones may be hidden.',
                 style: Theme.of(context).textTheme.bodySmall),
           ),
         Expanded(

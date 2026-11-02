@@ -245,8 +245,8 @@ const fleetSpec = PageSpec('fleet', [
     elementId: 'fleet.skipAll',
     caseClass: CaseClass.corner,
     name: 'skip_all_at_cap_warns_older_remain',
-    description: 'at the 500-row cap the confirm says older drafts stay in the '
-        'Inbox',
+    description: 'at the 500-row cap the confirm says older drafts may be hidden '
+        'and any that are stay in the Inbox',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
@@ -271,6 +271,37 @@ const fleetSpec = PageSpec('fleet', [
     name: 'stale_view_reply_dropped',
     description: 'a slow History reply arriving after a switch back to Inbox '
         'is dropped, so History rows never show under Inbox',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_with_status_filter',
+    description: 'with the status filter on approved, Skip all sends only the '
+        'approved ids listed',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.skipAll',
+    caseClass: CaseClass.corner,
+    name: 'skip_all_empty_reply_says_nothing',
+    description: 'a SkipReviews reply with no results snacks "Nothing skipped."',
+    expectedRpc: 'agent.v1.ReviewFleetService/SkipReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.adversarial,
+    name: 'stale_view_error_dropped',
+    description: 'a slow History failure arriving after a switch back to Inbox '
+        'is dropped, so no error shows under Inbox',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'fleet.view',
+    caseClass: CaseClass.corner,
+    name: 'unknown_status_stays_in_inbox',
+    description: 'a status the page doesn\'t know shows in Inbox, never in '
+        'History',
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
