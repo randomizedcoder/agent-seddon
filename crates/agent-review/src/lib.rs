@@ -71,9 +71,17 @@ pub fn render_draft(
         "# Review draft — `{}`..`{}`\n\n",
         ch.base_rev, ch.head_rev
     ));
+    // A diff that failed must not read as an empty change ("Files changed: 0").
+    let files_changed = match change_unknown(facts) {
+        Some(why) => format!(
+            "unknown — the diff could not be computed ({})",
+            redact(&why)
+        ),
+        None => ch.files.len().to_string(),
+    };
     out.push_str(&format!(
         "- Files changed: {}\n- Risk: {:.2} (gate {})\n- Static-analysis findings: {}\n\n",
-        ch.files.len(),
+        files_changed,
         facts.risk.max_score,
         if facts.risk.gate_failed {
             "FAILED"
@@ -198,6 +206,31 @@ pub fn redact(s: &str) -> String {
     out
 }
 
+/// Name of the collector that computes the change set.
+const CHANGE_COLLECTOR: &str = repo_facts::RepoChangeCollector::NAME;
+
+/// Why the changed-file list is unknown, when it is: the change-set collector ran but
+/// did not finish cleanly (its diff failed, it failed outright, or it ran out of time).
+/// `None` when it succeeded or didn't run. A base the mirror never fetched used to
+/// surface only as "Files changed: 0".
+pub fn change_unknown(facts: &ReviewFacts) -> Option<String> {
+    use agent_core::CollectStatus;
+    let run = facts
+        .meta
+        .collectors
+        .iter()
+        .find(|c| c.collector == CHANGE_COLLECTOR)?;
+    match run.status {
+        // `repo-change` has no `skipped` return today, so `Skipped` is unreachable. If a
+        // future change adds one, decide there whether the count must read as unknown.
+        CollectStatus::Ok | CollectStatus::Skipped => None,
+        CollectStatus::Partial | CollectStatus::Failed if run.reason.is_empty() => {
+            Some(run.status.as_str().to_string())
+        }
+        CollectStatus::Partial | CollectStatus::Failed => Some(run.reason.clone()),
+    }
+}
+
 /// Render, capping total size at `budget_bytes` (`0` ⇒ unbounded). The repo line,
 /// the commits, and the changed-file list are always included; the **diff hunks**
 /// fill the remaining budget, and any that don't fit are omitted with an honest
@@ -220,12 +253,23 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
             &gs.default_branch
         },
     ));
-    out.push_str(&format!(
-        "Change: `{}`..`{}` — {} changed file(s)\n",
-        ch.base_rev,
-        ch.head_rev,
-        ch.files.len(),
-    ));
+    match change_unknown(facts) {
+        // Said plainly, so the model reads the PR's files itself instead of reviewing an
+        // "empty" change.
+        Some(why) => out.push_str(&format!(
+            "Change: `{}`..`{}` — changed files UNKNOWN: the diff could not be computed \
+             ({}). This is not an empty change; find the changed files with the tools.\n",
+            ch.base_rev,
+            ch.head_rev,
+            redact(&why),
+        )),
+        None => out.push_str(&format!(
+            "Change: `{}`..`{}` — {} changed file(s)\n",
+            ch.base_rev,
+            ch.head_rev,
+            ch.files.len(),
+        )),
+    }
 
     // Commits (intent). Summary lines + the head commit's body.
     if !ch.commits.is_empty() {
@@ -845,6 +889,66 @@ mod draft_tests {
             "the count says whose findings it is"
         );
         assert!(!md.contains("\n- Findings:"), "no bare `Findings` count");
+    }
+
+    /// The change-set collector's outcome decides how the file count reads. A failed
+    /// diff says "unknown" (in the draft and in the brief the model reads), never 0.
+    #[rstest::rstest]
+    // desc: the change set was computed. expect: the real count, no "unknown".
+    #[case::positive_ok_shows_count(Some((CollectStatus::Ok, "")), None)]
+    // desc: the diff failed (a base the mirror never fetched). expect: unknown + reason.
+    #[case::negative_diff_failed_is_unknown(
+        Some((CollectStatus::Partial, "diff failed: bad revision 'master...abc'")),
+        Some("diff failed: bad revision")
+    )]
+    // desc: the collector failed with no reason (e.g. a crash). expect: unknown (failed).
+    #[case::negative_failed_without_reason(Some((CollectStatus::Failed, "")), Some("(failed)"))]
+    // desc: the collector timed out. expect: unknown, with the timeout as the reason.
+    #[case::boundary_timed_out(
+        Some((CollectStatus::Failed, "timed out after 60s")),
+        Some("timed out after 60s")
+    )]
+    // desc: the collector was skipped. expect: the count as-is (nothing failed).
+    #[case::corner_skipped_shows_count(Some((CollectStatus::Skipped, "off")), None)]
+    // desc: no change-set collector ran at all. expect: the count as-is.
+    #[case::corner_absent_shows_count(None, None)]
+    // desc: the git error echoes a credential. expect: redacted in both surfaces.
+    #[case::adversarial_reason_token_redacted(
+        Some((CollectStatus::Partial, "diff failed: Authorization: ghp_abcdefghijklmnopqrstuvwx")),
+        Some("[REDACTED]")
+    )]
+    fn change_unknown_never_reads_as_zero_files(
+        #[case] change: Option<(CollectStatus, &str)>,
+        #[case] unknown: Option<&str>,
+    ) {
+        let mut f = facts();
+        if let Some((status, reason)) = change {
+            f.meta.collectors.push(CollectorStatus {
+                collector: CHANGE_COLLECTOR.into(),
+                status,
+                reason: reason.into(),
+                duration_ms: 1,
+            });
+        }
+        let md = render_draft(&f, "narrative", &[]);
+        let brief = render_facts_with(&f, 0);
+        match unknown {
+            None => {
+                assert!(change_unknown(&f).is_none());
+                assert!(md.contains("- Files changed: 1\n"), "{md}");
+                assert!(brief.contains("— 1 changed file(s)"), "{brief}");
+            }
+            Some(why) => {
+                assert!(
+                    md.contains("- Files changed: unknown — the diff could not be computed"),
+                    "{md}"
+                );
+                assert!(md.contains(why), "draft carries the reason: {md}");
+                assert!(brief.contains("changed files UNKNOWN"), "{brief}");
+                assert!(brief.contains(why), "brief carries the reason: {brief}");
+                assert!(!md.contains("ghp_abc") && !brief.contains("ghp_abc"));
+            }
+        }
     }
 
     #[test]

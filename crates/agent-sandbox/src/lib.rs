@@ -108,6 +108,9 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
         .ok_or_else(|| Error::Sandbox("empty command".into()))?;
     let mut cmd = tokio::process::Command::new(prog);
     cmd.args(args).current_dir(&spec.cwd).kill_on_drop(true);
+    // Its own process group, so a timeout or a cancel can kill everything it started
+    // (see [`GroupKill`]), not only the direct child.
+    cmd.process_group(0);
     if spec.env == EnvPolicy::Scrub {
         // Drop the whole ambient env, then restore only a minimal PATH so the
         // program (and, in shell mode, `bash`) still resolves. Nothing else —
@@ -146,6 +149,10 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
     cmd.stderr(std::process::Stdio::piped());
     let run = async {
         let mut child = spawn_retrying_etxtbsy(&mut cmd, prog).await?;
+        // Declared after `child`, so on a timeout or cancel (this future dropped) it
+        // drops first and kills the group while the leader is still unreaped, so its
+        // pgid can't have been reused.
+        let mut group = GroupKill::new(child.id());
         // `piped()` guarantees these are `Some`.
         let out = child
             .stdout
@@ -168,6 +175,9 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
             .wait()
             .await
             .map_err(|e| Error::Sandbox(format!("waiting on `{prog}`: {e}")))?;
+        // A normal exit leaves the group alone: a command may deliberately leave a
+        // background process running.
+        group.disarm();
         Ok::<_, Error>((so, so_trunc, se, se_trunc, status))
     };
     match tokio::time::timeout(Duration::from_secs(spec.timeout_secs.max(1)), run).await {
@@ -199,6 +209,48 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
             timed_out: true,
             ..Default::default()
         }),
+    }
+}
+
+/// Kills a spawned command's whole process group when dropped, unless [`disarm`]ed
+/// after the command exited normally.
+///
+/// `kill_on_drop` only kills the direct child. A timed-out `git fetch` would leave
+/// `git-remote-https` and `index-pack` running, still writing `tmp_pack_*` files into
+/// the repo after the caller gave up; on l2 that filled the disk. Each command runs in
+/// its own group (`process_group(0)`, so the pgid is the child's pid), and this sends
+/// the group `SIGKILL` on a timeout, a cancel or an error.
+///
+/// [`disarm`]: GroupKill::disarm
+struct GroupKill {
+    pgid: Option<libc::pid_t>,
+}
+
+impl GroupKill {
+    /// `pid` is the group leader's pid (`None` once it was already reaped).
+    fn new(pid: Option<u32>) -> Self {
+        Self {
+            pgid: pid
+                .and_then(|p| libc::pid_t::try_from(p).ok())
+                .filter(|p| *p > 0),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.pgid {
+            // SAFETY: `killpg` takes plain integers and touches no memory. `pgid` is
+            // positive (checked in `new`), so it can't mean "our own group" (0) or
+            // "every process" (-1), and the leader is unreaped, so it is ours.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
     }
 }
 
@@ -634,6 +686,121 @@ mod tests {
             "truncation surfaced on stderr: {}",
             out.stderr
         );
+    }
+
+    // --- process-group kill: nothing outlives a timeout or a cancel -------------
+
+    /// Whether `pid` is a live (not zombie) process.
+    fn alive(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| {
+                // `pid (comm) S …`: the state follows the last `)`.
+                s.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.trim_start().chars().next())
+            })
+            .is_some_and(|state| state != 'Z' && state != 'X')
+    }
+
+    /// The pid a test command wrote to `file`, waiting up to 5 s for it to appear.
+    async fn read_pid(file: &std::path::Path) -> i32 {
+        for _ in 0..500 {
+            if let Some(pid) = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no pid written to {}", file.display());
+    }
+
+    /// Whether `pid` is gone within 5 s (a killed orphan is reaped by init).
+    async fn gone_soon(pid: i32) -> bool {
+        for _ in 0..500 {
+            if !alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Ending {
+        /// The spec's own timeout fires.
+        Timeout,
+        /// The caller drops the exec future first (an outer deadline, a cancelled review).
+        Cancel,
+        /// The command exits on its own.
+        Exit,
+    }
+
+    /// A command that starts a background `sleep` (the stand-in for `git fetch`'s
+    /// `index-pack`) and records its pid. A timeout or a cancel kills the whole process
+    /// group, so the grandchild dies with it; a normal exit leaves a deliberately
+    /// backgrounded process alone.
+    #[rstest]
+    #[case::adversarial_timeout_kills_the_grandchild(
+        "sleep 30 & echo $! > pid; wait",
+        Ending::Timeout,
+        false
+    )]
+    #[case::adversarial_cancel_kills_the_grandchild(
+        "sleep 30 & echo $! > pid; wait",
+        Ending::Cancel,
+        false
+    )]
+    #[case::corner_grandchild_holding_the_pipe_is_killed_at_timeout(
+        "sleep 30 & echo $! > pid",
+        Ending::Timeout,
+        false
+    )]
+    #[case::positive_normal_exit_leaves_a_detached_process(
+        "sleep 30 >/dev/null 2>&1 & echo $! > pid",
+        Ending::Exit,
+        true
+    )]
+    #[tokio::test]
+    async fn process_group_killed_unless_the_command_exited(
+        #[case] script: &str,
+        #[case] ending: Ending,
+        #[case] survives: bool,
+    ) {
+        let dir = tempdir();
+        let pid_file = dir.join("pid");
+        let timeout = match ending {
+            Ending::Timeout => 1,
+            Ending::Cancel | Ending::Exit => 60,
+        };
+        let spec = ExecSpec::sh(script, &dir).timeout(timeout);
+        match ending {
+            Ending::Timeout => {
+                let out = LocalSandbox.exec(&spec).await.unwrap();
+                assert!(out.timed_out, "the spec timeout fired");
+            }
+            Ending::Cancel => {
+                let res =
+                    tokio::time::timeout(Duration::from_millis(500), LocalSandbox.exec(&spec))
+                        .await;
+                assert!(res.is_err(), "the caller gave up first");
+            }
+            Ending::Exit => {
+                let out = LocalSandbox.exec(&spec).await.unwrap();
+                assert_eq!(out.exit_code, 0, "{}", out.stderr);
+            }
+        }
+        let pid = read_pid(&pid_file).await;
+        if survives {
+            assert!(alive(pid), "a normal exit must not kill the group");
+            // SAFETY: plain integer syscall; cleans up the test's own sleep.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        } else {
+            assert!(gone_soon(pid).await, "grandchild {pid} outlived {ending:?}");
+        }
     }
 
     // --- capability probes -------------------------------------------------

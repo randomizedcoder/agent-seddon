@@ -563,6 +563,9 @@ pub struct FixtureRepo {
     /// When set, `fetch` returns `Err` — to assert a caller treats the base-ref
     /// refresh as best-effort (a fetch hiccup must not fail the whole review).
     fail_fetch: Arc<Mutex<bool>>,
+    /// Every branch passed to [`RepoBackend::fetch_branch`], in order (the review's
+    /// base refresh). Clones share the log.
+    fetch_branch_calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl FixtureRepo {
@@ -598,14 +601,18 @@ impl FixtureRepo {
     pub fn fetch_calls(&self) -> u32 {
         *self.fetch_calls.lock().unwrap()
     }
+    /// The branches passed to [`RepoBackend::fetch_branch`] so far, in call order.
+    pub fn fetch_branch_calls(&self) -> Vec<String> {
+        self.fetch_branch_calls.lock().unwrap().clone()
+    }
     /// Make every `worktree_remove` fail — to test that a caller's cleanup is
     /// best-effort (a reap failure must not fail the surrounding work).
     pub fn with_failing_worktree_remove(self) -> Self {
         *self.fail_remove.lock().unwrap() = true;
         self
     }
-    /// Make every `fetch` fail — to test that a caller's base-ref refresh is
-    /// best-effort (a fetch failure must not fail the surrounding review).
+    /// Make every `fetch` and `fetch_branch` fail — to test that a caller's base-ref
+    /// refresh is best-effort (a fetch failure must not fail the surrounding review).
     pub fn with_failing_fetch(self) -> Self {
         *self.fail_fetch.lock().unwrap() = true;
         self
@@ -693,6 +700,18 @@ impl RepoBackend for FixtureRepo {
             return Err(agent_core::Error::Repo("fetch failed (fixture)".into()));
         }
         self.status().await
+    }
+    async fn fetch_branch(&self, branch: &str) -> Result<()> {
+        self.fetch_branch_calls
+            .lock()
+            .unwrap()
+            .push(branch.to_string());
+        if *self.fail_fetch.lock().unwrap() {
+            return Err(agent_core::Error::Repo(
+                "fetch_branch failed (fixture)".into(),
+            ));
+        }
+        Ok(())
     }
     async fn fetch_pr(&self, number: u64) -> Result<Revision> {
         self.fetch_pr_calls.lock().unwrap().push(number);

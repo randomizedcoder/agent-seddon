@@ -299,8 +299,13 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         let template = pr_ref_template_for(&backend, &self.pr_ref_override)
             .map_err(|e| Error::Config(format!("fleet row `{}`: {e}", row.id)))?;
 
+        // The mirror is cloned in the background: review prep is bounded by a timeout
+        // far shorter than a large clone (nixpkgs), and a clone cancelled there would
+        // restart from nothing on every trigger. Until it is ready the row's reviews fail
+        // fast and the poller retries them.
         let mut cli = agent_git::CliBackend::new(mirror.clone(), mirror.clone(), worktrees, url)
-            .with_pr_ref_template(template);
+            .with_pr_ref_template(template)
+            .with_background_mirror_clone();
         // forge-auth F2b: authenticate the clone/fetch of a (possibly private) GitHub
         // repo with the same credential the forge API uses, through the gated helper the
         // forge build above already used (the ghapp IDOR gate runs here too). This
@@ -942,8 +947,17 @@ mod tests {
             "env:AGENT_SEDDON_F2B_ENV_TOKEN",
         );
         let ctx = f.build(&r).await.expect("github row with env token builds");
-        // Drive the lazy clone + fetch so the credentialed git calls run through the seam.
-        let _ = ctx.repo.fetch_pr(1).await;
+        // Drive the lazy clone so the credentialed git call runs through the seam. The
+        // fleet clones in the background: `fetch_pr` fails fast with "being cloned" and
+        // the clone reaches the sandbox from its own task.
+        let err = ctx.repo.fetch_pr(1).await.unwrap_err();
+        assert!(err.to_string().contains("being cloned"), "{err}");
+        for _ in 0..3000 {
+            if rec.any_auth_header() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         assert!(
             rec.any_auth_header(),

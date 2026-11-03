@@ -18,10 +18,15 @@ const MAX_COMMITS: usize = 10;
 
 pub(crate) struct RepoChangeCollector;
 
+impl RepoChangeCollector {
+    /// The collector's name, which the draft renderer keys "files changed: unknown" on.
+    pub(crate) const NAME: &'static str = "repo-change";
+}
+
 #[async_trait::async_trait]
 impl FactCollector for RepoChangeCollector {
     fn name(&self) -> &'static str {
-        "repo-change"
+        Self::NAME
     }
 
     async fn collect(&self, ctx: &CollectCtx) -> CollectorOutput {
@@ -30,6 +35,9 @@ impl FactCollector for RepoChangeCollector {
 
         // The change set is the load-bearing fact; if the diff cannot be computed
         // the collector still contributes the git state (a partial result).
+        // Invariant: this is the ONLY partial this collector returns, because
+        // `change_unknown` reads a partial `repo-change` as "the diff could not be
+        // computed". A new partial reason here must change that reading too.
         let git_state = build_git_state(ctx, &files).await;
         let mut change = match ctx.repo.diff(&ctx.base, &ctx.head, &[]).await {
             Ok(diff) => build_change_set(ctx, diff, repo_file_count),

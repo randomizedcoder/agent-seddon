@@ -499,3 +499,278 @@ async fn positive_log_still_walks_a_real_branch() {
     let commits = b.log(&Revision::from("main"), None, 10).await.unwrap();
     assert!(!commits.is_empty(), "main has at least the init commit");
 }
+
+// --- review-graph inc 1: heads+tags mirror and the PR base fetch ------------
+
+/// The fleet layout: the mirror is also the root (reads and diffs run on it).
+fn fleet_backend(source: &Path, work: &Path) -> CliBackend {
+    let mirror = work.join("mirror");
+    CliBackend::new(
+        &mirror,
+        &mirror,
+        work.join("wt"),
+        source.to_string_lossy().to_string(),
+    )
+    .with_pr_ref_template("refs/pull/{n}/head")
+}
+
+/// Commit `file` on a new or existing `branch` of `repo`, returning the new oid.
+fn commit_on(repo: &Path, branch: &str, file: &str) -> String {
+    git(repo, &["switch", "-q", "-C", branch]);
+    std::fs::write(repo.join(file), format!("{branch}\n")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", file]);
+    let oid = git_out(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["switch", "-q", "main"]);
+    oid
+}
+
+#[tokio::test]
+async fn positive_mirror_is_heads_and_tags_only() {
+    // desc: a new mirror of a repo with a branch, a tag and a forge PR ref. expect:
+    // branches + tags arrive, `refs/pull/*` does not, and the fetch config is exactly
+    // the two refspecs (no `mirror = true`, which would imply `+refs/*:refs/*`).
+    let (source, _head) = fixture_with_pr();
+    git(&source, &["tag", "v1"]);
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap());
+
+    let mirror = work.join("mirror");
+    let refs = git_out(&mirror, &["for-each-ref", "--format=%(refname)"]);
+    let refs: Vec<&str> = refs.lines().collect();
+    assert!(refs.contains(&"refs/heads/main") && refs.contains(&"refs/heads/feature"));
+    assert!(refs.contains(&"refs/tags/v1"), "{refs:?}");
+    assert!(
+        !refs.iter().any(|r| r.starts_with("refs/pull/")),
+        "{refs:?}"
+    );
+    let fetch = git_out(&mirror, &["config", "--get-all", "remote.origin.fetch"]);
+    assert_eq!(
+        fetch.lines().collect::<Vec<_>>(),
+        agent_git::MIRROR_REFSPECS
+    );
+    let mirror_key = Command::new("git")
+        .args(["-C"])
+        .arg(&mirror)
+        .args(["config", "--get", "remote.origin.mirror"])
+        .status()
+        .unwrap();
+    assert!(!mirror_key.success(), "remote.origin.mirror is unset");
+    assert!(
+        !work.join("mirror.partial").exists(),
+        "staging dir renamed away"
+    );
+}
+
+#[tokio::test]
+async fn positive_staging_target_base_written() {
+    // desc: a PR targets `staging`, a branch created upstream after the mirror was
+    // made (hypothesis (a): the base was never fetched, so the diff failed and the
+    // draft read "Files changed: 0"). expect: before `fetch_branch` the diff errs;
+    // after it, `refs/heads/staging` is upstream's oid and the diff has the PR's files.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    b.ensure_mirror().await.unwrap();
+
+    let staging = commit_on(&source, "staging", "s.txt");
+    let pr = b.fetch_pr(1).await.unwrap();
+    let staging_rev = Revision::from("staging");
+    assert!(b.diff(&staging_rev, &pr, &[]).await.is_err(), "no base yet");
+
+    b.fetch_branch("staging").await.unwrap();
+    let mirror = work.join("mirror");
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/staging"]),
+        staging
+    );
+    let diff = b.diff(&staging_rev, &pr, &[]).await.unwrap();
+    assert!(!diff.files.is_empty(), "the PR's files are back");
+}
+
+#[tokio::test]
+async fn positive_fetch_branch_moves_a_stale_base() {
+    // desc: upstream `main` advanced since the mirror was made. expect: `fetch_branch`
+    // moves the mirror's `main` to it (a forced, full refspec); other branches are
+    // left as they were.
+    let source = fixture();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    b.ensure_mirror().await.unwrap();
+    let mirror = work.join("mirror");
+    let feature_before = git_out(&mirror, &["rev-parse", "refs/heads/feature"]);
+
+    let new_main = commit_on(&source, "main", "later.txt");
+    commit_on(&source, "feature", "f2.txt");
+    b.fetch_branch("main").await.unwrap();
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/main"]),
+        new_main
+    );
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/feature"]),
+        feature_before,
+        "only the named branch moved"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_killed_clone_is_replaced() {
+    // desc: the mirror path holds what a clone killed partway leaves (l2's nixpkgs
+    // mirror): a bare repo whose HEAD is git's `.invalid` placeholder, with no refs.
+    // expect: it is not treated as ready; `ensure_mirror` replaces it with a working
+    // mirror, and nothing is left at `.partial` / `.stale`.
+    let source = fixture();
+    let work = tempdir();
+    let mirror = work.join("mirror");
+    std::fs::create_dir_all(&mirror).unwrap();
+    git(&mirror, &["init", "-q", "--bare"]);
+    std::fs::write(mirror.join("HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+    std::fs::write(mirror.join("objects/pack/tmp_pack_junk"), vec![0u8; 1024]).unwrap();
+
+    let b = fleet_backend(&source, &work);
+    assert!(
+        b.ensure_mirror().await.unwrap(),
+        "the killed clone was replaced"
+    );
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/main"]),
+        git_out(&source, &["rev-parse", "main"])
+    );
+    assert!(!mirror.join("objects/pack/tmp_pack_junk").exists());
+    assert!(!work.join("mirror.partial").exists() && !work.join("mirror.stale").exists());
+    assert!(
+        !b.ensure_mirror().await.unwrap(),
+        "ready now: no second clone"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_old_shape_mirror_fetch_skips_pull_refs() {
+    // desc: a mirror made by the old code (`clone --mirror`, config `+refs/*:refs/*`,
+    // `mirror = true`); upstream then gains a commit on main and a new PR ref.
+    // expect: `fetch` moves main but does not bring the new `refs/pull/*`.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let mirror = work.join("mirror");
+    git(
+        &work,
+        &[
+            "clone",
+            "-q",
+            "--mirror",
+            &source.to_string_lossy(),
+            "mirror",
+        ],
+    );
+    let new_main = commit_on(&source, "main", "c.txt");
+    git(&source, &["update-ref", "refs/pull/2/head", &new_main]);
+
+    let b = fleet_backend(&source, &work);
+    b.fetch().await.unwrap();
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/main"]),
+        new_main
+    );
+    let refs = git_out(&mirror, &["for-each-ref", "--format=%(refname)"]);
+    assert!(!refs.contains("refs/pull/2/head"), "{refs}");
+}
+
+#[tokio::test]
+async fn boundary_empty_repo_is_cloned_once() {
+    // desc: the remote is an empty repo, so the finished mirror has no branch.
+    // expect: one clone, then the mirror counts as ready (no clone per call).
+    let source = tempdir();
+    git(&source, &["init", "-q", "-b", "main"]);
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap(), "first call clones");
+    assert!(!b.ensure_mirror().await.unwrap(), "no second clone");
+}
+
+#[tokio::test]
+async fn negative_failed_clone_leaves_no_partial() {
+    // desc: the remote does not exist, so the clone fails.
+    // expect: an error, and no `.partial` staging dir left behind.
+    let work = tempdir();
+    let b = fleet_backend(&work.join("no-such-repo"), &work);
+    assert!(b.ensure_mirror().await.is_err());
+    assert!(!work.join("mirror.partial").exists());
+    assert!(!work.join("mirror").exists());
+}
+
+#[tokio::test]
+async fn corner_leftover_partial_is_cleared_by_the_next_clone() {
+    // desc: a killed new-flow clone left `<mirror>.partial` behind.
+    // expect: the next clone clears it, finishes, and leaves no staging dir.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let partial = work.join("mirror.partial");
+    std::fs::create_dir_all(partial.join("objects")).unwrap();
+    std::fs::write(partial.join("HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap(), "cloned");
+    assert!(!partial.exists(), "the leftover staging dir is gone");
+    let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(main.len(), 40, "the mirror has main: {main}");
+}
+
+#[tokio::test]
+async fn positive_inline_fetch_clones_the_mirror() {
+    // desc: a backend without the background clone (the CLI path) fetches with no
+    // mirror yet. expect: the clone runs inline, under the ordinary git guard, and the
+    // fetch succeeds against the new mirror.
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    b.fetch().await.unwrap();
+    let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(main.len(), 40, "the mirror has main: {main}");
+}
+
+#[tokio::test]
+async fn positive_crash_mid_swap_recovers_the_staged_clone() {
+    // desc: a crash between the swap's two renames left the mirror path empty and a
+    // finished clone in `.partial`; the remote is gone since.
+    // expect: the finished clone is renamed into place, with no re-clone (which would
+    // fail, the remote being gone).
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap());
+    std::fs::rename(work.join("mirror"), work.join("mirror.partial")).unwrap();
+    std::fs::remove_dir_all(&source).unwrap();
+    assert!(b.ensure_mirror().await.unwrap(), "recovered");
+    assert!(!work.join("mirror.partial").exists());
+    let main = git_out(&work.join("mirror"), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(main.len(), 40, "the mirror has main: {main}");
+}
+
+#[tokio::test]
+async fn negative_unfinished_partial_is_recloned_not_recovered() {
+    // desc: `.partial` holds a clone whose refspecs were never set (killed between the
+    // clone and the config step), and the mirror path is empty.
+    // expect: it is not trusted; a fresh clone replaces it (a marker in it is gone).
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = fleet_backend(&source, &work);
+    assert!(b.ensure_mirror().await.unwrap());
+    let partial = work.join("mirror.partial");
+    std::fs::rename(work.join("mirror"), &partial).unwrap();
+    git(&partial, &["config", "--unset-all", "remote.origin.fetch"]);
+    std::fs::write(partial.join("marker"), "old").unwrap();
+    assert!(b.ensure_mirror().await.unwrap(), "re-cloned");
+    assert!(
+        !work.join("mirror").join("marker").exists(),
+        "a fresh clone"
+    );
+    let fetch = git_out(
+        &work.join("mirror"),
+        &["config", "--get-all", "remote.origin.fetch"],
+    );
+    assert_eq!(
+        fetch.lines().collect::<Vec<_>>(),
+        agent_git::MIRROR_REFSPECS
+    );
+}

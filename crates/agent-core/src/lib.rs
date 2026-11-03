@@ -5505,6 +5505,17 @@ pub trait RepoBackend: Send + Sync {
     async fn status(&self) -> Result<RepoStatus>;
     /// Update the shared mirror from upstream. Long-running.
     async fn fetch(&self) -> Result<RepoStatus>;
+    /// Fetch one upstream branch into the shared mirror, writing `refs/heads/<branch>`
+    /// itself (a full refspec), so a review's diff base is current without refreshing
+    /// every ref of a large repo. `branch` comes from the forge (a PR's target branch)
+    /// and is untrusted: an implementation validates it before it reaches git. Default
+    /// `Err` — a backend that cannot fetch one branch says so, and the caller treats the
+    /// refresh as best-effort.
+    async fn fetch_branch(&self, _branch: &str) -> Result<()> {
+        Err(Error::Repo(
+            "fetch_branch unsupported by this backend".into(),
+        ))
+    }
     /// Fetch a forge pull/merge-request head ref into a namespaced local ref and
     /// return the resolved head oid (the C14/C15 dedup key). A `PullRequest`
     /// carries only a branch name — never a head SHA — and the forge PR head ref

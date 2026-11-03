@@ -16,9 +16,9 @@ use agent_core::{
     Sandbox, TreeEntry, WorktreeHandle, WorktreeSpec,
 };
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Cap on how many changed files get a per-file patch fetched in one `diff`
 /// (the tool layer truncates the aggregate anyway).
@@ -30,8 +30,31 @@ const MAX_TOUCHED_FILES: usize = 500;
 /// Hang-guard timeout for a single `git` invocation. `git` has no built-in
 /// deadline, so a wedged transport (a stalled `fetch`, a credential prompt on a
 /// review of an untrusted repo) would block forever. Generous enough for a large
-/// `clone --mirror`/`fetch`, tight enough to kill a genuine hang.
+/// `fetch`, tight enough to kill a genuine hang. A mirror's first clone has its own,
+/// longer deadline ([`MIRROR_CLONE_TIMEOUT_SECS`]).
 const GIT_TIMEOUT_SECS: u64 = 600;
+
+/// Deadline for the one-off `clone` that creates a mirror. A heads-and-tags clone of
+/// nixpkgs is several GB, far past [`GIT_TIMEOUT_SECS`], and a clone killed at its
+/// deadline keeps nothing, so a deadline it can't meet would retry for ever. The fleet
+/// runs it off the review path ([`CliBackend::with_background_mirror_clone`]). A clone
+/// made inline, inside the `fetch` that needed it, keeps [`GIT_TIMEOUT_SECS`], so an
+/// interactive caller waits no longer than it did before.
+const MIRROR_CLONE_TIMEOUT_SECS: u64 = 7200;
+
+/// The mirror's fetch refspecs: branches and tags, nothing else. `clone --mirror`
+/// fetches `+refs/*:refs/*`, which on GitHub includes every `refs/pull/*` ref (for
+/// nixpkgs about 12M objects, which never finished inside a review's prep timeout and
+/// filled l2's disk with retries). PR heads are fetched one at a time by `fetch_pr`.
+/// Tags are listed so `fetch --prune` keeps them in step with upstream.
+pub const MIRROR_REFSPECS: [&str; 2] = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"];
+
+/// The `HEAD` git writes while a clone is still running: a clone killed before it
+/// wrote its refs leaves this behind.
+const CLONE_PLACEHOLDER_HEAD: &str = "ref: refs/heads/.invalid";
+
+/// Longest branch name [`safe_branch`] accepts (git's own limit is the filesystem's).
+const MAX_BRANCH_LEN: usize = 255;
 
 /// A [`RepoBackend`] over the `git` CLI.
 pub struct CliBackend {
@@ -66,6 +89,160 @@ pub struct CliBackend {
     /// never persisted to the mirror's `.git/config`. `None` ⇒ an unauthenticated
     /// (public) clone, exactly as before.
     auth: Option<std::sync::Arc<dyn agent_core::TokenSource>>,
+    /// Clone a missing mirror in a background task rather than inside the call that
+    /// needed it ([`with_background_mirror_clone`](Self::with_background_mirror_clone)).
+    background_clone: bool,
+}
+
+/// What is at a mirror path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MirrorState {
+    /// Not a git dir (nothing there, or something else).
+    Absent,
+    /// A clone killed before it finished: `git clone` writes the placeholder `HEAD`
+    /// ([`CLONE_PLACEHOLDER_HEAD`]) first and the real one only once the refs are in.
+    Incomplete,
+    /// A finished git dir, including the clone of an empty repo (no branch, real
+    /// `HEAD`), which must not be re-cloned on every call.
+    Ready,
+}
+
+/// Classify the mirror path from `HEAD` alone, so this is cheap enough for every
+/// call. Refs are never scanned: a misread there would delete a good mirror.
+fn mirror_state(dir: &Path) -> MirrorState {
+    let head = dir.join("HEAD");
+    if !head.is_file() && !dir.join("objects").is_dir() {
+        return MirrorState::Absent;
+    }
+    // A reftable repo keeps its real HEAD in the tables; its `HEAD` file is always
+    // the placeholder stub, so it says nothing about a finished clone.
+    if dir.join("reftable").is_dir() {
+        return MirrorState::Ready;
+    }
+    match std::fs::read_to_string(&head) {
+        Ok(h) if h.trim() != CLONE_PLACEHOLDER_HEAD => MirrorState::Ready,
+        _ => MirrorState::Incomplete,
+    }
+}
+
+/// Whether a path that is not a recognised git dir may be moved aside to make room
+/// for a new mirror: only an empty dir, or one holding nothing but the backend's own
+/// `.agent-seddon` cache. Anything else (a checkout configured as the mirror path by
+/// mistake) is left alone and the clone fails.
+fn replaceable_non_git(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .flatten()
+            .all(|e| e.file_name() == std::ffi::OsStr::new(".agent-seddon")),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// `<mirror>.<suffix>`, a sibling of the mirror, so a rename onto the mirror path
+/// stays on one filesystem and is atomic.
+fn sibling(mirror: &Path, suffix: &str) -> PathBuf {
+    let mut name = mirror
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_else(|| "mirror".into());
+    name.push(format!(".{suffix}"));
+    mirror.with_file_name(name)
+}
+
+/// Remove a directory tree off the async workers (a half-cloned mirror can be tens
+/// of GB). A missing path is fine.
+async fn remove_tree(path: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Repo(format!(
+            "removing {} failed: {e}",
+            path.display()
+        ))),
+    })
+    .await
+    .map_err(|e| Error::Repo(format!("removing a directory panicked: {e}")))?
+}
+
+/// Mirror paths with a clone in progress in this process, so two backends for one
+/// mirror (a rebuilt review context) never clone into the same staging dir.
+static CLONING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Mutex::default);
+
+/// The claim on one mirror path's clone; released on drop. It is held in this
+/// process ([`CLONING`]) and, across processes sharing the mirror (a fleet and a CLI
+/// review), by an exclusive lock on `<mirror>.clone-lock`, which the OS drops if the
+/// process dies.
+struct CloneSlot {
+    mirror: PathBuf,
+    _lock: Option<std::fs::File>,
+}
+
+impl CloneSlot {
+    /// Claim `mirror`, or `None` when a clone of it is already running here or in
+    /// another process.
+    fn claim(mirror: &Path) -> Option<Self> {
+        let mut cloning = CLONING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !cloning.insert(mirror.to_path_buf()) {
+            return None;
+        }
+        let lock = match Self::lock_file(mirror) {
+            Ok(lock) => Some(lock),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                cloning.remove(mirror);
+                return None;
+            }
+            // A lock file that can't be made (a read-only parent) still leaves the
+            // in-process claim, and the clone itself reports the real error.
+            Err(std::fs::TryLockError::Error(e)) => {
+                tracing::warn!(mirror = %mirror.display(), error = %e,
+                    "git: no cross-process clone lock; claiming in this process only");
+                None
+            }
+        };
+        Some(Self {
+            mirror: mirror.to_path_buf(),
+            _lock: lock,
+        })
+    }
+
+    fn lock_file(mirror: &Path) -> std::result::Result<std::fs::File, std::fs::TryLockError> {
+        if let Some(parent) = mirror.parent() {
+            std::fs::create_dir_all(parent).map_err(std::fs::TryLockError::Error)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sibling(mirror, "clone-lock"))
+            .map_err(std::fs::TryLockError::Error)?;
+        file.try_lock()?;
+        Ok(file)
+    }
+}
+
+impl Drop for CloneSlot {
+    fn drop(&mut self) {
+        CLONING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.mirror);
+    }
+}
+
+/// A branch name from the forge (a PR's target), screened before it goes into a
+/// refspec: at most [`MAX_BRANCH_LEN`] bytes of `/`-separated segments, each an
+/// [`agent_core::safe_segment`] (only `[A-Za-z0-9._-]`, so no `:`, `*`, `^`, `~`, `+`,
+/// whitespace or leading `-`). Git's own refname rules on top: no `..` anywhere, and
+/// no segment starting with `.` or ending in `.lock`.
+fn safe_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_BRANCH_LEN
+        && !name.contains("..")
+        && name.split('/').all(|seg| {
+            agent_core::safe_segment(seg) && !seg.starts_with('.') && !seg.ends_with(".lock")
+        })
 }
 
 impl CliBackend {
@@ -86,7 +263,19 @@ impl CliBackend {
             sandbox: Arc::new(agent_sandbox::LocalSandbox),
             pr_ref_template: String::new(),
             auth: None,
+            background_clone: false,
         }
+    }
+
+    /// Clone a missing mirror in a background task instead of inside the `fetch` /
+    /// `fetch_pr` / `fetch_branch` that needed it. Those calls then fail fast with
+    /// "being cloned" until it is ready, and the caller retries later. The fleet sets
+    /// this: its review prep is bounded by a timeout far shorter than a large clone,
+    /// and a clone cancelled at that timeout would restart from nothing every time.
+    #[must_use]
+    pub fn with_background_mirror_clone(mut self) -> Self {
+        self.background_clone = true;
+        self
     }
 
     /// Route every `git` spawn through `sandbox` instead of the default
@@ -144,9 +333,10 @@ impl CliBackend {
         (self.cache.hits(), self.cache.misses())
     }
 
-    /// Whether the shared mirror looks like an initialized git object DB.
+    /// Whether the shared mirror is a git dir with at least one branch. A clone killed
+    /// partway is not ready, so it is replaced rather than used for ever.
     fn mirror_ready(&self) -> bool {
-        self.mirror.join("HEAD").exists() || self.mirror.join("objects").exists()
+        mirror_state(&self.mirror) == MirrorState::Ready
     }
 
     /// The directory whose object DB drives worktree/mirror ops: the mirror when
@@ -219,26 +409,208 @@ impl CliBackend {
             .filter(|s| !s.is_empty())
     }
 
-    /// Bootstrap the shared bare mirror with `git clone --mirror` if it does not
-    /// exist yet. Returns `true` if a clone was performed, `false` if the mirror
-    /// was already present. Errs only if a clone is needed but no remote is known.
+    /// Bootstrap the shared bare mirror if it is not ready yet: a branches-and-tags
+    /// clone ([`MIRROR_REFSPECS`]), made in a staging dir and renamed into place only
+    /// once it is complete, so a clone killed partway never looks ready. Returns `true`
+    /// if a clone was performed (or a finished one recovered), `false` if the mirror was
+    /// already present, including when another clone finished while this one waited
+    /// for the lock. Errs if a
+    /// clone is needed but no remote is known, or one is already running.
     /// (Reads and worktrees work off the checkout's own object DB without one, so
     /// this is an opt-in optimization the runtime drives in the background.)
     pub async fn ensure_mirror(&self) -> Result<bool> {
         if self.mirror_ready() {
             return Ok(false);
         }
+        let slot = CloneSlot::claim(&self.mirror).ok_or_else(|| self.cloning_error())?;
+        self.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await
+    }
+
+    fn cloning_error(&self) -> Error {
+        Error::Repo(format!(
+            "the mirror at {} is being cloned (a one-off, up to {MIRROR_CLONE_TIMEOUT_SECS}s); \
+             retry once it is ready",
+            self.mirror.display()
+        ))
+    }
+
+    /// Clone the mirror (the caller holds `_slot`). Returns `false` without cloning when
+    /// the mirror became ready while the caller waited for the slot (another process's
+    /// clone finished between its readiness check and its claim). Steps:
+    /// 0. If the mirror path is empty and `<mirror>.partial` is a finished clone (a crash
+    ///    between the two renames of step 3), rename it into place instead of cloning.
+    /// 1. `clone --bare` into `<mirror>.partial`, cleared first (a killed run's leftovers).
+    /// 2. Set exactly the [`MIRROR_REFSPECS`] (`clone --bare` writes no fetch refspec).
+    /// 3. Move whatever is at the mirror path to `<mirror>.stale`, rename the staging
+    ///    dir into place, and delete the stale one.
+    async fn clone_mirror(&self, _slot: CloneSlot, deadline_secs: u64) -> Result<bool> {
+        if self.mirror_ready() {
+            return Ok(false);
+        }
+        let staging = sibling(&self.mirror, "partial");
+        let stale = sibling(&self.mirror, "stale");
+        if !self.mirror.exists() && self.staged_clone_finished(&staging).await {
+            tracing::warn!(mirror = %self.mirror.display(),
+                "git: recovering a finished clone left in .partial by a crash mid-swap");
+            std::fs::rename(&staging, &self.mirror).map_err(|e| {
+                Error::Repo(format!(
+                    "moving the recovered mirror into place failed: {e}"
+                ))
+            })?;
+            remove_tree(stale).await?;
+            return Ok(true);
+        }
         let remote = self.resolve_remote_url().await.ok_or_else(|| {
             Error::Repo("mirror bootstrap needs a remote (set [git] remote or an origin)".into())
         })?;
-        if let Some(parent) = self.mirror.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Repo(format!("creating mirror parent failed: {e}")))?;
+        let state = mirror_state(&self.mirror);
+        self.refuse_foreign_mirror_path()?;
+        let parent = self
+            .mirror
+            .parent()
+            .ok_or_else(|| Error::Repo("the mirror path has no parent dir".into()))?
+            .to_path_buf();
+        std::fs::create_dir_all(&parent)
+            .map_err(|e| Error::Repo(format!("creating mirror parent failed: {e}")))?;
+        remove_tree(staging.clone()).await?;
+        if state == MirrorState::Incomplete {
+            tracing::warn!(mirror = %self.mirror.display(),
+                "git: replacing an incomplete mirror (a clone killed before it wrote its refs)");
         }
-        let mirror_str = self.mirror.to_string_lossy().into_owned();
-        self.git_str(&self.root, &["clone", "--mirror", &remote, &mirror_str])
-            .await?;
+
+        let staging_s = staging.to_string_lossy().into_owned();
+        if let Err(e) = self
+            .git_run(
+                &parent,
+                &["clone", "--bare", &remote, &staging_s],
+                deadline_secs,
+            )
+            .await
+        {
+            // Don't leave a partial clone on disk until some later attempt.
+            if let Err(re) = remove_tree(staging).await {
+                tracing::warn!(error = %re, "git: removing a failed clone's staging dir failed");
+            }
+            return Err(e);
+        }
+        // `--unset-all` exits 5 when the key is absent, which is the normal case here.
+        let _ = self
+            .git_str(&staging, &["config", "--unset-all", "remote.origin.fetch"])
+            .await;
+        for spec in MIRROR_REFSPECS {
+            self.git_str(&staging, &["config", "--add", "remote.origin.fetch", spec])
+                .await?;
+        }
+
+        // Checked again: the clone can take hours, and something may have been put at
+        // the mirror path meanwhile.
+        if let Err(e) = self.refuse_foreign_mirror_path() {
+            if let Err(re) = remove_tree(staging).await {
+                tracing::warn!(error = %re, "git: removing a refused clone's staging dir failed");
+            }
+            return Err(e);
+        }
+        remove_tree(stale.clone()).await?;
+        if self.mirror.exists() {
+            std::fs::rename(&self.mirror, &stale)
+                .map_err(|e| Error::Repo(format!("moving the old mirror aside failed: {e}")))?;
+        }
+        std::fs::rename(&staging, &self.mirror)
+            .map_err(|e| Error::Repo(format!("moving the new mirror into place failed: {e}")))?;
+        remove_tree(stale).await?;
         Ok(true)
+    }
+
+    /// Whether `staging` holds a finished clone: ready by [`mirror_state`], and with
+    /// exactly the [`MIRROR_REFSPECS`] set, which `clone_mirror` writes only after the
+    /// clone itself succeeded. (A reftable dir reads ready mid-clone; the refspecs
+    /// don't.)
+    async fn staged_clone_finished(&self, staging: &Path) -> bool {
+        if mirror_state(staging) != MirrorState::Ready {
+            return false;
+        }
+        let Ok(specs) = self
+            .git_str(staging, &["config", "--get-all", "remote.origin.fetch"])
+            .await
+        else {
+            return false;
+        };
+        specs
+            .lines()
+            .map(str::trim)
+            .eq(MIRROR_REFSPECS.iter().copied())
+    }
+
+    /// Refuse to replace a mirror path that holds neither a git dir nor nothing (e.g. a
+    /// checkout configured as the mirror).
+    fn refuse_foreign_mirror_path(&self) -> Result<()> {
+        if mirror_state(&self.mirror) == MirrorState::Absent && !replaceable_non_git(&self.mirror) {
+            return Err(Error::Repo(format!(
+                "the mirror path {} holds something that is not a git mirror; not replacing it",
+                self.mirror.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Make sure the mirror exists before a fetch. Without a remote there is nothing
+    /// to clone, and the fetch runs on the checkout as before. Without
+    /// [`with_background_mirror_clone`](Self::with_background_mirror_clone) the clone
+    /// runs here, best-effort, under the ordinary [`GIT_TIMEOUT_SECS`] guard (a failure
+    /// is logged and the fetch goes on without the mirror). With it, a background task
+    /// clones (one per mirror path, under [`MIRROR_CLONE_TIMEOUT_SECS`]) and this errs
+    /// until the mirror is ready.
+    async fn prepare_mirror(&self) -> Result<()> {
+        if self.mirror_ready() {
+            return Ok(());
+        }
+        if !self.background_clone {
+            if let Some(slot) = CloneSlot::claim(&self.mirror) {
+                if let Err(e) = self.clone_mirror(slot, GIT_TIMEOUT_SECS).await {
+                    tracing::warn!(mirror = %self.mirror.display(), error = %e,
+                        "git: inline mirror clone failed; fetching without the mirror");
+                }
+            }
+            return Ok(());
+        }
+        if self.resolve_remote_url().await.is_none() {
+            return Ok(());
+        }
+        if let Some(slot) = CloneSlot::claim(&self.mirror) {
+            // Another process's clone may have finished between the check above and
+            // the claim.
+            if self.mirror_ready() {
+                return Ok(());
+            }
+            let backend = self.detached();
+            // unscoped-spawn: a one-off mirror clone that outlives the review that asked
+            // for it; it carries the backend's own token source, not a caller's.
+            tokio::spawn(async move {
+                let mirror = backend.mirror.display().to_string();
+                tracing::info!(%mirror, "git: cloning the mirror in the background");
+                match backend.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await {
+                    Ok(_) => tracing::info!(%mirror, "git: mirror clone finished"),
+                    Err(e) => tracing::warn!(%mirror, error = %e,
+                        "git: background mirror clone failed; the next fetch retries it"),
+                }
+            });
+        }
+        Err(self.cloning_error())
+    }
+
+    /// A copy of this backend for a background task (a fresh, empty OID cache).
+    fn detached(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            mirror: self.mirror.clone(),
+            worktrees: self.worktrees.clone(),
+            remote: self.remote.clone(),
+            cache: OidCache::new(self.root.join(".agent-seddon").join("cache")),
+            sandbox: self.sandbox.clone(),
+            pr_ref_template: self.pr_ref_template.clone(),
+            auth: self.auth.clone(),
+            background_clone: self.background_clone,
+        }
     }
 
     /// Epoch-millis of the last fetch (FETCH_HEAD mtime), or `0` if never fetched.
@@ -274,12 +646,17 @@ impl CliBackend {
     /// non-zero exit or a hang maps to `Err`, so callers see today's behaviour
     /// (e.g. `grep`'s exit-1 "no matches" is still an `Err` it swallows).
     async fn git_bytes(&self, cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
+        self.git_run(cwd, args, GIT_TIMEOUT_SECS).await
+    }
+
+    /// [`git_bytes`](Self::git_bytes) with an explicit deadline (the mirror clone).
+    async fn git_run(&self, cwd: &Path, args: &[&str], timeout_secs: u64) -> Result<Vec<u8>> {
         let mut argv: Vec<String> = Vec::with_capacity(args.len() + 3);
         argv.push("git".into());
         argv.push("-C".into());
         argv.push(cwd.to_string_lossy().into_owned());
         argv.extend(args.iter().map(|a| (*a).to_string()));
-        let mut spec = ExecSpec::argv(argv, cwd).timeout(GIT_TIMEOUT_SECS);
+        let mut spec = ExecSpec::argv(argv, cwd).timeout(timeout_secs);
         // Attach the clone/fetch credential (if any) as command-scoped config through
         // the child env — never as an arg, so the error paths below (which `args.join`)
         // cannot echo it. Only remote ops resolve it: a local read never needs the
@@ -296,7 +673,7 @@ impl CliBackend {
             .map_err(|e| Error::Repo(format!("spawning git failed: {e}")))?;
         if out.timed_out {
             return Err(Error::Repo(format!(
-                "git {} timed out after {GIT_TIMEOUT_SECS}s and was killed",
+                "git {} timed out after {timeout_secs}s and was killed",
                 args.join(" ")
             )));
         }
@@ -852,12 +1229,51 @@ impl RepoBackend for CliBackend {
     }
 
     async fn fetch(&self) -> Result<RepoStatus> {
-        // Bootstrap the shared mirror on first fetch when a remote is known;
-        // best-effort so a missing remote still lets the fetch run on the checkout.
-        let _ = self.ensure_mirror().await;
-        let base = self.base().to_path_buf();
-        self.git_str(&base, &["fetch", "--prune", "--all"]).await?;
+        // Bootstrap the shared mirror on first fetch when a remote is known (see
+        // `prepare_mirror`); a missing remote still lets the fetch run on the checkout.
+        self.prepare_mirror().await?;
+        if self.mirror_ready() {
+            // The refspecs are passed explicitly, so a mirror made by older code (a
+            // `clone --mirror`, whose config says `+refs/*:refs/*`) still fetches only
+            // branches and tags, never every `refs/pull/*`. `--prune` then prunes only
+            // within those namespaces.
+            let mut args = vec!["fetch", "--prune", "--no-tags", self.remote_name()];
+            args.extend(MIRROR_REFSPECS);
+            self.git_str(&self.mirror, &args).await?;
+        } else {
+            self.git_str(&self.root, &["fetch", "--prune", "--all"])
+                .await?;
+        }
         self.status().await
+    }
+
+    async fn fetch_branch(&self, branch: &str) -> Result<()> {
+        // The name comes from the forge (a PR's target branch), so it is screened
+        // before it goes into a refspec, and only a capped, sanitized copy is echoed.
+        if !safe_branch(branch) {
+            let shown: String = branch.chars().take(64).collect();
+            return Err(Error::Repo(format!(
+                "invalid branch name `{}`",
+                sanitize(&shown)
+            )));
+        }
+        self.prepare_mirror().await?;
+        // Only a mirror is refreshed. In a working checkout `refs/heads/<b>` is the
+        // user's own branch, and a forced fetch into it would overwrite local work.
+        if !self.mirror_ready() {
+            tracing::info!(branch, root = %self.root.display(),
+                "git: no mirror, so the base branch is not refreshed (a checkout's branches are the user's)");
+            return Ok(());
+        }
+        // A full refspec, so the branch ref itself is written. A bare `fetch origin <b>`
+        // only writes FETCH_HEAD, leaving a stale (or missing) base behind.
+        let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
+        self.git_str(
+            &self.mirror,
+            &["fetch", "--no-tags", self.remote_name(), &refspec],
+        )
+        .await?;
+        Ok(())
     }
 
     async fn fetch_pr(&self, number: u64) -> Result<Revision> {
@@ -868,9 +1284,9 @@ impl RepoBackend for CliBackend {
                 "fetch_pr needs [git] pr_ref_template (e.g. \"refs/pull/{n}/head\")".into(),
             ));
         }
-        // Bootstrap the mirror if needed (best-effort, like `fetch`): the fetch
-        // below still runs on the checkout when no remote is configured.
-        let _ = self.ensure_mirror().await;
+        // Bootstrap the mirror if needed (like `fetch`): the fetch below still runs
+        // on the checkout when no remote is configured.
+        self.prepare_mirror().await?;
 
         // `{n}` is the only interpolation and `number` is a `u64`, so the remote
         // ref is well-formed; the local ref comes from the shared `pr_local_ref`
@@ -1155,11 +1571,44 @@ mod tests {
         }
     }
 
+    impl RecordingSandbox {
+        /// The last recorded call that talked to the remote (`clone` / `fetch`): the
+        /// one that carries the credential. A clone is followed by local `config` calls.
+        fn last_remote(&self) -> ExecSpec {
+            self.all
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|s| matches!(s.argv.get(3).map(String::as_str), Some("clone" | "fetch")))
+                .cloned()
+                .expect("a remote git call ran")
+        }
+    }
+
+    /// Lay out a minimal git dir that `mirror_state` reads as ready.
+    fn make_ready(dir: &Path) {
+        std::fs::create_dir_all(dir.join("refs/heads")).unwrap();
+        std::fs::write(dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            dir.join("refs/heads/main"),
+            b"0000000000000000000000000000000000000000\n",
+        )
+        .unwrap();
+    }
+
     #[async_trait]
     impl Sandbox for RecordingSandbox {
         async fn exec(&self, spec: &ExecSpec) -> Result<ExecOutput> {
             *self.last.lock().unwrap() = Some(spec.clone());
             self.all.lock().unwrap().push(spec.clone());
+            // A successful `clone` leaves a git dir at its destination (the last arg),
+            // so the backend's rename into place has something to move.
+            if self.out.exit_code == 0 && spec.argv.get(3).map(String::as_str) == Some("clone") {
+                if let Some(dest) = spec.argv.last() {
+                    make_ready(Path::new(dest));
+                }
+            }
             Ok(self.out.clone())
         }
         fn capabilities(&self) -> SandboxCapabilities {
@@ -1312,9 +1761,8 @@ mod tests {
     fn backend_ready_mirror() -> (CliBackend, PathBuf) {
         let dir = agent_testkit::tempdir();
         let mirror = dir.join("mirror");
-        std::fs::create_dir_all(&mirror).unwrap();
-        // A `HEAD` marker makes `mirror_ready()` true (skips the clone).
-        std::fs::write(mirror.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        // A git dir with a branch makes `mirror_ready()` true (skips the clone).
+        make_ready(&mirror);
         let b = CliBackend::new(dir.join("root"), mirror.clone(), dir.join("wt"), "");
         (b, mirror)
     }
@@ -1430,7 +1878,8 @@ mod tests {
     // the clone URL, or an error string.
 
     /// A backend with a real `remote` and an **absent** mirror, so `ensure_mirror`
-    /// funnels exactly one `git clone --mirror <remote> <mirror>` through the sandbox.
+    /// funnels exactly one `git clone --bare <remote> <mirror>.partial` through the
+    /// sandbox (then local `config` calls on the staging dir).
     fn backend_for_clone(remote: &str) -> (CliBackend, PathBuf) {
         let dir = agent_testkit::tempdir();
         let mirror = dir.join("mirror");
@@ -1473,7 +1922,7 @@ mod tests {
         let b = b.with_sandbox(rec.clone()).with_github_token(&tok("ghs_x"));
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().expect("clone ran");
+        let spec = rec.last_remote();
         let m = env_map(&spec);
         assert_eq!(m.get("GIT_CONFIG_COUNT").map(String::as_str), Some("1"));
         assert_eq!(
@@ -1496,7 +1945,7 @@ mod tests {
         let b = b.with_sandbox(rec.clone()).with_github_token(&tok("ghs_x"));
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let spec = rec.last_remote();
         let val = env_map(&spec).remove("GIT_CONFIG_VALUE_0").unwrap();
         let payload = val.strip_prefix("Authorization: Basic ").unwrap();
         use base64::Engine as _;
@@ -1536,8 +1985,7 @@ mod tests {
         let rec = RecordingSandbox::new(ok_out(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"));
         let dir = agent_testkit::tempdir();
         let mirror = dir.join("mirror");
-        std::fs::create_dir_all(&mirror).unwrap();
-        std::fs::write(mirror.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        make_ready(&mirror);
         let b = CliBackend::new(
             dir.join("root"),
             mirror,
@@ -1575,7 +2023,7 @@ mod tests {
         let b = b.with_sandbox(rec.clone()); // no with_github_token
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let spec = rec.last_remote();
         assert!(
             spec.env_set.is_empty(),
             "a public clone sets no auth env: {:?}",
@@ -1593,7 +2041,7 @@ mod tests {
             .with_github_token(&agent_core::Secret::default());
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let spec = rec.last_remote();
         assert!(spec.env_set.is_empty(), "an empty token emits no header");
     }
 
@@ -1606,7 +2054,7 @@ mod tests {
         let b = b.with_sandbox(rec.clone()).with_github_token(&tok("ghs_x"));
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let spec = rec.last_remote();
         let m = env_map(&spec);
         assert_eq!(
             m.get("GIT_CONFIG_KEY_0").map(String::as_str),
@@ -1652,7 +2100,7 @@ mod tests {
         let b = b.with_sandbox(rec.clone()).with_github_token(&tok(hostile));
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let spec = rec.last_remote();
         let val = env_map(&spec).remove("GIT_CONFIG_VALUE_0").unwrap();
         assert!(
             !val.contains('\r') && !val.contains('\n'),
@@ -1713,7 +2161,7 @@ mod tests {
     #[tokio::test]
     async fn positive_token_source_is_read_per_call() {
         let rec = RecordingSandbox::new(ok_out(b""));
-        let (b, _m) = backend_for_clone("https://github.com/o/r.git");
+        let (b, m) = backend_for_clone("https://github.com/o/r.git");
         let src = Arc::new(RotatingSource {
             reads: Default::default(),
             fail: false,
@@ -1723,10 +2171,11 @@ mod tests {
             .with_github_token_source(src.clone());
 
         b.ensure_mirror().await.unwrap();
-        let first = rec.last.lock().unwrap().clone().unwrap();
-        // The mirror is still absent (the sandbox only records), so this clones again.
+        let first = rec.last_remote();
+        // Remove the mirror the first clone left, so this clones again.
+        std::fs::remove_dir_all(&m).unwrap();
         b.ensure_mirror().await.unwrap();
-        let second = rec.last.lock().unwrap().clone().unwrap();
+        let second = rec.last_remote();
 
         assert_eq!(decoded_token(&first), "x-access-token:ghs_0");
         assert_eq!(
@@ -1767,7 +2216,7 @@ mod tests {
         let b = b.with_sandbox(rec.clone()).with_github_token(&tok(hostile));
         b.ensure_mirror().await.unwrap();
 
-        let spec = rec.last.lock().unwrap().clone().unwrap();
+        let spec = rec.last_remote();
         let val = env_map(&spec).remove("GIT_CONFIG_VALUE_0").unwrap();
         assert!(
             !val.contains('\0'),
@@ -1783,7 +2232,7 @@ mod tests {
     /// Which subcommands resolve the credential. Each row: the git args, and whether
     /// the call is a remote op that needs it.
     #[rstest]
-    #[case::positive_clone("a mirror clone talks to the remote", &["clone", "--mirror", "u", "m"], true)]
+    #[case::positive_clone("a mirror clone talks to the remote", &["clone", "--bare", "u", "m"], true)]
     #[case::positive_fetch("a fetch talks to the remote", &["fetch", "--prune", "--all"], true)]
     #[case::positive_push("a push talks to the remote", &["push", "origin", "r"], true)]
     #[case::positive_ls_remote("ls-remote talks to the remote", &["ls-remote", "origin"], true)]
@@ -1831,5 +2280,381 @@ mod tests {
             b.ensure_mirror().await.is_err(),
             "the remote op still fails closed"
         );
+    }
+
+    // --- review-graph inc 1: heads+tags mirror, atomic clone, base fetch -------
+
+    #[derive(Debug, Clone, Copy)]
+    enum Layout {
+        Nothing,
+        EmptyDir,
+        /// A clone killed before it wrote refs: placeholder HEAD, objects, no refs.
+        KilledClone,
+        /// A finished clone of an empty repo: a real HEAD but no branch anywhere.
+        EmptyRepo,
+        /// Objects but no HEAD file (a dir git never finished setting up).
+        Headless,
+        Loose,
+        Nested,
+        /// A loose branch nested deeper than any sane ref walk would go.
+        DeepNested,
+        Packed,
+        Reftable,
+    }
+
+    fn lay_out(dir: &Path, layout: Layout) {
+        let mk = |p: &str| std::fs::create_dir_all(dir.join(p)).unwrap();
+        let put = |p: &str, body: &str| std::fs::write(dir.join(p), body).unwrap();
+        match layout {
+            Layout::Nothing => {}
+            Layout::EmptyDir => mk(""),
+            Layout::KilledClone => {
+                mk("objects/pack");
+                mk("refs/heads");
+                put("HEAD", "ref: refs/heads/.invalid\n");
+            }
+            Layout::EmptyRepo => {
+                mk("objects");
+                mk("refs/heads");
+                put("HEAD", "ref: refs/heads/main\n");
+            }
+            Layout::Loose => make_ready(dir),
+            Layout::Nested => {
+                mk("refs/heads/release");
+                put("HEAD", "ref: refs/heads/release/1\n");
+                put("refs/heads/release/1", "0\n");
+            }
+            Layout::Packed => {
+                mk("objects");
+                put("HEAD", "ref: refs/heads/master\n");
+                put(
+                    "packed-refs",
+                    "# pack-refs with: peeled fully-peeled sorted\n0000 refs/heads/master\n",
+                );
+            }
+            Layout::Headless => mk("objects/pack"),
+            Layout::DeepNested => {
+                let deep = format!("refs/heads/{}", vec!["d"; 40].join("/"));
+                mk(&deep);
+                put("HEAD", "ref: refs/heads/main\n");
+                put(&format!("{deep}/tip"), "0\n");
+            }
+            Layout::Reftable => {
+                mk("reftable");
+                put("HEAD", "ref: refs/heads/.invalid\n");
+            }
+        }
+    }
+
+    /// What `mirror_state` makes of each layout. l2's nixpkgs mirror was a killed clone
+    /// (placeholder HEAD, 33 GB of objects, no refs) that the old `HEAD exists` check
+    /// called ready, so it was never replaced and every diff failed.
+    #[rstest]
+    #[case::positive_loose_branch_is_ready(Layout::Loose, MirrorState::Ready)]
+    #[case::positive_packed_branch_is_ready(Layout::Packed, MirrorState::Ready)]
+    #[case::corner_nested_branch_is_ready(Layout::Nested, MirrorState::Ready)]
+    #[case::negative_nothing_is_absent(Layout::Nothing, MirrorState::Absent)]
+    #[case::negative_empty_dir_is_absent(Layout::EmptyDir, MirrorState::Absent)]
+    #[case::adversarial_killed_clone_is_incomplete(Layout::KilledClone, MirrorState::Incomplete)]
+    #[case::adversarial_headless_objects_is_incomplete(Layout::Headless, MirrorState::Incomplete)]
+    #[case::boundary_cloned_empty_repo_is_ready(Layout::EmptyRepo, MirrorState::Ready)]
+    #[case::corner_reftable_stub_head_is_ready(Layout::Reftable, MirrorState::Ready)]
+    #[case::corner_deeply_nested_branch_is_ready(Layout::DeepNested, MirrorState::Ready)]
+    fn mirror_state_cases(#[case] layout: Layout, #[case] want: MirrorState) {
+        let dir = agent_testkit::tempdir().join("mirror");
+        lay_out(&dir, layout);
+        assert_eq!(mirror_state(&dir), want, "{layout:?}");
+    }
+
+    /// Branch names from the forge, screened before they reach a refspec.
+    #[rstest]
+    #[case::positive_main("main", true)]
+    #[case::positive_staging("staging-next", true)]
+    #[case::positive_release_dot("release-25.11", true)]
+    #[case::positive_slashed("release/25.11", true)]
+    #[case::negative_empty("", false)]
+    #[case::negative_empty_segment("a//b", false)]
+    #[case::negative_trailing_slash("main/", false)]
+    #[case::adversarial_refspec_colon("x:refs/heads/main", false)]
+    #[case::adversarial_force_plus("+main", false)]
+    #[case::adversarial_glob("refs/*", false)]
+    #[case::adversarial_option("--upload-pack=sh", false)]
+    #[case::adversarial_traversal("a/../heads/main", false)]
+    #[case::adversarial_dotdot_inside("a..b", false)]
+    #[case::adversarial_leading_dot(".hidden", false)]
+    #[case::adversarial_lock_suffix("main.lock", false)]
+    #[case::adversarial_reflog_syntax("main@{1}", false)]
+    #[case::adversarial_newline("main\nrefs/heads/x", false)]
+    #[case::boundary_max_len(&"a".repeat(MAX_BRANCH_LEN.min(agent_core::MAX_SEGMENT_LEN)), true)]
+    #[case::boundary_over_len(&format!("{}/b", "a/".repeat(MAX_BRANCH_LEN)), false)]
+    fn safe_branch_cases(#[case] name: &str, #[case] ok: bool) {
+        assert_eq!(safe_branch(name), ok, "{name:?}");
+    }
+
+    /// Only an empty dir, or one holding just the backend's own cache, may be moved
+    /// aside for a new mirror. A checkout configured as the mirror path never is.
+    #[rstest]
+    #[case::positive_missing(None, true)]
+    #[case::positive_empty(Some(&[][..]), true)]
+    #[case::corner_only_the_cache(Some(&[".agent-seddon"][..]), true)]
+    #[case::adversarial_a_checkout(Some(&[".git", "src"][..]), false)]
+    #[case::adversarial_user_file(Some(&["notes.txt"][..]), false)]
+    fn replaceable_non_git_cases(#[case] entries: Option<&[&str]>, #[case] ok: bool) {
+        let dir = agent_testkit::tempdir().join("mirror");
+        if let Some(entries) = entries {
+            std::fs::create_dir_all(&dir).unwrap();
+            for e in entries {
+                std::fs::create_dir_all(dir.join(e)).unwrap();
+            }
+        }
+        assert_eq!(replaceable_non_git(&dir), ok);
+    }
+
+    /// A clone is `clone --bare` into the `.partial` sibling, then exactly the two
+    /// heads/tags refspecs, then a rename into place: never `--mirror`, never
+    /// `refs/pull/*`, and nothing left at `.partial` / `.stale`.
+    #[rstest]
+    #[case::positive_absent_mirror(Layout::Nothing)]
+    #[case::corner_dir_with_only_cache(Layout::EmptyDir)]
+    #[case::adversarial_killed_clone_replaced(Layout::KilledClone)]
+    #[tokio::test]
+    async fn clone_is_bare_heads_and_tags_staged_then_renamed(#[case] before: Layout) {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, m) = backend_for_clone("https://github.com/o/r.git");
+        lay_out(&m, before);
+        if matches!(before, Layout::EmptyDir) {
+            std::fs::create_dir_all(m.join(".agent-seddon/cache")).unwrap();
+        }
+        let b = b.with_sandbox(rec.clone());
+        assert!(b.ensure_mirror().await.unwrap(), "a clone ran");
+
+        let argvs = rec.all_argvs();
+        let staging = sibling(&m, "partial").to_string_lossy().into_owned();
+        assert_eq!(
+            argvs[0][3..],
+            [
+                "clone",
+                "--bare",
+                "https://github.com/o/r.git",
+                staging.as_str()
+            ],
+            "{argvs:?}"
+        );
+        let adds: Vec<&str> = argvs
+            .iter()
+            .filter(|a| a[3..].starts_with(&["config".into(), "--add".into()]))
+            .map(|a| a[6].as_str())
+            .collect();
+        assert_eq!(adds, MIRROR_REFSPECS, "exactly heads + tags");
+        assert!(!argvs
+            .iter()
+            .flatten()
+            .any(|a| a == "--mirror" || a.contains("refs/pull")));
+        assert_eq!(mirror_state(&m), MirrorState::Ready);
+        assert!(!sibling(&m, "partial").exists() && !sibling(&m, "stale").exists());
+    }
+
+    /// A mirror path holding something that isn't a git mirror is never replaced.
+    #[tokio::test]
+    async fn adversarial_clone_refuses_to_replace_a_foreign_dir() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, m) = backend_for_clone("https://github.com/o/r.git");
+        std::fs::create_dir_all(&m).unwrap();
+        std::fs::write(m.join("precious.txt"), "keep me").unwrap();
+        let err = b
+            .with_sandbox(rec.clone())
+            .ensure_mirror()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a git mirror"), "{err}");
+        assert!(rec.all_argvs().is_empty(), "no git ran");
+        assert_eq!(
+            std::fs::read_to_string(m.join("precious.txt")).unwrap(),
+            "keep me"
+        );
+    }
+
+    /// While a clone of a path runs, a second one is refused instead of colliding in
+    /// the same staging dir.
+    #[tokio::test]
+    async fn corner_second_clone_of_one_path_is_refused() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, m) = backend_for_clone("https://github.com/o/r.git");
+        let _held = CloneSlot::claim(&m).expect("first claim");
+        let err = b
+            .with_sandbox(rec.clone())
+            .ensure_mirror()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("being cloned"), "{err}");
+        assert!(rec.all_argvs().is_empty(), "no second clone ran");
+    }
+
+    /// With a background clone, the first fetch fails fast ("being cloned") instead of
+    /// running the clone under its caller's deadline; once the clone lands the same
+    /// call succeeds.
+    #[tokio::test]
+    async fn positive_background_clone_then_fetch() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, m) = backend_for_clone("https://github.com/o/r.git");
+        let b = b.with_sandbox(rec.clone()).with_background_mirror_clone();
+
+        let err = b.fetch_branch("main").await.unwrap_err();
+        assert!(err.to_string().contains("being cloned"), "{err}");
+        for _ in 0..500 {
+            if mirror_state(&m) == MirrorState::Ready && CloneSlot::claim(&m).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            mirror_state(&m),
+            MirrorState::Ready,
+            "the background clone landed"
+        );
+        b.fetch_branch("main").await.expect("ready now");
+        let fetches = rec
+            .all_argvs()
+            .into_iter()
+            .filter(|a| a[3] == "fetch")
+            .count();
+        assert_eq!(fetches, 1, "one fetch, after the clone");
+    }
+
+    /// `fetch_branch` writes the branch ref itself with a full refspec, on the mirror,
+    /// and rejects a hostile name before any git runs.
+    #[rstest]
+    #[case::positive_main("main", true)]
+    #[case::positive_staging_target("staging", true)]
+    #[case::corner_slashed("release/25.11", true)]
+    #[case::adversarial_refspec_injection("x:refs/heads/main", false)]
+    #[case::adversarial_option_injection("--upload-pack=touch /tmp/pwn", false)]
+    #[tokio::test]
+    async fn fetch_branch_full_refspec_on_the_mirror(#[case] branch: &str, #[case] ok: bool) {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, m) = backend_ready_mirror();
+        let b = b.with_sandbox(rec.clone());
+        let out = b.fetch_branch(branch).await;
+        let argvs = rec.all_argvs();
+        if ok {
+            out.unwrap();
+            let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
+            assert_eq!(
+                argvs,
+                vec![vec![
+                    "git".to_string(),
+                    "-C".into(),
+                    m.to_string_lossy().into_owned(),
+                    "fetch".into(),
+                    "--no-tags".into(),
+                    "origin".into(),
+                    refspec,
+                ]]
+            );
+        } else {
+            let err = out.unwrap_err().to_string();
+            assert!(err.contains("invalid branch name"), "{err}");
+            assert!(argvs.is_empty(), "no git ran for {branch:?}");
+            assert!(!err.contains("/tmp/pwn"), "echo is sanitized: {err}");
+        }
+    }
+
+    /// Without a mirror, `fetch_branch` leaves the checkout's branches alone: in a
+    /// working checkout `refs/heads/<b>` is the user's own work.
+    #[tokio::test]
+    async fn negative_fetch_branch_without_a_mirror_touches_nothing() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let dir = agent_testkit::tempdir();
+        let b = CliBackend::new(dir.join("root"), dir.join("mirror"), dir.join("wt"), "")
+            .with_sandbox(rec.clone());
+        // No remote configured, and `remote get-url origin` yields nothing.
+        b.fetch_branch("main").await.unwrap();
+        assert!(
+            !rec.all_argvs().iter().any(|a| a[3] == "fetch"),
+            "{:?}",
+            rec.all_argvs()
+        );
+    }
+
+    /// `fetch` on a ready mirror passes the heads/tags refspecs itself, so an old
+    /// `clone --mirror` (config `+refs/*:refs/*`) never pulls `refs/pull/*`; without a
+    /// mirror it is the checkout's own `fetch --all`, as before.
+    #[rstest]
+    #[case::positive_mirror_gets_explicit_refspecs(true)]
+    #[case::negative_checkout_keeps_its_own_config(false)]
+    #[tokio::test]
+    async fn fetch_refspecs_are_explicit_on_a_mirror(#[case] mirror_ready: bool) {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let dir = agent_testkit::tempdir();
+        let (root, mirror) = (dir.join("root"), dir.join("mirror"));
+        if mirror_ready {
+            make_ready(&mirror);
+        }
+        let b = CliBackend::new(&root, &mirror, dir.join("wt"), "").with_sandbox(rec.clone());
+        let _ = b.fetch().await;
+        let fetch = rec
+            .all_argvs()
+            .into_iter()
+            .find(|a| a[3] == "fetch")
+            .expect("a fetch ran");
+        let (cwd, tail): (&Path, Vec<&str>) = if mirror_ready {
+            let mut t = vec!["fetch", "--prune", "--no-tags", "origin"];
+            t.extend(MIRROR_REFSPECS);
+            (&mirror, t)
+        } else {
+            (&root, vec!["fetch", "--prune", "--all"])
+        };
+        assert_eq!(fetch[2], cwd.to_string_lossy());
+        assert_eq!(&fetch[3..], tail.as_slice());
+    }
+
+    /// The mirror's state when the slot is finally claimed: name, layout, whether the
+    /// clone reports `false` (nothing to do) without touching the (unreachable) remote.
+    #[rstest]
+    #[case::positive_ready_after_the_claim_is_not_recloned(Layout::Loose, true)]
+    #[case::corner_reftable_ready_after_the_claim(Layout::Reftable, true)]
+    #[case::negative_killed_clone_is_still_recloned(Layout::KilledClone, false)]
+    #[tokio::test]
+    async fn clone_rechecks_readiness_after_the_claim(
+        #[case] layout: Layout,
+        #[case] skipped: bool,
+    ) {
+        let work = agent_testkit::tempdir();
+        let mirror = work.join("mirror");
+        lay_out(&mirror, layout);
+        let b = CliBackend::new(
+            &mirror,
+            &mirror,
+            work.join("wt"),
+            work.join("no-such-remote").to_string_lossy().to_string(),
+        );
+        let slot = CloneSlot::claim(&mirror).expect("free slot");
+        let got = b.clone_mirror(slot, 30).await;
+        if skipped {
+            assert!(matches!(got, Ok(false)), "{got:?}");
+        } else {
+            assert!(got.is_err(), "a re-clone was attempted: {got:?}");
+        }
+    }
+
+    /// The clone claim is exclusive across processes too: a lock held on
+    /// `<mirror>.clone-lock` by another open file (as another process would) refuses
+    /// the claim, and releasing it allows one.
+    #[rstest]
+    #[case::adversarial_lock_held_elsewhere(true, false)]
+    #[case::positive_lock_free(false, true)]
+    fn clone_slot_honours_the_cross_process_lock(#[case] held: bool, #[case] claimed: bool) {
+        let mirror = agent_testkit::tempdir().join("m").join("mirror");
+        let other = held.then(|| {
+            std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(sibling(&mirror, "clone-lock")).unwrap();
+            f.try_lock().unwrap();
+            f
+        });
+        let slot = CloneSlot::claim(&mirror);
+        assert_eq!(slot.is_some(), claimed);
+        drop(slot);
+        drop(other);
+        assert!(CloneSlot::claim(&mirror).is_some(), "free once released");
     }
 }
