@@ -117,6 +117,25 @@ pub fn forge_refusal_status(e: &Error) -> Option<u16> {
     code.parse().ok()
 }
 
+/// Leading words of [`mirror_cloning`].
+const MIRROR_CLONING_PREFIX: &str = "the mirror is being cloned";
+
+/// A git fetch refused because the shared mirror at `path` is still being cloned in
+/// the background (up to `timeout_secs`). The caller retries later; it is a wait, not
+/// a failure.
+pub fn mirror_cloning(path: &std::path::Path, timeout_secs: u64) -> Error {
+    Error::Repo(format!(
+        "{MIRROR_CLONING_PREFIX} at {} (a one-off, up to {timeout_secs}s); retry once it is ready",
+        path.display()
+    ))
+}
+
+/// Whether `e` is the [`mirror_cloning`] wait, so logs can say "waiting" rather than
+/// "failed".
+pub fn is_mirror_cloning(e: &Error) -> bool {
+    matches!(e, Error::Repo(m) if m.starts_with(MIRROR_CLONING_PREFIX))
+}
+
 // The shared message vocabulary — see message.rs (re-exported below).
 mod message;
 pub use message::*;
@@ -7008,6 +7027,31 @@ mod tests {
         assert_eq!(
             forge_rate_limited(429, 60).to_string(),
             "repo error: forge api returned http 429: rate limited for 60s"
+        );
+    }
+
+    /// Which errors read as the mirror-cloning wait: name, error, expected.
+    #[rstest]
+    #[case::positive_made_by_the_helper(mirror_cloning(std::path::Path::new("/m"), 7200), true)]
+    #[case::negative_other_repo_error(Error::Repo("git fetch failed: could not resolve host".into()), false)]
+    #[case::negative_other_variant(Error::Tool("the mirror is being cloned".into()), false)]
+    #[case::corner_empty(Error::Repo(String::new()), false)]
+    #[case::boundary_bare_prefix(Error::Repo("the mirror is being cloned".into()), true)]
+    #[case::adversarial_phrase_mid_message(
+        Error::Repo("clone failed: the mirror is being cloned".into()),
+        false
+    )]
+    fn is_mirror_cloning_cases(#[case] e: Error, #[case] want: bool) {
+        assert_eq!(is_mirror_cloning(&e), want, "{e}");
+    }
+
+    /// The wording the git backend emits is exactly what the readers match.
+    #[test]
+    fn mirror_cloning_wording_is_pinned() {
+        assert_eq!(
+            mirror_cloning(std::path::Path::new("/var/m"), 7200).to_string(),
+            "repo error: the mirror is being cloned at /var/m (a one-off, up to 7200s); \
+             retry once it is ready"
         );
     }
 

@@ -229,6 +229,7 @@ dependencies = [
  "agent-testkit",
  "async-trait",
  "base64 0.22.1",
+ "libc",
  "rstest",
  "serde",
  "serde_json",

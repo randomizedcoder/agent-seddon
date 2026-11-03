@@ -11,8 +11,10 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | # | Title | Design | State | PR |
 |---|---|---|---|---|
 | 0 | Design directory | all | ✅ | #681 (+ follow-ups #683) |
-| 1 | Fix "Files changed: 0" on nixpkgs: heads+tags mirror via an atomic staged `clone --bare` (a killed clone is replaced), background clone off the review path, target-branch base fetch (`fetch_branch`) instead of a per-review `fetch --all`, process-group kill on timeout, loud unknown change set | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | 🟡 | (this PR) |
-| 1c | Mirror upkeep: old-shape (`clone --mirror`) migration as a maintenance job, `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, forge file-list fallback for a failed diff, a `FetchBranch` RPC for `GrpcRepo`, an off-path refresh of tags and non-target branches, recovering `<mirror>.stale` after a crash mid-swap, `safe_branch` parity with `git check-ref-format` (e.g. a trailing `.`) | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1 | Fix "Files changed: 0" on nixpkgs: heads+tags mirror via an atomic staged `clone --bare` (a killed clone is replaced), background clone off the review path, target-branch base fetch (`fetch_branch`) instead of a per-review `fetch --all`, process-group kill on timeout, loud unknown change set | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ✅ | #684 |
+| 1c-i | Mirror robustness (from #684's reviews): best-effort `.stale` delete after a swap plus a background sweep of a leftover one, fail closed on a `.clone-lock` that isn't a regular file, `fetch_branch` a no-op when the root isn't the mirror, the shared `agent_core::mirror_cloning` wording logged at info by auto-fetch and the fleet trigger loop, a log when an inline clone yields to a running one, `safe_branch` rejects a trailing `.` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | 🟡 | (this PR) |
+| 1c-ii | Mirror upkeep: `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, old-shape (`clone --mirror`) migration as a maintenance job, an off-path refresh of tags and non-target branches, a `.stale` sweep that renames then deletes without the clone lock, a typed `Error::MirrorCloning` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1c-iii | Remote and fallback: a `FetchBranch` RPC for `GrpcRepo`, forge file-list fallback for a failed diff, a stronger reftable readiness signal, the fleet's 30 s re-poll while a mirror clones | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1b | Work queues + worker pools: (i) in-process stage pools (fetch/ground/review/finish/index) with per-stage worker counts and per-repo/tenant caps; (ii) durable `FleetJobQueue` (memory + Postgres, SKIP LOCKED claim, leases, retries, coalescing); (iii) multi-process with affinity, graceful shutdown, portal stage view | [06](06-work-queue.md) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
@@ -92,3 +94,29 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - Auto-fetch logs "waits for the mirror clone" at info, not a "failed" warning.
   - The `Skipped` arm of `change_unknown` is commented as unreachable today.
   - Deferred to 1c: the fleet's 30 s re-poll while a mirror clones.
+
+  Merged as #684 (609658fc) and live on l2 on 2026-11-02. The nixpkgs mirror went from a
+  33G half-clone to 3.8G (heads and tags, no `refs/pull`), cloned in about 8 minutes, and
+  the first nixpkgs drafts report real counts (1 and 2 files changed, not 0).
+
+- **1c-i** (this PR): the robustness items #684's last reviews left.
+  - The old mirror's delete after a swap is best-effort (warn), so a ready mirror is never
+    reported as a failed clone; a leftover `<mirror>.stale` is swept in the background by
+    the next fetch, under the clone lock.
+  - A `<mirror>.clone-lock` that is a symlink or a dir fails the clone closed.
+  - `fetch_branch` does nothing when the root is not the mirror (the diff would never see
+    the branch); the fleet passes the mirror as both.
+  - The "being cloned" wording is `agent_core::mirror_cloning`, read with
+    `is_mirror_cloning` by auto-fetch and the fleet trigger loop, both now at info (on l2 the
+    trigger loop warned once per queued nixpkgs PR per poll during the clone).
+  - An inline clone that yields to a running one logs it; `safe_branch` rejects a trailing
+    `.` and a `.lock` segment mid-path is covered.
+  - From the fleet review of this PR: the foreign-lock guard moved into the lock open
+    (`O_NOFOLLOW | O_NONBLOCK`, then a regular-file check), so the `.stale` sweep, which
+    claimed without the guard, is covered too and there is no check-then-open race. A
+    FIFO lock is refused without hanging. A busy claim retries for about 40 ms, which also
+    fixed a pre-existing test flake (a child forked by a parallel test held the inherited
+    lock fd until exec). A mid-path segment ending in `.` stays valid, as git agrees.
+  - Left for 1c-ii: a sweep holds the clone lock while it deletes a large `.stale`, so a
+    concurrent clone attempt reads "being cloned" (rename first, then delete unlocked);
+    a typed `Error::MirrorCloning` instead of the pinned message prefix.

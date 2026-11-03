@@ -124,13 +124,14 @@ ref first and fetches only when it is missing. An empty `pr_ref_template` makes
 resolving a PR, best-effort, so the diff runs against today's base rather than
 whatever the mirror last saw. The name comes from the forge and is screened first: only
 `/`-separated `[A-Za-z0-9._-]` segments, none starting with `-` or `.` or ending in
-`.lock`, no `..`, at most 255 bytes. Without a mirror it does nothing, because in a
+`.lock`, no `..`, no trailing `.`, at most 255 bytes. Without a mirror it does nothing, because in a
 working checkout `refs/heads/<name>` is the user's own branch.
 
-The refreshed branch reaches the diff only when the checkout root *is* the mirror,
-which is the fleet's shape (each review worktree is cut from the mirror). A split
-config, with a working checkout as root and a separate mirror, resolves the base in
-the checkout, so the diff sees whatever that checkout last fetched.
+It also does nothing unless the checkout root *is* the mirror, which is the fleet's
+shape (each review worktree is cut from the mirror). The diff resolves the base in the
+root, so in a split config (a working checkout as root, a separate mirror) a branch
+fetched into the mirror would never reach it; the diff sees whatever that checkout
+last fetched.
 
 `fetch_branch` is not on the wire yet: `GrpcRepo` (`[git] backend = "grpc"`) keeps the
 trait's default, which errs, so a review over the gRPC repo backend logs a warning and
@@ -154,7 +155,15 @@ The clone:
    first) under a 2-hour deadline when it runs in the background, or the ordinary
    600 s git guard when it runs inline;
 2. sets exactly those two refspecs;
-3. renames the staging dir onto the mirror path.
+3. moves any old mirror to `<mirror>.stale`, renames the staging dir onto the mirror
+   path, and deletes the stale dir. That delete is best-effort: the new mirror is
+   already in place, so a failure is logged rather than reported as a failed clone,
+   and the next fetch on a ready mirror deletes a leftover `.stale` in the background
+   (holding the clone lock, so it never races a swap).
+
+A crash between the two renames leaves no mirror and a finished `.partial`; the next
+clone moves it into place instead of cloning again (it counts as finished only once
+its refspecs are set, which happens after the clone succeeds).
 
 A clone killed partway therefore never looks like a mirror. Readiness is read from
 `HEAD` alone: `git clone` writes the placeholder `ref: refs/heads/.invalid` first and
@@ -169,15 +178,22 @@ never scanned, because a misread there would delete a good mirror. A path that i
 neither a git dir nor empty is never replaced, and a failed clone removes its
 `.partial` dir. One clone runs per mirror path, across processes too: the claim
 holds an exclusive lock on `<mirror>.clone-lock`, which the OS releases if the
-process dies.
+process dies. The lock is opened with `O_NOFOLLOW | O_NONBLOCK`, so a lock path that
+is a symlink, a directory or a FIFO fails the claim closed in the open itself (no
+check-then-open race), on every claim site: both clone paths and the `.stale` sweep. A
+busy lock is retried for about 40 ms, because a child forked elsewhere in the process
+holds a copy of the fd until it execs. A clone re-checks readiness once it holds the
+lock, so one that finished while another waited is not repeated.
 
 `fetch` on a mirror passes the two refspecs on the command line
 (`fetch --prune --no-tags <remote> MIRROR_REFSPECS`), so a mirror made by older code
 (`clone --mirror`, config `+refs/*:refs/*`) never pulls `refs/pull/*` either. Without
 a mirror it is the checkout's own `fetch --prune --all`.
 `with_background_mirror_clone()` clones in a background task (2-hour deadline), and
-`fetch` / `fetch_pr` / `fetch_branch` fail fast with "being cloned" until the clone is
-done; reads and worktrees use the checkout meanwhile. It is set for every per-repo fleet
+`fetch` / `fetch_pr` / `fetch_branch` fail fast with `agent_core::mirror_cloning` ("the
+mirror is being cloned") until the clone is done. Callers that log it (auto-fetch, the
+fleet trigger loop) test it with `agent_core::is_mirror_cloning` and log at info, since
+it is a wait, not a failure; reads and worktrees use the checkout meanwhile. It is set for every per-repo fleet
 backend, and by `build_repo` whenever the mirror is managed off the request path:
 `auto_fetch_secs > 0` (the `spawn_fetch` upkeep) or a `[review_fleet] root` (a
 single-repo fleet). A large clone can't finish in 600 s, and one killed there would
