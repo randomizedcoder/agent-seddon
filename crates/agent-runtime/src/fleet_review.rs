@@ -951,7 +951,7 @@ mod tests {
         // fleet clones in the background: `fetch_pr` fails fast with "being cloned" and
         // the clone reaches the sandbox from its own task.
         let err = ctx.repo.fetch_pr(1).await.unwrap_err();
-        assert!(err.to_string().contains("being cloned"), "{err}");
+        assert!(agent_core::is_mirror_cloning(&err), "{err}");
         for _ in 0..3000 {
             if rec.any_auth_header() {
                 break;

@@ -1355,6 +1355,10 @@ pub async fn serve_fleet(
                     let tenant = trigger.tenant.clone();
                     match crate::fleet_sync::in_tenant(&tenant, orch.handle(trigger)).await {
                         Some(Ok(_)) | None => {}
+                        // A mirror still cloning is a wait; the next poll retries.
+                        Some(Err(e)) if agent_core::is_mirror_cloning(&e) => {
+                            tracing::info!(error = %e, "fleet: review waits for the mirror clone");
+                        }
                         Some(Err(e)) => tracing::warn!(error = %e, "fleet: review trigger failed"),
                     }
                 }
