@@ -113,16 +113,30 @@ impl ReviewCollector for FakeReview {
             change: ChangeSet {
                 base_rev: "main".into(),
                 head_rev: "feature".into(),
-                files: vec![ChangedFile {
-                    old_path: None,
-                    path: "main.go".into(),
-                    change: agent_core::ChangeKind::Modified,
-                    additions: 2,
-                    deletions: 1,
-                    is_binary: false,
-                    lang: "go".into(),
-                    patch: "@@ -1 +1 @@\n-old\n+new\n".into(),
-                }],
+                files: vec![
+                    ChangedFile {
+                        old_path: None,
+                        path: "main.go".into(),
+                        change: agent_core::ChangeKind::Modified,
+                        additions: 2,
+                        deletions: 1,
+                        is_binary: false,
+                        lang: "go".into(),
+                        patch: "@@ -1 +1 @@\n-old\n+new\n".into(),
+                    },
+                    // A rename: its base side must survive the hop, or a
+                    // reviewer's search can't flag hits on the pre-PR path.
+                    ChangedFile {
+                        old_path: Some("old/util.go".into()),
+                        path: "util.go".into(),
+                        change: agent_core::ChangeKind::Renamed,
+                        additions: 0,
+                        deletions: 0,
+                        is_binary: false,
+                        lang: "go".into(),
+                        patch: String::new(),
+                    },
+                ],
                 repo_file_count: 26,
                 commits: vec![agent_core::ReviewCommit {
                     short: "abc123".into(),
@@ -377,8 +391,22 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
         .await
         .expect("collect");
     assert_eq!(facts.meta.repo_hash, "abc123");
-    assert_eq!(facts.change.files.len(), 1);
+    assert_eq!(facts.change.files.len(), 2);
     assert_eq!(facts.change.files[0].lang, "go");
+    assert_eq!(
+        facts.change.files[0].old_path, None,
+        "a modify has no base side"
+    );
+    assert_eq!(
+        facts.change.files[1].old_path.as_deref(),
+        Some(std::path::Path::new("old/util.go")),
+        "a rename keeps its base side across gRPC"
+    );
+    assert_eq!(
+        facts.change.touched_paths().len(),
+        3,
+        "both sides of the rename plus the modify"
+    );
     assert_eq!(facts.change.files[0].patch, "@@ -1 +1 @@\n-old\n+new\n");
     assert_eq!(facts.change.commits.len(), 1);
     assert_eq!(facts.change.commits[0].summary, "add fmt.Println");

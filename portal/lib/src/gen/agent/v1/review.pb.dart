@@ -274,6 +274,7 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
     $core.bool? isBinary,
     $core.String? lang,
     $core.String? patch,
+    $core.String? oldPath,
   }) {
     final result = create();
     if (path != null) result.path = path;
@@ -283,6 +284,7 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
     if (isBinary != null) result.isBinary = isBinary;
     if (lang != null) result.lang = lang;
     if (patch != null) result.patch = patch;
+    if (oldPath != null) result.oldPath = oldPath;
     return result;
   }
 
@@ -307,6 +309,7 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
     ..aOB(5, _omitFieldNames ? '' : 'isBinary')
     ..aOS(6, _omitFieldNames ? '' : 'lang')
     ..aOS(7, _omitFieldNames ? '' : 'patch')
+    ..aOS(8, _omitFieldNames ? '' : 'oldPath')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -391,6 +394,17 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
   $core.bool hasPatch() => $_has(6);
   @$pb.TagNumber(7)
   void clearPatch() => $_clearField(7);
+
+  /// For a rename, the base-side path ("" otherwise): a search over the base branch
+  /// finds the file there, so its hits are pre-PR content too.
+  @$pb.TagNumber(8)
+  $core.String get oldPath => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set oldPath($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasOldPath() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearOldPath() => $_clearField(8);
 }
 
 class ReviewCommit extends $pb.GeneratedMessage {
@@ -2959,6 +2973,181 @@ class ReviewRiskReport extends $pb.GeneratedMessage {
   void clearGateFailed() => $_clearField(4);
 }
 
+/// One (tool, rule) tally in the analysis digest — the bucketed summary so a
+/// high-volume rule stays visible past the verbatim finding cap.
+class ReviewRuleCount extends $pb.GeneratedMessage {
+  factory ReviewRuleCount({
+    $core.String? tool,
+    $core.String? rule,
+    $core.int? count,
+    $core.int? inChange,
+  }) {
+    final result = create();
+    if (tool != null) result.tool = tool;
+    if (rule != null) result.rule = rule;
+    if (count != null) result.count = count;
+    if (inChange != null) result.inChange = inChange;
+    return result;
+  }
+
+  ReviewRuleCount._();
+
+  factory ReviewRuleCount.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ReviewRuleCount.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReviewRuleCount',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'tool')
+    ..aOS(2, _omitFieldNames ? '' : 'rule')
+    ..aI(3, _omitFieldNames ? '' : 'count', fieldType: $pb.PbFieldType.OU3)
+    ..aI(4, _omitFieldNames ? '' : 'inChange', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReviewRuleCount clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReviewRuleCount copyWith(void Function(ReviewRuleCount) updates) =>
+      super.copyWith((message) => updates(message as ReviewRuleCount))
+          as ReviewRuleCount;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReviewRuleCount create() => ReviewRuleCount._();
+  @$core.override
+  ReviewRuleCount createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ReviewRuleCount getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ReviewRuleCount>(create);
+  static ReviewRuleCount? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get tool => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set tool($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasTool() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearTool() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get rule => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set rule($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRule() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRule() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get count => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set count($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCount() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCount() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get inChange => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set inChange($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasInChange() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearInChange() => $_clearField(4);
+}
+
+/// The unified analysis digest (review-analysis-depth Stage 2): every
+/// ReviewAnalysisReport's findings deduped, risk-ranked, and rule-bucketed into
+/// one section. Tool-derived — no model.
+class ReviewAnalysisDigest extends $pb.GeneratedMessage {
+  factory ReviewAnalysisDigest({
+    $core.Iterable<ReviewAnalysisFinding>? findings,
+    $core.int? total,
+    $core.int? inChange,
+    $core.Iterable<ReviewRuleCount>? ruleCounts,
+  }) {
+    final result = create();
+    if (findings != null) result.findings.addAll(findings);
+    if (total != null) result.total = total;
+    if (inChange != null) result.inChange = inChange;
+    if (ruleCounts != null) result.ruleCounts.addAll(ruleCounts);
+    return result;
+  }
+
+  ReviewAnalysisDigest._();
+
+  factory ReviewAnalysisDigest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ReviewAnalysisDigest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReviewAnalysisDigest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..pPM<ReviewAnalysisFinding>(1, _omitFieldNames ? '' : 'findings',
+        subBuilder: ReviewAnalysisFinding.create)
+    ..aI(2, _omitFieldNames ? '' : 'total', fieldType: $pb.PbFieldType.OU3)
+    ..aI(3, _omitFieldNames ? '' : 'inChange', fieldType: $pb.PbFieldType.OU3)
+    ..pPM<ReviewRuleCount>(4, _omitFieldNames ? '' : 'ruleCounts',
+        subBuilder: ReviewRuleCount.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReviewAnalysisDigest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReviewAnalysisDigest copyWith(void Function(ReviewAnalysisDigest) updates) =>
+      super.copyWith((message) => updates(message as ReviewAnalysisDigest))
+          as ReviewAnalysisDigest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReviewAnalysisDigest create() => ReviewAnalysisDigest._();
+  @$core.override
+  ReviewAnalysisDigest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ReviewAnalysisDigest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisDigest>(create);
+  static ReviewAnalysisDigest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<ReviewAnalysisFinding> get findings => $_getList(0);
+
+  @$pb.TagNumber(2)
+  $core.int get total => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set total($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasTotal() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearTotal() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get inChange => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set inChange($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasInChange() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearInChange() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $pb.PbList<ReviewRuleCount> get ruleCounts => $_getList(3);
+}
+
 class ReviewFacts extends $pb.GeneratedMessage {
   factory ReviewFacts({
     ReviewMeta? meta,
@@ -2973,6 +3162,11 @@ class ReviewFacts extends $pb.GeneratedMessage {
     ReviewChurnReport? churn,
     ReviewSalienceReport? salience,
     ReviewRiskReport? risk,
+    ReviewAnalysisReport? shellcheck,
+    ReviewAnalysisReport? goChecks,
+    ReviewAnalysisReport? nearby,
+    ReviewAnalysisDigest? digest,
+    $core.String? digestSummary,
   }) {
     final result = create();
     if (meta != null) result.meta = meta;
@@ -2987,6 +3181,11 @@ class ReviewFacts extends $pb.GeneratedMessage {
     if (churn != null) result.churn = churn;
     if (salience != null) result.salience = salience;
     if (risk != null) result.risk = risk;
+    if (shellcheck != null) result.shellcheck = shellcheck;
+    if (goChecks != null) result.goChecks = goChecks;
+    if (nearby != null) result.nearby = nearby;
+    if (digest != null) result.digest = digest;
+    if (digestSummary != null) result.digestSummary = digestSummary;
     return result;
   }
 
@@ -3027,6 +3226,15 @@ class ReviewFacts extends $pb.GeneratedMessage {
         subBuilder: ReviewSalienceReport.create)
     ..aOM<ReviewRiskReport>(12, _omitFieldNames ? '' : 'risk',
         subBuilder: ReviewRiskReport.create)
+    ..aOM<ReviewAnalysisReport>(13, _omitFieldNames ? '' : 'shellcheck',
+        subBuilder: ReviewAnalysisReport.create)
+    ..aOM<ReviewAnalysisReport>(14, _omitFieldNames ? '' : 'goChecks',
+        subBuilder: ReviewAnalysisReport.create)
+    ..aOM<ReviewAnalysisReport>(15, _omitFieldNames ? '' : 'nearby',
+        subBuilder: ReviewAnalysisReport.create)
+    ..aOM<ReviewAnalysisDigest>(16, _omitFieldNames ? '' : 'digest',
+        subBuilder: ReviewAnalysisDigest.create)
+    ..aOS(17, _omitFieldNames ? '' : 'digestSummary')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3179,6 +3387,62 @@ class ReviewFacts extends $pb.GeneratedMessage {
   void clearRisk() => $_clearField(12);
   @$pb.TagNumber(12)
   ReviewRiskReport ensureRisk() => $_ensure(11);
+
+  /// review-fleet C12 collectors — all shaped as ReviewAnalysisReport.
+  @$pb.TagNumber(13)
+  ReviewAnalysisReport get shellcheck => $_getN(12);
+  @$pb.TagNumber(13)
+  set shellcheck(ReviewAnalysisReport value) => $_setField(13, value);
+  @$pb.TagNumber(13)
+  $core.bool hasShellcheck() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearShellcheck() => $_clearField(13);
+  @$pb.TagNumber(13)
+  ReviewAnalysisReport ensureShellcheck() => $_ensure(12);
+
+  @$pb.TagNumber(14)
+  ReviewAnalysisReport get goChecks => $_getN(13);
+  @$pb.TagNumber(14)
+  set goChecks(ReviewAnalysisReport value) => $_setField(14, value);
+  @$pb.TagNumber(14)
+  $core.bool hasGoChecks() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearGoChecks() => $_clearField(14);
+  @$pb.TagNumber(14)
+  ReviewAnalysisReport ensureGoChecks() => $_ensure(13);
+
+  @$pb.TagNumber(15)
+  ReviewAnalysisReport get nearby => $_getN(14);
+  @$pb.TagNumber(15)
+  set nearby(ReviewAnalysisReport value) => $_setField(15, value);
+  @$pb.TagNumber(15)
+  $core.bool hasNearby() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearNearby() => $_clearField(15);
+  @$pb.TagNumber(15)
+  ReviewAnalysisReport ensureNearby() => $_ensure(14);
+
+  /// Unified analysis digest (Stage 2) — deduped/risk-ranked/bucketed findings.
+  @$pb.TagNumber(16)
+  ReviewAnalysisDigest get digest => $_getN(15);
+  @$pb.TagNumber(16)
+  set digest(ReviewAnalysisDigest value) => $_setField(16, value);
+  @$pb.TagNumber(16)
+  $core.bool hasDigest() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearDigest() => $_clearField(16);
+  @$pb.TagNumber(16)
+  ReviewAnalysisDigest ensureDigest() => $_ensure(15);
+
+  /// Cheap local-LLM prose summary of the digest (Stage 3) — SOFT, may be empty.
+  @$pb.TagNumber(17)
+  $core.String get digestSummary => $_getSZ(16);
+  @$pb.TagNumber(17)
+  set digestSummary($core.String value) => $_setString(16, value);
+  @$pb.TagNumber(17)
+  $core.bool hasDigestSummary() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearDigestSummary() => $_clearField(17);
 }
 
 const $core.bool _omitFieldNames =

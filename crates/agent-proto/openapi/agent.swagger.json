@@ -9977,6 +9977,10 @@
         "patch": {
           "type": "string",
           "description": "Unified-diff hunks (bounded; empty for binary/omitted files). Untrusted."
+        },
+        "oldPath": {
+          "type": "string",
+          "description": "For a rename, the base-side path (\"\" otherwise): a search over the base branch\nfinds the file there, so its hits are pre-PR content too."
         }
       }
     },

@@ -93,10 +93,12 @@ fn build_change_set(
     for fd in diff.files {
         // The display path is the new path (or old for a delete). Validate it is
         // confined to the repo — a rename carrying `..` is dropped, not shown.
+        // Only a rename has a base-side path distinct from its display path (a delete's
+        // display path already is the base side).
         let renamed_from = fd
             .old_path
             .clone()
-            .filter(|o| fd.new_path.as_ref() != Some(o));
+            .filter(|o| fd.new_path.as_ref().is_some_and(|n| n != o));
         let rel = fd.new_path.or(fd.old_path).unwrap_or_default();
         let Some(rel) = confined_relative(&ctx.repo_root, &rel) else {
             tracing::debug!(path = %rel.display(), "dropping change with an escaping path");

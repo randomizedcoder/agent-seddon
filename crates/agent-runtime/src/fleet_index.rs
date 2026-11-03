@@ -1515,6 +1515,7 @@ mod tests {
     enum Edit {
         Modify,
         Rename,
+        Delete,
     }
 
     /// The two path spellings agree on a real diff: the change set's paths (from git)
@@ -1528,6 +1529,11 @@ mod tests {
         "a renamed file's base-side path is touched, so its hits are pre-PR",
         Edit::Rename,
         vec!["c.rs", "a.rs"]
+    )]
+    #[case::corner_deleted_file_flagged_once(
+        "a deleted file is touched once (its path is the base side), and flagged",
+        Edit::Delete,
+        vec!["a.rs"]
     )]
     #[tokio::test]
     async fn real_diff_paths_flag_pre_pr_hits(
@@ -1550,6 +1556,10 @@ mod tests {
             Edit::Rename => {
                 git(&fx.upstream, &["mv", "a.rs", "c.rs"]);
                 git(&fx.upstream, &["commit", "-q", "-m", "rename"]);
+            }
+            Edit::Delete => {
+                git(&fx.upstream, &["rm", "-q", "a.rs"]);
+                git(&fx.upstream, &["commit", "-q", "-m", "delete"]);
             }
         }
         let repo = fx.repo();

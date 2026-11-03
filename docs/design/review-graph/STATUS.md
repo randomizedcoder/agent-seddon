@@ -22,7 +22,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
 | 5a-ii | Portal index badge + Re-index (contact sheet), incremental refresh, base-moved trigger (poll/webhook), language indexes, history signals, overview, `knowledge_max_bytes`, nixpkgs path scoping, GC refcount | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
-| 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | 🟡 | (this PR) |
+| 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, follow-up (this PR) |
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
@@ -206,7 +206,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #688 (42878b0b) after three fleet rounds; the third said nothing blocks.
   Its items are done in 5b-ii below.
 
-- **5b-ii** (this PR): the review session searches the row index.
+- **5b-ii** (#689, d38310d7): the review session searches the row index.
   - `SearchTool::for_review(backend, changed)`: the description says the index is pre-PR,
     and a hit in a changed file is flagged `[pre-PR: this PR changes this file]` (exact
     repo-relative path; a look-alike or `./`-prefixed path is not).
@@ -240,3 +240,14 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     a rename row. Paths are normalized (no `./`, `/` separators) on both sides of the
     match, so a spelling difference can only add a flag, never drop one. The review
     output keeps 64 bytes for its trailer under the cap.
+
+  Merged as #689 (d38310d7) after three fleet rounds; the third had no must-fix.
+
+- **5b-ii follow-up** (this PR), from #689's last draft:
+  - `ReviewChangedFile.old_path = 8` on the wire (proto3-additive; "" is none), so a
+    change set that crosses gRPC keeps a rename's base side and its pre-PR flag.
+  - `old_path` is set only for a rename: a delete's display path already is its base
+    side, so `touched_paths()` no longer lists it twice (delete row in the real-diff
+    test).
+  - `normalized()` folds every spelling (`./`, `//`, `/./`, a trailing `/`, `\`) but
+    keeps `..`; a compile-time assert pins `MAX_OUTPUT > TRAILER_ROOM`.

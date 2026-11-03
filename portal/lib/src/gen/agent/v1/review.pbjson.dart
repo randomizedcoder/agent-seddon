@@ -170,6 +170,7 @@ const ReviewChangedFile$json = {
     {'1': 'is_binary', '3': 5, '4': 1, '5': 8, '10': 'isBinary'},
     {'1': 'lang', '3': 6, '4': 1, '5': 9, '10': 'lang'},
     {'1': 'patch', '3': 7, '4': 1, '5': 9, '10': 'patch'},
+    {'1': 'old_path', '3': 8, '4': 1, '5': 9, '10': 'oldPath'},
   ],
 };
 
@@ -178,7 +179,8 @@ final $typed_data.Uint8List reviewChangedFileDescriptor = $convert.base64Decode(
     'ChFSZXZpZXdDaGFuZ2VkRmlsZRISCgRwYXRoGAEgASgJUgRwYXRoEiwKBmNoYW5nZRgCIAEoDj'
     'IULmFnZW50LnYxLkNoYW5nZUtpbmRSBmNoYW5nZRIcCglhZGRpdGlvbnMYAyABKA1SCWFkZGl0'
     'aW9ucxIcCglkZWxldGlvbnMYBCABKA1SCWRlbGV0aW9ucxIbCglpc19iaW5hcnkYBSABKAhSCG'
-    'lzQmluYXJ5EhIKBGxhbmcYBiABKAlSBGxhbmcSFAoFcGF0Y2gYByABKAlSBXBhdGNo');
+    'lzQmluYXJ5EhIKBGxhbmcYBiABKAlSBGxhbmcSFAoFcGF0Y2gYByABKAlSBXBhdGNoEhkKCG9s'
+    'ZF9wYXRoGAggASgJUgdvbGRQYXRo');
 
 @$core.Deprecated('Use reviewCommitDescriptor instead')
 const ReviewCommit$json = {
@@ -826,6 +828,54 @@ final $typed_data.Uint8List reviewRiskReportDescriptor = $convert.base64Decode(
     'bGQYAyABKAFSDWdhdGVUaHJlc2hvbGQSHwoLZ2F0ZV9mYWlsZWQYBCABKAhSCmdhdGVGYWlsZW'
     'Q=');
 
+@$core.Deprecated('Use reviewRuleCountDescriptor instead')
+const ReviewRuleCount$json = {
+  '1': 'ReviewRuleCount',
+  '2': [
+    {'1': 'tool', '3': 1, '4': 1, '5': 9, '10': 'tool'},
+    {'1': 'rule', '3': 2, '4': 1, '5': 9, '10': 'rule'},
+    {'1': 'count', '3': 3, '4': 1, '5': 13, '10': 'count'},
+    {'1': 'in_change', '3': 4, '4': 1, '5': 13, '10': 'inChange'},
+  ],
+};
+
+/// Descriptor for `ReviewRuleCount`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reviewRuleCountDescriptor = $convert.base64Decode(
+    'Cg9SZXZpZXdSdWxlQ291bnQSEgoEdG9vbBgBIAEoCVIEdG9vbBISCgRydWxlGAIgASgJUgRydW'
+    'xlEhQKBWNvdW50GAMgASgNUgVjb3VudBIbCglpbl9jaGFuZ2UYBCABKA1SCGluQ2hhbmdl');
+
+@$core.Deprecated('Use reviewAnalysisDigestDescriptor instead')
+const ReviewAnalysisDigest$json = {
+  '1': 'ReviewAnalysisDigest',
+  '2': [
+    {
+      '1': 'findings',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.agent.v1.ReviewAnalysisFinding',
+      '10': 'findings'
+    },
+    {'1': 'total', '3': 2, '4': 1, '5': 13, '10': 'total'},
+    {'1': 'in_change', '3': 3, '4': 1, '5': 13, '10': 'inChange'},
+    {
+      '1': 'rule_counts',
+      '3': 4,
+      '4': 3,
+      '5': 11,
+      '6': '.agent.v1.ReviewRuleCount',
+      '10': 'ruleCounts'
+    },
+  ],
+};
+
+/// Descriptor for `ReviewAnalysisDigest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reviewAnalysisDigestDescriptor = $convert.base64Decode(
+    'ChRSZXZpZXdBbmFseXNpc0RpZ2VzdBI7CghmaW5kaW5ncxgBIAMoCzIfLmFnZW50LnYxLlJldm'
+    'lld0FuYWx5c2lzRmluZGluZ1IIZmluZGluZ3MSFAoFdG90YWwYAiABKA1SBXRvdGFsEhsKCWlu'
+    'X2NoYW5nZRgDIAEoDVIIaW5DaGFuZ2USOgoLcnVsZV9jb3VudHMYBCADKAsyGS5hZ2VudC52MS'
+    '5SZXZpZXdSdWxlQ291bnRSCnJ1bGVDb3VudHM=');
+
 @$core.Deprecated('Use reviewFactsDescriptor instead')
 const ReviewFacts$json = {
   '1': 'ReviewFacts',
@@ -926,6 +976,39 @@ const ReviewFacts$json = {
       '6': '.agent.v1.ReviewRiskReport',
       '10': 'risk'
     },
+    {
+      '1': 'shellcheck',
+      '3': 13,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.ReviewAnalysisReport',
+      '10': 'shellcheck'
+    },
+    {
+      '1': 'go_checks',
+      '3': 14,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.ReviewAnalysisReport',
+      '10': 'goChecks'
+    },
+    {
+      '1': 'nearby',
+      '3': 15,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.ReviewAnalysisReport',
+      '10': 'nearby'
+    },
+    {
+      '1': 'digest',
+      '3': 16,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.ReviewAnalysisDigest',
+      '10': 'digest'
+    },
+    {'1': 'digest_summary', '3': 17, '4': 1, '5': 9, '10': 'digestSummary'},
   ],
 };
 
@@ -943,4 +1026,9 @@ final $typed_data.Uint8List reviewFactsDescriptor = $convert.base64Decode(
     'Vwb3J0Ughjb2NoYW5nZRIxCgVjaHVybhgKIAEoCzIbLmFnZW50LnYxLlJldmlld0NodXJuUmVw'
     'b3J0UgVjaHVybhI6CghzYWxpZW5jZRgLIAEoCzIeLmFnZW50LnYxLlJldmlld1NhbGllbmNlUm'
     'Vwb3J0UghzYWxpZW5jZRIuCgRyaXNrGAwgASgLMhouYWdlbnQudjEuUmV2aWV3Umlza1JlcG9y'
-    'dFIEcmlzaw==');
+    'dFIEcmlzaxI+CgpzaGVsbGNoZWNrGA0gASgLMh4uYWdlbnQudjEuUmV2aWV3QW5hbHlzaXNSZX'
+    'BvcnRSCnNoZWxsY2hlY2sSOwoJZ29fY2hlY2tzGA4gASgLMh4uYWdlbnQudjEuUmV2aWV3QW5h'
+    'bHlzaXNSZXBvcnRSCGdvQ2hlY2tzEjYKBm5lYXJieRgPIAEoCzIeLmFnZW50LnYxLlJldmlld0'
+    'FuYWx5c2lzUmVwb3J0UgZuZWFyYnkSNgoGZGlnZXN0GBAgASgLMh4uYWdlbnQudjEuUmV2aWV3'
+    'QW5hbHlzaXNEaWdlc3RSBmRpZ2VzdBIlCg5kaWdlc3Rfc3VtbWFyeRgRIAEoCVINZGlnZXN0U3'
+    'VtbWFyeQ==');

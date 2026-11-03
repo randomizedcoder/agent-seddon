@@ -30,17 +30,23 @@ const PRE_PR_FLAG: &str = "  [pre-PR: this PR changes this file]";
 /// Room kept under the output cap for the "… N more hits not shown" line.
 const TRAILER_ROOM: usize = 64;
 
-/// A repo-relative path in one spelling: no leading `./`, `/` separators. Both the
-/// changed set and each hit pass through it, so a spelling difference can only add a
-/// flag, never drop one (the safe direction).
+/// A repo-relative path in one spelling: `/` separators, no `.` components, no empty
+/// ones (so `./a`, `a//b`, `a/./b`, `a/` and `a\\b` all read as their plain form). Both
+/// the changed set and each hit pass through it, so those spellings can't drop a flag.
+/// `..` is the one exception, and it fails open: `x/../src/a.rs` is not folded, so a hit
+/// spelled that way is not flagged. Neither git nor the scanner emits `..`, and the
+/// end-to-end path test pins that the two agree.
 fn normalized(p: &std::path::Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/");
-    let mut s = s.as_str();
-    while let Some(rest) = s.strip_prefix("./") {
-        s = rest;
-    }
-    PathBuf::from(s)
+    let parts: Vec<&str> = s
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    PathBuf::from(parts.join("/"))
 }
+
+// The review cut reserves `TRAILER_ROOM` under the shared cap.
+const _: () = assert!(crate::MAX_OUTPUT > TRAILER_ROOM);
 
 impl SearchTool {
     pub fn new(backend: Arc<dyn SearchBackend>) -> Self {
@@ -330,6 +336,8 @@ mod tests {
     #[case::adversarial_lookalike_path_not_flagged("src/a.rs.orig", 3, true, false)]
     #[case::adversarial_dot_prefixed_path_still_flagged("./src/a.rs", 3, true, true)]
     #[case::adversarial_backslash_path_still_flagged("src\\a.rs", 3, true, true)]
+    #[case::adversarial_interior_spellings_still_flagged("src//./a.rs", 3, true, true)]
+    #[case::adversarial_parent_component_not_flagged("x/../src/a.rs", 3, true, false)]
     #[tokio::test]
     async fn review_search_flags_pre_pr_hits(
         #[case] path: &str,
