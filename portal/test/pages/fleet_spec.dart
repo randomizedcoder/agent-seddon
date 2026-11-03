@@ -377,6 +377,64 @@ const fleetSpec = PageSpec('fleet', [
     description: 'flipping the switch fires SetEnabled {id, enabled}',
     expectedRpc: 'agent.v1.ReviewFleetService/SetEnabled',
   ),
+  // ── repo index badge + Re-index (review-graph 5a-ii-b) ─────────────────────────
+  SpecRow(
+    elementId: 'fleet.session.index',
+    caseClass: CaseClass.positive,
+    name: 'index_chip_shows_state',
+    description: 'a row with an index shows its state glyph, base and file count',
+    expectedRpc: 'agent.v1.ReviewFleetService/List',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.index',
+    caseClass: CaseClass.negative,
+    name: 'no_index_no_chip',
+    description: 'a server that reports no index shows no badge and no Re-index',
+    expectedRpc: 'agent.v1.ReviewFleetService/List',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.index',
+    caseClass: CaseClass.corner,
+    name: 'failed_index_names_error',
+    description: 'a failed index says so, with its (redacted) error in the tooltip',
+    expectedRpc: 'agent.v1.ReviewFleetService/List',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.index',
+    caseClass: CaseClass.adversarial,
+    name: 'hostile_index_fields_inert',
+    description:
+        'an unknown state and a markup-laden error render as plain text, never as markup',
+    expectedRpc: 'agent.v1.ReviewFleetService/List',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.positive,
+    name: 'reindex_fires',
+    description: 'Re-index fires Reindex {id} and says it is queued',
+    expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.boundary,
+    name: 'reindex_too_soon_says_when',
+    description: 'a too_soon reply names the seconds left',
+    expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.negative,
+    name: 'disabled_row_no_reindex',
+    description: 'a disabled row has no Re-index button (the server would refuse)',
+    expectedRpc: 'agent.v1.ReviewFleetService/List',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.negative,
+    name: 'reindex_error_snack',
+    description: 'a refused Reindex shows its error and the page stays usable',
+    expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
+  ),
   // ── session editor (forge-auth F5d2) ─────────────────────────────────────────
   SpecRow(
     elementId: 'fleet.session.item',

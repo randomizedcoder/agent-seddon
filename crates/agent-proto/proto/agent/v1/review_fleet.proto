@@ -104,6 +104,7 @@ message FleetReindexRequest {
 message FleetReindexReply {
   // "queued": a rebuild is queued. "coalesced": the row was already queued, and that job
   // now rebuilds. "too_soon": a rebuild was asked for within the cooldown; nothing queued.
+  // "busy": the index queue is full; nothing queued, and the caller may ask again.
   string outcome = 1;
   // With "too_soon": seconds until a rebuild can be asked for again (0 otherwise).
   uint32 retry_after_secs = 2;

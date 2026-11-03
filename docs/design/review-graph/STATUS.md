@@ -20,8 +20,8 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |
 | 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
-| 5a-ii-a | `Reindex` RPC (forced rebuild, per-row cooldown, disabled rows refused), staged builds swapped in, GC keeps the newest finished fallback, no refcount needed | [04](04-repo-knowledge.md#as-built-5a-ii-a) | 🟡 | this PR |
-| 5a-ii-b | Portal index badge + Re-index button (contact sheet) | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-ii-a | `Reindex` RPC (forced rebuild, per-row cooldown, disabled rows refused), staged builds swapped in, GC keeps the newest finished fallback, no refcount needed | [04](04-repo-knowledge.md#as-built-5a-ii-a) | ✅ | #691 |
+| 5a-ii-b | Portal index badge + Re-index button (contact sheet), #691's review items (failed-swap restore, `busy`, forced-while-waiting, wire test + client, RBAC row) | [04](04-repo-knowledge.md#as-built-5a-ii-b) | 🟡 | this PR |
 | 5a-ii-c | Push-webhook base-moved trigger, incremental refresh, nixpkgs path scoping, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
 | 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
@@ -258,7 +258,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   real gRPC round trip (`pool_review_roundtrip`, TCP and UDS); round 2 had no must-fix.
   Its small items are done in 5a-ii-a below.
 
-- **5a-ii-a** (this PR): the server side of Re-index.
+- **5a-ii-a** (#691, 35ce2c80): the server side of Re-index.
   - `ReviewFleetService.Reindex` looks the row up in the caller's own roster, refuses a
     disabled row, and queues it forced (`queued`, `coalesced`, or `too_soon` with
     `retry_after_secs`, one request per row per 5 minutes).
@@ -269,3 +269,20 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - From #690's last draft: `Copied` and `Deleted` round-trip rows, the proto `old_path`
     comment covers copies, a trailing-slash normalization row, and the `MAX_OUTPUT`
     assert sits under `TRAILER_ROOM`.
+
+  Merged as #691 (35ce2c80) after one fleet round with no must-fix. Its should-fix
+  items are done in 5a-ii-b below.
+
+- **5a-ii-b** (this PR): the portal side of Re-index, and #691's review items.
+  - Fleet roster rows show the index state as a distinct glyph (ready, stale, waiting,
+    failed), with base, file count, `partial` and the redacted error in its tooltip.
+    For a caller with `trigger:fleet` on an enabled row, the badge is the Re-index
+    button; the reply's outcome is a snack. A theme that names states puts the state at
+    the start of the subtitle rather than beside the glyph, so the narrow row keeps the
+    session id. Contact sheet: the prototype, TN3270 and accessible themes.
+  - A swap whose second rename fails puts the served generation back.
+  - A full queue answers `busy` (no cooldown spent), not `too_soon`.
+  - A forced job that only waited (mirror cloning, disk short) is forced again on the
+    next pass.
+  - `GrpcFleet::reindex` and a wire round trip over TCP and UDS; the RBAC matrix row.
+

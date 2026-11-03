@@ -343,6 +343,82 @@ class _FleetPageState extends State<FleetPage> {
     }
   }
 
+  /// Ask the server to rebuild the row's repo index now (review-graph 5a-ii).
+  Future<void> _reindex(FleetSession s) async {
+    try {
+      final reply =
+          await widget.clients.fleet.reindex(FleetReindexRequest()..id = s.id);
+      _snack(switch (reply.outcome) {
+        'queued' => 'Re-index of ${s.id} queued.',
+        'coalesced' => '${s.id} was already queued; that job now rebuilds.',
+        'too_soon' => '${s.id} was re-indexed recently; try again in '
+            '${reply.retryAfterSecs} s.',
+        'busy' => 'The index queue is full; try again shortly.',
+        _ => 'Re-index of ${s.id}: ${reply.outcome}.',
+      });
+      await _reload();
+    } on GrpcError catch (e) {
+      _snack('Re-index failed: ${e.message ?? e.codeName}');
+    }
+  }
+
+  /// A roster row's subtitle: its repo and forge card, led by the index state
+  /// when the theme names states (`status_icons`), so the name is never cut off.
+  String _sessionSubtitle(FleetSession s) {
+    final repo = s.forgeId.isEmpty ? s.repo : '${s.repo} · ${s.forgeId}';
+    return SeddonColors.of(context).statusIcons && s.hasIndex()
+        ? 'index ${s.index.state} · $repo'
+        : repo;
+  }
+
+  /// The row's repo index status as a distinct icon shape (never colour
+  /// alone, visual/08-accessibility.md), with the details in its tooltip. With
+  /// [onReindex] the badge is also the Re-index button, so the narrow roster
+  /// row keeps room for the session id.
+  Widget _indexChip(FleetSession s, {VoidCallback? onReindex}) {
+    final c = SeddonColors.of(context);
+    final ix = s.index;
+    final (icon, color) = switch (ix.state) {
+      'ready' => (Icons.manage_search, c.success),
+      'stale' => (Icons.update, c.warning),
+      'failed' => (Icons.error_outline, Theme.of(context).colorScheme.error),
+      _ => (Icons.hourglass_empty, c.info), // pending, indexing
+    };
+    final base = ix.baseSha.length >= 12 ? ix.baseSha.substring(0, 12) : '';
+    final detail = [
+      'Index: ${ix.state}',
+      if (base.isNotEmpty) 'base $base',
+      if (base.isNotEmpty) '${ix.files} files${ix.partial ? " (partial)" : ""}',
+      if (ix.error.isNotEmpty) ix.error,
+    ].join(' · ');
+    final glyph = Icon(icon,
+        key: Key('fleet.session.index.${s.id}'),
+        size: 18,
+        color: color,
+        semanticLabel: 'index ${ix.state}');
+    // Glyph only: the roster row is narrow, so a theme that names states
+    // (`status_icons`) gets the name in the subtitle instead (`_sessionSubtitle`).
+    // The same padding either way, so every row's title starts at one place.
+    if (onReindex == null) {
+      return Tooltip(
+          message: detail,
+          child: Padding(padding: const EdgeInsets.all(6), child: glyph));
+    }
+    return Tooltip(
+      message: '$detail\nClick to re-index',
+      child: Semantics(
+        button: true,
+        label: 'Re-index ${s.id}',
+        child: InkWell(
+          key: Key('fleet.session.reindex.${s.id}'),
+          onTap: onReindex,
+          customBorder: const CircleBorder(),
+          child: Padding(padding: const EdgeInsets.all(6), child: glyph),
+        ),
+      ),
+    );
+  }
+
   Future<void> _approve(ReviewSummary r) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -733,12 +809,18 @@ class _FleetPageState extends State<FleetPage> {
         ..._sessions.map((s) => ListTile(
                     key: Key('fleet.session.item.${s.id}'),
                     dense: SeddonColors.of(context).denseLists,
+                    // Only a server that indexes rows reports `index`, and a
+                    // disabled row is refused, so Re-index needs both.
+                    leading: s.hasIndex()
+                        ? _indexChip(s,
+                            onReindex: caps.can('trigger', 'fleet') && s.enabled
+                                ? () => _reindex(s)
+                                : null)
+                        : null,
                     title: Text(s.id,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text(
-                        s.forgeId.isEmpty ? s.repo : '${s.repo} · ${s.forgeId}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
+                    subtitle: Text(_sessionSubtitle(s),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [

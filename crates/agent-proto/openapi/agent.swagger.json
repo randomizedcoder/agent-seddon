@@ -7788,7 +7788,7 @@
       "properties": {
         "outcome": {
           "type": "string",
-          "description": "\"queued\": a rebuild is queued. \"coalesced\": the row was already queued, and that job\nnow rebuilds. \"too_soon\": a rebuild was asked for within the cooldown; nothing queued."
+          "description": "\"queued\": a rebuild is queued. \"coalesced\": the row was already queued, and that job\nnow rebuilds. \"too_soon\": a rebuild was asked for within the cooldown; nothing queued.\n\"busy\": the index queue is full; nothing queued, and the caller may ask again."
         },
         "retryAfterSecs": {
           "type": "integer",

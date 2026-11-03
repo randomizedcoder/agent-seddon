@@ -45,6 +45,7 @@ class FleetRobot extends Robot {
   static const _update = 'agent.v1.ReviewFleetService/UpdateReview';
   static const _reviewNow = 'agent.v1.ReviewFleetService/ReviewNow';
   static const _setEnabled = 'agent.v1.ReviewFleetService/SetEnabled';
+  static const reindexRpc = 'agent.v1.ReviewFleetService/Reindex';
   static const put = 'agent.v1.ReviewFleetService/Put';
   static const delete = 'agent.v1.ReviewFleetService/Delete';
 
@@ -284,6 +285,18 @@ class FleetRobot extends Robot {
     await tester.tap(byKey('fleet.reviewNow.cancel'));
     await _drainReal();
     await _unmount();
+  }
+
+  Future<void> reindex(String id) async {
+    final before = log.countOf(reindexRpc);
+    await tap('fleet.session.reindex.$id',
+        until: () => log.countOf(reindexRpc) > before);
+  }
+
+  /// The tooltip message wrapping the keyed widget, or null if none.
+  String? tooltipOf(String key) {
+    final f = find.ancestor(of: byKey(key), matching: find.byType(Tooltip));
+    return f.evaluate().isEmpty ? null : tester.widget<Tooltip>(f.first).message;
   }
 
   Future<void> toggleEnable(String id) async {

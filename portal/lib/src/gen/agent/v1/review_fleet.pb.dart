@@ -727,6 +727,7 @@ class FleetReindexReply extends $pb.GeneratedMessage {
 
   /// "queued": a rebuild is queued. "coalesced": the row was already queued, and that job
   /// now rebuilds. "too_soon": a rebuild was asked for within the cooldown; nothing queued.
+  /// "busy": the index queue is full; nothing queued, and the caller may ask again.
   @$pb.TagNumber(1)
   $core.String get outcome => $_getSZ(0);
   @$pb.TagNumber(1)

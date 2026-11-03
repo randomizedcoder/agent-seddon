@@ -2282,6 +2282,133 @@ async fn negative_fleet_get_unknown_is_not_found_over_wire() {
     );
 }
 
+// A recording repo indexer (the fleet indexer's role, for the wire test): records each
+// rebuild asked for and answers a preset outcome.
+struct RecordingIndexer {
+    reply: agent_core::ReindexOutcome,
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+}
+#[async_trait::async_trait]
+impl agent_core::FleetIndexer for RecordingIndexer {
+    fn enqueue(&self, _tenant: &str, _row: &agent_core::FleetSession) {}
+    async fn status(
+        &self,
+        _row: &agent_core::FleetSession,
+    ) -> Option<agent_core::FleetIndexStatus> {
+        None
+    }
+    fn reindex(&self, tenant: &str, row: &agent_core::FleetSession) -> agent_core::ReindexOutcome {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((tenant.to_string(), row.id.clone()));
+        self.reply
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReindexWire {
+    Indexer(agent_core::ReindexOutcome),
+    NoIndexer,
+}
+
+// Reindex over the wire: the indexer's answer (retry hint included) survives the hop,
+// and each refusal maps back to an error with nothing queued.
+#[rstest]
+#[case::positive_queued_tcp(
+    "queued, over TCP",
+    Transport::Tcp,
+    ReindexWire::Indexer(agent_core::ReindexOutcome::Queued),
+    "web",
+    true,
+    Some(agent_core::ReindexOutcome::Queued)
+)]
+#[case::positive_queued_uds(
+    "queued, over UDS",
+    Transport::Uds,
+    ReindexWire::Indexer(agent_core::ReindexOutcome::Queued),
+    "web",
+    true,
+    Some(agent_core::ReindexOutcome::Queued)
+)]
+#[case::boundary_too_soon_hint("too_soon keeps its retry hint", Transport::Tcp, ReindexWire::Indexer(agent_core::ReindexOutcome::TooSoon { retry_after_secs: 42 }), "web", true, Some(agent_core::ReindexOutcome::TooSoon { retry_after_secs: 42 }))]
+#[case::corner_busy(
+    "busy reads back as busy",
+    Transport::Tcp,
+    ReindexWire::Indexer(agent_core::ReindexOutcome::Busy),
+    "web",
+    true,
+    Some(agent_core::ReindexOutcome::Busy)
+)]
+#[case::negative_no_indexer(
+    "no indexer: an error, not a silent no-op",
+    Transport::Tcp,
+    ReindexWire::NoIndexer,
+    "web",
+    true,
+    None
+)]
+#[case::negative_disabled_row(
+    "a disabled row is refused",
+    Transport::Tcp,
+    ReindexWire::Indexer(agent_core::ReindexOutcome::Queued),
+    "web",
+    false,
+    None
+)]
+#[case::adversarial_unknown_id(
+    "an id not in the roster is refused",
+    Transport::Tcp,
+    ReindexWire::Indexer(agent_core::ReindexOutcome::Queued),
+    "../web",
+    true,
+    None
+)]
+#[tokio::test]
+async fn fleet_reindex_roundtrips(
+    #[case] description: &str,
+    #[case] transport: Transport,
+    #[case] wired: ReindexWire,
+    #[case] id: &str,
+    #[case] enabled: bool,
+    #[case] expected: Option<agent_core::ReindexOutcome>,
+) {
+    use agent_core::FleetRegistry;
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    store
+        .put(fleet_row("web", "env:ACME_GH_TOKEN", enabled))
+        .await
+        .unwrap();
+    let mut svc = agent_grpc::server::ReviewFleetSvc::new(store);
+    let indexer = Arc::new(RecordingIndexer {
+        reply: match wired {
+            ReindexWire::Indexer(r) => r,
+            ReindexWire::NoIndexer => agent_core::ReindexOutcome::Queued,
+        },
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    if matches!(wired, ReindexWire::Indexer(_)) {
+        svc = svc.with_indexer(indexer.clone() as Arc<dyn agent_core::FleetIndexer>);
+    }
+    let router = tonic::transport::Server::builder().add_service(svc.into_server());
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let got = client.reindex(id).await;
+    assert_eq!(
+        got.as_ref().ok().copied(),
+        expected,
+        "{description}: {got:?}"
+    );
+    let seen = indexer.seen.lock().unwrap().clone();
+    if expected.is_some() {
+        assert_eq!(seen.len(), 1, "{description}: queued once");
+        assert_eq!(seen[0].1, "web", "{description}");
+    } else {
+        assert!(seen.is_empty(), "{description}: nothing queued");
+    }
+}
+
 // A recording trigger sink (the orchestrator's role, for the wire test): records every
 // enqueued trigger and returns a preset outcome, so a test can prove `ReviewNow` reaches
 // the sink across the hop and reports accepted/coalesced faithfully.

@@ -41,6 +41,7 @@ Gaps:
 | Reviews | skip a draft so it is never posted | `ReviewFleet.SkipReview` | `(approve, review)` | medium, final for that head |
 | Reviews | skip many drafts at once | `ReviewFleet.SkipReviews` | `(approve, review)` | medium, final for each head; only the ids sent |
 | Reviews | trigger a review now | `ReviewFleet.ReviewNow` | `(trigger, fleet)` | medium (spend) |
+| Reviews | rebuild a repo's index now | `ReviewFleet.Reindex` | `(trigger, fleet)` | medium (spend) |
 | Repo onboarding | view the roster (token refs are never returned) | `ReviewFleet.List/Get/Preflight` | `(read, fleet)` | medium |
 | Repo onboarding | add, enable, disable, remove a repo | `ReviewFleet.Put/Delete/SetEnabled` | `(write \| delete, fleet)` | **high** |
 | Repo onboarding | forge credentials | `ForgeRegistryService.*` | `(read \| write \| delete, forge_registry)` | **high** |
@@ -74,7 +75,7 @@ optional follow-up).
 | `viewer` (renames `reader`; the old id stays as an alias) | `read` on every resource except `config` | auditor, stakeholder |
 | `review_viewer` | `(read, review)`, `(read, theme)` | "view the code reviews" |
 | `agent_user` | `(use, agent)`, `(read, prompt)`, `(read, review)`, `(read, graph)`, `(read \| write \| delete, theme)` | "log in and use the agent interactively" |
-| `reviewer` | `agent_user` + `(write, review)`, `(approve, review)`, `(trigger, fleet)`, `(read, fleet)` | edits and **approves / posts** reviews |
+| `reviewer` | `agent_user` + `(write, review)`, `(approve, review)`, `(trigger, fleet)`, `(read, fleet)` | edits and **approves / posts** reviews; `(trigger, fleet)` also lets it ask for a repo re-index, which is rate-limited per row |
 | `fleet_admin` | `reviewer` + `(write \| delete, fleet)`, `(read \| write \| delete, forge_registry)`, `(read \| write \| delete, transport_registry)`, `(read, registry)`, `(read, telemetry)` | "add a new repo": API keys, Slack channels |
 | `access_admin` | `(read \| write \| delete, role)`, `(read \| write \| delete, binding)`, `(read, theme)`, under the rules below | "control permissions" |
 | `svc_fleet` | `(use, agent)`, `(read \| write, review)`, `(trigger, fleet)`, `(read, fleet \| registry \| prompt)` | the review fleet's own identity (mTLS-bound) |
