@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use agent_core::{
     ApproveOutcome, FleetApprover, FleetDraftEditor, FleetDraftReader, FleetHistory, FleetIndexer,
-    FleetRegistry, FleetTrigger, PreflightProvider, ReviewDraftFilter, ReviewDraftRecord,
-    TriggerOutcome, TriggerSink, UpdateOutcome,
+    FleetRegistry, FleetTrigger, PreflightProvider, ReindexOutcome, ReviewDraftFilter,
+    ReviewDraftRecord, TriggerOutcome, TriggerSink, UpdateOutcome,
 };
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
@@ -55,7 +55,7 @@ pub struct ReviewFleetSvc {
     /// [`Self::with_editor`]. Edits the local draft only — it never posts.
     editor: Option<Arc<dyn FleetDraftEditor>>,
     /// The per-row repo indexer (review-graph 5a). When set, `List`/`Get` report each
-    /// row's index status; wired via [`Self::with_indexer`]. Read-only here.
+    /// row's index status and `Reindex` queues a rebuild; wired via [`Self::with_indexer`].
     indexer: Option<Arc<dyn FleetIndexer>>,
 }
 
@@ -278,6 +278,50 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 .await
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(row.into()))
+        }
+        .instrument(sp);
+        super::run_scoped(key, work).await
+    }
+
+    async fn reindex(
+        &self,
+        request: Request<pb::FleetReindexRequest>,
+    ) -> Result<Response<pb::FleetReindexReply>, Status> {
+        super::authz::require(agent_core::Action::Trigger, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
+        let sp = span("fleet.reindex", request.metadata());
+        // Opt-in: only the fleet process that indexes rows wires an indexer.
+        let Some(indexer) = self.indexer.clone() else {
+            return Err(Status::unimplemented(
+                "Reindex requires the fleet indexer (run `agent --serve-fleet` with \
+                 `[review_fleet.index]` enabled)",
+            ));
+        };
+        let inner = self.inner.clone();
+        let work = async move {
+            // The caller's own (tenant-scoped) roster: another tenant's id is not found.
+            let row = inner
+                .get(&request.into_inner().id)
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            // A disabled row is one an operator stopped; a rebuild would undo that.
+            if !row.enabled {
+                return Err(Status::failed_precondition(format!(
+                    "fleet row `{}` is disabled; enable it to index it",
+                    row.id
+                )));
+            }
+            // The same tenant the roster sync queues the row under, so the two coalesce.
+            let tenant = agent_core::scoped_tenant().unwrap_or_default();
+            let outcome = indexer.reindex(&tenant, &row);
+            let retry_after_secs = match outcome {
+                ReindexOutcome::TooSoon { retry_after_secs } => retry_after_secs,
+                _ => 0,
+            };
+            Ok(Response::new(pb::FleetReindexReply {
+                outcome: outcome.as_str().into(),
+                retry_after_secs,
+            }))
         }
         .instrument(sp);
         super::run_scoped(key, work).await
@@ -897,6 +941,178 @@ mod tests {
                 files: 3,
                 ..Default::default()
             })
+        }
+        fn reindex(&self, _tenant: &str, _row: &agent_core::FleetSession) -> ReindexOutcome {
+            ReindexOutcome::Queued
+        }
+    }
+
+    /// A roster of one row, `web`, owned by the caller (as a tenant-scoped store is):
+    /// any other id, or a call with no caller, is not found.
+    struct ReindexRoster {
+        enabled: bool,
+    }
+    #[tonic::async_trait]
+    impl FleetRegistry for ReindexRoster {
+        async fn list(&self) -> agent_core::Result<Vec<agent_core::FleetSession>> {
+            unimplemented!()
+        }
+        async fn put(
+            &self,
+            _session: agent_core::FleetSession,
+        ) -> agent_core::Result<agent_core::FleetSession> {
+            unimplemented!()
+        }
+        async fn get(&self, id: &str) -> agent_core::Result<agent_core::FleetSession> {
+            let row = scoped_row();
+            if id != row.id || row.user.is_empty() {
+                return Err(agent_core::Error::Config(format!("not found: {id}")));
+            }
+            Ok(agent_core::FleetSession {
+                enabled: self.enabled,
+                ..row
+            })
+        }
+        async fn delete(&self, _id: &str) -> agent_core::Result<bool> {
+            unimplemented!()
+        }
+        async fn set_enabled(
+            &self,
+            _id: &str,
+            _enabled: bool,
+        ) -> agent_core::Result<agent_core::FleetSession> {
+            unimplemented!()
+        }
+    }
+
+    /// Records each rebuild asked for, as (tenant, row user, row id), and answers `reply`.
+    struct ReindexRecorder {
+        reply: ReindexOutcome,
+        calls: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+    #[tonic::async_trait]
+    impl FleetIndexer for ReindexRecorder {
+        fn enqueue(&self, _tenant: &str, _row: &agent_core::FleetSession) {}
+        async fn status(
+            &self,
+            _row: &agent_core::FleetSession,
+        ) -> Option<agent_core::FleetIndexStatus> {
+            None
+        }
+        fn reindex(&self, tenant: &str, row: &agent_core::FleetSession) -> ReindexOutcome {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tenant.into(), row.user.clone(), row.id.clone()));
+            self.reply
+        }
+    }
+
+    // Reindex: only the caller's own enabled row is queued, and the indexer's answer
+    // reaches the wire as is.
+    #[rstest]
+    #[case::positive_own_row_queued(
+        "the caller's enabled row is queued under the caller's tenant",
+        true, true, "web", Some("acme"), ReindexOutcome::Queued,
+        Ok(("queued", 0))
+    )]
+    #[case::positive_coalesced(
+        "a row already queued reports coalesced",
+        true, true, "web", Some("acme"), ReindexOutcome::Coalesced,
+        Ok(("coalesced", 0))
+    )]
+    #[case::boundary_too_soon_carries_retry(
+        "within the cooldown: too_soon with the seconds left",
+        true, true, "web", Some("acme"), ReindexOutcome::TooSoon { retry_after_secs: 42 },
+        Ok(("too_soon", 42))
+    )]
+    #[case::negative_no_indexer_unimplemented(
+        "a process without an indexer refuses",
+        false,
+        true,
+        "web",
+        Some("acme"),
+        ReindexOutcome::Queued,
+        Err(tonic::Code::Unimplemented)
+    )]
+    #[case::negative_disabled_row_refused(
+        "a disabled row is never rebuilt",
+        true,
+        false,
+        "web",
+        Some("acme"),
+        ReindexOutcome::Queued,
+        Err(tonic::Code::FailedPrecondition)
+    )]
+    #[case::negative_missing_row_not_found(
+        "an id not in the caller's roster is not found",
+        true,
+        true,
+        "nope",
+        Some("acme"),
+        ReindexOutcome::Queued,
+        Err(tonic::Code::NotFound)
+    )]
+    #[case::adversarial_traversal_id_not_found(
+        "a traversal id names no row",
+        true,
+        true,
+        "../globex/web",
+        Some("acme"),
+        ReindexOutcome::Queued,
+        Err(tonic::Code::NotFound)
+    )]
+    #[case::adversarial_no_caller_not_found(
+        "with no caller identity there is no roster to find the row in",
+        true,
+        true,
+        "web",
+        None,
+        ReindexOutcome::Queued,
+        Err(tonic::Code::NotFound)
+    )]
+    #[tokio::test]
+    async fn reindex_queues_only_the_callers_enabled_row(
+        #[case] description: &str,
+        #[case] wired: bool,
+        #[case] enabled: bool,
+        #[case] id: &str,
+        #[case] user: Option<&str>,
+        #[case] reply: ReindexOutcome,
+        #[case] expected: Result<(&str, u32), tonic::Code>,
+    ) {
+        let recorder = Arc::new(ReindexRecorder {
+            reply,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut svc = ReviewFleetSvc::new(Arc::new(ReindexRoster { enabled }));
+        if wired {
+            svc = svc.with_indexer(recorder.clone());
+        }
+        let got = svc
+            .reindex(req_with(
+                pb::FleetReindexRequest { id: id.into() },
+                user,
+                Some("s1"),
+            ))
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|s| s.code());
+        let got = got
+            .as_ref()
+            .map(|r| (r.outcome.as_str(), r.retry_after_secs));
+        assert_eq!(got, expected.as_ref().map(|e| *e), "{description}");
+        let calls = recorder.calls.lock().unwrap().clone();
+        // Only an accepted request reaches the indexer.
+        if expected.is_ok() {
+            let user = user.unwrap();
+            assert_eq!(
+                calls,
+                vec![(user.to_string(), user.to_string(), id.to_string())],
+                "{description}: queued once, for the caller's own row"
+            );
+        } else {
+            assert!(calls.is_empty(), "{description}: nothing queued");
         }
     }
 

@@ -41,6 +41,7 @@ class FakeReviewFleetService extends ReviewFleetServiceBase {
   FleetSession putResponse = FleetSession();
   FleetDeleteReply deleteResponse = FleetDeleteReply();
   PreflightReply preflightResponse = PreflightReply();
+  FleetReindexReply reindexResponse = FleetReindexReply();
 
   /// When set, the next served RPC whose short method name matches [errorMethod]
   /// (or any call when [errorMethod] is null) throws this instead of returning —
@@ -113,6 +114,14 @@ class FakeReviewFleetService extends ReviewFleetServiceBase {
     _log.record('$_svc/SetEnabled', request);
     await _guard('SetEnabled');
     return setEnabledResponse;
+  }
+
+  @override
+  Future<FleetReindexReply> reindex(
+      ServiceCall call, FleetReindexRequest request) async {
+    _log.record('$_svc/Reindex', request);
+    await _guard('Reindex');
+    return reindexResponse;
   }
 
   @override

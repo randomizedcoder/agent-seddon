@@ -20,9 +20,11 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |
 | 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
-| 5a-ii | Portal index badge + Re-index (contact sheet), incremental refresh, base-moved trigger (poll/webhook), language indexes, history signals, overview, `knowledge_max_bytes`, nixpkgs path scoping, GC refcount | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-ii-a | `Reindex` RPC (forced rebuild, per-row cooldown, disabled rows refused), staged builds swapped in, GC keeps the newest finished fallback, no refcount needed | [04](04-repo-knowledge.md#as-built-5a-ii-a) | 🟡 | this PR |
+| 5a-ii-b | Portal index badge + Re-index button (contact sheet) | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-ii-c | Push-webhook base-moved trigger, incremental refresh, nixpkgs path scoping, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
-| 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, follow-up (this PR) |
+| 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
@@ -243,7 +245,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
 
   Merged as #689 (d38310d7) after three fleet rounds; the third had no must-fix.
 
-- **5b-ii follow-up** (this PR), from #689's last draft:
+- **5b-ii follow-up** (#690, 839de60c), from #689's last draft:
   - `ReviewChangedFile.old_path = 8` on the wire (proto3-additive; "" is none), so a
     change set that crosses gRPC keeps a rename's base side and its pre-PR flag.
   - `old_path` is set only for a rename: a delete's display path already is its base
@@ -251,3 +253,19 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     test).
   - `normalized()` folds every spelling (`./`, `//`, `/./`, a trailing `/`, `\`) but
     keeps `..`; a compile-time assert pins `MAX_OUTPUT > TRAILER_ROOM`.
+
+  Merged as #690 (839de60c) after two fleet rounds. Round 1 asked for a rename row in the
+  real gRPC round trip (`pool_review_roundtrip`, TCP and UDS); round 2 had no must-fix.
+  Its small items are done in 5a-ii-a below.
+
+- **5a-ii-a** (this PR): the server side of Re-index.
+  - `ReviewFleetService.Reindex` looks the row up in the caller's own roster, refuses a
+    disabled row, and queues it forced (`queued`, `coalesced`, or `too_soon` with
+    `retry_after_secs`, one request per row per 5 minutes).
+  - Builds are staged in `<sha>.partial` and swapped in, so a forced rebuild of the served
+    base never takes it away; GC keeps the newest finished other generation by manifest
+    and removes crash leftovers, but not foreign entries or symlinks.
+  - No GC refcount: an open read-only index survives its generation's removal.
+  - From #690's last draft: `Copied` and `Deleted` round-trip rows, the proto `old_path`
+    comment covers copies, a trailing-slash normalization row, and the `MAX_OUTPUT`
+    assert sits under `TRAILER_ROOM`.

@@ -145,6 +145,32 @@ const FleetDeleteReply$json = {
 final $typed_data.Uint8List fleetDeleteReplyDescriptor = $convert.base64Decode(
     'ChBGbGVldERlbGV0ZVJlcGx5EhgKB2RlbGV0ZWQYASABKAhSB2RlbGV0ZWQ=');
 
+@$core.Deprecated('Use fleetReindexRequestDescriptor instead')
+const FleetReindexRequest$json = {
+  '1': 'FleetReindexRequest',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 9, '10': 'id'},
+  ],
+};
+
+/// Descriptor for `FleetReindexRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List fleetReindexRequestDescriptor = $convert
+    .base64Decode('ChNGbGVldFJlaW5kZXhSZXF1ZXN0Eg4KAmlkGAEgASgJUgJpZA==');
+
+@$core.Deprecated('Use fleetReindexReplyDescriptor instead')
+const FleetReindexReply$json = {
+  '1': 'FleetReindexReply',
+  '2': [
+    {'1': 'outcome', '3': 1, '4': 1, '5': 9, '10': 'outcome'},
+    {'1': 'retry_after_secs', '3': 2, '4': 1, '5': 13, '10': 'retryAfterSecs'},
+  ],
+};
+
+/// Descriptor for `FleetReindexReply`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List fleetReindexReplyDescriptor = $convert.base64Decode(
+    'ChFGbGVldFJlaW5kZXhSZXBseRIYCgdvdXRjb21lGAEgASgJUgdvdXRjb21lEigKEHJldHJ5X2'
+    'FmdGVyX3NlY3MYAiABKA1SDnJldHJ5QWZ0ZXJTZWNz');
+
 @$core.Deprecated('Use fleetSetEnabledRequestDescriptor instead')
 const FleetSetEnabledRequest$json = {
   '1': 'FleetSetEnabledRequest',

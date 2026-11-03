@@ -4745,6 +4745,45 @@
         ]
       }
     },
+    "/v1/fleet/sessions/{id}/reindex": {
+      "post": {
+        "summary": "Rebuild one roster row's repo index now, even when its default branch has not moved\n(review-graph 5a-ii). The row is looked up in the caller's own roster, and a disabled\nrow is refused (FAILED_PRECONDITION). Opt-in: served only by the `--serve-fleet`\nprocess that indexes rows; elsewhere UNIMPLEMENTED.",
+        "operationId": "ReviewFleetService_Reindex",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/agent.v1.FleetReindexReply"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/google.rpc.Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/agent.v1.ReviewFleetService.ReindexBody"
+            }
+          }
+        ],
+        "tags": [
+          "ReviewFleetService"
+        ]
+      }
+    },
     "/v1/roles": {
       "get": {
         "summary": "REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,\nupsert → POST with `body: \"*\"`. Paths live under /v1/roles/.",
@@ -7744,6 +7783,20 @@
       },
       "description": "A fleet row's repo index status (review-graph 5a). Mirrors\n`agent_core::FleetIndexStatus`."
     },
+    "agent.v1.FleetReindexReply": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "description": "\"queued\": a rebuild is queued. \"coalesced\": the row was already queued, and that job\nnow rebuilds. \"too_soon\": a rebuild was asked for within the cooldown; nothing queued."
+        },
+        "retryAfterSecs": {
+          "type": "integer",
+          "format": "int64",
+          "description": "With \"too_soon\": seconds until a rebuild can be asked for again (0 otherwise)."
+        }
+      }
+    },
     "agent.v1.FleetSession": {
       "type": "object",
       "properties": {
@@ -9980,7 +10033,7 @@
         },
         "oldPath": {
           "type": "string",
-          "description": "For a rename, the base-side path (\"\" otherwise): a search over the base branch\nfinds the file there, so its hits are pre-PR content too."
+          "description": "For a rename (or a copy), the base-side path (\"\" otherwise): a search over the base branch\nfinds the file there, so its hits are pre-PR content too."
         }
       }
     },
@@ -10273,6 +10326,9 @@
     "agent.v1.ReviewFleetService.ApproveBody": {
       "type": "object",
       "description": "Approve a persisted review draft and post it to its forge (review-fleet C17, the\napprove→post tail). `review_id` names the draft row (server-minted Uuid, persisted at\n`drafted`); the approval gesture is the ONLY thing that posts — nothing is posted\nwithout an explicit Approve call. Idempotent: a draft already `posted` is a no-op."
+    },
+    "agent.v1.ReviewFleetService.ReindexBody": {
+      "type": "object"
     },
     "agent.v1.ReviewFleetService.ReviewNowBody": {
       "type": "object",

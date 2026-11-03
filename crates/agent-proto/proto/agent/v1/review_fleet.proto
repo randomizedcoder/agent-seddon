@@ -97,6 +97,18 @@ message FleetDeleteReply {
   bool deleted = 1; // false when the id was absent (not an error)
 }
 
+message FleetReindexRequest {
+  string id = 1;
+}
+
+message FleetReindexReply {
+  // "queued": a rebuild is queued. "coalesced": the row was already queued, and that job
+  // now rebuilds. "too_soon": a rebuild was asked for within the cooldown; nothing queued.
+  string outcome = 1;
+  // With "too_soon": seconds until a rebuild can be asked for again (0 otherwise).
+  uint32 retry_after_secs = 2;
+}
+
 message FleetSetEnabledRequest {
   string id = 1;
   bool enabled = 2;
@@ -364,5 +376,15 @@ service ReviewFleetService {
   // bare control-plane endpoint returns UNIMPLEMENTED.
   rpc Preflight(PreflightRequest) returns (PreflightReply) {
     option (google.api.http) = {get: "/v1/fleet/preflight"};
+  }
+  // Rebuild one roster row's repo index now, even when its default branch has not moved
+  // (review-graph 5a-ii). The row is looked up in the caller's own roster, and a disabled
+  // row is refused (FAILED_PRECONDITION). Opt-in: served only by the `--serve-fleet`
+  // process that indexes rows; elsewhere UNIMPLEMENTED.
+  rpc Reindex(FleetReindexRequest) returns (FleetReindexReply) {
+    option (google.api.http) = {
+      post: "/v1/fleet/sessions/{id}/reindex"
+      body: "*"
+    };
   }
 }

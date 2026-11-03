@@ -547,7 +547,10 @@ searches the reviewed repo; until the row has one, `nearby` is skipped (never th
 index, which is of another tree) and the brief says why (5b-i). With indexing off, fleet
 reviews have no search at all, for the same reason. The review session also gets a
 `search` tool over that index (5b-ii), replacing any process-wide one; hits in the PR's
-changed files are flagged as pre-PR content. Design and the remaining steps:
+changed files are flagged as pre-PR content. `Reindex` (`POST
+/v1/fleet/sessions/{id}/reindex`) rebuilds the caller's own enabled row now, at most once
+per row every 5 minutes; builds are staged and swapped in, so the served index never goes
+away mid-build (5a-ii-a). Design and the remaining steps:
 [04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)

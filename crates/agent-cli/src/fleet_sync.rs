@@ -599,6 +599,9 @@ mod tests {
         async fn status(&self, _row: &FleetSession) -> Option<agent_core::FleetIndexStatus> {
             None
         }
+        fn reindex(&self, _tenant: &str, _row: &FleetSession) -> agent_core::ReindexOutcome {
+            agent_core::ReindexOutcome::Queued
+        }
     }
 
     #[derive(Debug, Clone, Copy)]

@@ -623,6 +623,130 @@ class FleetDeleteReply extends $pb.GeneratedMessage {
   void clearDeleted() => $_clearField(1);
 }
 
+class FleetReindexRequest extends $pb.GeneratedMessage {
+  factory FleetReindexRequest({
+    $core.String? id,
+  }) {
+    final result = create();
+    if (id != null) result.id = id;
+    return result;
+  }
+
+  FleetReindexRequest._();
+
+  factory FleetReindexRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory FleetReindexRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FleetReindexRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FleetReindexRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FleetReindexRequest copyWith(void Function(FleetReindexRequest) updates) =>
+      super.copyWith((message) => updates(message as FleetReindexRequest))
+          as FleetReindexRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static FleetReindexRequest create() => FleetReindexRequest._();
+  @$core.override
+  FleetReindexRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static FleetReindexRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<FleetReindexRequest>(create);
+  static FleetReindexRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+}
+
+class FleetReindexReply extends $pb.GeneratedMessage {
+  factory FleetReindexReply({
+    $core.String? outcome,
+    $core.int? retryAfterSecs,
+  }) {
+    final result = create();
+    if (outcome != null) result.outcome = outcome;
+    if (retryAfterSecs != null) result.retryAfterSecs = retryAfterSecs;
+    return result;
+  }
+
+  FleetReindexReply._();
+
+  factory FleetReindexReply.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory FleetReindexReply.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FleetReindexReply',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'outcome')
+    ..aI(2, _omitFieldNames ? '' : 'retryAfterSecs',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FleetReindexReply clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FleetReindexReply copyWith(void Function(FleetReindexReply) updates) =>
+      super.copyWith((message) => updates(message as FleetReindexReply))
+          as FleetReindexReply;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static FleetReindexReply create() => FleetReindexReply._();
+  @$core.override
+  FleetReindexReply createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static FleetReindexReply getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<FleetReindexReply>(create);
+  static FleetReindexReply? _defaultInstance;
+
+  /// "queued": a rebuild is queued. "coalesced": the row was already queued, and that job
+  /// now rebuilds. "too_soon": a rebuild was asked for within the cooldown; nothing queued.
+  @$pb.TagNumber(1)
+  $core.String get outcome => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set outcome($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasOutcome() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearOutcome() => $_clearField(1);
+
+  /// With "too_soon": seconds until a rebuild can be asked for again (0 otherwise).
+  @$pb.TagNumber(2)
+  $core.int get retryAfterSecs => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set retryAfterSecs($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRetryAfterSecs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRetryAfterSecs() => $_clearField(2);
+}
+
 class FleetSetEnabledRequest extends $pb.GeneratedMessage {
   factory FleetSetEnabledRequest({
     $core.String? id,

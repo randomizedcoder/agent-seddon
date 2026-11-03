@@ -122,6 +122,7 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         ("ReviewFleetService", "Approve" | "SkipReview" | "SkipReviews") => {
             Require(Approve, Review)
         }
+        ("ReviewFleetService", "Reindex") => Require(Trigger, Fleet),
         ("ReviewFleetService", "ReviewNow") => Require(Trigger, Fleet),
         ("ReviewFleetService", "List" | "Get" | "Preflight") => Require(Read, Fleet),
         ("ReviewFleetService", "Put" | "SetEnabled") => Require(Write, Fleet),

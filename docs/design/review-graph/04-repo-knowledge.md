@@ -120,6 +120,39 @@ per new base), a base-moved trigger from the poller or a push webhook, the langu
 history signals and overview, `knowledge_max_bytes`, path-scoped nixpkgs indexing and the
 GC refcount.
 
+### As built (5a-ii-a)
+
+5a-ii is split too. 5a-ii-a is the server side of Re-index, and safer generations:
+
+- **`Reindex` RPC** (`ReviewFleetService.Reindex`, `POST /v1/fleet/sessions/{id}/reindex`,
+  `Trigger` on `Fleet`). The row is looked up in the caller's own tenant-scoped roster, so
+  another tenant's id is not found; a disabled row is refused (`FAILED_PRECONDITION`),
+  because disabling is how an operator stops a row's work. Served only by the fleet process
+  that indexes rows, `UNIMPLEMENTED` elsewhere.
+- **`FleetIndexer::reindex`** queues the row *forced*: its job rebuilds even when the base
+  has not moved. It coalesces with the sync pass's copy of the row (`coalesced`), and it is
+  rate-limited per `(tenant, id)` to one request per 5 minutes (`too_soon`, with
+  `retry_after_secs`), so the portal can't queue a costly rebuild over and over. A full
+  queue also answers `too_soon`.
+- **Staged builds.** Every build writes `knowledge/<sha>.partial/` and swaps it in for
+  `knowledge/<sha>/` once its manifest is written (the served copy moves to `<sha>.old` and
+  is removed). A rebuild of the base being served never takes that index away mid-build,
+  and a failed one leaves it as it was. Between the two renames a review finds no manifest
+  and goes without the index once.
+- **GC** keeps the current generation and the newest other *finished* one, chosen by
+  manifest `built_at` rather than by the status (after a rebuild of the same base the
+  status names no distinct previous). Crash leftovers (`<sha>.partial`, `<sha>.old`,
+  temp files, `knowledge-*` worktrees) are removed; entries that aren't the fleet's, and
+  symlinks, are left alone.
+- **No refcount.** A review opens its generation read-only and keeps it open, and on Unix
+  an unlinked file stays readable while it is open, so removing a generation never breaks
+  the review holding it. The refcount the design asked for is not needed.
+
+Left for 5a-ii-b and later: the portal badge and Re-index button (contact sheet), a
+base-moved trigger from a push webhook (the `refresh_secs` poll already rebuilds on a new
+base), the incremental refresh, path-scoped nixpkgs indexing, `knowledge_max_bytes`, and
+the language indexes, history signals and overview.
+
 ## Refresh
 
 - **Trigger:**

@@ -156,6 +156,17 @@ class ReviewFleetServiceClient extends $grpc.Client {
     return $createUnaryCall(_$preflight, request, options: options);
   }
 
+  /// Rebuild one roster row's repo index now, even when its default branch has not moved
+  /// (review-graph 5a-ii). The row is looked up in the caller's own roster, and a disabled
+  /// row is refused (FAILED_PRECONDITION). Opt-in: served only by the `--serve-fleet`
+  /// process that indexes rows; elsewhere UNIMPLEMENTED.
+  $grpc.ResponseFuture<$0.FleetReindexReply> reindex(
+    $0.FleetReindexRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$reindex, request, options: options);
+  }
+
   // method descriptors
 
   static final _$list =
@@ -221,6 +232,11 @@ class ReviewFleetServiceClient extends $grpc.Client {
           '/agent.v1.ReviewFleetService/Preflight',
           ($0.PreflightRequest value) => value.writeToBuffer(),
           $0.PreflightReply.fromBuffer);
+  static final _$reindex =
+      $grpc.ClientMethod<$0.FleetReindexRequest, $0.FleetReindexReply>(
+          '/agent.v1.ReviewFleetService/Reindex',
+          ($0.FleetReindexRequest value) => value.writeToBuffer(),
+          $0.FleetReindexReply.fromBuffer);
 }
 
 @$pb.GrpcServiceName('agent.v1.ReviewFleetService')
@@ -324,6 +340,15 @@ abstract class ReviewFleetServiceBase extends $grpc.Service {
         false,
         ($core.List<$core.int> value) => $0.PreflightRequest.fromBuffer(value),
         ($0.PreflightReply value) => value.writeToBuffer()));
+    $addMethod(
+        $grpc.ServiceMethod<$0.FleetReindexRequest, $0.FleetReindexReply>(
+            'Reindex',
+            reindex_Pre,
+            false,
+            false,
+            ($core.List<$core.int> value) =>
+                $0.FleetReindexRequest.fromBuffer(value),
+            ($0.FleetReindexReply value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.FleetSessionList> list_Pre($grpc.ServiceCall $call,
@@ -429,4 +454,12 @@ abstract class ReviewFleetServiceBase extends $grpc.Service {
 
   $async.Future<$0.PreflightReply> preflight(
       $grpc.ServiceCall call, $0.PreflightRequest request);
+
+  $async.Future<$0.FleetReindexReply> reindex_Pre($grpc.ServiceCall $call,
+      $async.Future<$0.FleetReindexRequest> $request) async {
+    return reindex($call, await $request);
+  }
+
+  $async.Future<$0.FleetReindexReply> reindex(
+      $grpc.ServiceCall call, $0.FleetReindexRequest request);
 }

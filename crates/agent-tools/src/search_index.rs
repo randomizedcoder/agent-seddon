@@ -29,6 +29,8 @@ pub struct SearchTool {
 const PRE_PR_FLAG: &str = "  [pre-PR: this PR changes this file]";
 /// Room kept under the output cap for the "… N more hits not shown" line.
 const TRAILER_ROOM: usize = 64;
+// The review cut reserves `TRAILER_ROOM` under the shared cap.
+const _: () = assert!(crate::MAX_OUTPUT > TRAILER_ROOM);
 
 /// A repo-relative path in one spelling: `/` separators, no `.` components, no empty
 /// ones (so `./a`, `a//b`, `a/./b`, `a/` and `a\\b` all read as their plain form). Both
@@ -44,9 +46,6 @@ fn normalized(p: &std::path::Path) -> PathBuf {
         .collect();
     PathBuf::from(parts.join("/"))
 }
-
-// The review cut reserves `TRAILER_ROOM` under the shared cap.
-const _: () = assert!(crate::MAX_OUTPUT > TRAILER_ROOM);
 
 impl SearchTool {
     pub fn new(backend: Arc<dyn SearchBackend>) -> Self {
@@ -337,6 +336,7 @@ mod tests {
     #[case::adversarial_dot_prefixed_path_still_flagged("./src/a.rs", 3, true, true)]
     #[case::adversarial_backslash_path_still_flagged("src\\a.rs", 3, true, true)]
     #[case::adversarial_interior_spellings_still_flagged("src//./a.rs", 3, true, true)]
+    #[case::adversarial_trailing_slash_still_flagged("src/a.rs/", 3, true, true)]
     #[case::adversarial_parent_component_not_flagged("x/../src/a.rs", 3, true, false)]
     #[tokio::test]
     async fn review_search_flags_pre_pr_hits(
