@@ -762,6 +762,19 @@ async fn remove_dir(dir: &Path) {
 
 /// Keep the `current` and `previous` generations and remove the rest, plus any build
 /// worktree a crash left behind.
+/// Remove `*.tmp` files directly in `dir` (a crashed manifest write's leftovers).
+fn sweep_tmp(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().ends_with(".tmp")
+                && e.file_type().is_ok_and(|t| t.is_file())
+            {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 async fn gc(repo: &Arc<dyn RepoBackend>, layout: &Layout, current: &str, previous: &str) {
     let keep = |name: &str| name == current || name == previous;
     if let Ok(entries) = std::fs::read_dir(&layout.knowledge) {
@@ -777,6 +790,8 @@ async fn gc(repo: &Arc<dyn RepoBackend>, layout: &Layout, current: &str, previou
                 commit_sha(&name).is_some() && e.file_type().is_ok_and(|t| t.is_dir());
             if is_generation && !keep(&name) {
                 remove_dir(&e.path()).await;
+            } else if is_generation {
+                sweep_tmp(&e.path());
             }
         }
     }
@@ -1347,6 +1362,27 @@ mod tests {
             Path::new("a.rs"),
             "repo-relative, for any checkout"
         );
+
+        // A failed rebuild still serves the last good index, and the line says so.
+        let bad = inner(fx.root.clone(), Arc::new(NoRepo), limits());
+        assert_eq!(bad.run(&r).await, Outcome::Failed);
+        let layout = Layout::for_row(&fx.root, &r).unwrap();
+        let (search, note) = open_row_search(layout.knowledge.clone()).await;
+        assert!(search.is_some(), "{note}");
+        assert!(
+            note.contains("the row is failed, so this is the last good index"),
+            "{note}"
+        );
+
+        // A generation whose index is corrupt is not opened: no search, and the line says so.
+        std::fs::write(
+            layout.generation(&sha).join("index/meta.json"),
+            "not tantivy",
+        )
+        .unwrap();
+        let (search, note) = open_row_search(layout.knowledge).await;
+        assert!(search.is_none(), "a corrupt index is never opened");
+        assert!(note.contains("could not be opened"), "{note}");
     }
 
     /// A status temp file left by a crash is swept by the next build's GC; the status
@@ -1362,6 +1398,15 @@ mod tests {
         let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
         assert_eq!(svc.run(&r).await, Outcome::Ready);
         assert!(!leftover.exists(), "the leftover temp file is gone");
+        // One inside a kept generation (a crashed manifest write) goes on the next GC.
+        let sha = status_of(&fx.root, &r).base_sha;
+        let inner_leftover = layout.generation(&sha).join("manifest.4242.8.tmp");
+        std::fs::write(&inner_leftover, "{").unwrap();
+        gc(&fx.repo(), &layout, &sha, "").await;
+        assert!(
+            !inner_leftover.exists(),
+            "a kept generation's temp file is gone"
+        );
         let st = status_of(&fx.root, &r);
         assert!(layout.status().exists() && layout.generation(&st.base_sha).exists());
     }

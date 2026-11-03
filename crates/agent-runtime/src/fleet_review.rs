@@ -171,17 +171,16 @@ pub(crate) struct FleetReviewCtxFactory {
     /// Static-analysis tool resolver (review-analysis-depth Inc 1), shared with the
     /// process-global path so every row's analyzer resolves tools identically.
     tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
-    search: Option<Arc<dyn agent_core::SearchBackend>>,
     /// Byte budget for the rendered grounded brief (same knob as the in-loop review).
     budget: usize,
     /// The forge-card registry (config C36 / D1b), so a row that references a forge by
     /// `forge_id` builds from the persisted card. `None` ⇒ only inline-forge rows work.
     forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
     metrics: Metrics,
-    /// Built `(repo, grounder)` by `(user, id)`, with the [`CacheFingerprint`] it was built
-    /// from. A repeated trigger reuses the checkout + engine while the fingerprint matches.
     /// Whether rows have their own repo index ([`Self::with_row_indexes`]).
     row_indexes: bool,
+    /// Built `(repo, grounder)` by `(user, id)`, with the [`CacheFingerprint`] it was built
+    /// from. A repeated trigger reuses the checkout + engine while the fingerprint matches.
     cache: Mutex<HashMap<(String, String), (CacheFingerprint, FleetReviewCtx)>>,
 }
 
@@ -194,7 +193,6 @@ impl FleetReviewCtxFactory {
         sandbox: Option<Arc<dyn agent_core::Sandbox>>,
         pool: Option<Arc<dyn agent_core::LlmPool>>,
         tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
-        search: Option<Arc<dyn agent_core::SearchBackend>>,
         budget: usize,
         forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
         metrics: Metrics,
@@ -206,7 +204,6 @@ impl FleetReviewCtxFactory {
             sandbox,
             pool,
             tool_provider,
-            search,
             budget,
             forge_registry,
             metrics,
@@ -216,8 +213,8 @@ impl FleetReviewCtxFactory {
     }
 
     /// Ground each row's reviews on its own repo index (review-graph 5b-i), set when
-    /// `[review_fleet.index]` builds them. Without it the grounder keeps the shared
-    /// search backend.
+    /// `[review_fleet.index]` builds them. Without it a row's review has no search (the
+    /// process's shared index is of another tree, so it is never used for a row).
     pub(crate) fn with_row_indexes(mut self) -> Self {
         self.row_indexes = true;
         self
@@ -347,7 +344,9 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         // OidCache) and the forge are captured and reused across triggers.
         let grounder: Arc<dyn agent_core::ReviewGrounder> = Arc::new(WorktreeGrounder {
             repo: repo.clone(),
-            search: self.search.clone(),
+            // Never the process's shared index: it is of the fleet's own tree, not this
+            // repo. A row searches its own index (`row_index`) or nothing.
+            search: None,
             forge,
             sandbox: self.sandbox.clone(),
             pool: self.pool.clone(),
@@ -611,7 +610,6 @@ mod tests {
             root,
             ReviewCfg::default(),
             String::new(),
-            None,
             None,
             None,
             None,
@@ -932,7 +930,6 @@ mod tests {
             ReviewCfg::default(),
             String::new(),
             Some(sandbox),
-            None,
             None,
             None,
             4096,

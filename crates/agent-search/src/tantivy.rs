@@ -177,7 +177,8 @@ impl SearchBackend for TantivyBackend {
             ],
             content_search: true,
             scored: true,
-            incremental: true,
+            // A read-only backend never reindexes.
+            incremental: self.writer.is_some(),
             max_concurrent_queries: 0,
         }
     }
@@ -218,6 +219,10 @@ impl SearchBackend for TantivyBackend {
     }
 
     async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+        // Fail fast: a read-only backend never scans (its source is the index dir).
+        if self.writer.is_none() {
+            return Err(Error::Search("this index is open read-only".into()));
+        }
         self.building.store(true, Ordering::Relaxed);
         let result = self.reindex_inner(progress).await;
         self.building.store(false, Ordering::Relaxed);
@@ -1000,6 +1005,12 @@ mod tests {
             );
             return;
         };
+        // The builder (`_writer_held`) still holds tantivy's writer lock: a second writer
+        // is refused, while readers open freely.
+        assert!(
+            TantivyBackend::open(dir.clone(), index_dir.clone()).is_err(),
+            "{description}: the writer lock is held"
+        );
         let second = TantivyBackend::open_read_only(index_dir).expect("readers share it");
         for b in [&ro, &second] {
             let hits = b
@@ -1013,5 +1024,6 @@ mod tests {
             ro.reindex(&|_p| {}).await.is_err(),
             "read-only never reindexes"
         );
+        assert!(!ro.capabilities().incremental, "and does not claim to");
     }
 }

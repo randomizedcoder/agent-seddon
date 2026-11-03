@@ -184,7 +184,9 @@ The `ground` node ([01](01-review-graph.md)) and the single-session grounder bot
   opens its row's last good index read-only (`TantivyBackend::open_read_only`: no writer
   lock, nothing created) and grounds on it, so the `nearby` collector searches *this*
   repo. Before, it searched the shared backend, which indexes the fleet process's own
-  tree. A row with no finished index gets no search, never the shared backend.
+  tree. A row with no finished index gets no search, never the shared backend, and with
+  `[review_fleet.index]` off no fleet review gets one (the factory no longer holds the
+  shared backend at all).
 - **The brief says which index it used:** "Repo index: the default branch at `<sha12>`
   (N files[, partial][; the row is stale/failed, so this is the last good index]). Search
   hits are pre-PR content", or "Repo index: not built yet / pending / … ; nearby-code

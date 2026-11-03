@@ -189,3 +189,9 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     holds its lock), `row_index_cases` (never built, pending, ready, failed serves last
     good, hostile sha, missing or mismatched manifest), `open_row_search_serves_the_row_index`,
     `grounder_search_choice` (shared vs row index, no fallback), GC temp sweep.
+  - From the fleet review: with indexing off, fleet reviews no longer get the shared
+    backend either (the factory dropped it; it was another tree); a read-only `reindex`
+    fails before any scan, and `capabilities().incremental` is false for it; the
+    read-only test proves the builder's writer lock is held while readers open; the
+    corrupt-generation path ("could not be opened") and the failed-row note are tested;
+    GC also sweeps temp files inside kept generations.

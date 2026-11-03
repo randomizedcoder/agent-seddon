@@ -544,7 +544,8 @@ redacted error) is in `knowledge/status.json` and on `ListSessions` / `GetSessio
 `agent_fleet_index_seconds`, `agent_fleet_index_bytes`, `agent_fleet_index_files`. Each
 review grounds on its row's last good index, opened read-only, so the `nearby` collector
 searches the reviewed repo; until the row has one, `nearby` is skipped (never the shared
-index, which is of another tree) and the brief says why (5b-i). Design and the remaining steps:
+index, which is of another tree) and the brief says why (5b-i). With indexing off, fleet
+reviews have no search at all, for the same reason. Design and the remaining steps:
 [04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)
