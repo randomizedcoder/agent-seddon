@@ -30,6 +30,9 @@ base64 = { workspace = true }
 # default is `LocalSandbox` (behaviour-identical to the old direct spawn); the
 # runtime injects the config-selected backend via `CliBackend::with_sandbox`.
 agent-sandbox = { workspace = true, features = ["sandbox-local"] }
+# O_NOFOLLOW / O_NONBLOCK for the clone lock open, so a symlinked or FIFO lock
+# path is refused by the open itself (no check-then-open race).
+libc = { workspace = true }
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

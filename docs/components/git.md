@@ -178,8 +178,11 @@ never scanned, because a misread there would delete a good mirror. A path that i
 neither a git dir nor empty is never replaced, and a failed clone removes its
 `.partial` dir. One clone runs per mirror path, across processes too: the claim
 holds an exclusive lock on `<mirror>.clone-lock`, which the OS releases if the
-process dies. A lock path that is a symlink or a directory fails the clone closed,
-rather than open whatever it points at. A clone re-checks readiness once it holds the
+process dies. The lock is opened with `O_NOFOLLOW | O_NONBLOCK`, so a lock path that
+is a symlink, a directory or a FIFO fails the claim closed in the open itself (no
+check-then-open race), on every claim site: both clone paths and the `.stale` sweep. A
+busy lock is retried for about 40 ms, because a child forked elsewhere in the process
+holds a copy of the fd until it execs. A clone re-checks readiness once it holds the
 lock, so one that finished while another waited is not repeated.
 
 `fetch` on a mirror passes the two refspecs on the command line

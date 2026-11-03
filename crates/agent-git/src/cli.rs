@@ -173,17 +173,14 @@ async fn remove_stale(stale: PathBuf) {
     }
 }
 
-/// Fail closed when `<mirror>.clone-lock` exists but is not a regular file (a symlink
-/// or a dir), rather than open whatever it points at or clone without the lock.
-fn refuse_foreign_lock(mirror: &Path) -> Result<()> {
-    let lock = sibling(mirror, "clone-lock");
-    match std::fs::symlink_metadata(&lock) {
-        Ok(m) if !m.file_type().is_file() => Err(Error::Repo(format!(
-            "the clone lock {} is not a regular file; not cloning",
-            lock.display()
-        ))),
-        _ => Ok(()),
-    }
+/// Why the cross-process clone lock could not be taken.
+enum LockError {
+    /// Another process holds it.
+    Busy,
+    /// `<mirror>.clone-lock` is not a regular file (a symlink, a dir, a FIFO).
+    Foreign(PathBuf),
+    /// It could not be made (a read-only parent).
+    Io(std::io::Error),
 }
 
 /// Mirror paths with a clone in progress in this process, so two backends for one
@@ -200,46 +197,98 @@ struct CloneSlot {
 }
 
 impl CloneSlot {
-    /// Claim `mirror`, or `None` when a clone of it is already running here or in
-    /// another process.
-    fn claim(mirror: &Path) -> Option<Self> {
-        let mut cloning = CLONING
+    /// Claim `mirror`: `Ok(None)` when a clone of it is already running here or in
+    /// another process. Errs, failing closed, when `<mirror>.clone-lock` is not a
+    /// regular file, rather than open whatever it points at or clone without the lock.
+    fn claim(mirror: &Path) -> Result<Option<Self>> {
+        if !CLONING
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !cloning.insert(mirror.to_path_buf()) {
-            return None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mirror.to_path_buf())
+        {
+            return Ok(None);
         }
-        let lock = match Self::lock_file(mirror) {
+        // The path is reserved here; the set's mutex is not held while locking.
+        let release = || {
+            CLONING
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(mirror);
+        };
+        let lock = match Self::lock_file_patiently(mirror) {
             Ok(lock) => Some(lock),
-            Err(std::fs::TryLockError::WouldBlock) => {
-                cloning.remove(mirror);
-                return None;
+            Err(LockError::Busy) => {
+                release();
+                return Ok(None);
+            }
+            Err(LockError::Foreign(lock)) => {
+                release();
+                return Err(Error::Repo(format!(
+                    "the clone lock {} is not a regular file; not cloning",
+                    lock.display()
+                )));
             }
             // A lock file that can't be made (a read-only parent) still leaves the
             // in-process claim, and the clone itself reports the real error.
-            Err(std::fs::TryLockError::Error(e)) => {
+            Err(LockError::Io(e)) => {
                 tracing::warn!(mirror = %mirror.display(), error = %e,
                     "git: no cross-process clone lock; claiming in this process only");
                 None
             }
         };
-        Some(Self {
+        Ok(Some(Self {
             mirror: mirror.to_path_buf(),
             _lock: lock,
-        })
+        }))
     }
 
-    fn lock_file(mirror: &Path) -> std::result::Result<std::fs::File, std::fs::TryLockError> {
-        if let Some(parent) = mirror.parent() {
-            std::fs::create_dir_all(parent).map_err(std::fs::TryLockError::Error)?;
+    /// [`Self::lock_file`], retried briefly while busy. A child forked anywhere in this
+    /// process holds a copy of the lock fd until it execs (the fd is close-on-exec),
+    /// so a lock just released can read busy for a moment; a real clone holds it far
+    /// longer than this wait.
+    fn lock_file_patiently(mirror: &Path) -> std::result::Result<std::fs::File, LockError> {
+        const TRIES: u32 = 5;
+        for _ in 1..TRIES {
+            match Self::lock_file(mirror) {
+                Err(LockError::Busy) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                other => return other,
+            }
         }
+        Self::lock_file(mirror)
+    }
+
+    /// Open and lock `<mirror>.clone-lock`. `O_NOFOLLOW` makes the open itself refuse a
+    /// symlink (no check-then-open race), `O_NONBLOCK` keeps a FIFO from hanging it,
+    /// and a dir fails the write open; anything opened that is not a regular file is
+    /// refused too.
+    fn lock_file(mirror: &Path) -> std::result::Result<std::fs::File, LockError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = mirror.parent() {
+            std::fs::create_dir_all(parent).map_err(LockError::Io)?;
+        }
+        let path = sibling(mirror, "clone-lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(sibling(mirror, "clone-lock"))
-            .map_err(std::fs::TryLockError::Error)?;
-        file.try_lock()?;
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+            .map_err(|e| match e.raw_os_error() {
+                Some(libc::ELOOP | libc::EISDIR | libc::ENXIO) => LockError::Foreign(path.clone()),
+                _ => LockError::Io(e),
+            })?;
+        if !file
+            .metadata()
+            .map_err(LockError::Io)?
+            .file_type()
+            .is_file()
+        {
+            return Err(LockError::Foreign(path));
+        }
+        file.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => LockError::Busy,
+            std::fs::TryLockError::Error(e) => LockError::Io(e),
+        })?;
         Ok(file)
     }
 }
@@ -454,8 +503,7 @@ impl CliBackend {
         if self.mirror_ready() {
             return Ok(false);
         }
-        refuse_foreign_lock(&self.mirror)?;
-        let slot = CloneSlot::claim(&self.mirror).ok_or_else(|| self.cloning_error())?;
+        let slot = CloneSlot::claim(&self.mirror)?.ok_or_else(|| self.cloning_error())?;
         self.clone_mirror(slot, MIRROR_CLONE_TIMEOUT_SECS).await
     }
 
@@ -557,8 +605,13 @@ impl CliBackend {
         if std::fs::symlink_metadata(&stale).is_err() {
             return;
         }
-        let Some(slot) = CloneSlot::claim(&self.mirror) else {
-            return;
+        let slot = match CloneSlot::claim(&self.mirror) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "git: not sweeping the old mirror");
+                return;
+            }
         };
         // unscoped-spawn: one-off disk cleanup with no caller to report to.
         tokio::spawn(async move {
@@ -612,9 +665,8 @@ impl CliBackend {
             self.sweep_stale();
             return Ok(());
         }
-        refuse_foreign_lock(&self.mirror)?;
         if !self.background_clone {
-            match CloneSlot::claim(&self.mirror) {
+            match CloneSlot::claim(&self.mirror)? {
                 Some(slot) => {
                     if let Err(e) = self.clone_mirror(slot, GIT_TIMEOUT_SECS).await {
                         tracing::warn!(mirror = %self.mirror.display(), error = %e,
@@ -629,7 +681,7 @@ impl CliBackend {
         if self.resolve_remote_url().await.is_none() {
             return Ok(());
         }
-        if let Some(slot) = CloneSlot::claim(&self.mirror) {
+        if let Some(slot) = CloneSlot::claim(&self.mirror)? {
             // Another process's clone may have finished between the check above and
             // the claim.
             if self.mirror_ready() {
@@ -1314,7 +1366,7 @@ impl RepoBackend for CliBackend {
         // Only a mirror is refreshed. In a working checkout `refs/heads/<b>` is the
         // user's own branch, and a forced fetch into it would overwrite local work.
         if !self.mirror_ready() {
-            tracing::info!(branch, root = %self.root.display(),
+            tracing::debug!(branch, root = %self.root.display(),
                 "git: no mirror, so the base branch is not refreshed (a checkout's branches are the user's)");
             return Ok(());
         }
@@ -2350,6 +2402,21 @@ mod tests {
         Absent,
         Symlink,
         Dir,
+        Fifo,
+    }
+
+    fn lay_lock(lock: &Path, at: LockPath, target: &Path) {
+        match at {
+            LockPath::File => std::fs::write(lock, b"").unwrap(),
+            LockPath::Absent => {}
+            LockPath::Symlink => std::os::unix::fs::symlink(target, lock).unwrap(),
+            LockPath::Dir => std::fs::create_dir(lock).unwrap(),
+            LockPath::Fifo => {
+                let c = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            }
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -2454,6 +2521,9 @@ mod tests {
     #[case::adversarial_lock_suffix_mid_path("a.lock/b", false)]
     #[case::adversarial_trailing_dot("main.", false)]
     #[case::corner_inner_dot_kept("v1.2/x", true)]
+    // Git's trailing-dot rule is about the refname's end, so a segment ending in `.`
+    // mid-path is a valid ref (as `git check-ref-format` agrees).
+    #[case::corner_segment_ending_in_dot_mid_path_kept("release./25.11", true)]
     #[case::adversarial_reflog_syntax("main@{1}", false)]
     #[case::adversarial_newline("main\nrefs/heads/x", false)]
     #[case::boundary_max_len(&"a".repeat(MAX_BRANCH_LEN.min(agent_core::MAX_SEGMENT_LEN)), true)]
@@ -2551,7 +2621,7 @@ mod tests {
     async fn corner_second_clone_of_one_path_is_refused() {
         let rec = RecordingSandbox::new(ok_out(b""));
         let (b, m) = backend_for_clone("https://github.com/o/r.git");
-        let _held = CloneSlot::claim(&m).expect("first claim");
+        let _held = CloneSlot::claim(&m).unwrap().expect("first claim");
         let err = b
             .with_sandbox(rec.clone())
             .ensure_mirror()
@@ -2577,7 +2647,8 @@ mod tests {
         let err = b.fetch_branch("main").await.unwrap_err();
         assert!(agent_core::is_mirror_cloning(&err), "{err}");
         for _ in 0..500 {
-            if mirror_state(&m) == MirrorState::Ready && CloneSlot::claim(&m).is_some() {
+            if mirror_state(&m) == MirrorState::Ready && matches!(CloneSlot::claim(&m), Ok(Some(_)))
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2728,7 +2799,7 @@ mod tests {
             work.join("wt"),
             work.join("no-such-remote").to_string_lossy().to_string(),
         );
-        let slot = CloneSlot::claim(&mirror).expect("free slot");
+        let slot = CloneSlot::claim(&mirror).unwrap().expect("free slot");
         let got = b.clone_mirror(slot, 30).await;
         if skipped {
             assert!(matches!(got, Ok(false)), "{got:?}");
@@ -2738,24 +2809,21 @@ mod tests {
     }
 
     /// A `<mirror>.clone-lock` that is not a regular file fails closed before any
-    /// clone: name, what sits at the lock path, whether `ensure_mirror` refuses.
+    /// clone, on both clone paths (`ensure_mirror` and the inline `prepare_mirror`):
+    /// name, what sits at the lock path, whether the claim is refused.
     #[rstest]
     #[case::positive_regular_file_is_used(LockPath::File, false)]
     #[case::corner_absent_is_created(LockPath::Absent, false)]
     #[case::adversarial_symlink_is_refused(LockPath::Symlink, true)]
     #[case::adversarial_dir_is_refused(LockPath::Dir, true)]
+    #[case::adversarial_fifo_is_refused_without_hanging(LockPath::Fifo, true)]
     #[tokio::test]
     async fn foreign_clone_lock_fails_closed(#[case] at: LockPath, #[case] refused: bool) {
         let work = agent_testkit::tempdir();
         let mirror = work.join("mirror");
         let lock = sibling(&mirror, "clone-lock");
         let target = work.join("elsewhere");
-        match at {
-            LockPath::File => std::fs::write(&lock, b"").unwrap(),
-            LockPath::Absent => {}
-            LockPath::Symlink => std::os::unix::fs::symlink(&target, &lock).unwrap(),
-            LockPath::Dir => std::fs::create_dir(&lock).unwrap(),
-        }
+        lay_lock(&lock, at, &target);
         let b = CliBackend::new(
             &mirror,
             &mirror,
@@ -2763,8 +2831,51 @@ mod tests {
             work.join("no-such-remote").to_string_lossy().to_string(),
         );
         let err = b.ensure_mirror().await.unwrap_err().to_string();
-        assert_eq!(err.contains("not a regular file"), refused, "{err}");
+        assert_eq!(err.contains("not a regular file"), refused, "ensure: {err}");
+        // The inline path warns on a failed clone and goes on; only a refused lock errs.
+        let inline = b.prepare_mirror().await;
+        assert_eq!(inline.is_err(), refused, "inline: {inline:?}");
         assert!(!target.exists(), "the symlink's target was never created");
+    }
+
+    /// The background sweep of a leftover `<mirror>.stale` claims the same lock, so it
+    /// is held to the same rules: a foreign lock or a running clone leaves the stale
+    /// dir alone. Name, the lock path, whether a clone holds the slot, swept.
+    #[rstest]
+    #[case::positive_free_slot_sweeps(LockPath::Absent, false, true)]
+    #[case::negative_running_clone_blocks_the_sweep(LockPath::File, true, false)]
+    #[case::adversarial_symlink_lock_never_followed(LockPath::Symlink, false, false)]
+    #[case::adversarial_dir_lock_refused(LockPath::Dir, false, false)]
+    #[tokio::test]
+    async fn sweep_obeys_the_clone_lock(
+        #[case] at: LockPath,
+        #[case] held: bool,
+        #[case] swept: bool,
+    ) {
+        let work = agent_testkit::tempdir();
+        let mirror = work.join("mirror");
+        make_ready(&mirror);
+        let stale = sibling(&mirror, "stale");
+        make_ready(&stale);
+        let target = work.join("elsewhere");
+        lay_lock(&sibling(&mirror, "clone-lock"), at, &target);
+        let _held = held.then(|| CloneSlot::claim(&mirror).unwrap().expect("free slot"));
+        let b = CliBackend::new(&mirror, &mirror, work.join("wt"), "")
+            .with_sandbox(RecordingSandbox::new(ok_out(b"")));
+        b.prepare_mirror().await.expect("a ready mirror never errs");
+        for _ in 0..200 {
+            if !stale.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(!stale.exists(), swept, "stale removed");
+        assert!(!target.exists(), "the symlink's target was never created");
+        assert_eq!(
+            mirror_state(&mirror),
+            MirrorState::Ready,
+            "live mirror untouched"
+        );
     }
 
     /// A `<mirror>.stale` left beside a ready mirror (a crash after the swap) is swept
@@ -2812,10 +2923,13 @@ mod tests {
             f.try_lock().unwrap();
             f
         });
-        let slot = CloneSlot::claim(&mirror);
+        let slot = CloneSlot::claim(&mirror).expect("a regular lock file");
         assert_eq!(slot.is_some(), claimed);
         drop(slot);
         drop(other);
-        assert!(CloneSlot::claim(&mirror).is_some(), "free once released");
+        assert!(
+            matches!(CloneSlot::claim(&mirror), Ok(Some(_))),
+            "free once released"
+        );
     }
 }
