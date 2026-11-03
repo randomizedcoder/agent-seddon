@@ -67,7 +67,9 @@ pub struct TantivyBackend {
     // The `IndexReader`/`IndexWriter` own everything the backend needs, so the
     // `Index` itself is not retained.
     reader: IndexReader,
-    writer: Mutex<IndexWriter>,
+    /// `None` for a [`read_only`](Self::open_read_only) backend: it takes no writer
+    /// lock, so many readers can share an index another process builds.
+    writer: Option<Mutex<IndexWriter>>,
     fields: Fields,
     building: AtomicBool,
 }
@@ -115,7 +117,43 @@ impl TantivyBackend {
             source,
             index_dir,
             reader,
-            writer: Mutex::new(writer),
+            writer: Some(Mutex::new(writer)),
+            fields,
+            building: AtomicBool::new(false),
+        })
+    }
+
+    /// Open an existing, finished index at `index_dir` for queries only: nothing is
+    /// created, no writer lock is taken (so any number of readers can share it), and
+    /// `reindex` errs. `status` reads the saved manifest without rescanning a corpus.
+    /// Hit paths are the ids the index was built with (repo-relative for a code
+    /// index), so they resolve against any checkout of the same tree.
+    pub fn open_read_only(index_dir: PathBuf) -> Result<Self> {
+        if !index_dir.join("meta.json").is_file() {
+            return Err(Error::Search(format!(
+                "no finished index at {}",
+                index_dir.display()
+            )));
+        }
+        let dir = MmapDirectory::open(&index_dir).map_err(se)?;
+        let index = Index::open(dir).map_err(se)?;
+        let schema = index.schema();
+        let fields = Fields {
+            path: schema.get_field("path").map_err(se)?,
+            content: schema.get_field("content").map_err(se)?,
+            lang: schema.get_field("lang").map_err(se)?,
+        };
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(se)?;
+        Ok(Self {
+            // Never read: `status` and `reindex` take the read-only branch first.
+            source: Arc::new(FsDocumentSource::new(index_dir.clone())),
+            index_dir,
+            reader,
+            writer: None,
             fields,
             building: AtomicBool::new(false),
         })
@@ -148,10 +186,18 @@ impl SearchBackend for TantivyBackend {
         let source = self.source.clone();
         let mpath = self.manifest_path();
         let building = self.building.load(Ordering::Relaxed);
+        let read_only = self.writer.is_none();
         let status = tokio::task::spawn_blocking(move || {
             let stored = Manifest::load(&mpath);
             let state = if building {
                 IndexState::Building
+            } else if read_only {
+                // A read-only index is whatever its builder left: fresh if finished.
+                if stored.is_some() {
+                    IndexState::Fresh
+                } else {
+                    IndexState::Missing
+                }
             } else {
                 source.compare(stored.as_ref())
             };
@@ -228,7 +274,10 @@ impl TantivyBackend {
         let stored = Manifest::load(&self.manifest_path());
         let (upserts, deletes) = diff(stored.as_ref(), &current);
 
-        let mut writer = self.writer.lock().await;
+        let Some(writer) = &self.writer else {
+            return Err(Error::Search("this index is open read-only".into()));
+        };
+        let mut writer = writer.lock().await;
         if stored.is_none() {
             // No prior manifest: rebuild from scratch so a partial/foreign index
             // can't leave stale docs behind.
@@ -910,5 +959,59 @@ mod tests {
     #[case::single_segment_no_cross("*.nix", "a/flake.nix", false)]
     fn glob_cases(#[case] glob: &str, #[case] path: &str, #[case] expected: bool) {
         assert_eq!(glob_to_regex(glob).unwrap().is_match(path), expected);
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum RoAt {
+        Built,
+        Missing,
+        Empty,
+    }
+
+    // A read-only open serves a finished index without taking the writer lock (so it
+    // works while the builder still holds it, and many readers share one index),
+    // refuses to reindex, and never creates an index where there is none.
+    #[rstest]
+    #[case::positive_built_index_serves_queries("a finished index answers", RoAt::Built, true)]
+    #[case::negative_missing_dir_errs("no dir: an error, nothing created", RoAt::Missing, false)]
+    #[case::adversarial_empty_dir_is_not_an_index(
+        "an empty dir is refused, not turned into an empty index",
+        RoAt::Empty,
+        false
+    )]
+    #[tokio::test]
+    async fn read_only_open(#[case] description: &str, #[case] at: RoAt, #[case] opens: bool) {
+        let (dir, _writer_held) = indexed().await;
+        let index_dir = match at {
+            RoAt::Built => dir.join(".agent-seddon/index/tantivy"),
+            RoAt::Missing => dir.join("nowhere"),
+            RoAt::Empty => {
+                let d = dir.join("empty");
+                std::fs::create_dir_all(&d).unwrap();
+                d
+            }
+        };
+        let got = TantivyBackend::open_read_only(index_dir.clone());
+        assert_eq!(got.is_ok(), opens, "{description}");
+        let Ok(ro) = got else {
+            assert!(
+                !index_dir.join("meta.json").exists(),
+                "{description}: nothing created"
+            );
+            return;
+        };
+        let second = TantivyBackend::open_read_only(index_dir).expect("readers share it");
+        for b in [&ro, &second] {
+            let hits = b
+                .query(&query("FINDME_LITERAL", SearchMode::Literal))
+                .await
+                .unwrap();
+            assert_eq!(hits.len(), 2, "{description}");
+        }
+        assert_eq!(ro.status().await.unwrap().state, IndexState::Fresh);
+        assert!(
+            ro.reindex(&|_p| {}).await.is_err(),
+            "read-only never reindexes"
+        );
     }
 }

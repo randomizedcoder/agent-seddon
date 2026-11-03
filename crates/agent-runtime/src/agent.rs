@@ -453,6 +453,9 @@ pub(crate) struct WorktreeGrounder {
     pub(crate) metrics: Metrics,
     /// The byte budget handed to the fact renderer (same knob the in-loop review uses).
     pub(crate) budget: usize,
+    /// The row's `knowledge` dir when rows have their own repo index (review-graph 5b-i):
+    /// each review searches that index, opened read-only, instead of `search`.
+    pub(crate) row_index: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "review")]
@@ -468,11 +471,14 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
         // OidCache), which the worktree's `.git` resolves against — so the git-object
         // collectors are unaffected; only the filesystem-reading collectors change from
         // empty to populated.
+        // A row with its own index searches that (or nothing until it is built): the
+        // shared backend indexes the fleet process's own tree, not this repo.
+        let (search, index_note) = self.row_search().await;
         let engine: Arc<dyn agent_core::ReviewCollector> =
             Arc::new(crate::builder::build_review_orchestrator(
                 root.to_path_buf(),
                 self.repo.clone(),
-                self.search.clone(),
+                search,
                 self.forge.clone(),
                 self.sandbox.clone(),
                 self.pool.clone(),
@@ -481,7 +487,12 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
                 self.metrics.clone(),
             ));
         let facts = engine.collect(&target).await?;
-        let brief = agent_review::render_facts_with(&facts, self.budget);
+        let mut brief = agent_review::render_facts_with(&facts, self.budget);
+        if let Some(note) = index_note {
+            brief.push('\n');
+            brief.push_str(&note);
+            brief.push('\n');
+        }
         Ok(agent_core::GroundedReview { brief, facts })
     }
 
@@ -502,6 +513,24 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
             )
             .collect_deadline(),
         )
+    }
+}
+
+#[cfg(feature = "review")]
+impl WorktreeGrounder {
+    /// The search backend for one review, and the brief's line about the row index.
+    pub(crate) async fn row_search(
+        &self,
+    ) -> (Option<Arc<dyn agent_core::SearchBackend>>, Option<String>) {
+        #[cfg(feature = "search")]
+        if let Some(knowledge) = &self.row_index {
+            let (search, note) = crate::fleet_index::open_row_search(knowledge.clone()).await;
+            return (search, Some(note));
+        }
+        // Rows only get their own index with `search` built in.
+        #[cfg(not(feature = "search"))]
+        let _ = &self.row_index;
+        (self.search.clone(), None)
     }
 }
 

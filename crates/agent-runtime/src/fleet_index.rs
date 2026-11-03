@@ -16,9 +16,15 @@
 //!    `ready`, `stale`, `failed`). A failed or stale row keeps serving its last good index.
 //! 5. **GC.** Only the current and the previous good generation are kept.
 //!
-//! Everything lives under the row's tenant-scoped workspace, so one tenant's index is never
-//! another's, even for the same public repo. Indexing pauses while the fleet root's
-//! filesystem is short of space; reviews carry on.
+//! Everything lives under the row's workspace `<fleet_root>/<user>/<id>/`, and a row's
+//! `user` is its tenant: the fleet service binds it to the caller's tenant on every write
+//! (`ReviewFleetSvc::put`). So one tenant's index is never another's, even for the same
+//! public repo. Indexing pauses while the fleet root's filesystem is short of space;
+//! reviews carry on.
+//!
+//! Reviews read the index through [`open_row_search`] (review-graph 5b-i), read-only. A
+//! review holds the generation it opened; GC keeps the previous generation, and builds
+//! are at least `refresh_secs` apart, so a generation outlives the reviews using it.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -145,6 +151,89 @@ impl Layout {
     fn generation(&self, sha: &str) -> PathBuf {
         self.knowledge.join(sha)
     }
+}
+
+/// A row's search index as a review sees it (review-graph 5b-i).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RowIndex {
+    /// A finished index of `base_sha`. `state` is the row's current status: a `stale` or
+    /// `failed` row still serves its last good index.
+    Ready {
+        dir: PathBuf,
+        base_sha: String,
+        files: u64,
+        partial: bool,
+        state: FleetIndexState,
+    },
+    /// No finished index yet; the review goes without one. The string says why.
+    NotReady(String),
+}
+
+/// The row's last good index under `knowledge` (`<fleet_root>/<user>/<id>/knowledge`),
+/// read from its status and checked against its manifest. Blocking (two small reads).
+pub(crate) fn row_index(knowledge: &Path) -> RowIndex {
+    let layout = Layout {
+        knowledge: knowledge.to_path_buf(),
+    };
+    let Some(status) = read_json::<FleetIndexStatus>(&layout.status()) else {
+        return RowIndex::NotReady("not built yet".into());
+    };
+    let Some(sha) = commit_sha(&status.base_sha) else {
+        return RowIndex::NotReady(status.state.as_str().into());
+    };
+    let generation = layout.generation(sha);
+    let finished = read_json::<KnowledgeManifest>(&generation.join(MANIFEST_FILE))
+        .is_some_and(|m| m.format == INDEX_FORMAT && m.base_sha == sha);
+    if !finished {
+        return RowIndex::NotReady("its last build is incomplete".into());
+    }
+    RowIndex::Ready {
+        dir: generation.join("index"),
+        base_sha: sha.to_string(),
+        files: status.files,
+        partial: status.partial,
+        state: status.state,
+    }
+}
+
+/// Open the row's index read-only for one review, and the line the brief carries about
+/// it. `None` when there is no finished index: the review goes without one rather than
+/// fall back to the process-global index, which is of a different repo.
+pub(crate) async fn open_row_search(
+    knowledge: PathBuf,
+) -> (Option<Arc<dyn agent_core::SearchBackend>>, String) {
+    let opened = tokio::task::spawn_blocking(move || match row_index(&knowledge) {
+        RowIndex::Ready {
+            dir,
+            base_sha,
+            files,
+            partial,
+            state,
+        } => {
+            let partial = if partial { ", partial" } else { "" };
+            let stale = match state {
+                FleetIndexState::Ready => String::new(),
+                other => format!("; the row is {}, so this is the last good index", other.as_str()),
+            };
+            let note = format!(
+                "Repo index: the default branch at {} ({files} files{partial}{stale}). Search hits are pre-PR content.",
+                &base_sha[..12]
+            );
+            match TantivyBackend::open_read_only(dir) {
+                Ok(b) => (Some(Arc::new(b) as Arc<dyn agent_core::SearchBackend>), note),
+                Err(e) => {
+                    tracing::warn!(error = %e, "fleet index: opening the row index failed");
+                    (None, "Repo index: could not be opened; nearby-code search is skipped.".into())
+                }
+            }
+        }
+        RowIndex::NotReady(why) => (
+            None,
+            format!("Repo index: {why}; nearby-code search is skipped until it is ready."),
+        ),
+    })
+    .await;
+    opened.unwrap_or_else(|_| (None, "Repo index: unavailable.".into()))
 }
 
 /// `s` if it is a full commit id (40 or 64 lowercase hex), else `None`. The base comes
@@ -678,6 +767,12 @@ async fn gc(repo: &Arc<dyn RepoBackend>, layout: &Layout, current: &str, previou
     if let Ok(entries) = std::fs::read_dir(&layout.knowledge) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
+            // A status write's temp file left by a crash. The one worker is between
+            // writes here, so any temp file is a leftover.
+            if name.ends_with(".tmp") && e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::remove_file(e.path());
+                continue;
+            }
             let is_generation =
                 commit_sha(&name).is_some() && e.file_type().is_ok_and(|t| t.is_dir());
             if is_generation && !keep(&name) {
@@ -1114,6 +1209,161 @@ mod tests {
                 assert_eq!(gens, 0, "{description}: no generation left");
             }
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Seed {
+        Nothing,
+        Pending,
+        Built,
+        FailedAfterBuilt,
+        TraversalSha,
+        ManifestGone,
+        ManifestOtherSha,
+    }
+
+    // What a review sees of a row's index: only a finished, consistent generation is
+    // ever opened; a stale or failed row still serves its last good one.
+    #[rstest]
+    #[case::negative_never_built("no status: not built yet", Seed::Nothing, None)]
+    #[case::corner_pending_has_no_index("pending: nothing to open", Seed::Pending, None)]
+    #[case::positive_ready("a built row is ready", Seed::Built, Some(FleetIndexState::Ready))]
+    #[case::positive_failed_serves_last_good(
+        "a failed rebuild still serves the last good index",
+        Seed::FailedAfterBuilt,
+        Some(FleetIndexState::Failed)
+    )]
+    #[case::adversarial_traversal_sha_never_opened(
+        "a hostile base_sha in the status names no directory",
+        Seed::TraversalSha,
+        None
+    )]
+    #[case::negative_incomplete_generation(
+        "a generation without its manifest is unfinished",
+        Seed::ManifestGone,
+        None
+    )]
+    #[case::adversarial_manifest_of_another_sha(
+        "a manifest naming another base is not this index",
+        Seed::ManifestOtherSha,
+        None
+    )]
+    #[tokio::test]
+    async fn row_index_cases(
+        #[case] description: &str,
+        #[case] seed: Seed,
+        #[case] expected: Option<FleetIndexState>,
+    ) {
+        let fx = Fixture::new(&[("a.rs", "fn needle_symbol() {}\n")]);
+        let r = row("acme", "web");
+        let layout = Layout::for_row(&fx.root, &r).unwrap();
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        match seed {
+            Seed::Nothing => {}
+            Seed::Pending => {
+                write_json(&layout.status(), &FleetIndexStatus::default()).unwrap();
+            }
+            Seed::Built => assert_eq!(svc.run(&r).await, Outcome::Ready),
+            Seed::FailedAfterBuilt => {
+                assert_eq!(svc.run(&r).await, Outcome::Ready);
+                let bad = inner(fx.root.clone(), Arc::new(NoRepo), limits());
+                assert_eq!(bad.run(&r).await, Outcome::Failed);
+            }
+            Seed::TraversalSha => {
+                let st = FleetIndexStatus {
+                    state: FleetIndexState::Ready,
+                    base_sha: "../../other".into(),
+                    ..Default::default()
+                };
+                write_json(&layout.status(), &st).unwrap();
+            }
+            Seed::ManifestGone | Seed::ManifestOtherSha => {
+                assert_eq!(svc.run(&r).await, Outcome::Ready);
+                let sha = status_of(&fx.root, &r).base_sha;
+                let m = layout.generation(&sha).join(MANIFEST_FILE);
+                if matches!(seed, Seed::ManifestGone) {
+                    std::fs::remove_file(m).unwrap();
+                } else {
+                    let mut man: KnowledgeManifest = read_json(&m).unwrap();
+                    man.base_sha = "b".repeat(40);
+                    write_json(&m, &man).unwrap();
+                }
+            }
+        }
+        let got = row_index(&layout.knowledge);
+        match (expected, got) {
+            (None, RowIndex::NotReady(_)) => {}
+            (
+                Some(want),
+                RowIndex::Ready {
+                    dir, state, files, ..
+                },
+            ) => {
+                assert_eq!(state, want, "{description}");
+                assert_eq!(files, 1, "{description}");
+                assert!(
+                    dir.starts_with(&layout.knowledge),
+                    "{description}: confined"
+                );
+            }
+            (want, got) => panic!("{description}: expected {want:?}, got {got:?}"),
+        }
+    }
+
+    /// The review's search opens the row's index read-only and finds its content, and
+    /// the brief line names the base; before a build there is no backend and the line
+    /// says so (no fallback to another repo's index).
+    #[tokio::test]
+    async fn open_row_search_serves_the_row_index() {
+        let fx = Fixture::new(&[("a.rs", "fn needle_symbol() {}\n")]);
+        let r = row("acme", "web");
+        let knowledge = Layout::for_row(&fx.root, &r).unwrap().knowledge;
+        let (none, note) = open_row_search(knowledge.clone()).await;
+        assert!(none.is_none() && note.contains("not built yet"), "{note}");
+
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        let sha = status_of(&fx.root, &r).base_sha;
+        let (search, note) = open_row_search(knowledge).await;
+        assert!(
+            note.contains(&sha[..12]) && note.contains("pre-PR"),
+            "{note}"
+        );
+        let hits = search
+            .expect("a ready index opens")
+            .query(&agent_core::SearchQuery {
+                text: "needle_symbol".into(),
+                mode: agent_core::SearchMode::Literal,
+                path_globs: Vec::new(),
+                lang: None,
+                limit: 5,
+                fuzzy_distance: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].path,
+            Path::new("a.rs"),
+            "repo-relative, for any checkout"
+        );
+    }
+
+    /// A status temp file left by a crash is swept by the next build's GC; the status
+    /// and generations are kept.
+    #[tokio::test]
+    async fn corner_gc_sweeps_leftover_temp_files() {
+        let fx = Fixture::new(&[("a.rs", "fn a() {}\n")]);
+        let r = row("acme", "web");
+        let layout = Layout::for_row(&fx.root, &r).unwrap();
+        std::fs::create_dir_all(&layout.knowledge).unwrap();
+        let leftover = layout.knowledge.join("status.4242.7.tmp");
+        std::fs::write(&leftover, "{").unwrap();
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        assert!(!leftover.exists(), "the leftover temp file is gone");
+        let st = status_of(&fx.root, &r);
+        assert!(layout.status().exists() && layout.generation(&st.base_sha).exists());
     }
 
     /// While the mirror's first clone runs, the row waits (pending) and is retried.

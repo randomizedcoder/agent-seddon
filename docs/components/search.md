@@ -169,6 +169,12 @@ oversized, expired }` for the most recent scan; the fleet repo index records `tr
 `.git` (a worktree's `.git` file names a host path). `scan` and
 `compare` are unchanged and unlimited (`ScanLimits::UNLIMITED`).
 
+**Read-only open.** `TantivyBackend::open_read_only(index_dir)` opens an existing, finished
+index for queries only: nothing is created (an empty or missing dir errs), no writer lock
+is taken, so any number of readers share an index another process builds, and `reindex`
+errs. Its `status` reads the saved manifest without rescanning. The fleet opens each
+row's repo index this way for its reviews.
+
 ## Listing files from the index (`index_ls`)
 
 Besides `query`, the `SearchBackend` seam exposes `list_files(globs)` — the

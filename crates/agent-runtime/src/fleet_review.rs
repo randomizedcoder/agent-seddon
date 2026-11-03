@@ -180,6 +180,8 @@ pub(crate) struct FleetReviewCtxFactory {
     metrics: Metrics,
     /// Built `(repo, grounder)` by `(user, id)`, with the [`CacheFingerprint`] it was built
     /// from. A repeated trigger reuses the checkout + engine while the fingerprint matches.
+    /// Whether rows have their own repo index ([`Self::with_row_indexes`]).
+    row_indexes: bool,
     cache: Mutex<HashMap<(String, String), (CacheFingerprint, FleetReviewCtx)>>,
 }
 
@@ -208,8 +210,17 @@ impl FleetReviewCtxFactory {
             budget,
             forge_registry,
             metrics,
+            row_indexes: false,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Ground each row's reviews on its own repo index (review-graph 5b-i), set when
+    /// `[review_fleet.index]` builds them. Without it the grounder keeps the shared
+    /// search backend.
+    pub(crate) fn with_row_indexes(mut self) -> Self {
+        self.row_indexes = true;
+        self
     }
 }
 
@@ -344,6 +355,7 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
             review: self.review.clone(),
             metrics: self.metrics.clone(),
             budget: self.budget,
+            row_index: self.row_indexes.then(|| base.join("knowledge")),
         });
 
         let ctx = FleetReviewCtx { repo, grounder };
@@ -1052,5 +1064,77 @@ mod tests {
             rec.specs().is_empty(),
             "no git spawn before the credential resolves"
         );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Wiring {
+        Shared,
+        RowIndexUnbuilt,
+    }
+
+    // Which search a fleet review grounds on: the shared backend only when rows have no
+    // index of their own; with row indexes, the row's (and never the shared backend,
+    // which indexes the fleet process's own tree, not this repo).
+    #[cfg(feature = "search")]
+    #[rstest::rstest]
+    #[case::negative_no_row_index_keeps_shared(
+        "without row indexes the shared backend is used, with no brief line",
+        Wiring::Shared,
+        true,
+        None
+    )]
+    #[case::adversarial_unbuilt_row_index_never_falls_back(
+        "a row index not built yet means no search, not another repo's",
+        Wiring::RowIndexUnbuilt,
+        false,
+        Some("not built yet")
+    )]
+    #[tokio::test]
+    async fn grounder_search_choice(
+        #[case] description: &str,
+        #[case] wiring: Wiring,
+        #[case] shared_used: bool,
+        #[case] note: Option<&str>,
+    ) {
+        let tmp = agent_testkit::tempdir();
+        let shared: Arc<dyn agent_core::SearchBackend> =
+            Arc::new(agent_testkit::FixtureSearch::new());
+        let repo: Arc<dyn agent_core::RepoBackend> = Arc::new(agent_git::CliBackend::new(
+            tmp.join("mirror"),
+            tmp.join("mirror"),
+            tmp.join("worktrees"),
+            "",
+        ));
+        let g = WorktreeGrounder {
+            repo,
+            search: Some(shared.clone()),
+            forge: None,
+            sandbox: None,
+            pool: None,
+            tool_provider: None,
+            review: ReviewCfg::default(),
+            metrics: Metrics::new(),
+            budget: 4096,
+            row_index: match wiring {
+                Wiring::Shared => None,
+                Wiring::RowIndexUnbuilt => Some(tmp.join("knowledge")),
+            },
+        };
+        let (search, got_note) = g.row_search().await;
+        assert_eq!(
+            search.as_ref().is_some_and(|s| Arc::ptr_eq(s, &shared)),
+            shared_used,
+            "{description}"
+        );
+        if !shared_used {
+            assert!(search.is_none(), "{description}: no fallback");
+        }
+        match note {
+            None => assert!(got_note.is_none(), "{description}"),
+            Some(want) => assert!(
+                got_note.as_deref().is_some_and(|n| n.contains(want)),
+                "{description}: {got_note:?}"
+            ),
+        }
     }
 }
