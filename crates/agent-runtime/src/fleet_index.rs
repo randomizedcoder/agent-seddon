@@ -2122,6 +2122,50 @@ mod tests {
         assert_eq!(cfg.scope_for(repo), expected, "{description}");
     }
 
+    #[rstest]
+    #[case::positive_default_is_valid("the default scopes load", "", None)]
+    #[case::positive_set_is_valid(
+        "a set entry loads",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"src\"]\n",
+        None
+    )]
+    #[case::boundary_no_scopes_is_valid("`scopes = []` loads", "scopes = []\n", None)]
+    #[case::negative_empty_paths(
+        "an entry with no paths would index the repo whole",
+        "[[scopes]]\nrepo = \"NixOS/nixpkgs\"\npaths = []\n",
+        Some("has no `paths`")
+    )]
+    #[case::negative_empty_repo(
+        "an entry with no repo matches nothing",
+        "[[scopes]]\nrepo = \" \"\npaths = [\"lib\"]\n",
+        Some("empty `repo`")
+    )]
+    #[case::corner_duplicate_across_forms(
+        "the slug and owner/name forms of one repo are a duplicate",
+        "[[scopes]]\nrepo = \"NixOS/nixpkgs\"\npaths = [\"lib\"]\n[[scopes]]\nrepo = \"nixos__NIXPKGS\"\npaths = [\"pkgs\"]\n",
+        Some("twice")
+    )]
+    #[case::adversarial_huge_repo_name_clipped(
+        "a huge repo name is clipped in the error",
+        &format!("[[scopes]]\nrepo = \"{}\"\npaths = []\n", "a".repeat(10_000)),
+        Some("has no `paths`")
+    )]
+    fn scope_validation(
+        #[case] description: &str,
+        #[case] toml_src: &str,
+        #[case] expected_err: Option<&str>,
+    ) {
+        let cfg: FleetIndexCfg = toml::from_str(toml_src).expect("parses");
+        match (cfg.validate(), expected_err) {
+            (Ok(()), None) => {}
+            (Err(e), Some(want)) => {
+                assert!(e.contains(want), "{description}: {e}");
+                assert!(e.len() < 400, "{description}: error is bounded");
+            }
+            (got, want) => panic!("{description}: got {got:?}, want {want:?}"),
+        }
+    }
+
     /// A zero file, file-size or byte cap would build a permanently empty index.
     #[test]
     fn adversarial_zero_caps_clamped_to_one() {
@@ -2367,42 +2411,48 @@ mod tests {
         scoped("acme/web", &["lib"]),
         scoped("acme/web", &["lib"]),
         1,
-        Outcome::Unchanged
+        Outcome::Unchanged,
+        1
     )]
     #[case::positive_unscoped_indexes_all(
         "a repo with no scope is indexed whole",
         Vec::new(),
         Vec::new(),
         3,
-        Outcome::Unchanged
+        Outcome::Unchanged,
+        3
     )]
     #[case::corner_other_repo_scope_ignored(
         "another repo's scope does not apply",
         scoped("NixOS/nixpkgs", &["lib"]),
         scoped("NixOS/nixpkgs", &["lib"]),
         3,
-        Outcome::Unchanged
+        Outcome::Unchanged,
+        3
     )]
     #[case::corner_scope_change_rebuilds(
         "widening the scope rebuilds the unmoved base",
         scoped("acme__web", &["lib"]),
         scoped("acme__web", &["lib", "src"]),
         1,
-        Outcome::Ready
+        Outcome::Ready,
+        2
     )]
     #[case::negative_scope_removed_rebuilds(
         "dropping the scope rebuilds the whole repo",
         scoped("ACME/Web", &["lib"]),
         Vec::new(),
         1,
-        Outcome::Ready
+        Outcome::Ready,
+        3
     )]
     #[case::adversarial_traversal_scope_indexes_nothing(
         "a scope of only `..` paths indexes nothing rather than the whole repo",
         scoped("acme/web", &["..", "../../etc"]),
         scoped("acme/web", &["..", "../../etc"]),
         0,
-        Outcome::Unchanged
+        Outcome::Unchanged,
+        0
     )]
     #[tokio::test]
     async fn scoped_index(
@@ -2411,6 +2461,7 @@ mod tests {
         #[case] second: Vec<FleetIndexScope>,
         #[case] expected_files: u64,
         #[case] expected_second: Outcome,
+        #[case] expected_files_after: u64,
     ) {
         let fx = Fixture::new(&[
             ("lib/a.rs", "pub fn a() {}\n"),
@@ -2434,6 +2485,11 @@ mod tests {
             again.run(&r).await,
             expected_second,
             "{description}: second pass"
+        );
+        assert_eq!(
+            status_of(&fx.root, &r).files,
+            expected_files_after,
+            "{description}: files after the second pass (built under the new scope)"
         );
     }
 

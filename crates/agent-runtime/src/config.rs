@@ -285,15 +285,41 @@ pub struct FleetIndexCfg {
 )]
 pub struct FleetIndexScope {
     /// The row's repo, as `owner/name` or the roster slug `owner__name`; matched
-    /// without regard to case.
+    /// without regard to case. A roster slug's `__` separates owner and name, so
+    /// neither may contain `__` (GitHub names never do).
     pub repo: String,
     /// Paths relative to the repo root. A path with `..`, a leading `/` or `.`, or one
     /// reached through a symlink is skipped. An entry whose paths are all skipped
-    /// indexes nothing.
+    /// indexes nothing. Must not be empty: to index a repo whole, leave it out.
     pub paths: Vec<String>,
 }
 
 impl FleetIndexCfg {
+    /// Load-time checks of `scopes`: an entry with no repo or no paths, or a second
+    /// entry for one repo, is a mistake that would otherwise index the repo whole.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.scopes {
+            let key = scope_key(&s.repo);
+            let shown = agent_core::campaign::truncate_chars(s.repo.trim(), 80);
+            if key.is_empty() {
+                return Err("`[[review_fleet.index.scopes]]` entry has an empty `repo`".into());
+            }
+            if s.paths.is_empty() {
+                return Err(format!(
+                    "`[[review_fleet.index.scopes]]` for {shown:?} has no `paths`; \
+                     leave the entry out to index the repo whole"
+                ));
+            }
+            if !seen.insert(key) {
+                return Err(format!(
+                    "`[[review_fleet.index.scopes]]` lists {shown:?} twice"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The paths `repo` (a roster slug or `owner/name`) is indexed under; empty means
     /// the whole repo.
     pub fn scope_for(&self, repo: &str) -> &[String] {

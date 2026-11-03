@@ -173,6 +173,9 @@ GC refcount.
 - **Rebuild on change.** The scope is recorded in the generation's manifest; a row whose
   configured scope differs from it is rebuilt even on an unmoved base.
 - **Cooldown.** `reindex_cooldown_secs` (default 300, clamped to 30..=86400).
+- **Load-time checks** (from #693's review). An entry with no `paths` (which would index
+  the repo whole), an empty `repo`, or a second entry for one repo (`owner/name` and
+  `owner__name` are the same) refuses to load.
 
 Left for 5a-ii-d and later: a base-moved trigger from a push webhook (the `refresh_secs`
 poll already rebuilds on a new base), the incremental refresh, `knowledge_max_bytes`, and
