@@ -1026,6 +1026,15 @@ mod tests {
         true, true, "web", Some("acme"), ReindexOutcome::TooSoon { retry_after_secs: 42 },
         Ok(("too_soon", 42))
     )]
+    #[case::boundary_busy_queue(
+        "a full index queue says busy, with no retry hint",
+        true,
+        true,
+        "web",
+        Some("acme"),
+        ReindexOutcome::Busy,
+        Ok(("busy", 0))
+    )]
     #[case::negative_no_indexer_unimplemented(
         "a process without an indexer refuses",
         false,

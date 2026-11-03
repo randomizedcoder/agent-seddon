@@ -6676,6 +6676,8 @@ pub enum ReindexOutcome {
     Coalesced,
     /// A rebuild was asked for within the cooldown; nothing was queued.
     TooSoon { retry_after_secs: u32 },
+    /// The queue is full; nothing was queued and no cooldown was spent.
+    Busy,
 }
 
 impl ReindexOutcome {
@@ -6684,6 +6686,7 @@ impl ReindexOutcome {
             Self::Queued => "queued",
             Self::Coalesced => "coalesced",
             Self::TooSoon { .. } => "too_soon",
+            Self::Busy => "busy",
         }
     }
 }

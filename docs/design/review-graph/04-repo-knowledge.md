@@ -148,7 +148,18 @@ GC refcount.
   an unlinked file stays readable while it is open, so removing a generation never breaks
   the review holding it. The refcount the design asked for is not needed.
 
-Left for 5a-ii-b and later: the portal badge and Re-index button (contact sheet), a
+### As built (5a-ii-b)
+
+- **Portal.** Each Fleet roster row with an index shows its state as a glyph of its own
+  shape (ready, stale, pending/indexing, failed), never by colour alone, with the base,
+  file count, `partial` and the redacted error in its tooltip. For a caller holding
+  `(trigger, fleet)` on an enabled row the badge is also the Re-index button, and the
+  reply (`queued`, `coalesced`, `too_soon` with seconds left, `busy`) is shown as a snack.
+- **Review items from #691.** A failed swap restores the served generation; a full queue
+  answers `busy` and spends no cooldown; a forced job that only waited is forced again on
+  the next pass; `GrpcFleet::reindex` exists and the RPC has a wire round trip.
+
+Left for 5a-ii-c and later: a
 base-moved trigger from a push webhook (the `refresh_secs` poll already rebuilds on a new
 base), the incremental refresh, path-scoped nixpkgs indexing, `knowledge_max_bytes`, and
 the language indexes, history signals and overview.

@@ -6,8 +6,8 @@
 //! nothing here resolves it.
 
 use agent_core::{
-    ApproveOutcome, DraftBody, Error, FleetRegistry, FleetSession, Result, ReviewDraftFilter,
-    ReviewDraftRecord, UpdateOutcome,
+    ApproveOutcome, DraftBody, Error, FleetRegistry, FleetSession, ReindexOutcome, Result,
+    ReviewDraftFilter, ReviewDraftRecord, UpdateOutcome,
 };
 use agent_proto::pb;
 use async_trait::async_trait;
@@ -44,6 +44,28 @@ impl GrpcFleet {
         };
         let resp = unary!(self, review_now, req).map_err(status_to_err)?;
         Ok(resp.into_inner().accepted)
+    }
+
+    /// Rebuild a roster row's repo index now, even on an unmoved base (review-graph
+    /// 5a-ii). Served only by the `--serve-fleet` process that indexes rows; elsewhere
+    /// `UNIMPLEMENTED`, and a disabled row is `FAILED_PRECONDITION`. An unrecognized
+    /// outcome string is a protocol fault (`Err`).
+    pub async fn reindex(&self, id: &str) -> Result<ReindexOutcome> {
+        let req = pb::FleetReindexRequest { id: id.to_string() };
+        let r = unary!(self, reindex, req)
+            .map_err(status_to_err)?
+            .into_inner();
+        match r.outcome.as_str() {
+            "queued" => Ok(ReindexOutcome::Queued),
+            "coalesced" => Ok(ReindexOutcome::Coalesced),
+            "too_soon" => Ok(ReindexOutcome::TooSoon {
+                retry_after_secs: r.retry_after_secs,
+            }),
+            "busy" => Ok(ReindexOutcome::Busy),
+            _ => Err(Error::Fleet(
+                "reindex: the server sent an unknown outcome".into(),
+            )),
+        }
     }
 
     /// Approve a persisted draft → post it to its forge (review-fleet C17). The human

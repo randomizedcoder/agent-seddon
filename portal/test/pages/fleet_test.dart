@@ -56,8 +56,22 @@ void main() {
     String id = 's1',
     String repo = 'owner__name',
     bool enabled = false,
+    FleetIndexStatus? index,
   }) =>
-      FleetSession(id: id, repo: repo, enabled: enabled);
+      FleetSession(id: id, repo: repo, enabled: enabled, index: index);
+
+  FleetIndexStatus indexed({
+    String state = 'ready',
+    String error = '',
+    bool partial = false,
+  }) =>
+      FleetIndexStatus(
+        state: state,
+        baseSha: 'a' * 40,
+        files: Int64(1234),
+        partial: partial,
+        error: error,
+      );
 
   ForgeCard card(String id,
           {String kind = 'github',
@@ -694,6 +708,119 @@ void main() {
           final req = call!.request as FleetSetEnabledRequest;
           expect(req.id, 's1');
           expect(req.enabled, isTrue);
+          await robot.settle();
+
+        // ── repo index badge + Re-index ──────────────────────────────────────────
+        case 'positive_index_chip_shows_state':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          await robot.load();
+          await robot.expandSessions();
+          expect(robot.exists('fleet.session.index.s1'), isTrue);
+          final tip = robot.tooltipOf('fleet.session.index.s1')!;
+          expect(tip, contains('Index: ready'));
+          expect(tip, contains('base aaaaaaaaaaaa'));
+          expect(tip, contains('1234 files'));
+          expect(robot.exists('fleet.session.reindex.s1'), isTrue);
+          await robot.settle();
+
+        case 'negative_no_index_no_chip':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse = roster([session(id: 's1', enabled: true)]);
+          await robot.load();
+          await robot.expandSessions();
+          expect(robot.exists('fleet.session.index.s1'), isFalse);
+          expect(robot.exists('fleet.session.reindex.s1'), isFalse);
+          await robot.settle();
+
+        case 'corner_failed_index_names_error':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse = roster([
+            session(
+                id: 's1',
+                enabled: true,
+                index: indexed(state: 'failed', error: 'the checkout took too long'))
+          ]);
+          await robot.load();
+          await robot.expandSessions();
+          final tip = robot.tooltipOf('fleet.session.index.s1')!;
+          expect(tip, contains('Index: failed'));
+          expect(tip, contains('the checkout took too long'));
+          await robot.settle();
+
+        case 'adversarial_hostile_index_fields_inert':
+          const hostile = '<b>x</b> [click](https://evil.invalid) \u202e';
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse = roster([
+            session(
+                id: 's1',
+                enabled: true,
+                index: indexed(state: 'pwned', error: hostile))
+          ]);
+          await robot.load();
+          await robot.expandSessions();
+          // An unknown state still gets a glyph (the waiting one), and the error
+          // rides verbatim as plain tooltip text: nothing is rendered as markup.
+          expect(robot.exists('fleet.session.index.s1'), isTrue);
+          final tip = robot.tooltipOf('fleet.session.index.s1')!;
+          expect(tip, contains('Index: pwned'));
+          expect(tip, contains(hostile));
+          await robot.settle();
+
+        case 'positive_reindex_fires':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          fake.reindexResponse = FleetReindexReply()..outcome = 'queued';
+          await robot.load();
+          await robot.expandSessions();
+          await robot.reindex('s1');
+          final call = robot.log.last(FleetRobot.reindexRpc);
+          expect((call!.request as FleetReindexRequest).id, 's1');
+          await robot.pumpUntil(() => robot.textShown('Re-index of s1 queued.'),
+              reason: 'the queued snack');
+          await robot.settle();
+
+        case 'boundary_reindex_too_soon_says_when':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          fake.reindexResponse = FleetReindexReply()
+            ..outcome = 'too_soon'
+            ..retryAfterSecs = 42;
+          await robot.load();
+          await robot.expandSessions();
+          await robot.reindex('s1');
+          await robot.pumpUntil(() => robot.textShown('try again in 42 s'),
+              reason: 'the too-soon snack');
+          await robot.settle();
+
+        case 'negative_disabled_row_no_reindex':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: false, index: indexed())]);
+          await robot.load();
+          await robot.expandSessions();
+          expect(robot.exists('fleet.session.index.s1'), isTrue,
+              reason: 'the badge still shows the last index');
+          expect(robot.exists('fleet.session.reindex.s1'), isFalse);
+          await robot.settle();
+
+        case 'negative_reindex_error_snack':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          fake.error = GrpcError.failedPrecondition('fleet row `s1` is disabled');
+          fake.errorMethod = 'Reindex';
+          await robot.load();
+          await robot.expandSessions();
+          await robot.reindex('s1');
+          await robot.pumpUntil(
+              () => robot.textShown('Re-index failed: fleet row `s1` is disabled'),
+              reason: 'the error snack');
+          expect(robot.exists('fleet.session.reindex.s1'), isTrue,
+              reason: 'the page stays usable');
           await robot.settle();
 
         // ── detail pane ──────────────────────────────────────────────────────────

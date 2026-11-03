@@ -550,7 +550,8 @@ reviews have no search at all, for the same reason. The review session also gets
 changed files are flagged as pre-PR content. `Reindex` (`POST
 /v1/fleet/sessions/{id}/reindex`) rebuilds the caller's own enabled row now, at most once
 per row every 5 minutes; builds are staged and swapped in, so the served index never goes
-away mid-build (5a-ii-a). Design and the remaining steps:
+away mid-build (5a-ii-a). The portal's Fleet roster shows each row's index state as a
+badge, which is also the Re-index button (5a-ii-b). Design and the remaining steps:
 [04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)

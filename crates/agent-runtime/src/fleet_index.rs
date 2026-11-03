@@ -462,9 +462,8 @@ impl Queue {
         let outcome = if self.rows.contains_key(&key) {
             ReindexOutcome::Coalesced
         } else if self.order.len() >= MAX_QUEUED_ROWS {
-            return ReindexOutcome::TooSoon {
-                retry_after_secs: u32::try_from(REINDEX_COOLDOWN.as_secs()).unwrap_or(u32::MAX),
-            };
+            // Not a cooldown: nothing is recorded, so the caller may ask again at once.
+            return ReindexOutcome::Busy;
         } else {
             self.order.push_back(key.clone());
             ReindexOutcome::Queued
@@ -472,9 +471,18 @@ impl Queue {
         self.rows.insert(key.clone(), row.clone());
         self.forced.insert(key.clone());
         // Bounded like `checked`: requests older than the cooldown limit nothing.
-        if self.last_forced.len() >= MAX_QUEUED_ROWS {
+        if self.last_forced.len() > MAX_QUEUED_ROWS {
             self.last_forced
                 .retain(|_, at| now.saturating_duration_since(*at) < REINDEX_COOLDOWN);
+            // A force kept for a row no longer queued nor recently asked for (a deleted
+            // row's) is dropped with it.
+            let live: std::collections::HashSet<_> = self
+                .rows
+                .keys()
+                .chain(self.last_forced.keys())
+                .cloned()
+                .collect();
+            self.forced.retain(|k| live.contains(k));
         }
         self.last_forced.insert(key, now);
         outcome
@@ -489,7 +497,8 @@ impl Queue {
     }
 
     /// Record a finished check. A row left `Waiting` is not recorded, so the next pass
-    /// tries it again. Past [`MAX_QUEUED_ROWS`] records, those older than `refresh` (which
+    /// tries it again; if its job was `forced`, the next pass's copy is forced too, so a
+    /// rebuild asked for while the mirror was cloning (or the disk was short) still runs. Past [`MAX_QUEUED_ROWS`] records, those older than `refresh` (which
     /// throttle nothing any more, such as a deleted row's) are dropped, so the map stays
     /// bounded by the live rows.
     fn checked(
@@ -497,11 +506,15 @@ impl Queue {
         tenant: &str,
         row: &FleetSession,
         outcome: Outcome,
+        forced: bool,
         refresh: Duration,
         now: Instant,
     ) {
         let key = (tenant.to_string(), row.id.clone());
         if outcome == Outcome::Waiting {
+            if forced {
+                self.forced.insert(key.clone());
+            }
             self.checked.remove(&key);
         } else {
             self.checked.insert(key, (now, RowFingerprint::of(row)));
@@ -565,7 +578,14 @@ impl FleetIndexService {
                         .queue
                         .lock()
                         .expect("fleet index queue poisoned")
-                        .checked(&tenant, &row, outcome, inner.limits.refresh, Instant::now());
+                        .checked(
+                            &tenant,
+                            &row,
+                            outcome,
+                            force,
+                            inner.limits.refresh,
+                            Instant::now(),
+                        );
                 }
             });
         });
@@ -876,7 +896,14 @@ fn swap_in(staged: &Path, served: &Path) -> Result<()> {
             std::fs::remove_dir_all(&retired)?;
         }
         std::fs::rename(served, &retired)?;
-        std::fs::rename(staged, served)?;
+        if let Err(e) = std::fs::rename(staged, served) {
+            // Put the served generation back, so a failed swap leaves it as it was.
+            if let Err(back) = std::fs::rename(&retired, served) {
+                tracing::warn!(dir = %served.display(), error = %back,
+                    "fleet index: could not restore the served generation after a failed swap");
+            }
+            return Err(e.into());
+        }
         if let Err(e) = std::fs::remove_dir_all(&retired) {
             tracing::warn!(dir = %retired.display(), error = %e, "fleet index: could not remove a retired generation");
         }
@@ -1913,7 +1940,9 @@ mod tests {
                 Step::Pop => {
                     q.pop().expect("a queued row");
                 }
-                Step::Done(t, id, outcome) => q.checked(t, &row(t, id), outcome, refresh, now),
+                Step::Done(t, id, outcome) => {
+                    q.checked(t, &row(t, id), outcome, false, refresh, now);
+                }
                 Step::Wait(secs) => now += Duration::from_secs(secs),
             }
         }
@@ -1952,6 +1981,7 @@ mod tests {
                 "acme",
                 &row("acme", &format!("gone{i}")),
                 Outcome::Ready,
+                false,
                 refresh,
                 start,
             );
@@ -1962,7 +1992,14 @@ mod tests {
             "at the cap, nothing pruned"
         );
         let later = start + refresh;
-        q.checked("acme", &row("acme", "live"), Outcome::Ready, refresh, later);
+        q.checked(
+            "acme",
+            &row("acme", "live"),
+            Outcome::Ready,
+            false,
+            refresh,
+            later,
+        );
         assert_eq!(
             q.checked.len(),
             1,
@@ -2047,6 +2084,8 @@ mod tests {
         Push(&'static str, &'static str),
         /// Pop the next row and expect it to be forced or not.
         Pop(bool),
+        /// The last popped row's job ended with this outcome.
+        Done(Outcome, bool),
         Wait(u64),
     }
 
@@ -2086,6 +2125,21 @@ mod tests {
         &[FStep::Force("acme", "web"), FStep::Force("globex", "web")],
         &[ReindexOutcome::Queued, ReindexOutcome::Queued]
     )]
+    #[case::corner_forced_waiting_stays_forced(
+        "a forced job that only waited (mirror cloning) is forced on the next pass",
+        &[FStep::Force("acme", "web"), FStep::Pop(true), FStep::Done(Outcome::Waiting, true), FStep::Push("acme", "web"), FStep::Pop(true)],
+        &[ReindexOutcome::Queued]
+    )]
+    #[case::negative_forced_done_not_forced_again(
+        "a forced job that ran is not forced on the next pass",
+        &[FStep::Force("acme", "web"), FStep::Pop(true), FStep::Done(Outcome::Ready, true), FStep::Wait(3601), FStep::Push("acme", "web"), FStep::Pop(false)],
+        &[ReindexOutcome::Queued]
+    )]
+    #[case::negative_unforced_waiting_not_forced(
+        "a plain job that waited stays plain",
+        &[FStep::Push("acme", "web"), FStep::Pop(false), FStep::Done(Outcome::Waiting, false), FStep::Push("acme", "web"), FStep::Pop(false)],
+        &[]
+    )]
     #[case::adversarial_spam_while_queued_is_one_job(
         "repeated requests for a queued row are refused, not queued again",
         &[FStep::Force("acme", "web"), FStep::Force("acme", "web"), FStep::Force("acme", "web"), FStep::Pop(true), FStep::Pop(false)],
@@ -2110,6 +2164,9 @@ mod tests {
                     Some((_, _, f)) => assert_eq!(f, forced, "{description}: popped row forced"),
                     None => assert!(!forced, "{description}: expected a forced row, queue empty"),
                 },
+                FStep::Done(outcome, forced) => {
+                    q.checked("acme", &row("acme", "web"), outcome, forced, refresh, now);
+                }
                 FStep::Wait(secs) => now += Duration::from_secs(secs),
             }
         }
@@ -2125,15 +2182,19 @@ mod tests {
         }
         assert_eq!(
             q.force("acme", &row("acme", "one-more"), now),
-            ReindexOutcome::TooSoon {
-                retry_after_secs: 300
-            },
+            ReindexOutcome::Busy,
             "a full queue refuses rather than grow"
         );
         assert_eq!(
             q.force("acme", &row("acme", "r0"), now),
             ReindexOutcome::Coalesced,
             "a row already in the full queue can still be forced in place"
+        );
+        q.pop();
+        assert_eq!(
+            q.force("acme", &row("acme", "one-more"), now),
+            ReindexOutcome::Queued,
+            "busy spends no cooldown: once there is room, the same request is queued"
         );
     }
 
@@ -2316,6 +2377,64 @@ mod tests {
         assert!(
             outside.join("keep.txt").exists(),
             "{description}: nothing outside the row is touched"
+        );
+    }
+
+    // swap_in: the staged build replaces the served one, and a failed swap leaves the
+    // served one where it was.
+    #[rstest]
+    #[case::positive_swaps_over_served(
+        "a staged build replaces the served one and the old copy is removed",
+        true,
+        true,
+        Ok("new")
+    )]
+    #[case::corner_first_build_nothing_served(
+        "with nothing served the staged build is renamed into place",
+        false,
+        true,
+        Ok("new")
+    )]
+    #[case::negative_failed_swap_restores_served(
+        "a failed second rename puts the served generation back",
+        true,
+        false,
+        Err("old")
+    )]
+    fn swap_in_cases(
+        #[case] description: &str,
+        #[case] served_exists: bool,
+        #[case] staged_exists: bool,
+        #[case] expected: std::result::Result<&str, &str>,
+    ) {
+        let dir = tempdir();
+        let served = dir.join("a".repeat(40));
+        let staged = dir.join(format!("{}{STAGING_SUFFIX}", "a".repeat(40)));
+        if served_exists {
+            std::fs::create_dir_all(&served).unwrap();
+            std::fs::write(served.join("which"), "old").unwrap();
+        }
+        if staged_exists {
+            std::fs::create_dir_all(&staged).unwrap();
+            std::fs::write(staged.join("which"), "new").unwrap();
+        }
+        let got = swap_in(&staged, &served);
+        let content = std::fs::read_to_string(served.join("which")).unwrap_or_default();
+        match expected {
+            Ok(want) => {
+                assert!(got.is_ok(), "{description}: {got:?}");
+                assert_eq!(content, want, "{description}");
+            }
+            Err(want) => {
+                assert!(got.is_err(), "{description}: the swap reports its failure");
+                assert_eq!(content, want, "{description}: the served copy is back");
+            }
+        }
+        let mut retired = served.as_os_str().to_owned();
+        retired.push(RETIRED_SUFFIX);
+        assert!(
+            !PathBuf::from(retired).exists(),
+            "{description}: no retired copy left"
         );
     }
 }
