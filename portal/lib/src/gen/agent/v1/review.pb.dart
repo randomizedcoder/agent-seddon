@@ -395,7 +395,7 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
   @$pb.TagNumber(7)
   void clearPatch() => $_clearField(7);
 
-  /// For a rename, the base-side path ("" otherwise): a search over the base branch
+  /// For a rename (or a copy), the base-side path ("" otherwise): a search over the base branch
   /// finds the file there, so its hits are pre-PR content too.
   @$pb.TagNumber(8)
   $core.String get oldPath => $_getSZ(7);

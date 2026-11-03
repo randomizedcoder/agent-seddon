@@ -6661,6 +6661,31 @@ pub trait FleetIndexer: Send + Sync {
     fn enqueue(&self, tenant: &str, row: &FleetSession);
     /// The row's index status, or `None` when it has never been queued or indexed.
     async fn status(&self, row: &FleetSession) -> Option<FleetIndexStatus>;
+    /// Queue `row` for a rebuild even when its base has not moved (the portal's
+    /// Re-index, review-graph 5a-ii). Coalesced per row, rate-limited per row, and never
+    /// blocks. The caller has already checked that `tenant` owns `row`.
+    fn reindex(&self, tenant: &str, row: &FleetSession) -> ReindexOutcome;
+}
+
+/// What [`FleetIndexer::reindex`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReindexOutcome {
+    /// A rebuild is queued.
+    Queued,
+    /// The row was already queued; that job now rebuilds.
+    Coalesced,
+    /// A rebuild was asked for within the cooldown; nothing was queued.
+    TooSoon { retry_after_secs: u32 },
+}
+
+impl ReindexOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Coalesced => "coalesced",
+            Self::TooSoon { .. } => "too_soon",
+        }
+    }
 }
 
 /// One review feedback item carried across rounds (review-fleet C15/C16). Model-authored

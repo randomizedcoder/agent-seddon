@@ -144,6 +144,7 @@
 "ReviewFleetService.ListReviews" = "read:review"
 "ReviewFleetService.Preflight" = "read:fleet"
 "ReviewFleetService.Put" = "write:fleet"
+"ReviewFleetService.Reindex" = "trigger:fleet"
 "ReviewFleetService.ReviewNow" = "trigger:fleet"
 "ReviewFleetService.SetEnabled" = "write:fleet"
 "ReviewFleetService.SkipReview" = "approve:review"

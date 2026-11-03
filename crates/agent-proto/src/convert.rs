@@ -5858,6 +5858,16 @@ mod tests {
         agent_core::ChangeKind::Modified,
         "src/old.rs"
     )]
+    #[case::positive_copy_round_trips(
+        Some("src/old.rs"),
+        agent_core::ChangeKind::Copied,
+        "src/old.rs"
+    )]
+    #[case::corner_old_path_on_delete_kept(
+        Some("src/old.rs"),
+        agent_core::ChangeKind::Deleted,
+        "src/old.rs"
+    )]
     fn changed_file_old_path_round_trip(
         #[case] old: Option<&str>,
         #[case] change: agent_core::ChangeKind,

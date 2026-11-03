@@ -14,7 +14,12 @@
 //!    it. The worktree is removed afterwards: only the index is kept.
 //! 4. **Status.** `knowledge/status.json` says where the row stands (`pending`, `indexing`,
 //!    `ready`, `stale`, `failed`). A failed or stale row keeps serving its last good index.
-//! 5. **GC.** Only the current and the previous good generation are kept.
+//! 5. **GC.** Only the current and the newest other finished generation are kept.
+//!
+//! A build is written to `<base-sha>.partial/` and swapped in when it is complete, so the
+//! generation a review reads is never half-written. [`FleetIndexer::reindex`] (the
+//! portal's Re-index) rebuilds a row even when its base has not moved, at most once per
+//! [`REINDEX_COOLDOWN`] per row.
 //!
 //! Everything lives under the row's workspace `<fleet_root>/<user>/<id>/`, and a row's
 //! `user` is its tenant: the fleet service binds it to the caller's tenant on every write
@@ -26,7 +31,8 @@
 //! review holds the generation it opened. GC keeps the previous generation, so it takes
 //! two more builds to remove the one a review uses; even then the review's open index
 //! keeps working, because on Unix an unlinked file stays readable while it is open (its
-//! segments are already mapped). A refcount is 5a-ii.
+//! segments are already mapped). That is why there is no refcount: removing a generation
+//! never breaks a review that holds it.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -34,8 +40,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use agent_core::{
-    FleetIndexState, FleetIndexStatus, FleetIndexer, FleetReviewFactory, FleetSession, RepoBackend,
-    Result, Revision, SessionKey, WorktreeSpec,
+    FleetIndexState, FleetIndexStatus, FleetIndexer, FleetReviewFactory, FleetSession,
+    ReindexOutcome, RepoBackend, Result, Revision, SessionKey, WorktreeSpec,
 };
 use agent_metrics::Metrics;
 use agent_search::{FsDocumentSource, ScanLimits, TantivyBackend};
@@ -61,6 +67,14 @@ const MAX_QUEUED_ROWS: usize = 4096;
 /// The index layout version, recorded in each manifest. Bump it when the layout changes,
 /// so an old generation is rebuilt rather than read.
 const INDEX_FORMAT: u32 = 1;
+/// A build's staging directory, `<sha>` plus this, swapped in for `<sha>` once it is
+/// complete. A suffix, so it never parses as a [`commit_sha`].
+const STAGING_SUFFIX: &str = ".partial";
+/// The generation a swap moves aside, removed straight after.
+const RETIRED_SUFFIX: &str = ".old";
+/// How soon a row can be rebuilt on request again. A rebuild of a large repo is costly,
+/// and the request comes from the portal.
+const REINDEX_COOLDOWN: Duration = Duration::from_secs(300);
 
 /// The `[review_fleet.index]` settings, clamped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +166,11 @@ impl Layout {
     /// A generation's directory. `sha` must already be a [`commit_sha`].
     fn generation(&self, sha: &str) -> PathBuf {
         self.knowledge.join(sha)
+    }
+
+    /// Where a build of `sha` is written before it is swapped in for [`Self::generation`].
+    fn staging(&self, sha: &str) -> PathBuf {
+        self.knowledge.join(format!("{sha}{STAGING_SUFFIX}"))
     }
 }
 
@@ -381,6 +400,10 @@ struct Queue {
     /// When each row was last checked, and the repo fields it was checked with. A row
     /// is not checked again within `refresh` unless those fields change.
     checked: HashMap<(String, String), (Instant, RowFingerprint)>,
+    /// Queued rows that rebuild even when their base has not moved.
+    forced: std::collections::HashSet<(String, String)>,
+    /// When each row was last asked to rebuild, for [`REINDEX_COOLDOWN`].
+    last_forced: HashMap<(String, String), Instant>,
 }
 
 /// The row fields an index depends on.
@@ -423,10 +446,46 @@ impl Queue {
         true
     }
 
-    fn pop(&mut self) -> Option<(String, FleetSession)> {
+    /// Queue `row` for a rebuild, past the `refresh` throttle. Refused within
+    /// [`REINDEX_COOLDOWN`] of the row's last request, and when the queue is full.
+    fn force(&mut self, tenant: &str, row: &FleetSession, now: Instant) -> ReindexOutcome {
+        let key = (tenant.to_string(), row.id.clone());
+        if let Some(at) = self.last_forced.get(&key) {
+            let waited = now.saturating_duration_since(*at);
+            if waited < REINDEX_COOLDOWN {
+                let left = (REINDEX_COOLDOWN - waited).as_secs().max(1);
+                return ReindexOutcome::TooSoon {
+                    retry_after_secs: u32::try_from(left).unwrap_or(u32::MAX),
+                };
+            }
+        }
+        let outcome = if self.rows.contains_key(&key) {
+            ReindexOutcome::Coalesced
+        } else if self.order.len() >= MAX_QUEUED_ROWS {
+            return ReindexOutcome::TooSoon {
+                retry_after_secs: u32::try_from(REINDEX_COOLDOWN.as_secs()).unwrap_or(u32::MAX),
+            };
+        } else {
+            self.order.push_back(key.clone());
+            ReindexOutcome::Queued
+        };
+        self.rows.insert(key.clone(), row.clone());
+        self.forced.insert(key.clone());
+        // Bounded like `checked`: requests older than the cooldown limit nothing.
+        if self.last_forced.len() >= MAX_QUEUED_ROWS {
+            self.last_forced
+                .retain(|_, at| now.saturating_duration_since(*at) < REINDEX_COOLDOWN);
+        }
+        self.last_forced.insert(key, now);
+        outcome
+    }
+
+    /// The next row, and whether it was asked to rebuild.
+    fn pop(&mut self) -> Option<(String, FleetSession, bool)> {
         let key = self.order.pop_front()?;
         let row = self.rows.remove(&key)?;
-        Some((key.0, row))
+        let force = self.forced.remove(&key);
+        Some((key.0, row, force))
     }
 
     /// Record a finished check. A row left `Waiting` is not recorded, so the next pass
@@ -493,11 +552,11 @@ impl FleetIndexService {
                         .lock()
                         .expect("fleet index queue poisoned")
                         .pop();
-                    let Some((tenant, row)) = next else {
+                    let Some((tenant, row, force)) = next else {
                         inner.wake.notified().await;
                         continue;
                     };
-                    let outcome = agent_core::in_tenant(&tenant, inner.run(&row)).await;
+                    let outcome = agent_core::in_tenant(&tenant, inner.run_job(&row, force)).await;
                     let outcome = outcome.unwrap_or_else(|| {
                         tracing::warn!(row = %row.id, "fleet index: refusing an invalid tenant");
                         Outcome::Failed
@@ -535,15 +594,37 @@ impl FleetIndexer for FleetIndexService {
             .ok()
             .flatten()
     }
+
+    fn reindex(&self, tenant: &str, row: &FleetSession) -> ReindexOutcome {
+        let outcome = self
+            .inner
+            .queue
+            .lock()
+            .expect("fleet index queue poisoned")
+            .force(tenant, row, Instant::now());
+        tracing::info!(row = %row.id, outcome = outcome.as_str(), "fleet index: rebuild requested");
+        if !matches!(outcome, ReindexOutcome::TooSoon { .. }) {
+            self.start_worker();
+            self.inner.wake.notify_one();
+        }
+        outcome
+    }
 }
 
 impl Inner {
-    /// One row's job. Never errs: a failure is recorded in the row's status and metrics.
+    /// One row's job, rebuilding only when its base moved.
+    #[cfg(test)]
     pub(crate) async fn run(&self, row: &FleetSession) -> Outcome {
+        self.run_job(row, false).await
+    }
+
+    /// One row's job; `force` rebuilds even when the base has not moved. Never errs: a
+    /// failure is recorded in the row's status and metrics.
+    pub(crate) async fn run_job(&self, row: &FleetSession, force: bool) -> Outcome {
         let fm = self.metrics.for_fleet(&row.user, &row.repo);
         let started = Instant::now();
         let outcome = match Layout::for_row(&self.root, row) {
-            Ok(layout) => self.check(row, &layout).await,
+            Ok(layout) => self.check(row, &layout, force).await,
             Err(e) => {
                 tracing::warn!(row = %row.id, error = %e, "fleet index: unusable row");
                 Outcome::Failed
@@ -556,7 +637,7 @@ impl Inner {
         outcome
     }
 
-    async fn check(&self, row: &FleetSession, layout: &Layout) -> Outcome {
+    async fn check(&self, row: &FleetSession, layout: &Layout, force: bool) -> Outcome {
         let mut status: FleetIndexStatus = read_json(&layout.status()).unwrap_or_default();
 
         if let Some(pct) = free_pct(&self.root) {
@@ -594,7 +675,8 @@ impl Inner {
             return self.fail(row, layout, &mut status, &e);
         };
 
-        let current = status.state == FleetIndexState::Ready
+        let current = !force
+            && status.state == FleetIndexState::Ready
             && status.base_sha == base
             && read_json::<KnowledgeManifest>(&layout.generation(&base).join(MANIFEST_FILE))
                 .is_some_and(|m| m.format == INDEX_FORMAT);
@@ -622,13 +704,14 @@ impl Inner {
         let built = match built {
             Ok(m) => m,
             Err(e) => {
-                remove_dir(&layout.generation(&base)).await;
+                // Only the staging copy: a rebuild of the base already served leaves the
+                // served generation as it was.
+                remove_dir(&layout.staging(&base)).await;
                 return self.fail(row, layout, &mut status, &e);
             }
         };
 
         let entry = &built.indexes[0];
-        let previous = std::mem::take(&mut status.base_sha);
         status = FleetIndexStatus {
             state: FleetIndexState::Ready,
             base_sha: base.clone(),
@@ -645,7 +728,7 @@ impl Inner {
         self.metrics
             .for_fleet(&row.user, &row.repo)
             .set_index_size(entry.bytes, entry.files);
-        gc(&repo, layout, &base, &previous).await;
+        gc(&repo, layout, &base).await;
         tracing::info!(row = %row.id, base = %base, files = entry.files, bytes = entry.bytes,
             partial = entry.partial, "fleet index: ready");
         if entry.partial {
@@ -663,7 +746,9 @@ impl Inner {
         base: &str,
     ) -> Result<KnowledgeManifest> {
         let started = Instant::now();
-        let generation = layout.generation(base);
+        // The build is written aside and swapped in when complete, so a rebuild of the
+        // base already served (a forced one) never takes that index away mid-build.
+        let generation = layout.staging(base);
         // A leftover from a crashed build is rebuilt from nothing.
         remove_dir(&generation).await;
         let wt_id = worktree_id(base);
@@ -742,6 +827,10 @@ impl Inner {
             }],
         };
         write_json(&generation.join(MANIFEST_FILE), &manifest)?;
+        let served = layout.generation(base);
+        tokio::task::spawn_blocking(move || swap_in(&generation, &served))
+            .await
+            .map_err(|e| agent_core::Error::Repo(format!("swap task panicked: {e}")))??;
         Ok(manifest)
     }
 
@@ -774,6 +863,29 @@ async fn remove_dir(dir: &Path) {
     .await;
 }
 
+/// Put the finished build at `staged` in place of `served`. A served generation is moved
+/// aside and removed: a review that has it open keeps reading it (on Unix an unlinked
+/// file stays readable while open). Between the two renames a reader finds no manifest
+/// and goes without the index for that one review.
+fn swap_in(staged: &Path, served: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(served).is_ok() {
+        let mut retired = served.as_os_str().to_owned();
+        retired.push(RETIRED_SUFFIX);
+        let retired = PathBuf::from(retired);
+        if retired.exists() {
+            std::fs::remove_dir_all(&retired)?;
+        }
+        std::fs::rename(served, &retired)?;
+        std::fs::rename(staged, served)?;
+        if let Err(e) = std::fs::remove_dir_all(&retired) {
+            tracing::warn!(dir = %retired.display(), error = %e, "fleet index: could not remove a retired generation");
+        }
+    } else {
+        std::fs::rename(staged, served)?;
+    }
+    Ok(())
+}
+
 /// Remove `*.tmp` files directly in `dir` (a crashed manifest write's leftovers).
 fn sweep_tmp(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -787,27 +899,58 @@ fn sweep_tmp(dir: &Path) {
     }
 }
 
-/// Keep the `current` and `previous` generations and remove the rest, plus any build
-/// worktree a crash left behind.
-async fn gc(repo: &Arc<dyn RepoBackend>, layout: &Layout, current: &str, previous: &str) {
-    let keep = |name: &str| name == current || name == previous;
+/// Keep the `current` generation and the newest other finished one (the fallback a
+/// review may still hold), and remove the rest: older generations, a crash's staging or
+/// retired copies, temp files, and any build worktree a crash left behind. The newest
+/// other is picked by its manifest, not taken from the status, so a rebuild of the
+/// current base (which leaves no distinct "previous" in the status) keeps it too.
+async fn gc(repo: &Arc<dyn RepoBackend>, layout: &Layout, current: &str) {
+    let mut others: Vec<(i64, String, PathBuf)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&layout.knowledge) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
+            let Ok(kind) = e.file_type() else { continue };
             // A status write's temp file left by a crash. The one worker is between
             // writes here, so any temp file is a leftover.
-            if name.ends_with(".tmp") && e.file_type().is_ok_and(|t| t.is_file()) {
+            if name.ends_with(".tmp") && kind.is_file() {
                 let _ = std::fs::remove_file(e.path());
                 continue;
             }
-            let is_generation =
-                commit_sha(&name).is_some() && e.file_type().is_ok_and(|t| t.is_dir());
-            if is_generation && !keep(&name) {
+            if !kind.is_dir() {
+                continue;
+            }
+            // Between builds no staging or retired copy is live: any one is a crash's.
+            let leftover = [STAGING_SUFFIX, RETIRED_SUFFIX].iter().any(|suffix| {
+                name.strip_suffix(suffix)
+                    .is_some_and(|sha| commit_sha(sha).is_some())
+            });
+            if leftover {
                 remove_dir(&e.path()).await;
-            } else if is_generation {
-                sweep_tmp(&e.path());
+                continue;
+            }
+            if commit_sha(&name).is_none() {
+                continue;
+            }
+            sweep_tmp(&e.path());
+            if name != current {
+                // An unfinished generation sorts first, so it is never the one kept.
+                let built_at = read_json::<KnowledgeManifest>(&e.path().join(MANIFEST_FILE))
+                    .filter(|m| m.format == INDEX_FORMAT && m.base_sha == name)
+                    .map_or(i64::MIN, |m| m.built_at);
+                others.push((built_at, name, e.path()));
             }
         }
+    }
+    others.sort();
+    // The newest finished one stays; everything older, or unfinished, goes.
+    if others
+        .last()
+        .is_some_and(|(built_at, _, _)| *built_at != i64::MIN)
+    {
+        others.pop();
+    }
+    for (_, _, dir) in others {
+        remove_dir(&dir).await;
     }
     if let Ok(worktrees) = repo.worktree_list().await {
         for wt in worktrees {
@@ -1446,7 +1589,7 @@ mod tests {
         let sha = status_of(&fx.root, &r).base_sha;
         let inner_leftover = layout.generation(&sha).join("manifest.4242.8.tmp");
         std::fs::write(&inner_leftover, "{").unwrap();
-        gc(&fx.repo(), &layout, &sha, "").await;
+        gc(&fx.repo(), &layout, &sha).await;
         assert!(
             !inner_leftover.exists(),
             "a kept generation's temp file is gone"
@@ -1894,5 +2037,285 @@ mod tests {
             "no write through a symlinked dir"
         );
         assert!(!real.join(STATUS_FILE).exists());
+    }
+
+    // ---- forced rebuilds (the portal's Re-index) ------------------------------
+
+    #[derive(Debug, Clone, Copy)]
+    enum FStep {
+        Force(&'static str, &'static str),
+        Push(&'static str, &'static str),
+        /// Pop the next row and expect it to be forced or not.
+        Pop(bool),
+        Wait(u64),
+    }
+
+    #[rstest]
+    #[case::positive_force_queues(
+        "a rebuild request queues the row, forced",
+        &[FStep::Force("acme", "web"), FStep::Pop(true)],
+        &[ReindexOutcome::Queued]
+    )]
+    #[case::positive_force_on_queued_row_coalesces(
+        "a row already queued by the sync pass is forced in place",
+        &[FStep::Push("acme", "web"), FStep::Force("acme", "web"), FStep::Pop(true)],
+        &[ReindexOutcome::Coalesced]
+    )]
+    #[case::negative_plain_push_not_forced(
+        "a sync-pass row is not forced",
+        &[FStep::Push("acme", "web"), FStep::Pop(false)],
+        &[]
+    )]
+    #[case::corner_push_after_force_stays_forced(
+        "a sync pass re-queuing a forced row keeps it forced",
+        &[FStep::Force("acme", "web"), FStep::Push("acme", "web"), FStep::Pop(true)],
+        &[ReindexOutcome::Queued]
+    )]
+    #[case::boundary_within_cooldown_too_soon(
+        "a second request within the cooldown is refused, with the seconds left",
+        &[FStep::Force("acme", "web"), FStep::Pop(true), FStep::Wait(100), FStep::Force("acme", "web")],
+        &[ReindexOutcome::Queued, ReindexOutcome::TooSoon { retry_after_secs: 200 }]
+    )]
+    #[case::boundary_cooldown_elapsed_queued(
+        "a request exactly one cooldown later is queued",
+        &[FStep::Force("acme", "web"), FStep::Pop(true), FStep::Wait(300), FStep::Force("acme", "web"), FStep::Pop(true)],
+        &[ReindexOutcome::Queued, ReindexOutcome::Queued]
+    )]
+    #[case::adversarial_cooldown_per_tenant(
+        "one tenant's request does not use up another's cooldown for the same id",
+        &[FStep::Force("acme", "web"), FStep::Force("globex", "web")],
+        &[ReindexOutcome::Queued, ReindexOutcome::Queued]
+    )]
+    #[case::adversarial_spam_while_queued_is_one_job(
+        "repeated requests for a queued row are refused, not queued again",
+        &[FStep::Force("acme", "web"), FStep::Force("acme", "web"), FStep::Force("acme", "web"), FStep::Pop(true), FStep::Pop(false)],
+        &[ReindexOutcome::Queued, ReindexOutcome::TooSoon { retry_after_secs: 300 }, ReindexOutcome::TooSoon { retry_after_secs: 300 }]
+    )]
+    fn force_cases(
+        #[case] description: &str,
+        #[case] steps: &[FStep],
+        #[case] expected: &[ReindexOutcome],
+    ) {
+        let mut q = Queue::default();
+        let refresh = Duration::from_secs(3600);
+        let mut now = Instant::now();
+        let mut got = Vec::new();
+        for step in steps {
+            match *step {
+                FStep::Force(t, id) => got.push(q.force(t, &row(t, id), now)),
+                FStep::Push(t, id) => {
+                    q.push(t, &row(t, id), refresh, now);
+                }
+                FStep::Pop(forced) => match q.pop() {
+                    Some((_, _, f)) => assert_eq!(f, forced, "{description}: popped row forced"),
+                    None => assert!(!forced, "{description}: expected a forced row, queue empty"),
+                },
+                FStep::Wait(secs) => now += Duration::from_secs(secs),
+            }
+        }
+        assert_eq!(got, expected, "{description}");
+    }
+
+    #[test]
+    fn boundary_full_queue_refuses_a_rebuild() {
+        let mut q = Queue::default();
+        let now = Instant::now();
+        for i in 0..MAX_QUEUED_ROWS {
+            assert!(q.push("acme", &row("acme", &format!("r{i}")), Duration::ZERO, now));
+        }
+        assert_eq!(
+            q.force("acme", &row("acme", "one-more"), now),
+            ReindexOutcome::TooSoon {
+                retry_after_secs: 300
+            },
+            "a full queue refuses rather than grow"
+        );
+        assert_eq!(
+            q.force("acme", &row("acme", "r0"), now),
+            ReindexOutcome::Coalesced,
+            "a row already in the full queue can still be forced in place"
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Forced {
+        /// Built, then forced with no new commit.
+        SameBase,
+        /// Built, the base moved and was built, then forced.
+        AfterMove,
+        /// Built, then a forced rebuild fails mid-build.
+        Fails,
+    }
+
+    // A forced rebuild runs even on an unmoved base, never takes the served index away,
+    // and keeps the fallback generation.
+    #[rstest]
+    #[case::positive_forced_same_base_rebuilds(
+        "an unmoved base is rebuilt when forced, in place",
+        Forced::SameBase,
+        Outcome::Ready,
+        FleetIndexState::Ready,
+        1
+    )]
+    #[case::corner_forced_after_move_keeps_fallback(
+        "forcing the current base keeps the previous generation as the fallback",
+        Forced::AfterMove,
+        Outcome::Ready,
+        FleetIndexState::Ready,
+        2
+    )]
+    #[case::negative_failed_rebuild_keeps_served(
+        "a forced rebuild that fails leaves the served index readable",
+        Forced::Fails,
+        Outcome::Failed,
+        FleetIndexState::Failed,
+        1
+    )]
+    #[tokio::test]
+    async fn forced_rebuild(
+        #[case] description: &str,
+        #[case] scenario: Forced,
+        #[case] expected_outcome: Outcome,
+        #[case] expected_state: FleetIndexState,
+        #[case] expected_generations: usize,
+    ) {
+        let fx = Fixture::new(&[("src/lib.rs", "pub fn alpha() {}\n")]);
+        let r = row("acme", "web");
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        if matches!(scenario, Forced::AfterMove) {
+            fx.commit("src/lib.rs", "pub fn beta() {}\n");
+            assert_eq!(svc.run(&r).await, Outcome::Ready);
+        }
+        let served = status_of(&fx.root, &r).base_sha;
+        let outcome = match scenario {
+            Forced::Fails => {
+                // A zero deadline: the scan stops at once and the build is an error.
+                let lim = IndexLimits {
+                    deadline: Duration::ZERO,
+                    ..limits()
+                };
+                let bad = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim);
+                bad.run_job(&r, true).await
+            }
+            _ => svc.run_job(&r, true).await,
+        };
+        assert_eq!(outcome, expected_outcome, "{description}");
+        let st = status_of(&fx.root, &r);
+        assert_eq!(st.state, expected_state, "{description}");
+        assert_eq!(st.base_sha, served, "{description}: same base");
+        assert_eq!(
+            generations(&fx.root, &r).len(),
+            expected_generations,
+            "{description}"
+        );
+        let layout = Layout::for_row(&fx.root, &r).unwrap();
+        assert!(
+            matches!(row_index(&layout.knowledge), RowIndex::Ready { ref base_sha, .. } if *base_sha == served),
+            "{description}: the served index is still readable"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&layout.knowledge)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(STAGING_SUFFIX) || n.ends_with(RETIRED_SUFFIX))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "{description}: no staging left: {leftovers:?}"
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Plant {
+        Dir,
+        /// A generation dir with a finished manifest of this age.
+        Finished(i64),
+        /// A symlink to a directory outside the row.
+        SymlinkOut,
+    }
+
+    // GC between builds: crash leftovers go, foreign entries stay, links are not
+    // followed, and of the other generations only the newest finished one is kept.
+    #[rstest]
+    #[case::corner_staging_leftover_removed(
+        "a crashed build's staging dir is removed",
+        &[(STAGING_SUFFIX, 'b', Plant::Dir)], &[false]
+    )]
+    #[case::corner_retired_leftover_removed(
+        "a crashed swap's retired dir is removed",
+        &[(RETIRED_SUFFIX, 'b', Plant::Dir)], &[false]
+    )]
+    #[case::negative_unfinished_generation_removed(
+        "a generation with no manifest is removed",
+        &[("", 'c', Plant::Dir)], &[false]
+    )]
+    #[case::positive_newest_other_kept(
+        "of two finished others, the newer is kept and the older removed",
+        &[("", 'd', Plant::Finished(100)), ("", 'e', Plant::Finished(200))], &[false, true]
+    )]
+    #[case::boundary_finished_beats_unfinished(
+        "an unfinished generation is never the one kept",
+        &[("", 'd', Plant::Finished(100)), ("", 'e', Plant::Dir)], &[true, false]
+    )]
+    #[case::adversarial_symlinked_staging_not_followed(
+        "a symlink named like staging is not followed into its target",
+        &[(STAGING_SUFFIX, 'f', Plant::SymlinkOut)], &[true]
+    )]
+    #[tokio::test]
+    async fn gc_cases(
+        #[case] description: &str,
+        #[case] plants: &[(&str, char, Plant)],
+        #[case] expected_kept: &[bool],
+    ) {
+        let fx = Fixture::new(&[("src/lib.rs", "pub fn alpha() {}\n")]);
+        let r = row("acme", "web");
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        let layout = Layout::for_row(&fx.root, &r).unwrap();
+        let current = status_of(&fx.root, &r).base_sha;
+        let outside = fx.root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.txt"), "x").unwrap();
+        // A foreign entry the fleet never writes: GC leaves it alone.
+        let foreign = layout.knowledge.join("notes.partial");
+        std::fs::create_dir_all(&foreign).unwrap();
+        let mut paths = Vec::new();
+        for (suffix, c, plant) in plants {
+            let sha = c.to_string().repeat(40);
+            let path = layout.knowledge.join(format!("{sha}{suffix}"));
+            match plant {
+                Plant::Dir => std::fs::create_dir_all(&path).unwrap(),
+                Plant::Finished(built_at) => {
+                    let m = KnowledgeManifest {
+                        format: INDEX_FORMAT,
+                        base_sha: sha.clone(),
+                        built_at: *built_at,
+                        indexes: vec![],
+                    };
+                    write_json(&path.join(MANIFEST_FILE), &m).unwrap();
+                }
+                Plant::SymlinkOut => std::os::unix::fs::symlink(&outside, &path).unwrap(),
+            }
+            paths.push(path);
+        }
+        gc(&fx.repo(), &layout, &current).await;
+        let kept: Vec<bool> = paths
+            .iter()
+            .map(|p| std::fs::symlink_metadata(p).is_ok())
+            .collect();
+        assert_eq!(kept, expected_kept, "{description}");
+        assert!(
+            layout.generation(&current).exists(),
+            "{description}: current kept"
+        );
+        assert!(
+            foreign.exists(),
+            "{description}: a foreign dir is not ours to remove"
+        );
+        assert!(
+            outside.join("keep.txt").exists(),
+            "{description}: nothing outside the row is touched"
+        );
     }
 }
