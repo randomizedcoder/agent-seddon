@@ -289,6 +289,8 @@ impl Session {
             self.tool_overrides
                 .register(crate::metered::tool(tool, self.agent.metrics.clone()));
         }
+        // Without `search` no workspace carries one anyway: `WorktreeGrounder::row_search`
+        // only opens a row index under the same feature.
         #[cfg(not(feature = "search"))]
         let _ = (workspace.search, workspace.changed);
     }

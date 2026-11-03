@@ -10,6 +10,7 @@ use agent_review::{render_facts, render_facts_with};
 
 fn file(path: &str, patch: &str) -> ChangedFile {
     ChangedFile {
+        old_path: None,
         path: path.into(),
         change: ChangeKind::Modified,
         additions: 3,

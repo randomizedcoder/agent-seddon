@@ -1511,12 +1511,30 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum Edit {
+        Modify,
+        Rename,
+    }
+
     /// The two path spellings agree on a real diff: the change set's paths (from git)
     /// and the index's ids (from the scan) are both repo-relative with no `./`, so the
-    /// session's `search` flags the PR's changed file. A mismatch would fail open (no
+    /// session's `search` flags the PR's changed file. A rename is flagged on its base
+    /// side too, where the base-branch index has it. A mismatch would fail open (no
     /// flag), so it is pinned end to end.
+    #[rstest]
+    #[case::positive_modified_file_flagged("a modified file's hits are pre-PR", Edit::Modify, vec!["a.rs"])]
+    #[case::corner_renamed_file_flagged_on_its_old_path(
+        "a renamed file's base-side path is touched, so its hits are pre-PR",
+        Edit::Rename,
+        vec!["c.rs", "a.rs"]
+    )]
     #[tokio::test]
-    async fn real_diff_paths_flag_pre_pr_hits() {
+    async fn real_diff_paths_flag_pre_pr_hits(
+        #[case] description: &str,
+        #[case] edit: Edit,
+        #[case] touched: Vec<&str>,
+    ) {
         use agent_core::{ReviewGrounder as _, Tool as _};
         let fx = Fixture::new(&[
             ("a.rs", "fn needle_symbol() {}\n"),
@@ -1527,7 +1545,13 @@ mod tests {
         assert_eq!(svc.run(&r).await, Outcome::Ready);
         let base = status_of(&fx.root, &r).base_sha;
 
-        fx.commit("a.rs", "fn needle_symbol() { changed() }\n");
+        match edit {
+            Edit::Modify => fx.commit("a.rs", "fn needle_symbol() { changed() }\n"),
+            Edit::Rename => {
+                git(&fx.upstream, &["mv", "a.rs", "c.rs"]);
+                git(&fx.upstream, &["commit", "-q", "-m", "rename"]);
+            }
+        }
         let repo = fx.repo();
         repo.fetch().await.expect("the mirror sees the new head");
         let head = repo
@@ -1552,14 +1576,9 @@ mod tests {
             .ground(&fx.upstream, agent_core::ReviewTarget::Revs { base, head })
             .await
             .expect("grounds");
-        let changed: Vec<PathBuf> = grounded
-            .facts
-            .change
-            .files
-            .iter()
-            .map(|f| f.path.clone())
-            .collect();
-        assert_eq!(changed, vec![PathBuf::from("a.rs")], "repo-relative, no ./");
+        let changed = grounded.facts.change.touched_paths();
+        let want: Vec<PathBuf> = touched.iter().map(PathBuf::from).collect();
+        assert_eq!(changed, want, "{description}: repo-relative, no ./");
 
         let tool =
             agent_tools::SearchTool::for_review(grounded.search.expect("row index"), changed);
@@ -1580,7 +1599,7 @@ mod tests {
         };
         assert!(
             line_of("a.rs:").is_some_and(|l| l.contains("[pre-PR")),
-            "{}",
+            "{description}: {}",
             obs.content
         );
         assert!(

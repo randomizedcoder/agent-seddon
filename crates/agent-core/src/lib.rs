@@ -5680,6 +5680,10 @@ pub struct ChangedFile {
     /// context budget). Bounded — it is untrusted repo content, rendered as data.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub patch: String,
+    /// For a rename, the path on the base side (repo-relative, confined). The base
+    /// branch's index has the file there, so a search hit on it is pre-PR content too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<PathBuf>,
 }
 
 /// One commit in a review's revision range (`base..head`), for the reviewer's
@@ -5709,6 +5713,18 @@ pub struct ChangeSet {
     /// Commits in `base..head` (capped), newest first — the change's stated intent.
     #[serde(default)]
     pub commits: Vec<ReviewCommit>,
+}
+
+impl ChangeSet {
+    /// Every repo-relative path this change touches on either side: each file's path,
+    /// plus a renamed file's base-side path. A search over the base branch finds the
+    /// old path, so its hits are pre-PR content too.
+    pub fn touched_paths(&self) -> Vec<PathBuf> {
+        self.files
+            .iter()
+            .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+            .collect()
+    }
 }
 
 /// Which forge a remote points at (parsed, closed set; fails closed to `Other`).

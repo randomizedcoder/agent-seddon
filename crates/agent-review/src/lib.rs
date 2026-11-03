@@ -841,6 +841,7 @@ mod draft_tests {
         f.change.base_rev = "aaaa".into();
         f.change.head_rev = "bbbb".into();
         f.change.files.push(ChangedFile {
+            old_path: None,
             path: "src/x.rs".into(),
             change: ChangeKind::Modified,
             additions: 5,

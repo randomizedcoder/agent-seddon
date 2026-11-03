@@ -3501,6 +3501,7 @@ impl From<agent_core::ChangedFile> for pb::ReviewChangedFile {
 impl From<pb::ReviewChangedFile> for agent_core::ChangedFile {
     fn from(f: pb::ReviewChangedFile) -> Self {
         agent_core::ChangedFile {
+            old_path: None,
             path: std::path::PathBuf::from(f.path),
             change: change_kind_from_i32(f.change),
             additions: f.additions,

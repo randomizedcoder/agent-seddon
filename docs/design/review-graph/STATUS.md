@@ -234,3 +234,9 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     silently); a review's output is cut between whole hits so no flag is lost to the
     cap; the description notes a stale index can trail the branch; `GroundedReview`'s
     Debug names the backend.
+  - Second fleet round: a rename is flagged on its base side too. `ChangedFile.old_path`
+    (serde default, set only for a rename, confined like the display path) and
+    `ChangeSet::touched_paths()` give the session both sides; the real-diff test gained
+    a rename row. Paths are normalized (no `./`, `/` separators) on both sides of the
+    match, so a spelling difference can only add a flag, never drop one. The review
+    output keeps 64 bytes for its trailer under the cap.

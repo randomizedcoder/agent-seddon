@@ -204,8 +204,8 @@ The `ground` node ([01](01-review-graph.md)) and the single-session grounder bot
   has both.
 - **Pre-PR flags.** Its description says the index is the default branch, not the PR,
   and to read the PR's own files with `read_file`/`grep`. A hit in a file the PR changes
-  (exact repo-relative path from the grounded change set) ends with
-  `[pre-PR: this PR changes this file]`.
+  (repo-relative path from the grounded change set, both sides of a rename, normalized
+  on both sides of the match) ends with `[pre-PR: this PR changes this file]`.
 - **No index, no tool:** with no row index, or when grounding failed, the session's
   tool set is unchanged.
 - `TantivyBackend`'s read-only form now has no corpus at all (the source and writer are

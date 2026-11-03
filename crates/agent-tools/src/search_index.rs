@@ -27,6 +27,20 @@ pub struct SearchTool {
 
 /// The flag on a hit in a file the PR changes.
 const PRE_PR_FLAG: &str = "  [pre-PR: this PR changes this file]";
+/// Room kept under the output cap for the "… N more hits not shown" line.
+const TRAILER_ROOM: usize = 64;
+
+/// A repo-relative path in one spelling: no leading `./`, `/` separators. Both the
+/// changed set and each hit pass through it, so a spelling difference can only add a
+/// flag, never drop one (the safe direction).
+fn normalized(p: &std::path::Path) -> PathBuf {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let mut s = s.as_str();
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    PathBuf::from(s)
+}
 
 impl SearchTool {
     pub fn new(backend: Arc<dyn SearchBackend>) -> Self {
@@ -45,7 +59,7 @@ impl SearchTool {
     ) -> Self {
         Self {
             backend,
-            pre_pr: Some(changed.into_iter().collect()),
+            pre_pr: Some(changed.into_iter().map(|p| normalized(&p)).collect()),
         }
     }
 }
@@ -163,12 +177,14 @@ fn format_hits(hits: &[SearchHit], pre_pr: Option<&HashSet<PathBuf>>) -> String 
         } else {
             format!("{}\t{}", h.path.display(), h.snippet)
         };
-        if pre_pr.is_some_and(|changed| changed.contains(&h.path)) {
+        if pre_pr.is_some_and(|changed| changed.contains(&normalized(&h.path))) {
             line.push_str(PRE_PR_FLAG);
         }
         line.push('\n');
-        // Whole hits only: a cut mid-line could drop a hit's pre-PR flag.
-        if pre_pr.is_some() && out.len() + line.len() > crate::MAX_OUTPUT {
+        // A review's output is cut between whole hits (a cut mid-line could drop a
+        // hit's pre-PR flag), with room for the trailer; a plain `search` keeps the
+        // byte cut below.
+        if pre_pr.is_some() && out.len() + line.len() > crate::MAX_OUTPUT - TRAILER_ROOM {
             out.push_str(&format!("… {} more hits not shown\n", hits.len() - i));
             return out;
         }
@@ -312,7 +328,8 @@ mod tests {
     #[case::corner_filename_only_hit_flagged("src/a.rs", 0, true, true)]
     #[case::negative_plain_search_never_flags("src/a.rs", 3, false, false)]
     #[case::adversarial_lookalike_path_not_flagged("src/a.rs.orig", 3, true, false)]
-    #[case::adversarial_dot_prefixed_path_not_flagged("./src/a.rs", 3, true, false)]
+    #[case::adversarial_dot_prefixed_path_still_flagged("./src/a.rs", 3, true, true)]
+    #[case::adversarial_backslash_path_still_flagged("src\\a.rs", 3, true, true)]
     #[tokio::test]
     async fn review_search_flags_pre_pr_hits(
         #[case] path: &str,
@@ -351,7 +368,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            obs.content.len() <= crate::MAX_OUTPUT + 64,
+            obs.content.len() <= crate::MAX_OUTPUT,
             "{}",
             obs.content.len()
         );

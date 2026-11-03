@@ -114,6 +114,7 @@ impl ReviewCollector for FakeReview {
                 base_rev: "main".into(),
                 head_rev: "feature".into(),
                 files: vec![ChangedFile {
+                    old_path: None,
                     path: "main.go".into(),
                     change: agent_core::ChangeKind::Modified,
                     additions: 2,

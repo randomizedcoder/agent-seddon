@@ -887,9 +887,10 @@ impl FleetOrchestrator {
             worktree: worktree.path.clone(),
             repo: repo.clone(),
             search,
+            // Both sides of a rename: the base-branch index has the old path.
             changed: facts
                 .as_ref()
-                .map(|f| f.change.files.iter().map(|c| c.path.clone()).collect())
+                .map(|f| f.change.touched_paths())
                 .unwrap_or_default(),
         };
         // The per-review worktree id, moved into the task so it reaps exactly this
@@ -1264,6 +1265,7 @@ mod tests {
             let mut f = ReviewFacts::default();
             f.meta.head_rev = "deadbeef".into();
             f.change.files.push(agent_core::ChangedFile {
+                old_path: None,
                 path: "src/x.rs".into(),
                 change: agent_core::ChangeKind::Modified,
                 additions: 3,
