@@ -244,7 +244,8 @@ impl Session {
         // it never mutates the tree. Restrict the advertised tools to the read-only
         // subset (REVIEW_READONLY_TOOLS) so bash/edit/write/apply_patch and the heavy
         // explorers are off — no hand-tuned [tools] needed, and run_loop's dispatch
-        // enforces the same list fail-closed. Fail closed: if the process registry
+        // enforces the advertised set fail-closed (this list, plus the row-index
+        // `search` `bind_review_workspace` may add). Fail closed: if the process registry
         // offers none of these (a minimal build), the review runs with no tools,
         // grounded on the diff already in context, rather than falling back to the
         // full mutating set. An operator's max_tokens is floored in run_loop.
@@ -257,8 +258,9 @@ impl Session {
     /// `git_*` tool is rebound to the row's repo, which holds the fetched PR head. The
     /// backend's own tools stay rooted at the process cwd/`[git]` repo, which for a
     /// fleet is an unrelated checkout; without this, a review would read and cite
-    /// that tree instead of the PR's. Only tools already advertised are rebound, so
-    /// this never widens the read-only set [`Self::seed_review`] chose.
+    /// that tree instead of the PR's. Only tools already advertised are rebound. The
+    /// one widening is deliberate: a workspace that carries the row's own index adds a
+    /// `search` over it (read-only, pre-PR flagged), replacing any process-wide one.
     pub(super) fn bind_review_workspace(&mut self, workspace: agent_core::ReviewWorkspace) {
         self.tool_ctx = ToolContext {
             cwd: workspace.worktree,
@@ -272,6 +274,25 @@ impl Session {
         }
         #[cfg(not(feature = "git"))]
         let _ = workspace.repo;
+        // The row's own index (review-graph 5b-ii): the one tool this adds to the
+        // read-only set. It reads a prebuilt index of the base branch (no worktree
+        // walk, no write), its hits in the PR's changed files are flagged pre-PR, and
+        // it replaces any process-wide `search`, which indexes another tree.
+        #[cfg(feature = "search")]
+        if let Some(search) = workspace.search {
+            let tool: Arc<dyn agent_core::Tool> = Arc::new(agent_tools::SearchTool::for_review(
+                search,
+                workspace.changed,
+            ));
+            self.tool_schemas.retain(|s| s.name != tool.name());
+            self.tool_schemas.push(tool.schema());
+            self.tool_overrides
+                .register(crate::metered::tool(tool, self.agent.metrics.clone()));
+        }
+        // Without `search` no workspace carries one anyway: `WorktreeGrounder::row_search`
+        // only opens a row index under the same feature.
+        #[cfg(not(feature = "search"))]
+        let _ = (workspace.search, workspace.changed);
     }
 
     /// Seed this session as a campaign worker (CP-06b): implement mode from the

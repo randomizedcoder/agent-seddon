@@ -197,4 +197,16 @@ async fn tantivy_corpus_path() {
         assert!(!hits.is_empty());
     })
     .await;
+
+    // A fleet review opens a row's index read-only, queries it and drops it, once per
+    // review (review-graph 5b): the reader, its mmaps and segment readers must all be
+    // freed on drop, so opening one per review never accumulates.
+    let ro_dir = idx.join("idx");
+    // ~860 blocks/run measured (open + one query); 2048 leaves the corpus path's headroom.
+    assert_flat("tantivy read-only open/drop", 16, 2048, || async {
+        let ro = TantivyBackend::open_read_only(ro_dir.clone()).unwrap();
+        let hits = ro.query(&lit("retry backoff")).await.unwrap();
+        assert!(!hits.is_empty());
+    })
+    .await;
 }

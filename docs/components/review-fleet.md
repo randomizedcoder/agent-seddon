@@ -545,7 +545,9 @@ redacted error) is in `knowledge/status.json` and on `ListSessions` / `GetSessio
 review grounds on its row's last good index, opened read-only, so the `nearby` collector
 searches the reviewed repo; until the row has one, `nearby` is skipped (never the shared
 index, which is of another tree) and the brief says why (5b-i). With indexing off, fleet
-reviews have no search at all, for the same reason. Design and the remaining steps:
+reviews have no search at all, for the same reason. The review session also gets a
+`search` tool over that index (5b-ii), replacing any process-wide one; hits in the PR's
+changed files are flagged as pre-PR content. Design and the remaining steps:
 [04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)

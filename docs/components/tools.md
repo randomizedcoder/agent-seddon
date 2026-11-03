@@ -41,6 +41,12 @@ keep the built-ins consistent: `resolve_within` (reject `..`/absolute escapes),
 tools are gitignore-aware (via the `ignore` crate) and run their blocking walk on
 `spawn_blocking`.
 
+`SearchTool::for_review(backend, changed)` is the fleet review session's `search`
+(review-graph 5b-ii): the backend is the reviewed repo's index of its default branch, so
+the description says the hits are pre-PR content, and a hit in one of the PR's `changed`
+files is flagged `[pre-PR: this PR changes this file]`. It is the one tool the fleet
+adds to the read-only review set ([review-fleet.md](review-fleet.md)).
+
 ## Adding your own
 
 In-tree: implement `Tool` in `agent-tools` (gate behind a `tool-*` feature),

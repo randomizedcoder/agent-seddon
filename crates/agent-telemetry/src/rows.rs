@@ -1135,6 +1135,7 @@ mod tests {
         let mut f = agent_core::ReviewFacts::default();
         for _ in 0..2 {
             f.change.files.push(agent_core::ChangedFile {
+                old_path: None,
                 path: "x".into(),
                 change: agent_core::ChangeKind::Modified,
                 additions: u32::MAX,

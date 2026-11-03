@@ -183,7 +183,13 @@ pub(crate) fn row_index(knowledge: &Path) -> RowIndex {
     let Some(sha) = commit_sha(&status.base_sha) else {
         // No base yet (pending, a first build running or failed), or a status naming no
         // commit at all; say which without echoing the value.
-        return RowIndex::NotReady(if status.base_sha.is_empty() {
+        // Only `pending`, `indexing` and `failed` can lack a base; a `ready` or `stale`
+        // status without one is corrupt, and saying "ready" would contradict the line.
+        let waiting = matches!(
+            status.state,
+            FleetIndexState::Pending | FleetIndexState::Indexing | FleetIndexState::Failed
+        );
+        return RowIndex::NotReady(if status.base_sha.is_empty() && waiting {
             status.state.as_str().into()
         } else {
             "its status names no commit".into()
@@ -1242,6 +1248,7 @@ mod tests {
         StaleAfterBuilt,
         FailedAfterBuilt,
         TraversalSha,
+        ReadyWithoutBase,
         ManifestGone,
         ManifestOtherSha,
     }
@@ -1265,6 +1272,11 @@ mod tests {
     #[case::adversarial_traversal_sha_never_opened(
         "a hostile base_sha in the status names no directory",
         Seed::TraversalSha,
+        None
+    )]
+    #[case::adversarial_ready_without_base(
+        "a corrupt ready status with no base is not ready, and does not say so",
+        Seed::ReadyWithoutBase,
         None
     )]
     #[case::negative_incomplete_generation(
@@ -1291,6 +1303,13 @@ mod tests {
             Seed::Nothing => {}
             Seed::Pending => {
                 write_json(&layout.status(), &FleetIndexStatus::default()).unwrap();
+            }
+            Seed::ReadyWithoutBase => {
+                let st = FleetIndexStatus {
+                    state: FleetIndexState::Ready,
+                    ..Default::default()
+                };
+                write_json(&layout.status(), &st).unwrap();
             }
             Seed::Built => assert_eq!(svc.run(&r).await, Outcome::Ready),
             Seed::StaleAfterBuilt => {
@@ -1328,7 +1347,7 @@ mod tests {
         let got = row_index(&layout.knowledge);
         match (expected, got) {
             (None, RowIndex::NotReady(why)) => {
-                if matches!(seed, Seed::TraversalSha) {
+                if matches!(seed, Seed::TraversalSha | Seed::ReadyWithoutBase) {
                     // Never "ready" (which the status claims), and never the hostile value.
                     assert_eq!(why, "its status names no commit", "{description}");
                 }
@@ -1434,6 +1453,160 @@ mod tests {
         );
         let st = status_of(&fx.root, &r);
         assert!(layout.status().exists() && layout.generation(&st.base_sha).exists());
+    }
+
+    /// End to end through the fleet grounder: a review of a row with a built index
+    /// carries the "Repo index:" line in its brief and hands the same index on for the
+    /// session's `search`; before the build, the line says why and nothing is handed on.
+    #[tokio::test]
+    async fn grounding_carries_the_row_index() {
+        use agent_core::ReviewGrounder as _;
+        let fx = Fixture::new(&[("a.rs", "fn needle_symbol() {}\n")]);
+        let r = row("acme", "web");
+        let knowledge = Layout::for_row(&fx.root, &r).unwrap().knowledge;
+        let grounder = crate::agent::WorktreeGrounder {
+            repo: fx.repo(),
+            forge: None,
+            sandbox: None,
+            pool: None,
+            tool_provider: None,
+            review: crate::config::ReviewCfg::default(),
+            metrics: Metrics::new(),
+            budget: 64 * 1024,
+            row_index: Some(knowledge),
+        };
+        let target = || agent_core::ReviewTarget::Revs {
+            base: "HEAD".into(),
+            head: "HEAD".into(),
+        };
+
+        let before = grounder
+            .ground(&fx.upstream, target())
+            .await
+            .expect("grounds");
+        assert!(
+            before.brief.contains("Repo index: not built yet"),
+            "{}",
+            before.brief
+        );
+        assert!(before.search.is_none(), "nothing to hand on before a build");
+
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        let sha = status_of(&fx.root, &r).base_sha;
+        let after = grounder
+            .ground(&fx.upstream, target())
+            .await
+            .expect("grounds");
+        assert!(
+            after
+                .brief
+                .contains(&format!("Repo index: the default branch at {}", &sha[..12])),
+            "{}",
+            after.brief
+        );
+        assert!(
+            after.search.is_some(),
+            "the row index is handed on to the session"
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Edit {
+        Modify,
+        Rename,
+    }
+
+    /// The two path spellings agree on a real diff: the change set's paths (from git)
+    /// and the index's ids (from the scan) are both repo-relative with no `./`, so the
+    /// session's `search` flags the PR's changed file. A rename is flagged on its base
+    /// side too, where the base-branch index has it. A mismatch would fail open (no
+    /// flag), so it is pinned end to end.
+    #[rstest]
+    #[case::positive_modified_file_flagged("a modified file's hits are pre-PR", Edit::Modify, vec!["a.rs"])]
+    #[case::corner_renamed_file_flagged_on_its_old_path(
+        "a renamed file's base-side path is touched, so its hits are pre-PR",
+        Edit::Rename,
+        vec!["c.rs", "a.rs"]
+    )]
+    #[tokio::test]
+    async fn real_diff_paths_flag_pre_pr_hits(
+        #[case] description: &str,
+        #[case] edit: Edit,
+        #[case] touched: Vec<&str>,
+    ) {
+        use agent_core::{ReviewGrounder as _, Tool as _};
+        let fx = Fixture::new(&[
+            ("a.rs", "fn needle_symbol() {}\n"),
+            ("b.rs", "fn other() { needle_symbol() }\n"),
+        ]);
+        let r = row("acme", "web");
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        let base = status_of(&fx.root, &r).base_sha;
+
+        match edit {
+            Edit::Modify => fx.commit("a.rs", "fn needle_symbol() { changed() }\n"),
+            Edit::Rename => {
+                git(&fx.upstream, &["mv", "a.rs", "c.rs"]);
+                git(&fx.upstream, &["commit", "-q", "-m", "rename"]);
+            }
+        }
+        let repo = fx.repo();
+        repo.fetch().await.expect("the mirror sees the new head");
+        let head = repo
+            .resolve(&agent_core::Revision::from("HEAD"))
+            .await
+            .expect("head")
+            .0;
+        assert_ne!(head, base);
+
+        let grounder = crate::agent::WorktreeGrounder {
+            repo,
+            forge: None,
+            sandbox: None,
+            pool: None,
+            tool_provider: None,
+            review: crate::config::ReviewCfg::default(),
+            metrics: Metrics::new(),
+            budget: 64 * 1024,
+            row_index: Some(Layout::for_row(&fx.root, &r).unwrap().knowledge),
+        };
+        let grounded = grounder
+            .ground(&fx.upstream, agent_core::ReviewTarget::Revs { base, head })
+            .await
+            .expect("grounds");
+        let changed = grounded.facts.change.touched_paths();
+        let want: Vec<PathBuf> = touched.iter().map(PathBuf::from).collect();
+        assert_eq!(changed, want, "{description}: repo-relative, no ./");
+
+        let tool =
+            agent_tools::SearchTool::for_review(grounded.search.expect("row index"), changed);
+        let obs = tool
+            .execute(
+                serde_json::json!({"query": "needle_symbol"}),
+                &agent_core::ToolContext {
+                    cwd: fx.upstream.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let line_of = |p: &str| {
+            obs.content
+                .lines()
+                .find(|l| l.starts_with(p))
+                .map(str::to_string)
+        };
+        assert!(
+            line_of("a.rs:").is_some_and(|l| l.contains("[pre-PR")),
+            "{description}: {}",
+            obs.content
+        );
+        assert!(
+            line_of("b.rs:").is_some_and(|l| !l.contains("[pre-PR")),
+            "{}",
+            obs.content
+        );
     }
 
     /// While the mirror's first clone runs, the row waits (pending) and is retried.

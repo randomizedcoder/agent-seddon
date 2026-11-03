@@ -195,9 +195,24 @@ The `ground` node ([01](01-review-graph.md)) and the single-session grounder bot
   manifest has the current format and the same base. Anything else (a hostile `base_sha`,
   a missing or mismatched manifest) is not opened.
 
-Left for 5b-ii: the `search` / `find_*` session tools on the row index (with "pre-PR"
-flags on changed files), `wait_for_index_secs`, and the overview, call-graph and history
-context, which need 5a-ii's indexes.
+### As built (5b-ii)
+
+- **A `search` tool for the review session** over the same row index grounding opened
+  (`GroundedReview.search` → `ReviewWorkspace.search`). It is the one tool added to the
+  read-only review set: it reads a prebuilt index, walks nothing and writes nothing. It
+  replaces any process-wide `search` (which indexes another tree), so a session never
+  has both.
+- **Pre-PR flags.** Its description says the index is the default branch, not the PR,
+  and to read the PR's own files with `read_file`/`grep`. A hit in a file the PR changes
+  (repo-relative path from the grounded change set, both sides of a rename, normalized
+  on both sides of the match) ends with `[pre-PR: this PR changes this file]`.
+- **No index, no tool:** with no row index, or when grounding failed, the session's
+  tool set is unchanged.
+- `TantivyBackend`'s read-only form now has no corpus at all (the source and writer are
+  one optional `Writable`), so no future method can mistake the index dir for a corpus.
+
+Left for 5b-iii: `find_symbol` / `find_references` on a symbol index, `wait_for_index_secs`,
+and the overview, call-graph and history context, which need 5a-ii's indexes.
 
 **When a review arrives before the indexes are ready**, it does not wait. `ground` notes
 "index pending" in the brief and proceeds. A row can set `wait_for_index_secs` (0–600,
