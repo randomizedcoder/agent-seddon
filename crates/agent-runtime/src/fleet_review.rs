@@ -171,13 +171,14 @@ pub(crate) struct FleetReviewCtxFactory {
     /// Static-analysis tool resolver (review-analysis-depth Inc 1), shared with the
     /// process-global path so every row's analyzer resolves tools identically.
     tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
-    search: Option<Arc<dyn agent_core::SearchBackend>>,
     /// Byte budget for the rendered grounded brief (same knob as the in-loop review).
     budget: usize,
     /// The forge-card registry (config C36 / D1b), so a row that references a forge by
     /// `forge_id` builds from the persisted card. `None` ⇒ only inline-forge rows work.
     forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
     metrics: Metrics,
+    /// Whether rows have their own repo index ([`Self::with_row_indexes`]).
+    row_indexes: bool,
     /// Built `(repo, grounder)` by `(user, id)`, with the [`CacheFingerprint`] it was built
     /// from. A repeated trigger reuses the checkout + engine while the fingerprint matches.
     cache: Mutex<HashMap<(String, String), (CacheFingerprint, FleetReviewCtx)>>,
@@ -192,7 +193,6 @@ impl FleetReviewCtxFactory {
         sandbox: Option<Arc<dyn agent_core::Sandbox>>,
         pool: Option<Arc<dyn agent_core::LlmPool>>,
         tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
-        search: Option<Arc<dyn agent_core::SearchBackend>>,
         budget: usize,
         forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
         metrics: Metrics,
@@ -204,12 +204,20 @@ impl FleetReviewCtxFactory {
             sandbox,
             pool,
             tool_provider,
-            search,
             budget,
             forge_registry,
             metrics,
+            row_indexes: false,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Ground each row's reviews on its own repo index (review-graph 5b-i), set when
+    /// `[review_fleet.index]` builds them. Without it a row's review has no search (the
+    /// process's shared index is of another tree, so it is never used for a row).
+    pub(crate) fn with_row_indexes(mut self) -> Self {
+        self.row_indexes = true;
+        self
     }
 }
 
@@ -336,7 +344,6 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         // OidCache) and the forge are captured and reused across triggers.
         let grounder: Arc<dyn agent_core::ReviewGrounder> = Arc::new(WorktreeGrounder {
             repo: repo.clone(),
-            search: self.search.clone(),
             forge,
             sandbox: self.sandbox.clone(),
             pool: self.pool.clone(),
@@ -344,6 +351,7 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
             review: self.review.clone(),
             metrics: self.metrics.clone(),
             budget: self.budget,
+            row_index: self.row_indexes.then(|| base.join("knowledge")),
         });
 
         let ctx = FleetReviewCtx { repo, grounder };
@@ -599,7 +607,6 @@ mod tests {
             root,
             ReviewCfg::default(),
             String::new(),
-            None,
             None,
             None,
             None,
@@ -922,7 +929,6 @@ mod tests {
             Some(sandbox),
             None,
             None,
-            None,
             4096,
             None,
             Metrics::new(),
@@ -1052,5 +1058,63 @@ mod tests {
             rec.specs().is_empty(),
             "no git spawn before the credential resolves"
         );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Wiring {
+        IndexingOff,
+        RowIndexUnbuilt,
+    }
+
+    // A fleet review searches its row's own index or nothing: there is no other backend
+    // to fall back to (the process's shared index is of the fleet's own tree).
+    #[cfg(feature = "search")]
+    #[rstest::rstest]
+    #[case::negative_indexing_off_no_search(
+        "with indexing off a review has no search and no brief line",
+        Wiring::IndexingOff,
+        None
+    )]
+    #[case::adversarial_unbuilt_row_index_never_falls_back(
+        "a row index not built yet means no search, not another repo's",
+        Wiring::RowIndexUnbuilt,
+        Some("not built yet")
+    )]
+    #[tokio::test]
+    async fn grounder_search_choice(
+        #[case] description: &str,
+        #[case] wiring: Wiring,
+        #[case] note: Option<&str>,
+    ) {
+        let tmp = agent_testkit::tempdir();
+        let repo: Arc<dyn agent_core::RepoBackend> = Arc::new(agent_git::CliBackend::new(
+            tmp.join("mirror"),
+            tmp.join("mirror"),
+            tmp.join("worktrees"),
+            "",
+        ));
+        let g = WorktreeGrounder {
+            repo,
+            forge: None,
+            sandbox: None,
+            pool: None,
+            tool_provider: None,
+            review: ReviewCfg::default(),
+            metrics: Metrics::new(),
+            budget: 4096,
+            row_index: match wiring {
+                Wiring::IndexingOff => None,
+                Wiring::RowIndexUnbuilt => Some(tmp.join("knowledge")),
+            },
+        };
+        let (search, got_note) = g.row_search().await;
+        assert!(search.is_none(), "{description}: no fallback");
+        match note {
+            None => assert!(got_note.is_none(), "{description}"),
+            Some(want) => assert!(
+                got_note.as_deref().is_some_and(|n| n.contains(want)),
+                "{description}: {got_note:?}"
+            ),
+        }
     }
 }

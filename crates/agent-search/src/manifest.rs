@@ -163,6 +163,15 @@ fn scan_entries(root: &Path, limits: &ScanLimits) -> (BTreeMap<PathBuf, FileStam
         .sort_by_file_name(std::cmp::Ord::cmp)
         .build();
     for result in walk {
+        // Checked per walked entry (dirs and unreadable ones too), so a huge or hostile
+        // tree still stops at the deadline.
+        if limits
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            report.expired = true;
+            break;
+        }
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -184,13 +193,6 @@ fn scan_entries(root: &Path, limits: &ScanLimits) -> (BTreeMap<PathBuf, FileStam
             if meta.len() > limits.max_file_bytes {
                 report.oversized += 1;
                 continue;
-            }
-            if limits
-                .deadline
-                .is_some_and(|d| std::time::Instant::now() >= d)
-            {
-                report.expired = true;
-                break;
             }
             if entries.len() >= limits.max_files
                 || total.saturating_add(meta.len()) > limits.max_total_bytes

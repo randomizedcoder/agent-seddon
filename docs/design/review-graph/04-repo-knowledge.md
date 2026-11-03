@@ -178,6 +178,27 @@ The `ground` node ([01](01-review-graph.md)) and the single-session grounder bot
 - **Overview fed as data.** The overview is model output, so every step receives it fenced
   as data, never as instructions.
 
+### As built (5b-i)
+
+- **Nearby code from the row's index.** With `[review_fleet.index]` on, each fleet review
+  opens its row's last good index read-only (`TantivyBackend::open_read_only`: no writer
+  lock, nothing created) and grounds on it, so the `nearby` collector searches *this*
+  repo. Before, it searched the shared backend, which indexes the fleet process's own
+  tree. A row with no finished index gets no search, never the shared backend, and with
+  `[review_fleet.index]` off no fleet review gets one (the factory no longer holds the
+  shared backend at all).
+- **The brief says which index it used:** "Repo index: the default branch at `<sha12>`
+  (N files[, partial][; the row is stale/failed, so this is the last good index]). Search
+  hits are pre-PR content", or "Repo index: not built yet / pending / … ; nearby-code
+  search is skipped until it is ready".
+- **What counts as finished:** the status names a valid commit, and that generation's
+  manifest has the current format and the same base. Anything else (a hostile `base_sha`,
+  a missing or mismatched manifest) is not opened.
+
+Left for 5b-ii: the `search` / `find_*` session tools on the row index (with "pre-PR"
+flags on changed files), `wait_for_index_secs`, and the overview, call-graph and history
+context, which need 5a-ii's indexes.
+
 **When a review arrives before the indexes are ready**, it does not wait. `ground` notes
 "index pending" in the brief and proceeds. A row can set `wait_for_index_secs` (0–600,
 default 0) to wait for a running job.

@@ -1396,23 +1396,24 @@ pub async fn build_agent_with_mode(
             .then(|| std::path::PathBuf::from(expand_tilde(&cfg.review_fleet.root)));
         match (cfg.review.backend.as_str(), fleet_root) {
             ("local", Some(root)) => {
-                #[cfg(feature = "search")]
-                let search = Some(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
-                #[cfg(not(feature = "search"))]
-                let search: Option<Arc<dyn agent_core::SearchBackend>> = None;
-                Some(Arc::new(crate::fleet_review::FleetReviewCtxFactory::new(
+                let factory = crate::fleet_review::FleetReviewCtxFactory::new(
                     root,
                     cfg.review.clone(),
                     cfg.git.pr_ref_template.clone(),
                     shared_sandbox.clone(),
                     llm_pool_seam.clone(),
                     review_tool_provider.clone(),
-                    search,
                     cfg.review.context_budget_bytes,
                     forge_registry_seam.clone(),
                     metrics.clone(),
-                ))
-                    as Arc<dyn agent_core::FleetReviewFactory>)
+                );
+                // The rows' own repo indexes (5a) back their reviews' search (5b-i).
+                let factory = if cfg!(feature = "search") && cfg.review_fleet.index.enabled {
+                    factory.with_row_indexes()
+                } else {
+                    factory
+                };
+                Some(Arc::new(factory) as Arc<dyn agent_core::FleetReviewFactory>)
             }
             _ => None,
         }

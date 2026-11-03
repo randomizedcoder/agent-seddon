@@ -19,9 +19,10 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |
-| 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | 🟡 | (this PR) |
+| 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
 | 5a-ii | Portal index badge + Re-index (contact sheet), incremental refresh, base-moved trigger (poll/webhook), language indexes, history signals, overview, `knowledge_max_bytes`, nixpkgs path scoping, GC refcount | [04](04-repo-knowledge.md) | ⬜ | — |
-| 5b | Index consumption: brief context, `find_*`/`search` step tools on the row index, overview fed as data | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
+| 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | 🟡 | (this PR) |
+| 5b-ii | `search`/`find_*` session tools on the row index with pre-PR flags, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
 
@@ -130,7 +131,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   reading as the mirror is untested. A PR the trigger loop skips while the mirror clones
   stays open and unreviewed, so the next poll lists it again (nothing is dropped).
 
-- **5a-i** (this PR): index when a repo is added, the search index only.
+- **5a-i** (#687, 3a1494a9): index when a repo is added, the search index only.
   - `FleetIndexService` (`agent-runtime/src/fleet_index.rs`) behind the new `FleetIndexer`
     seam in agent-core. The fleet sync pass queues each admitted, enabled row (a skipped
     row, such as one with a missing forge card, is never queued, so never cloned).
@@ -168,3 +169,35 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     failure), last-good-serves on failure, waiting on a cloning mirror, disk guard, layout
     confinement, other tenant unreachable (store and gRPC), queue and limits tables, a
     torn status file, rows reaching the indexer from the sync pass.
+
+  Merged as #687 (3a1494a9) after a security review and two fleet rounds; the last draft
+  had no must-fix. Not deployed to l2 yet. Its leftovers are in 5b-i below.
+
+- **5b-i** (this PR): fleet reviews ground on their row's own index.
+  - `TantivyBackend::open_read_only`: an existing index for queries only (no writer lock,
+    so reviews share it while the builder works on the next generation; nothing created;
+    `reindex` errs; `status` from the saved manifest).
+  - `fleet_index::row_index` / `open_row_search`: the row's last good generation, checked
+    against status and manifest, opened per review. `WorktreeGrounder` uses it when the
+    factory has `with_row_indexes()` (set when `[review_fleet.index]` is on), with no
+    fallback to the shared backend (another repo); the brief carries a "Repo index:" line.
+  - #687 leftovers: the module doc says why `<root>/<user>/<id>` is tenant-isolated (Put
+    binds `user` to the caller's tenant); GC sweeps leftover `*.tmp` status files; the
+    scan checks its deadline on every walked entry; `agent_fleet_index_seconds` buckets
+    reach 21600 s.
+  - Tests: `read_only_open` (built / missing / empty dir, two readers while the writer
+    holds its lock), `row_index_cases` (never built, pending, ready, failed serves last
+    good, hostile sha, missing or mismatched manifest), `open_row_search_serves_the_row_index`,
+    `grounder_search_choice` (shared vs row index, no fallback), GC temp sweep.
+  - From the fleet review: with indexing off, fleet reviews no longer get the shared
+    backend either (the factory dropped it; it was another tree); a read-only `reindex`
+    fails before any scan, and `capabilities().incremental` is false for it; the
+    read-only test proves the builder's writer lock is held while readers open; the
+    corrupt-generation path ("could not be opened") and the failed-row note are tested;
+    GC also sweeps temp files inside kept generations.
+  - Second fleet round: `WorktreeGrounder` lost its `search` field and fallback, so no
+    code path can hand a fleet review the shared index (the test now asserts "no search"
+    with indexing off, instead of a fallback production could not reach); a status whose
+    `base_sha` names no commit says so rather than echoing its claimed state; a stale row
+    serves its last good index (new row); `reindex_inner` checks for a writer before
+    scanning; the GC doc rests on unlink-while-open, not on build spacing.

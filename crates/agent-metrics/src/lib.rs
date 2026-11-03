@@ -1027,7 +1027,9 @@ impl Metrics {
                 "agent_fleet_index_seconds",
                 "Review-fleet repo index build time, by tenant and repo",
             )
-            .buckets(vec![1.0, 5.0, 15.0, 60.0, 180.0, 600.0, 1800.0]),
+            .buckets(vec![
+                1.0, 5.0, 15.0, 60.0, 180.0, 600.0, 1800.0, 3600.0, 21600.0,
+            ]),
             &["user", "repo"],
         )
         .unwrap();
