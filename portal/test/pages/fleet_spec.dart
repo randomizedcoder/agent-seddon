@@ -423,6 +423,28 @@ const fleetSpec = PageSpec('fleet', [
   ),
   SpecRow(
     elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.corner,
+    name: 'reindex_coalesced_says_rebuilds',
+    description: 'a coalesced reply says the queued job now rebuilds',
+    expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.boundary,
+    name: 'reindex_busy_names_row',
+    description: 'a busy reply (queue full) names the row that was not queued',
+    expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
+    caseClass: CaseClass.adversarial,
+    name: 'reindex_unknown_outcome_clipped',
+    description:
+        'an unknown, huge, markup-laden outcome shows as plain text, cut to 40 characters',
+    expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
+  ),
+  SpecRow(
+    elementId: 'fleet.session.reindex',
     caseClass: CaseClass.negative,
     name: 'disabled_row_no_reindex',
     description: 'a disabled row has no Re-index button (the server would refuse)',

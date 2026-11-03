@@ -266,6 +266,52 @@ pub struct FleetIndexCfg {
     /// free (reviews continue). Clamped to 0..=90. Default 10.
     #[serde(default = "default_index_disk_min_free_pct")]
     pub disk_min_free_pct: u8,
+    /// How soon one row can be rebuilt on request (the portal's Re-index) again.
+    /// Clamped to 30..=86400. Default 300.
+    #[serde(default = "default_index_reindex_cooldown_secs")]
+    pub reindex_cooldown_secs: u64,
+    /// Repos indexed only under some paths, for trees too large to index whole. A row
+    /// whose `repo` matches no entry is indexed whole. Default: `NixOS/nixpkgs` under
+    /// `pkgs/by-name`, `lib` and `nixos/modules`. Setting the list replaces the default.
+    #[serde(default = "default_index_scopes")]
+    pub scopes: Vec<FleetIndexScope>,
+}
+
+/// One `[[review_fleet.index.scopes]]` entry: index `repo` only under `paths`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct FleetIndexScope {
+    /// The row's repo, as `owner/name` or the roster slug `owner__name`; matched
+    /// without regard to case.
+    pub repo: String,
+    /// Paths relative to the repo root. A path with `..`, a leading `/` or `.`, or one
+    /// reached through a symlink is skipped. An entry whose paths are all skipped
+    /// indexes nothing.
+    pub paths: Vec<String>,
+}
+
+impl FleetIndexCfg {
+    /// The paths `repo` (a roster slug or `owner/name`) is indexed under; empty means
+    /// the whole repo.
+    pub fn scope_for(&self, repo: &str) -> &[String] {
+        scope_for(&self.scopes, repo)
+    }
+}
+
+/// The paths of the first of `scopes` that matches `repo`; empty means the whole repo.
+pub(crate) fn scope_for<'a>(scopes: &'a [FleetIndexScope], repo: &str) -> &'a [String] {
+    let key = scope_key(repo);
+    scopes
+        .iter()
+        .find(|s| scope_key(&s.repo) == key)
+        .map_or(&[], |s| s.paths.as_slice())
+}
+
+fn scope_key(repo: &str) -> String {
+    repo.trim().replace("__", "/").to_ascii_lowercase()
 }
 
 impl Default for FleetIndexCfg {
@@ -278,6 +324,8 @@ impl Default for FleetIndexCfg {
             max_file_bytes: default_index_max_file_bytes(),
             max_bytes: default_index_max_bytes(),
             disk_min_free_pct: default_index_disk_min_free_pct(),
+            reindex_cooldown_secs: default_index_reindex_cooldown_secs(),
+            scopes: default_index_scopes(),
         }
     }
 }
@@ -304,6 +352,19 @@ fn default_index_max_bytes() -> u64 {
 
 fn default_index_disk_min_free_pct() -> u8 {
     10
+}
+
+fn default_index_reindex_cooldown_secs() -> u64 {
+    300
+}
+
+fn default_index_scopes() -> Vec<FleetIndexScope> {
+    vec![FleetIndexScope {
+        repo: "NixOS/nixpkgs".into(),
+        paths: ["pkgs/by-name", "lib", "nixos/modules"]
+            .map(String::from)
+            .to_vec(),
+    }]
 }
 
 /// `[review_fleet.webhook]` (forge-auth F6): where `--serve-fleet` accepts GitHub App

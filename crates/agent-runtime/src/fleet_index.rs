@@ -19,7 +19,9 @@
 //! A build is written to `<base-sha>.partial/` and swapped in when it is complete, so the
 //! generation a review reads is never half-written. [`FleetIndexer::reindex`] (the
 //! portal's Re-index) rebuilds a row even when its base has not moved, at most once per
-//! [`REINDEX_COOLDOWN`] per row.
+//! `reindex_cooldown_secs` per row. A repo listed in `[[review_fleet.index.scopes]]` is
+//! indexed only under its paths (by default nixpkgs under `pkgs/by-name`, `lib` and
+//! `nixos/modules`); the paths are recorded in the manifest, so changing them rebuilds.
 //!
 //! Everything lives under the row's workspace `<fleet_root>/<user>/<id>/`, and a row's
 //! `user` is its tenant: the fleet service binds it to the caller's tenant on every write
@@ -48,7 +50,7 @@ use agent_search::{FsDocumentSource, ScanLimits, TantivyBackend};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::config::FleetIndexCfg;
+use crate::config::{FleetIndexCfg, FleetIndexScope};
 
 /// The directory under a row's workspace that holds its index generations.
 const KNOWLEDGE_DIR: &str = "knowledge";
@@ -72,17 +74,18 @@ const INDEX_FORMAT: u32 = 1;
 const STAGING_SUFFIX: &str = ".partial";
 /// The generation a swap moves aside, removed straight after.
 const RETIRED_SUFFIX: &str = ".old";
-/// How soon a row can be rebuilt on request again. A rebuild of a large repo is costly,
-/// and the request comes from the portal.
-const REINDEX_COOLDOWN: Duration = Duration::from_secs(300);
 
 /// The `[review_fleet.index]` settings, clamped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IndexLimits {
     pub refresh: Duration,
     pub deadline: Duration,
     pub scan: ScanLimits,
     pub disk_min_free_pct: u8,
+    /// How soon a row can be rebuilt on request again. A rebuild of a large repo is
+    /// costly, and the request comes from the portal.
+    pub reindex_cooldown: Duration,
+    pub scopes: Vec<FleetIndexScope>,
 }
 
 impl IndexLimits {
@@ -99,6 +102,8 @@ impl IndexLimits {
                 deadline: None,
             },
             disk_min_free_pct: cfg.disk_min_free_pct.min(90),
+            reindex_cooldown: Duration::from_secs(cfg.reindex_cooldown_secs.clamp(30, 86_400)),
+            scopes: cfg.scopes.clone(),
         }
     }
 }
@@ -140,6 +145,9 @@ struct IndexEntry {
     /// Files left out for size.
     oversized: u64,
     duration_ms: u64,
+    /// The paths indexed (`[[review_fleet.index.scopes]]`); empty means the whole repo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scope: Vec<String>,
 }
 
 /// A row's paths under `<fleet_root>/<user>/<id>/knowledge/`.
@@ -402,7 +410,7 @@ struct Queue {
     checked: HashMap<(String, String), (Instant, RowFingerprint)>,
     /// Queued rows that rebuild even when their base has not moved.
     forced: std::collections::HashSet<(String, String)>,
-    /// When each row was last asked to rebuild, for [`REINDEX_COOLDOWN`].
+    /// When each row was last asked to rebuild, for the reindex cooldown.
     last_forced: HashMap<(String, String), Instant>,
 }
 
@@ -447,13 +455,19 @@ impl Queue {
     }
 
     /// Queue `row` for a rebuild, past the `refresh` throttle. Refused within
-    /// [`REINDEX_COOLDOWN`] of the row's last request, and when the queue is full.
-    fn force(&mut self, tenant: &str, row: &FleetSession, now: Instant) -> ReindexOutcome {
+    /// `cooldown` of the row's last request, and when the queue is full.
+    fn force(
+        &mut self,
+        tenant: &str,
+        row: &FleetSession,
+        cooldown: Duration,
+        now: Instant,
+    ) -> ReindexOutcome {
         let key = (tenant.to_string(), row.id.clone());
         if let Some(at) = self.last_forced.get(&key) {
             let waited = now.saturating_duration_since(*at);
-            if waited < REINDEX_COOLDOWN {
-                let left = (REINDEX_COOLDOWN - waited).as_secs().max(1);
+            if waited < cooldown {
+                let left = (cooldown - waited).as_secs().max(1);
                 return ReindexOutcome::TooSoon {
                     retry_after_secs: u32::try_from(left).unwrap_or(u32::MAX),
                 };
@@ -470,10 +484,14 @@ impl Queue {
         };
         self.rows.insert(key.clone(), row.clone());
         self.forced.insert(key.clone());
-        // Bounded like `checked`: requests older than the cooldown limit nothing.
+        // Bounded like `checked`: requests older than the cooldown limit nothing. A forced
+        // row left waiting (popped, its mirror still cloning) for longer than the
+        // cooldown loses its flag here, but only once more than [`MAX_QUEUED_ROWS`] rows
+        // were forced within one cooldown; its next pass then rebuilds only if the base
+        // moved. Memory stays bounded at that cost.
         if self.last_forced.len() > MAX_QUEUED_ROWS {
             self.last_forced
-                .retain(|_, at| now.saturating_duration_since(*at) < REINDEX_COOLDOWN);
+                .retain(|_, at| now.saturating_duration_since(*at) < cooldown);
             // A force kept for a row no longer queued nor recently asked for (a deleted
             // row's) is dropped with it.
             let live: std::collections::HashSet<_> = self
@@ -498,9 +516,10 @@ impl Queue {
 
     /// Record a finished check. A row left `Waiting` is not recorded, so the next pass
     /// tries it again; if its job was `forced`, the next pass's copy is forced too, so a
-    /// rebuild asked for while the mirror was cloning (or the disk was short) still runs. Past [`MAX_QUEUED_ROWS`] records, those older than `refresh` (which
-    /// throttle nothing any more, such as a deleted row's) are dropped, so the map stays
-    /// bounded by the live rows.
+    /// rebuild asked for while the mirror was cloning (or the disk was short) still
+    /// runs. Past [`MAX_QUEUED_ROWS`] records, those older than `refresh` (which throttle
+    /// nothing any more, such as a deleted row's) are dropped, so the map stays bounded
+    /// by the live rows.
     fn checked(
         &mut self,
         tenant: &str,
@@ -621,7 +640,12 @@ impl FleetIndexer for FleetIndexService {
             .queue
             .lock()
             .expect("fleet index queue poisoned")
-            .force(tenant, row, Instant::now());
+            .force(
+                tenant,
+                row,
+                self.inner.limits.reindex_cooldown,
+                Instant::now(),
+            );
         tracing::info!(row = %row.id, outcome = outcome.as_str(), "fleet index: rebuild requested");
         if !matches!(outcome, ReindexOutcome::TooSoon { .. }) {
             self.start_worker();
@@ -636,6 +660,11 @@ impl Inner {
     #[cfg(test)]
     pub(crate) async fn run(&self, row: &FleetSession) -> Outcome {
         self.run_job(row, false).await
+    }
+
+    /// The paths `row`'s repo is indexed under; empty means all of it.
+    fn scope(&self, row: &FleetSession) -> Vec<String> {
+        crate::config::scope_for(&self.limits.scopes, &row.repo).to_vec()
     }
 
     /// One row's job; `force` rebuilds even when the base has not moved. Never errs: a
@@ -695,11 +724,14 @@ impl Inner {
             return self.fail(row, layout, &mut status, &e);
         };
 
+        let scope = self.scope(row);
         let current = !force
             && status.state == FleetIndexState::Ready
             && status.base_sha == base
             && read_json::<KnowledgeManifest>(&layout.generation(&base).join(MANIFEST_FILE))
-                .is_some_and(|m| m.format == INDEX_FORMAT);
+                .is_some_and(|m| {
+                    m.format == INDEX_FORMAT && m.indexes.first().map(|e| &e.scope) == Some(&scope)
+                });
         if current {
             status.updated_at = now_secs();
             let _ = write_json(&layout.status(), &status);
@@ -718,7 +750,7 @@ impl Inner {
         // Never abandoned by a timeout: the reindex runs on a blocking thread that a
         // dropped future would leave writing into the generation this cleanup removes.
         // The build stops itself at the deadline instead (see `build`).
-        let built = self.build(&repo, layout, &base).await;
+        let built = self.build(&repo, layout, &base, scope).await;
         // The worktree is only the build's input: remove it whatever happened.
         let _ = repo.worktree_remove(&worktree_id(&base)).await;
         let built = match built {
@@ -764,6 +796,7 @@ impl Inner {
         repo: &Arc<dyn RepoBackend>,
         layout: &Layout,
         base: &str,
+        scope: Vec<String>,
     ) -> Result<KnowledgeManifest> {
         let started = Instant::now();
         // The build is written aside and swapped in when complete, so a rebuild of the
@@ -797,7 +830,11 @@ impl Inner {
             deadline: Some(started + self.limits.deadline),
             ..self.limits.scan
         };
-        let source = Arc::new(FsDocumentSource::new(wt.path.clone()).with_limits(limits));
+        let source = Arc::new(
+            FsDocumentSource::new(wt.path.clone())
+                .with_limits(limits)
+                .with_paths(scope.iter().map(PathBuf::from).collect()),
+        );
         let backend = TantivyBackend::open_with_source(source.clone(), index_dir.clone())?;
         // tantivy's reindex reads and adds documents in a loop with no await point, so
         // it runs on a blocking thread, never a runtime worker; it ends at the deadline
@@ -844,6 +881,7 @@ impl Inner {
                 partial: report.truncated,
                 oversized: report.oversized,
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                scope,
             }],
         };
         write_json(&generation.join(MANIFEST_FILE), &manifest)?;
@@ -1114,12 +1152,17 @@ mod tests {
         }
     }
 
+    /// The default reindex cooldown, as the tests' queues use it.
+    const COOLDOWN: Duration = Duration::from_secs(300);
+
     fn limits() -> IndexLimits {
         IndexLimits {
             refresh: Duration::from_secs(3600),
             deadline: Duration::from_secs(120),
             scan: ScanLimits::UNLIMITED,
             disk_min_free_pct: 0,
+            reindex_cooldown: COOLDOWN,
+            scopes: Vec::new(),
         }
     }
 
@@ -2029,6 +2072,56 @@ mod tests {
         assert_eq!(l.disk_min_free_pct, disk);
     }
 
+    #[rstest]
+    #[case::positive_default("the default is five minutes", None, 300)]
+    #[case::positive_set("a set value is kept", Some(900), 900)]
+    #[case::boundary_floor("a zero cooldown is raised to 30 s", Some(0), 30)]
+    #[case::adversarial_huge("a huge cooldown is capped at a day", Some(u64::MAX), 86_400)]
+    fn reindex_cooldown_is_clamped(
+        #[case] description: &str,
+        #[case] secs: Option<u64>,
+        #[case] expected: u64,
+    ) {
+        let mut cfg = FleetIndexCfg::default();
+        if let Some(secs) = secs {
+            cfg.reindex_cooldown_secs = secs;
+        }
+        assert_eq!(
+            IndexLimits::from_cfg(&cfg).reindex_cooldown.as_secs(),
+            expected,
+            "{description}"
+        );
+    }
+
+    // `[[review_fleet.index.scopes]]` from TOML, and which repo a scope applies to.
+    #[rstest]
+    #[case::positive_default_scopes_nixpkgs("by default nixpkgs is scoped", "", "NixOS__nixpkgs", &["pkgs/by-name", "lib", "nixos/modules"])]
+    #[case::positive_default_leaves_others_whole("by default other repos are whole", "", "acme__web", &[])]
+    #[case::corner_case_insensitive("the repo matches without regard to case", "", "nixos/NIXPKGS", &["pkgs/by-name", "lib", "nixos/modules"])]
+    #[case::positive_set_replaces_default(
+        "a set list replaces the default",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"src\"]\n",
+        "NixOS__nixpkgs",
+        &[]
+    )]
+    #[case::positive_set_applies(
+        "a set entry applies to its repo",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"src\"]\n",
+        "acme__web",
+        &["src"]
+    )]
+    #[case::boundary_empty_list_scopes_nothing("an empty list indexes every repo whole", "scopes = []\n", "NixOS__nixpkgs", &[])]
+    #[case::negative_prefix_is_not_a_match("a repo name prefix does not match", "", "NixOS__nixpkgs-extra", &[])]
+    fn scope_for_cases(
+        #[case] description: &str,
+        #[case] toml_src: &str,
+        #[case] repo: &str,
+        #[case] expected: &[&str],
+    ) {
+        let cfg: FleetIndexCfg = toml::from_str(toml_src).expect("parses");
+        assert_eq!(cfg.scope_for(repo), expected, "{description}");
+    }
+
     /// A zero file, file-size or byte cap would build a permanently empty index.
     #[test]
     fn adversarial_zero_caps_clamped_to_one() {
@@ -2156,7 +2249,7 @@ mod tests {
         let mut got = Vec::new();
         for step in steps {
             match *step {
-                FStep::Force(t, id) => got.push(q.force(t, &row(t, id), now)),
+                FStep::Force(t, id) => got.push(q.force(t, &row(t, id), COOLDOWN, now)),
                 FStep::Push(t, id) => {
                     q.push(t, &row(t, id), refresh, now);
                 }
@@ -2181,20 +2274,166 @@ mod tests {
             assert!(q.push("acme", &row("acme", &format!("r{i}")), Duration::ZERO, now));
         }
         assert_eq!(
-            q.force("acme", &row("acme", "one-more"), now),
+            q.force("acme", &row("acme", "one-more"), COOLDOWN, now),
             ReindexOutcome::Busy,
             "a full queue refuses rather than grow"
         );
         assert_eq!(
-            q.force("acme", &row("acme", "r0"), now),
+            q.force("acme", &row("acme", "r0"), COOLDOWN, now),
             ReindexOutcome::Coalesced,
             "a row already in the full queue can still be forced in place"
         );
         q.pop();
         assert_eq!(
-            q.force("acme", &row("acme", "one-more"), now),
+            q.force("acme", &row("acme", "one-more"), COOLDOWN, now),
             ReindexOutcome::Queued,
             "busy spends no cooldown: once there is room, the same request is queued"
+        );
+    }
+
+    // The `forced` set is pruned with `last_forced`, and only past the cap: a deleted
+    // row's flag (left by a waiting job, its request aged out) goes; a queued row's stays.
+    #[rstest]
+    #[case::boundary_at_cap_keeps_everything(
+        "at exactly the cap nothing is pruned, the dead row's flag included",
+        MAX_QUEUED_ROWS - 1,
+        true
+    )]
+    #[case::positive_past_cap_drops_the_dead_flag(
+        "one request past the cap prunes the dead row's flag",
+        MAX_QUEUED_ROWS,
+        false
+    )]
+    fn forced_prune_cases(
+        #[case] description: &str,
+        #[case] others: usize,
+        #[case] expected_dead_kept: bool,
+    ) {
+        let refresh = Duration::from_secs(3600);
+        let mut now = Instant::now();
+        let mut q = Queue::default();
+        let dead = row("acme", "dead");
+        let live = row("acme", "live");
+        // `dead` was forced, popped and left waiting (so flagged, but not queued), then
+        // removed from the roster; `live` was forced and is still queued.
+        assert_eq!(
+            q.force("acme", &dead, COOLDOWN, now),
+            ReindexOutcome::Queued
+        );
+        let (_, _, forced) = q.pop().expect("dead queued");
+        q.checked("acme", &dead, Outcome::Waiting, forced, refresh, now);
+        assert_eq!(
+            q.force("acme", &live, COOLDOWN, now),
+            ReindexOutcome::Queued
+        );
+        now += COOLDOWN + Duration::from_secs(1);
+        for i in 0..others {
+            let r = row("acme", &format!("r{i}"));
+            assert_eq!(q.force("acme", &r, COOLDOWN, now), ReindexOutcome::Queued);
+            // Taken by the worker, as `pop` would, but from the back so `live` stays
+            // queued.
+            let k = q.order.pop_back().expect("just queued");
+            q.rows.remove(&k);
+            q.forced.remove(&k);
+        }
+        let key = |id: &str| ("acme".to_string(), id.to_string());
+        assert_eq!(
+            q.forced.contains(&key("dead")),
+            expected_dead_kept,
+            "{description}"
+        );
+        assert!(
+            q.forced.contains(&key("live")),
+            "{description}: a queued row keeps its flag"
+        );
+        assert!(
+            q.last_forced.len() <= MAX_QUEUED_ROWS + 1,
+            "{description}: requests stay bounded"
+        );
+    }
+
+    fn scoped(repo: &str, paths: &[&str]) -> Vec<FleetIndexScope> {
+        vec![FleetIndexScope {
+            repo: repo.into(),
+            paths: paths.iter().map(ToString::to_string).collect(),
+        }]
+    }
+
+    // A scoped repo indexes only its paths; the scope is in the manifest, so a changed
+    // scope rebuilds an unmoved base and an unchanged one does not.
+    #[rstest]
+    #[case::positive_scoped_to_one_dir(
+        "a scope keeps only its directory's files",
+        scoped("acme/web", &["lib"]),
+        scoped("acme/web", &["lib"]),
+        1,
+        Outcome::Unchanged
+    )]
+    #[case::positive_unscoped_indexes_all(
+        "a repo with no scope is indexed whole",
+        Vec::new(),
+        Vec::new(),
+        3,
+        Outcome::Unchanged
+    )]
+    #[case::corner_other_repo_scope_ignored(
+        "another repo's scope does not apply",
+        scoped("NixOS/nixpkgs", &["lib"]),
+        scoped("NixOS/nixpkgs", &["lib"]),
+        3,
+        Outcome::Unchanged
+    )]
+    #[case::corner_scope_change_rebuilds(
+        "widening the scope rebuilds the unmoved base",
+        scoped("acme__web", &["lib"]),
+        scoped("acme__web", &["lib", "src"]),
+        1,
+        Outcome::Ready
+    )]
+    #[case::negative_scope_removed_rebuilds(
+        "dropping the scope rebuilds the whole repo",
+        scoped("ACME/Web", &["lib"]),
+        Vec::new(),
+        1,
+        Outcome::Ready
+    )]
+    #[case::adversarial_traversal_scope_indexes_nothing(
+        "a scope of only `..` paths indexes nothing rather than the whole repo",
+        scoped("acme/web", &["..", "../../etc"]),
+        scoped("acme/web", &["..", "../../etc"]),
+        0,
+        Outcome::Unchanged
+    )]
+    #[tokio::test]
+    async fn scoped_index(
+        #[case] description: &str,
+        #[case] first: Vec<FleetIndexScope>,
+        #[case] second: Vec<FleetIndexScope>,
+        #[case] expected_files: u64,
+        #[case] expected_second: Outcome,
+    ) {
+        let fx = Fixture::new(&[
+            ("lib/a.rs", "pub fn a() {}\n"),
+            ("src/b.rs", "pub fn b() {}\n"),
+            ("README.md", "hi\n"),
+        ]);
+        let r = row("acme", "web");
+        let lim = |scopes| IndexLimits { scopes, ..limits() };
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim(first));
+        assert!(
+            matches!(svc.run(&r).await, Outcome::Ready),
+            "{description}: first build"
+        );
+        assert_eq!(
+            status_of(&fx.root, &r).files,
+            expected_files,
+            "{description}: files"
+        );
+        let again = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim(second));
+        assert_eq!(
+            again.run(&r).await,
+            expected_second,
+            "{description}: second pass"
         );
     }
 

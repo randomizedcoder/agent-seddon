@@ -353,14 +353,19 @@ class _FleetPageState extends State<FleetPage> {
         'coalesced' => '${s.id} was already queued; that job now rebuilds.',
         'too_soon' => '${s.id} was re-indexed recently; try again in '
             '${reply.retryAfterSecs} s.',
-        'busy' => 'The index queue is full; try again shortly.',
-        _ => 'Re-index of ${s.id}: ${reply.outcome}.',
+        'busy' => 'The index queue is full; ${s.id} was not queued. '
+            'Try again shortly.',
+        // A newer server's outcome, shown as text and cut short.
+        _ => 'Re-index of ${s.id}: ${_clip(reply.outcome, 40)}.',
       });
       await _reload();
     } on GrpcError catch (e) {
       _snack('Re-index failed: ${e.message ?? e.codeName}');
     }
   }
+
+  static String _clip(String s, int max) =>
+      s.length > max ? '${s.substring(0, max)}…' : s;
 
   /// A roster row's subtitle: its repo and forge card, led by the index state
   /// when the theme names states (`status_icons`), so the name is never cut off.

@@ -49,7 +49,15 @@ impl Manifest {
     /// caller can mark its index partial instead of silently serving a truncated one.
     /// Blocking.
     pub fn scan_with(root: &Path, limits: &ScanLimits) -> (Self, ScanReport) {
-        let (entries, report) = scan_entries(root, limits);
+        Self::scan_in(root, limits, &[])
+    }
+
+    /// [`scan_with`](Self::scan_with) of only the files under `paths` (relative to
+    /// `root`; empty means all of it). Ids stay relative to `root`. A path that is not a
+    /// plain relative one, does not exist, or resolves through a symlink is left out, so
+    /// a hostile tree cannot point the walk outside `root`. Blocking.
+    pub fn scan_in(root: &Path, limits: &ScanLimits, paths: &[PathBuf]) -> (Self, ScanReport) {
+        let (entries, report) = scan_entries(root, limits, paths);
         let manifest = Self {
             entries,
             git_head: git_head(root),
@@ -136,6 +144,16 @@ pub fn compare(root: &Path, stored: Option<&Manifest>) -> IndexState {
 /// [`compare`] against a scan under the same `limits` the index was built with, so a
 /// capped index does not read as stale forever. Blocking.
 pub fn compare_with(root: &Path, stored: Option<&Manifest>, limits: &ScanLimits) -> IndexState {
+    compare_in(root, stored, limits, &[])
+}
+
+/// [`compare_with`] against a scan of only `paths`, as [`Manifest::scan_in`]. Blocking.
+pub fn compare_in(
+    root: &Path,
+    stored: Option<&Manifest>,
+    limits: &ScanLimits,
+    paths: &[PathBuf],
+) -> IndexState {
     let Some(stored) = stored else {
         return IndexState::Missing;
     };
@@ -146,19 +164,67 @@ pub fn compare_with(root: &Path, stored: Option<&Manifest>, limits: &ScanLimits)
         }
     }
     // Fallback: stat-walk and diff the stamp sets.
-    if scan_entries(root, limits).0 == stored.entries {
+    if scan_entries(root, limits, paths).0 == stored.entries {
         IndexState::Fresh
     } else {
         IndexState::Stale
     }
 }
 
-fn scan_entries(root: &Path, limits: &ScanLimits) -> (BTreeMap<PathBuf, FileStamp>, ScanReport) {
+/// The walk's starting points: `root` itself, or the usable `paths` under it, sorted and
+/// with any path inside another left out (so no file is counted twice). `None` when
+/// `paths` names nothing usable: an empty scope, not the whole tree.
+fn walk_roots(root: &Path, paths: &[PathBuf]) -> Option<(PathBuf, Vec<PathBuf>)> {
+    if paths.is_empty() {
+        return Some((root.to_path_buf(), vec![root.to_path_buf()]));
+    }
+    let base = std::fs::canonicalize(root).ok()?;
+    let mut kept: Vec<PathBuf> = paths
+        .iter()
+        .filter(|p| {
+            !p.as_os_str().is_empty()
+                && p.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+        })
+        .filter(|p| {
+            // No symlink anywhere on the way: the resolved path is the lexical one.
+            std::fs::canonicalize(base.join(p)).is_ok_and(|real| real == base.join(p))
+        })
+        .cloned()
+        .collect();
+    kept.sort();
+    kept.dedup();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for p in kept {
+        if !roots.iter().any(|r| p.starts_with(r)) {
+            roots.push(p);
+        }
+    }
+    if roots.is_empty() {
+        return None;
+    }
+    let walks = roots.iter().map(|p| base.join(p)).collect();
+    Some((base, walks))
+}
+
+fn scan_entries(
+    root: &Path,
+    limits: &ScanLimits,
+    paths: &[PathBuf],
+) -> (BTreeMap<PathBuf, FileStamp>, ScanReport) {
     let mut entries = BTreeMap::new();
     let mut report = ScanReport::default();
     let mut total: u64 = 0;
+    let Some((root, starts)) = walk_roots(root, paths) else {
+        return (entries, report);
+    };
+    let root = root.as_path();
     // Sorted, so a capped walk keeps the same files every time.
-    let walk = WalkBuilder::new(root)
+    let mut builder = WalkBuilder::new(&starts[0]);
+    for start in &starts[1..] {
+        builder.add(start);
+    }
+    let walk = builder
         .hidden(false)
         .sort_by_file_name(std::cmp::Ord::cmp)
         .build();
@@ -323,7 +389,7 @@ mod tests {
         let dir = fixture();
         std::fs::create_dir_all(dir.join(".agent-seddon/index")).unwrap();
         std::fs::write(dir.join(".agent-seddon/index/seg.dat"), "binary").unwrap();
-        let (entries, _) = scan_entries(&dir, &ScanLimits::UNLIMITED);
+        let (entries, _) = scan_entries(&dir, &ScanLimits::UNLIMITED, &[]);
         assert!(
             !entries.keys().any(|p| p.starts_with(".agent-seddon")),
             "the index directory must not be part of the freshness manifest"
@@ -460,5 +526,50 @@ mod tests {
             a.entries, b.entries,
             "the same files survive the cap each time"
         );
+    }
+
+    /// A scoped scan keeps only the files under its paths, ids still relative to the
+    /// root; a path that is not plain, missing, or reached through a symlink is dropped.
+    #[rstest]
+    #[case::positive_one_dir("one directory keeps only its files", &["src"], &["src/b.rs"])]
+    #[case::positive_two_dirs("two directories keep both", &["src", "lib"], &["lib/c.rs", "lib/sub/d.rs", "src/b.rs"])]
+    #[case::positive_a_file("a file path keeps that file", &["a.rs"], &["a.rs"])]
+    #[case::positive_unscoped("no paths is the whole tree", &[], &["a.rs", "lib/c.rs", "lib/sub/d.rs", "src/b.rs", "srcx/e.rs"])]
+    #[case::corner_nested_counted_once("a path inside another is not walked twice", &["lib", "lib/sub"], &["lib/c.rs", "lib/sub/d.rs"])]
+    #[case::corner_component_prefix("`src` does not take in `srcx`", &["src"], &["src/b.rs"])]
+    #[case::corner_missing_skipped("a missing path is skipped, the rest kept", &["nope", "src"], &["src/b.rs"])]
+    #[case::boundary_all_missing_is_empty("only missing paths scan nothing, not everything", &["nope"], &[])]
+    #[case::adversarial_parent("`..` is refused", &["../outside"], &[])]
+    #[case::adversarial_absolute("an absolute path is refused", &["/etc"], &[])]
+    #[case::adversarial_dot("`./src` is not a plain path, so it is refused", &["./src"], &[])]
+    #[case::adversarial_symlink_out("a symlink out of the tree is refused", &["escape"], &[])]
+    #[case::adversarial_symlink_in("a symlink inside the tree is refused too", &["alias"], &[])]
+    fn scan_in_cases(#[case] description: &str, #[case] paths: &[&str], #[case] expected: &[&str]) {
+        let dir = fixture();
+        for f in ["lib/c.rs", "lib/sub/d.rs", "srcx/e.rs"] {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        let outside = tempdir();
+        std::fs::write(outside.join("secret.rs"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+        std::os::unix::fs::symlink(dir.join("src"), dir.join("alias")).unwrap();
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let (m, _) = Manifest::scan_in(&dir, &ScanLimits::UNLIMITED, &paths);
+        let got: Vec<String> = m
+            .entries
+            .keys()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| p != "escape" && p != "alias")
+            .collect();
+        assert_eq!(got, expected, "{description}");
+        if !paths.is_empty() {
+            assert_eq!(
+                compare_in(&dir, Some(&m), &ScanLimits::UNLIMITED, &paths),
+                IndexState::Fresh,
+                "{description}: a scoped manifest is fresh under its own scope"
+            );
+        }
     }
 }
