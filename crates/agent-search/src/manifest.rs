@@ -421,6 +421,28 @@ mod tests {
         );
     }
 
+    /// A tree of directories only (no file ever reaches the size or count checks)
+    /// still stops at a passed deadline: the check is per walked entry, not per file.
+    #[test]
+    fn adversarial_dirs_only_tree_still_expires() {
+        let dir = tempdir();
+        let mut deep = dir.clone();
+        for i in 0..50 {
+            deep = deep.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let limits = ScanLimits {
+            deadline: Some(std::time::Instant::now()),
+            ..ScanLimits::UNLIMITED
+        };
+        let (m, report) = Manifest::scan_with(&dir, &limits);
+        assert!(m.entries.is_empty());
+        assert!(
+            report.expired,
+            "a dirs-only walk is bounded by the deadline too"
+        );
+    }
+
     #[test]
     fn capped_scan_is_deterministic() {
         let dir = fixture();

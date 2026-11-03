@@ -272,6 +272,23 @@ impl Session {
         }
         #[cfg(not(feature = "git"))]
         let _ = workspace.repo;
+        // The row's own index (review-graph 5b-ii): the one tool this adds to the
+        // read-only set. It reads a prebuilt index of the base branch (no worktree
+        // walk, no write), its hits in the PR's changed files are flagged pre-PR, and
+        // it replaces any process-wide `search`, which indexes another tree.
+        #[cfg(feature = "search")]
+        if let Some(search) = workspace.search {
+            let tool: Arc<dyn agent_core::Tool> = Arc::new(agent_tools::SearchTool::for_review(
+                search,
+                workspace.changed,
+            ));
+            self.tool_schemas.retain(|s| s.name != tool.name());
+            self.tool_schemas.push(tool.schema());
+            self.tool_overrides
+                .register(crate::metered::tool(tool, self.agent.metrics.clone()));
+        }
+        #[cfg(not(feature = "search"))]
+        let _ = (workspace.search, workspace.changed);
     }
 
     /// Seed this session as a campaign worker (CP-06b): implement mode from the

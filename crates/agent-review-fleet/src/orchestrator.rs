@@ -833,7 +833,7 @@ impl FleetOrchestrator {
         // session, keeping the facts for the C13 draft. Grounding is **fail-soft**: if the
         // engine errors (e.g. no forge to resolve a PR number), fall back to the bare
         // instruction so a review still runs (with no draft — nothing to render from).
-        let (goal, facts) = match &grounder {
+        let (goal, facts, search) = match &grounder {
             Some(grounder) => match with_prep_timeout(
                 "review grounding",
                 grounding_timeout(grounder.time_budget()),
@@ -846,14 +846,15 @@ impl FleetOrchestrator {
                 Ok(grounded) => (
                     Self::grounded_goal(&row, pr, &grounded.brief),
                     Some(grounded.facts),
+                    grounded.search,
                 ),
                 Err(e) => {
                     tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
                         "fleet: review engine failed; driving an ungrounded review");
-                    (Self::review_goal(&row, pr), None)
+                    (Self::review_goal(&row, pr), None, None)
                 }
             },
-            None => (Self::review_goal(&row, pr), None),
+            None => (Self::review_goal(&row, pr), None, None),
         };
 
         // A server-minted review-round id (unguessable), carried into the draft record so
@@ -880,9 +881,16 @@ impl FleetOrchestrator {
         // Root the review session's tools at THIS PR: its read-only worktree for the
         // filesystem tools and the row's repo (with the PR head fetched) for `git_*`.
         // Without it the session's tools would read the fleet process's own checkout.
+        // With the row's own index (5b-ii), the session also gets a `search` over it,
+        // flagging hits in the files this PR changes as pre-PR content.
         let review_ws = agent_core::ReviewWorkspace {
             worktree: worktree.path.clone(),
             repo: repo.clone(),
+            search,
+            changed: facts
+                .as_ref()
+                .map(|f| f.change.files.iter().map(|c| c.path.clone()).collect())
+                .unwrap_or_default(),
         };
         // The per-review worktree id, moved into the task so it reaps exactly this
         // review's worktree (matching the `(session_id, pr)`-keyed add above).
@@ -1075,6 +1083,9 @@ mod tests {
         /// The worktree each started review's tools were rooted at (same order as
         /// `reviews`) — the fleet must hand the session the PR's checkout.
         workspaces: Vec<std::path::PathBuf>,
+        /// Per started review: whether its workspace carried a search backend, and the
+        /// changed files it was given (5b-ii).
+        bound: Vec<(bool, Vec<std::path::PathBuf>)>,
     }
 
     /// A [`FleetHost`] double with a configurable global cap. Admits are idempotent, so
@@ -1134,6 +1145,9 @@ mod tests {
         fn workspaces(&self) -> Vec<std::path::PathBuf> {
             self.state.lock().unwrap().workspaces.clone()
         }
+        fn bound(&self) -> Vec<(bool, Vec<std::path::PathBuf>)> {
+            self.state.lock().unwrap().bound.clone()
+        }
         fn removed(&self) -> Vec<SessionKey> {
             self.state.lock().unwrap().removed.clone()
         }
@@ -1172,6 +1186,8 @@ mod tests {
             {
                 let mut s = self.state.lock().unwrap();
                 s.workspaces.push(workspace.worktree);
+                s.bound
+                    .push((workspace.search.is_some(), workspace.changed));
                 if self.max_total > 0
                     && !s.admitted.contains(&key)
                     && s.admitted.len() >= self.max_total
@@ -1205,6 +1221,8 @@ mod tests {
         /// The checkout roots the engine was actually rooted at (fleet-grounding track):
         /// the fleet must ground against the per-review worktree, not the bare mirror.
         roots: Mutex<Vec<std::path::PathBuf>>,
+        /// The search backend grounding hands on (the row index, 5b-ii).
+        search: Option<Arc<dyn agent_core::SearchBackend>>,
     }
     impl FakeGrounder {
         fn ok(brief: &str) -> Arc<Self> {
@@ -1212,6 +1230,16 @@ mod tests {
                 brief: Ok(brief.into()),
                 grounded: Mutex::new(Vec::new()),
                 roots: Mutex::new(Vec::new()),
+                search: None,
+            })
+        }
+        /// Grounds like [`Self::ok`] and hands on a row-index search backend.
+        fn with_index(brief: &str) -> Arc<Self> {
+            Arc::new(Self {
+                brief: Ok(brief.into()),
+                grounded: Mutex::new(Vec::new()),
+                roots: Mutex::new(Vec::new()),
+                search: Some(Arc::new(agent_testkit::FixtureSearch::new())),
             })
         }
         fn broken() -> Arc<Self> {
@@ -1219,6 +1247,7 @@ mod tests {
                 brief: Err("engine boom".into()),
                 grounded: Mutex::new(Vec::new()),
                 roots: Mutex::new(Vec::new()),
+                search: Some(Arc::new(agent_testkit::FixtureSearch::new())),
             })
         }
         /// The PR numbers the engine was actually asked to ground (order preserved).
@@ -1261,6 +1290,7 @@ mod tests {
                 Ok(b) => Ok(GroundedReview {
                     brief: b.clone(),
                     facts: Self::facts(),
+                    search: self.search.clone(),
                 }),
                 Err(e) => Err(agent_core::Error::Fleet(e.clone())),
             }
@@ -2513,6 +2543,59 @@ mod tests {
                 "{description}: the model's tools read the same checkout the facts came from"
             );
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Grounding {
+        WithIndex,
+        WithoutIndex,
+        Broken,
+    }
+
+    // The review session gets the row index grounding used, with the PR's changed files
+    // to flag pre-PR hits (5b-ii); no index, or failed grounding, means no search.
+    #[rstest::rstest]
+    #[case::positive_index_reaches_the_session(
+        "grounding's row index and the changed files reach the session",
+        Grounding::WithIndex,
+        (true, vec![std::path::PathBuf::from("src/x.rs")])
+    )]
+    #[case::negative_no_index_no_search(
+        "no row index: the session gets no search",
+        Grounding::WithoutIndex,
+        (false, vec![std::path::PathBuf::from("src/x.rs")])
+    )]
+    #[case::corner_failed_grounding_no_search(
+        "failed grounding hands on nothing, even if the grounder holds an index",
+        Grounding::Broken,
+        (false, Vec::new())
+    )]
+    #[tokio::test]
+    async fn review_session_gets_the_row_index(
+        #[case] description: &str,
+        #[case] grounding: Grounding,
+        #[case] expected: (bool, Vec<std::path::PathBuf>),
+    ) {
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = match grounding {
+            Grounding::WithIndex => FakeGrounder::with_index("brief"),
+            Grounding::WithoutIndex => FakeGrounder::ok("brief"),
+            Grounding::Broken => FakeGrounder::broken(),
+        };
+        let o = orch(roster, repo, host.clone()).with_grounder(grounder);
+        o.handle(FleetTrigger {
+            head_sha: String::new(),
+            session_id: "web".into(),
+            pr_number: 7,
+            requested_by: Vec::new(),
+            tenant: String::new(),
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 7).await, "{description}: review task ran");
+        assert_eq!(host.bound(), vec![expected], "{description}");
     }
 
     #[tokio::test]

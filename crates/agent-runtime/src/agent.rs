@@ -421,7 +421,11 @@ impl agent_core::ReviewGrounder for EngineGrounder {
         // this same run rather than collecting twice.
         let facts = self.engine.collect(&target).await?;
         let brief = agent_review::render_facts_with(&facts, self.budget);
-        Ok(agent_core::GroundedReview { brief, facts })
+        Ok(agent_core::GroundedReview {
+            brief,
+            facts,
+            search: None,
+        })
     }
 
     fn time_budget(&self) -> Option<std::time::Duration> {
@@ -477,7 +481,7 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
             Arc::new(crate::builder::build_review_orchestrator(
                 root.to_path_buf(),
                 self.repo.clone(),
-                search,
+                search.clone(),
                 self.forge.clone(),
                 self.sandbox.clone(),
                 self.pool.clone(),
@@ -487,12 +491,19 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
             ));
         let facts = engine.collect(&target).await?;
         let mut brief = agent_review::render_facts_with(&facts, self.budget);
+        // Outside the fact budget on purpose: one fixed-format line (~150 bytes) that
+        // must survive even when the facts fill it.
         if let Some(note) = index_note {
             brief.push('\n');
             brief.push_str(&note);
             brief.push('\n');
         }
-        Ok(agent_core::GroundedReview { brief, facts })
+        // The same index backs the review session's `search` tool (5b-ii).
+        Ok(agent_core::GroundedReview {
+            brief,
+            facts,
+            search,
+        })
     }
 
     /// Every `ground` builds the same collectors (only the root differs), so the
@@ -502,6 +513,8 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
             crate::builder::build_review_orchestrator(
                 std::path::PathBuf::new(),
                 self.repo.clone(),
+                // `ground` may pass a row index here; no collector's deadline depends on
+                // whether search is present, so the budget is the same either way.
                 None,
                 self.forge.clone(),
                 self.sandbox.clone(),
@@ -6959,6 +6972,8 @@ mod tests {
             session.bind_review_workspace(agent_core::ReviewWorkspace {
                 worktree: std::path::PathBuf::from("/fleet/acme/web/worktrees/pr-42"),
                 repo: pr_repo,
+                search: None,
+                changed: Vec::new(),
             });
         }
         assert_eq!(session.send("review this").await.unwrap(), "done");
@@ -7028,6 +7043,8 @@ mod tests {
                 repo: Arc::new(
                     agent_testkit::FixtureRepo::new().with_blob("HEAD", "f.rs", "PR-SIDE"),
                 ),
+                search: None,
+                changed: Vec::new(),
             },
         )
         .await
@@ -7083,6 +7100,8 @@ mod tests {
         session.bind_review_workspace(agent_core::ReviewWorkspace {
             worktree: std::env::temp_dir(),
             repo: Arc::new(agent_testkit::FixtureRepo::new()),
+            search: None,
+            changed: Vec::new(),
         });
         let after: Vec<String> = session
             .tool_schemas
@@ -7104,6 +7123,111 @@ mod tests {
             session.tool_overrides.get("git_read").is_some(),
             "advertised read-only git tools are rebound"
         );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Shared {
+        None,
+        Present,
+    }
+
+    // A review workspace that carries the row's index adds exactly one `search` (over
+    // that index, flagging the PR's changed files pre-PR), replacing any process-wide
+    // one; without it nothing is added. The write tools stay unadvertised either way.
+    #[cfg(feature = "search")]
+    #[rstest::rstest]
+    #[case::positive_row_index_adds_search(
+        "a row index adds one review search",
+        true,
+        Shared::None
+    )]
+    #[case::adversarial_replaces_process_search(
+        "a process-wide search (another tree) is replaced, never kept beside it",
+        true,
+        Shared::Present
+    )]
+    #[case::negative_no_row_index_no_search("no row index: no search added", false, Shared::None)]
+    #[tokio::test]
+    async fn review_workspace_search(
+        #[case] description: &str,
+        #[case] with_index: bool,
+        #[case] shared: Shared,
+    ) {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(NamedTool("bash")));
+        if matches!(shared, Shared::Present) {
+            tools.register(Arc::new(agent_tools::SearchTool::new(Arc::new(
+                agent_testkit::FixtureSearch::new().with_hits(vec![
+                    agent_testkit::FixtureSearch::hit("OTHER_TREE.rs", 1, "x"),
+                ]),
+            ))));
+        }
+        let agent = Arc::new(Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ));
+        let mut session = agent.session();
+        session.seed_review(None);
+        let row_index: Arc<dyn agent_core::SearchBackend> =
+            Arc::new(agent_testkit::FixtureSearch::new().with_hits(vec![
+                agent_testkit::FixtureSearch::hit("src/changed.rs", 3, "fn a()"),
+                agent_testkit::FixtureSearch::hit("src/other.rs", 9, "fn a()"),
+            ]));
+        session.bind_review_workspace(agent_core::ReviewWorkspace {
+            worktree: std::env::temp_dir(),
+            repo: Arc::new(agent_testkit::FixtureRepo::new()),
+            search: with_index.then_some(row_index),
+            changed: vec![std::path::PathBuf::from("src/changed.rs")],
+        });
+        let advertised: Vec<&str> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        let searches = advertised.iter().filter(|n| **n == "search").count();
+        assert_eq!(
+            searches,
+            usize::from(with_index),
+            "{description}: {advertised:?}"
+        );
+        assert!(
+            !advertised.contains(&"bash"),
+            "{description}: bash never advertised"
+        );
+        if !with_index {
+            assert!(
+                session.tool_overrides.get("search").is_none(),
+                "{description}"
+            );
+            return;
+        }
+        let tool = session.tool_overrides.get("search").expect("bound");
+        let obs = tool
+            .execute(
+                serde_json::json!({"query": "a"}),
+                &ToolContext {
+                    cwd: std::env::temp_dir(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !obs.content.contains("OTHER_TREE"),
+            "{description}: {}",
+            obs.content
+        );
+        let flagged: Vec<&str> = obs
+            .content
+            .lines()
+            .filter(|l| l.contains("[pre-PR"))
+            .collect();
+        assert_eq!(flagged.len(), 1, "{description}: {}", obs.content);
+        assert!(flagged[0].starts_with("src/changed.rs:3"), "{description}");
     }
 
     // ---- compaction reserve tracks the request's max_tokens (Bug L1) -------

@@ -21,8 +21,9 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |
 | 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
 | 5a-ii | Portal index badge + Re-index (contact sheet), incremental refresh, base-moved trigger (poll/webhook), language indexes, history signals, overview, `knowledge_max_bytes`, nixpkgs path scoping, GC refcount | [04](04-repo-knowledge.md) | ⬜ | — |
-| 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | 🟡 | (this PR) |
-| 5b-ii | `search`/`find_*` session tools on the row index with pre-PR flags, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
+| 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
+| 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | 🟡 | (this PR) |
+| 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
 
@@ -173,7 +174,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #687 (3a1494a9) after a security review and two fleet rounds; the last draft
   had no must-fix. Not deployed to l2 yet. Its leftovers are in 5b-i below.
 
-- **5b-i** (this PR): fleet reviews ground on their row's own index.
+- **5b-i** (#688, 42878b0b): fleet reviews ground on their row's own index.
   - `TantivyBackend::open_read_only`: an existing index for queries only (no writer lock,
     so reviews share it while the builder works on the next generation; nothing created;
     `reindex` errs; `status` from the saved manifest).
@@ -201,3 +202,27 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     `base_sha` names no commit says so rather than echoing its claimed state; a stale row
     serves its last good index (new row); `reindex_inner` checks for a writer before
     scanning; the GC doc rests on unlink-while-open, not on build spacing.
+
+  Merged as #688 (42878b0b) after three fleet rounds; the third said nothing blocks.
+  Its items are done in 5b-ii below.
+
+- **5b-ii** (this PR): the review session searches the row index.
+  - `SearchTool::for_review(backend, changed)`: the description says the index is pre-PR,
+    and a hit in a changed file is flagged `[pre-PR: this PR changes this file]` (exact
+    repo-relative path; a look-alike or `./`-prefixed path is not).
+  - `GroundedReview.search` carries the backend grounding opened; the fleet orchestrator
+    puts it and the change set's paths in `ReviewWorkspace { search, changed }`;
+    `bind_review_workspace` registers the tool, replacing any process-wide `search`. No
+    index, or failed grounding, adds nothing.
+  - #688 round-3 items: `TantivyBackend`'s source and writer are one optional `Writable`
+    (a read-only backend has no corpus to misuse); an end-to-end `ground()` test checks
+    the brief line and the hand-off; a dirs-only tree with a passed deadline expires; the
+    leak gate opens, queries and drops a read-only backend 100 times (~860 blocks/run,
+    budget 2048); a `ready` status with no base says "names no commit"; comments on the
+    unbudgeted brief line and `time_budget`'s `None`.
+  - Tests: `review_search_flags_pre_pr_hits` (6 rows incl. look-alike and `./` paths),
+    `review_workspace_search` (adds one, replaces a process-wide one, none without an
+    index; `bash` never advertised), `review_session_gets_the_row_index` (index reaches
+    the session; none without one; none after failed grounding),
+    `grounding_carries_the_row_index`, `adversarial_dirs_only_tree_still_expires`,
+    `adversarial_ready_without_base`.

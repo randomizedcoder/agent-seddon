@@ -59,17 +59,23 @@ struct Fields {
     lang: Field,
 }
 
+/// What a writable backend has and a read-only one does not.
+struct Writable {
+    source: Arc<dyn DocumentSource>,
+    writer: Mutex<IndexWriter>,
+}
+
 /// A tantivy-backed [`SearchBackend`] over a [`DocumentSource`], with its index
 /// under `index_dir` (typically `<root>/.agent-seddon/index/tantivy`).
 pub struct TantivyBackend {
-    source: Arc<dyn DocumentSource>,
     index_dir: PathBuf,
     // The `IndexReader`/`IndexWriter` own everything the backend needs, so the
     // `Index` itself is not retained.
     reader: IndexReader,
-    /// `None` for a [`read_only`](Self::open_read_only) backend: it takes no writer
-    /// lock, so many readers can share an index another process builds.
-    writer: Option<Mutex<IndexWriter>>,
+    /// The corpus and the writer, together: `None` for a
+    /// [`read_only`](Self::open_read_only) backend, which has neither (no writer lock,
+    /// so many readers share an index another backend builds; nothing to rescan).
+    write: Option<Writable>,
     fields: Fields,
     building: AtomicBool,
 }
@@ -114,10 +120,12 @@ impl TantivyBackend {
         let writer = index.writer(WRITER_HEAP_BYTES).map_err(se)?;
 
         Ok(Self {
-            source,
             index_dir,
             reader,
-            writer: Some(Mutex::new(writer)),
+            write: Some(Writable {
+                source,
+                writer: Mutex::new(writer),
+            }),
             fields,
             building: AtomicBool::new(false),
         })
@@ -149,11 +157,9 @@ impl TantivyBackend {
             .try_into()
             .map_err(se)?;
         Ok(Self {
-            // Never read: `status` and `reindex` take the read-only branch first.
-            source: Arc::new(FsDocumentSource::new(index_dir.clone())),
             index_dir,
             reader,
-            writer: None,
+            write: None,
             fields,
             building: AtomicBool::new(false),
         })
@@ -178,29 +184,23 @@ impl SearchBackend for TantivyBackend {
             content_search: true,
             scored: true,
             // A read-only backend never reindexes.
-            incremental: self.writer.is_some(),
+            incremental: self.write.is_some(),
             max_concurrent_queries: 0,
         }
     }
 
     async fn status(&self) -> Result<IndexStatus> {
-        let source = self.source.clone();
+        let source = self.write.as_ref().map(|w| w.source.clone());
         let mpath = self.manifest_path();
         let building = self.building.load(Ordering::Relaxed);
-        let read_only = self.writer.is_none();
         let status = tokio::task::spawn_blocking(move || {
             let stored = Manifest::load(&mpath);
-            let state = if building {
-                IndexState::Building
-            } else if read_only {
+            let state = match (building, source) {
+                (true, _) => IndexState::Building,
+                (false, Some(source)) => source.compare(stored.as_ref()),
                 // A read-only index is whatever its builder left: fresh if finished.
-                if stored.is_some() {
-                    IndexState::Fresh
-                } else {
-                    IndexState::Missing
-                }
-            } else {
-                source.compare(stored.as_ref())
+                (false, None) if stored.is_some() => IndexState::Fresh,
+                (false, None) => IndexState::Missing,
             };
             let (files, last, digest) = match &stored {
                 Some(m) => (m.entries.len() as u64, m.built_ms, m.digest()),
@@ -220,7 +220,7 @@ impl SearchBackend for TantivyBackend {
 
     async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
         // Fail fast: a read-only backend never scans (its source is the index dir).
-        if self.writer.is_none() {
+        if self.write.is_none() {
             return Err(Error::Search("this index is open read-only".into()));
         }
         self.building.store(true, Ordering::Relaxed);
@@ -270,11 +270,11 @@ impl SearchBackend for TantivyBackend {
 
 impl TantivyBackend {
     async fn reindex_inner(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
-        let Some(writer) = &self.writer else {
+        let Some(write) = &self.write else {
             return Err(Error::Search("this index is open read-only".into()));
         };
         // Scan the corpus off the async executor — it can be large.
-        let source = self.source.clone();
+        let source = write.source.clone();
         let current = tokio::task::spawn_blocking(move || source.scan())
             .await
             .map_err(|e| Error::Search(format!("scan task panicked: {e}")))?;
@@ -282,7 +282,7 @@ impl TantivyBackend {
         let stored = Manifest::load(&self.manifest_path());
         let (upserts, deletes) = diff(stored.as_ref(), &current);
 
-        let mut writer = writer.lock().await;
+        let mut writer = write.writer.lock().await;
         if stored.is_none() {
             // No prior manifest: rebuild from scratch so a partial/foreign index
             // can't leave stale docs behind.
@@ -298,7 +298,7 @@ impl TantivyBackend {
         // contents is held at once — the old code held one file); a small batch is
         // read sequentially since rayon's dispatch wouldn't repay. The set of
         // documents indexed — and therefore every query result — is unchanged.
-        let source = self.source.clone();
+        let source = write.source.clone();
         let mut done: u64 = 0;
         for batch in upserts.chunks(REINDEX_READ_BATCH) {
             let loaded: Vec<(String, Option<crate::source::SourceDoc>)> =

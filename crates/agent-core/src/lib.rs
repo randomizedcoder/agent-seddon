@@ -3812,6 +3812,12 @@ pub struct ReviewWorkspace {
     /// The repo backend owning `worktree` (the row's mirror, with the PR head ref
     /// fetched); backs the review session's `git_*` tools.
     pub repo: Arc<dyn RepoBackend>,
+    /// The row's own repo index, opened read-only for this review (review-graph 5b-ii).
+    /// It is of the base branch, so it backs a `search` tool whose hits in `changed`
+    /// files are flagged pre-PR. `None`: the session gets no `search`.
+    pub search: Option<Arc<dyn SearchBackend>>,
+    /// The PR's changed files, repo-relative (from the grounded change set).
+    pub changed: Vec<PathBuf>,
 }
 
 #[async_trait]
@@ -6477,10 +6483,24 @@ pub trait ReviewGrounder: Send + Sync {
 /// The output of one review-engine run (review-fleet C10): the rendered `brief` handed to
 /// the review session, plus the `facts` it came from — kept so the FSM can also render the
 /// C13 draft from the same run rather than collecting twice.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GroundedReview {
     pub brief: String,
     pub facts: ReviewFacts,
+    /// The search backend grounding used (the row's own index, read-only), handed on
+    /// to the review session's `search` tool (review-graph 5b-ii). `None` when grounding
+    /// had none.
+    pub search: Option<Arc<dyn SearchBackend>>,
+}
+
+impl std::fmt::Debug for GroundedReview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroundedReview")
+            .field("brief", &self.brief)
+            .field("facts", &self.facts)
+            .field("search", &self.search.as_ref().map(|_| "SearchBackend"))
+            .finish()
+    }
 }
 
 /// Everything the [`ReviewDrafter`] needs to render and persist a review draft
