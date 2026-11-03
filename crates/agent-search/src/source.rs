@@ -95,7 +95,19 @@ impl DocumentSource for FsDocumentSource {
     fn load(&self, id: &Path) -> Option<SourceDoc> {
         // Binary/unreadable files are silently skipped (as before). The read is capped
         // too: a file that grew past the size cap after the scan is skipped, never
-        // buffered whole.
+        // buffered whole. Past the deadline nothing more is read, so a long build ends
+        // soon after it (the report says it expired).
+        if self
+            .limits
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            self.last_scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expired = true;
+            return None;
+        }
         let file = std::fs::File::open(self.root.join(id)).ok()?;
         let mut text = String::new();
         file.take(self.limits.max_file_bytes.saturating_add(1))
@@ -209,6 +221,7 @@ mod tests {
         let src = FsDocumentSource::new(dir.clone()).with_limits(ScanLimits {
             max_files: usize::MAX,
             max_file_bytes: 16,
+            ..ScanLimits::UNLIMITED
         });
         assert!(src.scan().entries.contains_key(Path::new("a.txt")));
         std::fs::write(dir.join("a.txt"), "x".repeat(size)).unwrap();
@@ -217,6 +230,23 @@ mod tests {
             expected_loaded,
             "{description}"
         );
+    }
+
+    /// A read after the deadline returns nothing and marks the report expired, so a
+    /// build that has run out of time stops reading instead of finishing the corpus.
+    #[test]
+    fn adversarial_reads_stop_at_the_deadline() {
+        let dir = tempdir();
+        std::fs::write(dir.join("a.rs"), "x").unwrap();
+        let src = FsDocumentSource::new(dir).with_limits(ScanLimits {
+            deadline: Some(std::time::Instant::now()),
+            ..ScanLimits::UNLIMITED
+        });
+        assert!(
+            src.load(Path::new("a.rs")).is_none(),
+            "no read past the deadline"
+        );
+        assert!(src.last_scan().expired, "the report says it expired");
     }
 
     #[test]
@@ -228,6 +258,7 @@ mod tests {
         let src = FsDocumentSource::new(dir).with_limits(ScanLimits {
             max_files: 2,
             max_file_bytes: u64::MAX,
+            ..ScanLimits::UNLIMITED
         });
         assert_eq!(
             src.last_scan(),

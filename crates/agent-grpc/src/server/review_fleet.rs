@@ -59,6 +59,9 @@ pub struct ReviewFleetSvc {
     indexer: Option<Arc<dyn FleetIndexer>>,
 }
 
+/// Index status reads `List` runs at once.
+const LIST_STATUS_CONCURRENCY: usize = 16;
+
 /// A roster row on the wire, with its repo index status when an indexer is wired. The
 /// status is looked up by the row the caller's own (tenant-scoped) roster returned, so it
 /// is never another tenant's.
@@ -185,10 +188,14 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         let indexer = self.indexer.clone();
         let work = async move {
             let rows = inner.list().await.map_err(|e| status_from_error(&e))?;
-            let mut sessions = Vec::with_capacity(rows.len());
-            for row in rows {
-                sessions.push(session_reply(row, indexer.as_ref()).await);
-            }
+            // Each status read is a file read on a blocking thread: run a bounded number
+            // at once, keeping the roster's order.
+            use futures_util::StreamExt as _;
+            let sessions: Vec<pb::FleetSession> = futures_util::stream::iter(rows)
+                .map(|row| session_reply(row, indexer.as_ref()))
+                .buffered(LIST_STATUS_CONCURRENCY)
+                .collect()
+                .await;
             Ok(Response::new(pb::FleetSessionList { sessions }))
         }
         .instrument(sp);

@@ -86,7 +86,11 @@ search index, end to end; the rest of this document is still the target.
   read-only worktree `knowledge-<sha12>` at the base, index it into
   `knowledge/<sha>/index` with `TantivyBackend` over a capped `FsDocumentSource`, write
   `knowledge/<sha>/manifest.json`, and remove the worktree (only the index is kept, to save
-  disk). The whole build runs under `deadline_secs` (default 1800).
+  disk). The build runs on a blocking thread (tantivy's reindex loop has no await point)
+  and stops itself at `deadline_secs` (default 1800): the scan and every file read check
+  the deadline, and an expired build fails and keeps no generation. Nothing abandons the
+  build by a timeout (an orphaned blocking task could write into a generation being
+  removed); only the git checkout has one, at least 60 s.
 - **Waiting.** While the mirror is still being cloned the job returns at once and the row
   shows `pending`; the next pass retries, since a wait is not counted against the throttle.
 - **Status** lives in `knowledge/status.json` beside the row's mirror, not in the roster
@@ -96,9 +100,11 @@ search index, end to end; the rest of this document is still the target.
   A failure keeps the last good `base_sha`, and its error is redacted and capped at 512
   characters.
 - **Limits.** `max_files` (default 200 000, files taken in name order so a capped index is
-  deterministic) and `max_file_bytes` (default 1 MiB, larger files skipped); a capped index
-  is `partial`. Indexing pauses below `disk_min_free_pct` (default 10 %) free on the fleet
-  root's filesystem.
+  deterministic), `max_file_bytes` (default 1 MiB, larger files skipped) and `max_bytes`
+  (default 2 GiB read per index, which bounds its size on disk); a capped index is
+  `partial`. Git's own data (`.git`) is never indexed. Indexing pauses below
+  `disk_min_free_pct` (default 10 %) free on the fleet root's filesystem, and a build that
+  left the disk under it is dropped.
 - **GC** keeps the current and the previous generation and removes leftover
   `knowledge-*` worktrees.
 - **Visible** on `ListSessions` / `GetSession` as `FleetSession.index` (`FleetIndexStatus`),

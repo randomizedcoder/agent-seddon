@@ -258,6 +258,10 @@ pub struct FleetIndexCfg {
     /// Leave out files larger than this (generated or vendored blobs). Default 1 MiB.
     #[serde(default = "default_index_max_file_bytes")]
     pub max_file_bytes: u64,
+    /// Read at most this many bytes of files into one index (which bounds its size on
+    /// disk); past it the index is marked partial. Default 2 GiB.
+    #[serde(default = "default_index_max_bytes")]
+    pub max_bytes: u64,
     /// Pause indexing while the fleet root's filesystem has less than this percent
     /// free (reviews continue). Clamped to 0..=90. Default 10.
     #[serde(default = "default_index_disk_min_free_pct")]
@@ -272,6 +276,7 @@ impl Default for FleetIndexCfg {
             deadline_secs: default_index_deadline_secs(),
             max_files: default_index_max_files(),
             max_file_bytes: default_index_max_file_bytes(),
+            max_bytes: default_index_max_bytes(),
             disk_min_free_pct: default_index_disk_min_free_pct(),
         }
     }
@@ -291,6 +296,10 @@ fn default_index_max_files() -> usize {
 
 fn default_index_max_file_bytes() -> u64 {
     1024 * 1024
+}
+
+fn default_index_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
 }
 
 fn default_index_disk_min_free_pct() -> u8 {

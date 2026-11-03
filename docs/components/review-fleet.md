@@ -112,6 +112,7 @@ refresh_secs      = 3600                   # re-check a row at most this often (
 deadline_secs     = 1800                   # one build's deadline (60..21600)
 max_files         = 200000                 # files per index; more ⇒ `partial`
 max_file_bytes    = 1048576                # larger files are skipped
+max_bytes         = 2147483648             # bytes read into one index; more ⇒ `partial`
 disk_min_free_pct = 10                     # pause indexing below this free % (max 90)
 ```
 
@@ -533,7 +534,10 @@ for an index of its default branch: `FleetIndexService`
 mirror, adds a read-only worktree at the base commit, builds a tantivy search index into
 `<root>/<user>/<id>/knowledge/<sha>/index` with a manifest, and removes the worktree. One
 job runs at a time, under the row's tenant; a row is re-checked at most every
-`refresh_secs`, and a new base sha builds a new generation (the previous one is kept). The
+`refresh_secs`, and a new base sha builds a new generation (the previous one is kept).
+The build runs on a blocking thread and stops itself at `deadline_secs` (the scan and
+every file read check it), reads at most `max_bytes`, and is dropped if the disk fell
+under `disk_min_free_pct` while it ran. The
 status (`pending | indexing | ready | stale | failed`, base sha, files, bytes, `partial`,
 redacted error) is in `knowledge/status.json` and on `ListSessions` / `GetSession` as
 `FleetSession.index`. Metrics: `agent_fleet_index_runs_total{outcome,user,repo}`,

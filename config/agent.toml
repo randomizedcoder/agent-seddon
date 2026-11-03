@@ -207,6 +207,7 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # deadline_secs = 1800          # one build's deadline (60..21600)
 # max_files = 200000            # files per index; more ⇒ partial
 # max_file_bytes = 1048576      # larger files are skipped
+# max_bytes = 2147483648        # bytes read into one index; more ⇒ partial
 # disk_min_free_pct = 10        # pause indexing below this free % of the fleet root
 
 # [role] — operator-defined RBAC role cards (config C34 / C1b). Under `[auth] mode =

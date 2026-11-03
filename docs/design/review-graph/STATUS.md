@@ -147,6 +147,23 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     skipped) for a bounded scan of an untrusted tree.
   - Metrics `agent_fleet_index_{runs_total,seconds,bytes,files}`, retired with the row.
   - Disk guard: indexing pauses below `disk_min_free_pct` free.
+  - From the commit security review: tantivy's reindex loop has no await point, so the
+    outer timeout could not stop it and it held a runtime worker. The build now runs on a
+    blocking thread and stops itself (the scan and every read check a deadline), with a
+    `max_bytes` read budget (default 2 GiB) and a disk re-check after the build. All scans
+    now skip `.git`, which also kept a worktree's host path out of the index and fixes the
+    review's `repo_file_count` (it counted every `.git` object file; pinned in
+    `repo_facts_e2e`).
+  - From the fleet review (approve-with-comments): no timeout ever drops the build, so no
+    orphaned blocking task can write into a generation being removed or rebuilt (only the
+    git checkout has a timeout, floored at 60 s); the throttle map is pruned of expired
+    records past 4096, so a deleted row's entry does not leak; `List` reads index statuses
+    16 at a time instead of one by one; zero caps clamp to 1; status writes refuse a
+    symlinked dir and use a unique temp name; a convert test covers the wire status.
+  - Not taken: `rustix` stays enabled by the `review` feature alone (the module needs
+    `review` + `search`; Cargo cannot express "both", and it is a small, audited crate);
+    status writes stay on the runtime thread (one small file per job). The portal
+    `index` field is 5a-ii.
   - Tests: the job table (first build, unchanged, base moved, GC, partial, redacted forge
     failure), last-good-serves on failure, waiting on a cloning mirror, disk guard, layout
     confinement, other tenant unreachable (store and gRPC), queue and limits tables, a

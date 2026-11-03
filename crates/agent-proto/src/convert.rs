@@ -5801,4 +5801,37 @@ mod tests {
         assert_eq!(core.version, 0);
         assert!(core.source_ref.is_empty());
     }
+
+    // The index status reaches the wire field for field, each state as its wire string.
+    #[rstest::rstest]
+    #[case::positive_ready(agent_core::FleetIndexState::Ready, "ready")]
+    #[case::corner_pending_default(agent_core::FleetIndexState::Pending, "pending")]
+    #[case::positive_indexing(agent_core::FleetIndexState::Indexing, "indexing")]
+    #[case::positive_stale(agent_core::FleetIndexState::Stale, "stale")]
+    #[case::negative_failed(agent_core::FleetIndexState::Failed, "failed")]
+    fn fleet_index_status_to_wire(
+        #[case] state: agent_core::FleetIndexState,
+        #[case] expected: &str,
+    ) {
+        let core = agent_core::FleetIndexStatus {
+            state,
+            base_sha: "a".repeat(40),
+            files: u64::MAX,
+            bytes: 7,
+            partial: true,
+            error: "e".into(),
+            built_at: 1,
+            updated_at: 2,
+        };
+        let wire = pb::FleetIndexStatus::from(core);
+        assert_eq!(wire.state, expected);
+        assert_eq!(
+            (wire.base_sha.len(), wire.files, wire.bytes, wire.partial),
+            (40, u64::MAX, 7, true)
+        );
+        assert_eq!(
+            (wire.error.as_str(), wire.built_at, wire.updated_at),
+            ("e", 1, 2)
+        );
+    }
 }

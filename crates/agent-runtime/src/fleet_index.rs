@@ -69,8 +69,12 @@ impl IndexLimits {
             refresh: Duration::from_secs(cfg.refresh_secs.max(60)),
             deadline: Duration::from_secs(cfg.deadline_secs.clamp(60, 6 * 3600)),
             scan: ScanLimits {
-                max_files: cfg.max_files,
-                max_file_bytes: cfg.max_file_bytes,
+                // A zero cap would build a permanently empty index.
+                max_files: cfg.max_files.max(1),
+                max_file_bytes: cfg.max_file_bytes.max(1),
+                max_total_bytes: cfg.max_bytes.max(1),
+                // Set per build, from `deadline`.
+                deadline: None,
             },
             disk_min_free_pct: cfg.disk_min_free_pct.min(90),
         }
@@ -177,8 +181,18 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
+        // As in `read_json`: never write through a planted symlink.
+        if std::fs::symlink_metadata(dir)?.file_type().is_symlink() {
+            return Err(agent_core::Error::Repo(format!(
+                "{} is a symlink; not writing",
+                dir.display()
+            )));
+        }
     }
-    let tmp = path.with_extension("json.tmp");
+    // A unique temp name, so two writers never share one.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{n}.tmp", std::process::id()));
     std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -313,13 +327,26 @@ impl Queue {
     }
 
     /// Record a finished check. A row left `Waiting` is not recorded, so the next pass
-    /// tries it again.
-    fn checked(&mut self, tenant: &str, row: &FleetSession, outcome: Outcome, now: Instant) {
+    /// tries it again. Past [`MAX_QUEUED_ROWS`] records, those older than `refresh` (which
+    /// throttle nothing any more, such as a deleted row's) are dropped, so the map stays
+    /// bounded by the live rows.
+    fn checked(
+        &mut self,
+        tenant: &str,
+        row: &FleetSession,
+        outcome: Outcome,
+        refresh: Duration,
+        now: Instant,
+    ) {
         let key = (tenant.to_string(), row.id.clone());
         if outcome == Outcome::Waiting {
             self.checked.remove(&key);
         } else {
             self.checked.insert(key, (now, RowFingerprint::of(row)));
+        }
+        if self.checked.len() > MAX_QUEUED_ROWS {
+            self.checked
+                .retain(|_, (at, _)| now.duration_since(*at) < refresh);
         }
     }
 }
@@ -376,7 +403,7 @@ impl FleetIndexService {
                         .queue
                         .lock()
                         .expect("fleet index queue poisoned")
-                        .checked(&tenant, &row, outcome, Instant::now());
+                        .checked(&tenant, &row, outcome, inner.limits.refresh, Instant::now());
                 }
             });
         });
@@ -483,22 +510,16 @@ impl Inner {
         let _ = write_json(&layout.status(), &status);
         tracing::info!(row = %row.id, base = %base, "fleet index: building");
 
-        let built =
-            tokio::time::timeout(self.limits.deadline, self.build(&repo, layout, &base)).await;
+        // Never abandoned by a timeout: the reindex runs on a blocking thread that a
+        // dropped future would leave writing into the generation this cleanup removes.
+        // The build stops itself at the deadline instead (see `build`).
+        let built = self.build(&repo, layout, &base).await;
         // The worktree is only the build's input: remove it whatever happened.
         let _ = repo.worktree_remove(&worktree_id(&base)).await;
         let built = match built {
-            Ok(Ok(m)) => m,
-            Ok(Err(e)) => {
+            Ok(m) => m,
+            Err(e) => {
                 remove_dir(&layout.generation(&base)).await;
-                return self.fail(row, layout, &mut status, &e);
-            }
-            Err(_) => {
-                remove_dir(&layout.generation(&base)).await;
-                let e = agent_core::Error::Repo(format!(
-                    "indexing took longer than {}s",
-                    self.limits.deadline.as_secs()
-                ));
                 return self.fail(row, layout, &mut status, &e);
             }
         };
@@ -544,23 +565,59 @@ impl Inner {
         remove_dir(&generation).await;
         let wt_id = worktree_id(base);
         let _ = repo.worktree_remove(&wt_id).await;
-        let wt = repo
-            .worktree_add(&WorktreeSpec {
+        // The checkout is a git step (no blocking thread), so a plain timeout can stop it.
+        // It gets at least the config floor (60 s), whatever the build's own deadline.
+        let checkout = self.limits.deadline.max(Duration::from_secs(60));
+        let wt = tokio::time::timeout(
+            checkout,
+            repo.worktree_add(&WorktreeSpec {
                 revision: Revision::from(base),
                 writable: false,
                 id: Some(wt_id),
-            })
-            .await?;
+            }),
+        )
+        .await
+        .map_err(|_| {
+            agent_core::Error::Repo(format!(
+                "the checkout took longer than {}s",
+                checkout.as_secs()
+            ))
+        })??;
 
         let index_dir = generation.join("index");
-        let source = Arc::new(FsDocumentSource::new(wt.path.clone()).with_limits(self.limits.scan));
-        let files = {
-            let backend = TantivyBackend::open_with_source(source.clone(), index_dir.clone())?;
-            agent_core::SearchBackend::reindex(&backend, &|_| {})
-                .await?
-                .indexed_files
+        let limits = ScanLimits {
+            deadline: Some(started + self.limits.deadline),
+            ..self.limits.scan
         };
+        let source = Arc::new(FsDocumentSource::new(wt.path.clone()).with_limits(limits));
+        let backend = TantivyBackend::open_with_source(source.clone(), index_dir.clone())?;
+        // tantivy's reindex reads and adds documents in a loop with no await point, so
+        // it runs on a blocking thread, never a runtime worker; it ends at the deadline
+        // because the source stops reading.
+        let rt = tokio::runtime::Handle::current();
+        let files = tokio::task::spawn_blocking(move || {
+            rt.block_on(agent_core::SearchBackend::reindex(&backend, &|_| {}))
+        })
+        .await
+        .map_err(|e| agent_core::Error::Search(format!("index task panicked: {e}")))??
+        .indexed_files;
         let report = source.last_scan();
+        if report.expired {
+            return Err(agent_core::Error::Repo(format!(
+                "indexing took longer than {}s",
+                self.limits.deadline.as_secs()
+            )));
+        }
+        // The byte budget bounds this index, but other rows and reviews share the disk:
+        // a build that left it under the floor is dropped rather than kept.
+        if let Some(pct) = free_pct(&self.root) {
+            if pct < self.limits.disk_min_free_pct {
+                return Err(agent_core::Error::Repo(format!(
+                    "the fleet root's disk fell to {pct}% free while indexing (min {}%)",
+                    self.limits.disk_min_free_pct
+                )));
+            }
+        }
         let bytes = {
             let dir = index_dir.clone();
             tokio::task::spawn_blocking(move || dir_size(&dir))
@@ -995,6 +1052,70 @@ mod tests {
             .exists());
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum Bound {
+        None,
+        Bytes(u64),
+        NoTime,
+    }
+
+    // A build stays inside its byte budget and its deadline, enforced by the build
+    // itself (the scan and every read), not only by an outer timeout.
+    #[rstest]
+    #[case::positive_within_bounds(
+        "a build inside its bounds is ready and whole",
+        Bound::None,
+        Outcome::Ready,
+        Some(2)
+    )]
+    #[case::boundary_byte_budget_marks_partial(
+        "the byte budget stops the scan: one file kept, the index partial",
+        Bound::Bytes(12),
+        Outcome::Partial,
+        Some(1)
+    )]
+    #[case::adversarial_deadline_stops_the_build(
+        "a build out of time stops reading, fails, and keeps no generation",
+        Bound::NoTime,
+        Outcome::Failed,
+        None
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_bounds(
+        #[case] description: &str,
+        #[case] bound: Bound,
+        #[case] expected: Outcome,
+        #[case] expected_files: Option<u64>,
+    ) {
+        let fx = Fixture::new(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let mut lim = limits();
+        match bound {
+            Bound::None => {}
+            Bound::Bytes(n) => lim.scan.max_total_bytes = n,
+            Bound::NoTime => lim.deadline = Duration::ZERO,
+        }
+        let r = row("acme", "web");
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim);
+        assert_eq!(svc.run(&r).await, expected, "{description}");
+        let st = status_of(&fx.root, &r);
+        match expected_files {
+            Some(n) => assert_eq!(st.files, n, "{description}: files"),
+            None => {
+                assert!(
+                    st.error.contains("indexing took longer than"),
+                    "{description}: the build's own deadline stopped it: {}",
+                    st.error
+                );
+                let gens = std::fs::read_dir(&Layout::for_row(&fx.root, &r).unwrap().knowledge)
+                    .unwrap()
+                    .filter_map(std::result::Result::ok)
+                    .filter(|e| e.path().is_dir())
+                    .count();
+                assert_eq!(gens, 0, "{description}: no generation left");
+            }
+        }
+    }
+
     /// While the mirror's first clone runs, the row waits (pending) and is retried.
     #[tokio::test]
     async fn corner_mirror_cloning_waits_pending() {
@@ -1146,7 +1267,7 @@ mod tests {
                 Step::Pop => {
                     q.pop().expect("a queued row");
                 }
-                Step::Done(t, id, outcome) => q.checked(t, &row(t, id), outcome, now),
+                Step::Done(t, id, outcome) => q.checked(t, &row(t, id), outcome, refresh, now),
                 Step::Wait(secs) => now += Duration::from_secs(secs),
             }
         }
@@ -1173,6 +1294,40 @@ mod tests {
         assert_eq!(q.order.len(), MAX_QUEUED_ROWS);
     }
 
+    /// The throttle map stays bounded: past the cap, records older than `refresh` (a
+    /// deleted row's, say) are dropped, and fresh ones still throttle.
+    #[test]
+    fn boundary_checked_map_is_pruned() {
+        let mut q = Queue::default();
+        let refresh = Duration::from_secs(60);
+        let start = Instant::now();
+        for i in 0..MAX_QUEUED_ROWS {
+            q.checked(
+                "acme",
+                &row("acme", &format!("gone{i}")),
+                Outcome::Ready,
+                refresh,
+                start,
+            );
+        }
+        assert_eq!(
+            q.checked.len(),
+            MAX_QUEUED_ROWS,
+            "at the cap, nothing pruned"
+        );
+        let later = start + refresh;
+        q.checked("acme", &row("acme", "live"), Outcome::Ready, refresh, later);
+        assert_eq!(
+            q.checked.len(),
+            1,
+            "expired records dropped, the fresh one kept"
+        );
+        assert!(
+            !q.push("acme", &row("acme", "live"), refresh, later),
+            "the kept record still throttles"
+        );
+    }
+
     #[rstest]
     #[case::positive_defaults(FleetIndexCfg::default(), 3600, 1800, 10)]
     #[case::boundary_refresh_floor(FleetIndexCfg { refresh_secs: 0, ..FleetIndexCfg::default() }, 60, 1800, 10)]
@@ -1191,6 +1346,25 @@ mod tests {
         assert_eq!(l.disk_min_free_pct, disk);
     }
 
+    /// A zero file, file-size or byte cap would build a permanently empty index.
+    #[test]
+    fn adversarial_zero_caps_clamped_to_one() {
+        let l = IndexLimits::from_cfg(&FleetIndexCfg {
+            max_files: 0,
+            max_file_bytes: 0,
+            max_bytes: 0,
+            ..FleetIndexCfg::default()
+        });
+        assert_eq!(
+            (
+                l.scan.max_files,
+                l.scan.max_file_bytes,
+                l.scan.max_total_bytes
+            ),
+            (1, 1, 1)
+        );
+    }
+
     #[test]
     fn adversarial_torn_status_reads_as_none() {
         let dir = tempdir();
@@ -1207,5 +1381,15 @@ mod tests {
             read_json::<FleetIndexStatus>(&link).is_none(),
             "a symlink is not followed"
         );
+        // Writes refuse a planted symlinked directory too.
+        let real = dir.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let knowledge = dir.join("knowledge");
+        std::os::unix::fs::symlink(&real, &knowledge).unwrap();
+        assert!(
+            write_json(&knowledge.join(STATUS_FILE), &FleetIndexStatus::default()).is_err(),
+            "no write through a symlinked dir"
+        );
+        assert!(!real.join(STATUS_FILE).exists());
     }
 }
