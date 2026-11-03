@@ -442,7 +442,6 @@ impl agent_core::ReviewGrounder for EngineGrounder {
 #[cfg(feature = "review")]
 pub(crate) struct WorktreeGrounder {
     pub(crate) repo: Arc<dyn agent_core::RepoBackend>,
-    pub(crate) search: Option<Arc<dyn agent_core::SearchBackend>>,
     pub(crate) forge: Option<Arc<dyn agent_core::Forge>>,
     pub(crate) sandbox: Option<Arc<dyn agent_core::Sandbox>>,
     pub(crate) pool: Option<Arc<dyn agent_core::LlmPool>>,
@@ -503,7 +502,7 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
             crate::builder::build_review_orchestrator(
                 std::path::PathBuf::new(),
                 self.repo.clone(),
-                self.search.clone(),
+                None,
                 self.forge.clone(),
                 self.sandbox.clone(),
                 self.pool.clone(),
@@ -527,10 +526,11 @@ impl WorktreeGrounder {
             let (search, note) = crate::fleet_index::open_row_search(knowledge.clone()).await;
             return (search, Some(note));
         }
-        // Rows only get their own index with `search` built in.
+        // Rows only get their own index with `search` built in. There is deliberately no
+        // other backend to fall back to: the process's shared index is of another tree.
         #[cfg(not(feature = "search"))]
         let _ = &self.row_index;
-        (self.search.clone(), None)
+        (None, None)
     }
 }
 

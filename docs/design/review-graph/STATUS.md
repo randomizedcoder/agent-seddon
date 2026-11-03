@@ -195,3 +195,9 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     read-only test proves the builder's writer lock is held while readers open; the
     corrupt-generation path ("could not be opened") and the failed-row note are tested;
     GC also sweeps temp files inside kept generations.
+  - Second fleet round: `WorktreeGrounder` lost its `search` field and fallback, so no
+    code path can hand a fleet review the shared index (the test now asserts "no search"
+    with indexing off, instead of a fallback production could not reach); a status whose
+    `base_sha` names no commit says so rather than echoing its claimed state; a stale row
+    serves its last good index (new row); `reindex_inner` checks for a writer before
+    scanning; the GC doc rests on unlink-while-open, not on build spacing.

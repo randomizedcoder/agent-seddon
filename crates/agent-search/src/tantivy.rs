@@ -270,6 +270,9 @@ impl SearchBackend for TantivyBackend {
 
 impl TantivyBackend {
     async fn reindex_inner(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+        let Some(writer) = &self.writer else {
+            return Err(Error::Search("this index is open read-only".into()));
+        };
         // Scan the corpus off the async executor — it can be large.
         let source = self.source.clone();
         let current = tokio::task::spawn_blocking(move || source.scan())
@@ -279,9 +282,6 @@ impl TantivyBackend {
         let stored = Manifest::load(&self.manifest_path());
         let (upserts, deletes) = diff(stored.as_ref(), &current);
 
-        let Some(writer) = &self.writer else {
-            return Err(Error::Search("this index is open read-only".into()));
-        };
         let mut writer = writer.lock().await;
         if stored.is_none() {
             // No prior manifest: rebuild from scratch so a partial/foreign index

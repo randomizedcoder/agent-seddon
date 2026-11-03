@@ -23,8 +23,10 @@
 //! reviews carry on.
 //!
 //! Reviews read the index through [`open_row_search`] (review-graph 5b-i), read-only. A
-//! review holds the generation it opened; GC keeps the previous generation, and builds
-//! are at least `refresh_secs` apart, so a generation outlives the reviews using it.
+//! review holds the generation it opened. GC keeps the previous generation, so it takes
+//! two more builds to remove the one a review uses; even then the review's open index
+//! keeps working, because on Unix an unlinked file stays readable while it is open (its
+//! segments are already mapped). A refcount is 5a-ii.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -179,7 +181,13 @@ pub(crate) fn row_index(knowledge: &Path) -> RowIndex {
         return RowIndex::NotReady("not built yet".into());
     };
     let Some(sha) = commit_sha(&status.base_sha) else {
-        return RowIndex::NotReady(status.state.as_str().into());
+        // No base yet (pending, a first build running or failed), or a status naming no
+        // commit at all; say which without echoing the value.
+        return RowIndex::NotReady(if status.base_sha.is_empty() {
+            status.state.as_str().into()
+        } else {
+            "its status names no commit".into()
+        });
     };
     let generation = layout.generation(sha);
     let finished = read_json::<KnowledgeManifest>(&generation.join(MANIFEST_FILE))
@@ -760,8 +768,6 @@ async fn remove_dir(dir: &Path) {
     .await;
 }
 
-/// Keep the `current` and `previous` generations and remove the rest, plus any build
-/// worktree a crash left behind.
 /// Remove `*.tmp` files directly in `dir` (a crashed manifest write's leftovers).
 fn sweep_tmp(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -775,6 +781,8 @@ fn sweep_tmp(dir: &Path) {
     }
 }
 
+/// Keep the `current` and `previous` generations and remove the rest, plus any build
+/// worktree a crash left behind.
 async fn gc(repo: &Arc<dyn RepoBackend>, layout: &Layout, current: &str, previous: &str) {
     let keep = |name: &str| name == current || name == previous;
     if let Ok(entries) = std::fs::read_dir(&layout.knowledge) {
@@ -1231,6 +1239,7 @@ mod tests {
         Nothing,
         Pending,
         Built,
+        StaleAfterBuilt,
         FailedAfterBuilt,
         TraversalSha,
         ManifestGone,
@@ -1243,6 +1252,11 @@ mod tests {
     #[case::negative_never_built("no status: not built yet", Seed::Nothing, None)]
     #[case::corner_pending_has_no_index("pending: nothing to open", Seed::Pending, None)]
     #[case::positive_ready("a built row is ready", Seed::Built, Some(FleetIndexState::Ready))]
+    #[case::positive_stale_serves_last_good(
+        "a row whose base moved still serves the last good index",
+        Seed::StaleAfterBuilt,
+        Some(FleetIndexState::Stale)
+    )]
     #[case::positive_failed_serves_last_good(
         "a failed rebuild still serves the last good index",
         Seed::FailedAfterBuilt,
@@ -1279,6 +1293,12 @@ mod tests {
                 write_json(&layout.status(), &FleetIndexStatus::default()).unwrap();
             }
             Seed::Built => assert_eq!(svc.run(&r).await, Outcome::Ready),
+            Seed::StaleAfterBuilt => {
+                assert_eq!(svc.run(&r).await, Outcome::Ready);
+                let mut st = status_of(&fx.root, &r);
+                st.state = FleetIndexState::Stale;
+                write_json(&layout.status(), &st).unwrap();
+            }
             Seed::FailedAfterBuilt => {
                 assert_eq!(svc.run(&r).await, Outcome::Ready);
                 let bad = inner(fx.root.clone(), Arc::new(NoRepo), limits());
@@ -1307,7 +1327,12 @@ mod tests {
         }
         let got = row_index(&layout.knowledge);
         match (expected, got) {
-            (None, RowIndex::NotReady(_)) => {}
+            (None, RowIndex::NotReady(why)) => {
+                if matches!(seed, Seed::TraversalSha) {
+                    // Never "ready" (which the status claims), and never the hostile value.
+                    assert_eq!(why, "its status names no commit", "{description}");
+                }
+            }
             (
                 Some(want),
                 RowIndex::Ready {

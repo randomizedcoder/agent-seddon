@@ -344,9 +344,6 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         // OidCache) and the forge are captured and reused across triggers.
         let grounder: Arc<dyn agent_core::ReviewGrounder> = Arc::new(WorktreeGrounder {
             repo: repo.clone(),
-            // Never the process's shared index: it is of the fleet's own tree, not this
-            // repo. A row searches its own index (`row_index`) or nothing.
-            search: None,
             forge,
             sandbox: self.sandbox.clone(),
             pool: self.pool.clone(),
@@ -1065,37 +1062,31 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     enum Wiring {
-        Shared,
+        IndexingOff,
         RowIndexUnbuilt,
     }
 
-    // Which search a fleet review grounds on: the shared backend only when rows have no
-    // index of their own; with row indexes, the row's (and never the shared backend,
-    // which indexes the fleet process's own tree, not this repo).
+    // A fleet review searches its row's own index or nothing: there is no other backend
+    // to fall back to (the process's shared index is of the fleet's own tree).
     #[cfg(feature = "search")]
     #[rstest::rstest]
-    #[case::negative_no_row_index_keeps_shared(
-        "without row indexes the shared backend is used, with no brief line",
-        Wiring::Shared,
-        true,
+    #[case::negative_indexing_off_no_search(
+        "with indexing off a review has no search and no brief line",
+        Wiring::IndexingOff,
         None
     )]
     #[case::adversarial_unbuilt_row_index_never_falls_back(
         "a row index not built yet means no search, not another repo's",
         Wiring::RowIndexUnbuilt,
-        false,
         Some("not built yet")
     )]
     #[tokio::test]
     async fn grounder_search_choice(
         #[case] description: &str,
         #[case] wiring: Wiring,
-        #[case] shared_used: bool,
         #[case] note: Option<&str>,
     ) {
         let tmp = agent_testkit::tempdir();
-        let shared: Arc<dyn agent_core::SearchBackend> =
-            Arc::new(agent_testkit::FixtureSearch::new());
         let repo: Arc<dyn agent_core::RepoBackend> = Arc::new(agent_git::CliBackend::new(
             tmp.join("mirror"),
             tmp.join("mirror"),
@@ -1104,7 +1095,6 @@ mod tests {
         ));
         let g = WorktreeGrounder {
             repo,
-            search: Some(shared.clone()),
             forge: None,
             sandbox: None,
             pool: None,
@@ -1113,19 +1103,12 @@ mod tests {
             metrics: Metrics::new(),
             budget: 4096,
             row_index: match wiring {
-                Wiring::Shared => None,
+                Wiring::IndexingOff => None,
                 Wiring::RowIndexUnbuilt => Some(tmp.join("knowledge")),
             },
         };
         let (search, got_note) = g.row_search().await;
-        assert_eq!(
-            search.as_ref().is_some_and(|s| Arc::ptr_eq(s, &shared)),
-            shared_used,
-            "{description}"
-        );
-        if !shared_used {
-            assert!(search.is_none(), "{description}: no fallback");
-        }
+        assert!(search.is_none(), "{description}: no fallback");
         match note {
             None => assert!(got_note.is_none(), "{description}"),
             Some(want) => assert!(
