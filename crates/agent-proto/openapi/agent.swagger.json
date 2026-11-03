@@ -7704,6 +7704,46 @@
         }
       }
     },
+    "agent.v1.FleetIndexStatus": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "\"pending\" | \"indexing\" | \"ready\" | \"stale\" | \"failed\"."
+        },
+        "baseSha": {
+          "type": "string",
+          "description": "The base commit of the last good index (\"\" before the first one)."
+        },
+        "files": {
+          "type": "string",
+          "format": "uint64",
+          "description": "Files and on-disk bytes of the last good index."
+        },
+        "bytes": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "partial": {
+          "type": "boolean",
+          "description": "The last good index hit the file cap and is missing files."
+        },
+        "error": {
+          "type": "string",
+          "description": "Why the last job failed (redacted); \"\" otherwise."
+        },
+        "builtAt": {
+          "type": "string",
+          "format": "int64",
+          "description": "Unix seconds: when the last good index was built, and when this status last changed."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "int64"
+        }
+      },
+      "description": "A fleet row's repo index status (review-graph 5a). Mirrors\n`agent_core::FleetIndexStatus`."
+    },
     "agent.v1.FleetSession": {
       "type": "object",
       "properties": {
@@ -7763,6 +7803,10 @@
         "transportId": {
           "type": "string",
           "description": "Persisted transport card id (config C37 / D2b). When set, the row's Slack watch\n(and, later, its progress feed) is driven by the `TransportCard` of this id in the\n`TransportRegistry`: its `app_token_ref` supplies the Socket-Mode token and its\n`trigger`-purpose channel bindings supersede `slack_trigger_channel` above. Empty ⇒\nthe inline `slack_*` fields + the `[review_fleet.slack]` default token are used\n(unchanged behavior). Path-safe."
+        },
+        "index": {
+          "$ref": "#/definitions/agent.v1.FleetIndexStatus",
+          "description": "Output only (review-graph 5a): where the row's repo index stands. Set by List/Get\nwhen the server indexes rows; ignored on Put."
         }
       },
       "description": "One durable roster row — a review session's identity, the repo it watches, how\nit reaches its forge, and its triggers. Mirrors `agent_core::FleetSession`."

@@ -385,6 +385,8 @@ pub struct Agent {
     /// grounder). Not feature-gated (the seam lives in `agent-core`); only ever populated
     /// under `review`, exactly like `review_collector` gates `review_grounder`.
     fleet_review_factory: Option<Arc<dyn agent_core::FleetReviewFactory>>,
+    /// The per-row repo indexer (review-graph 5a); see [`Agent::fleet_indexer`].
+    fleet_indexer: Option<Arc<dyn agent_core::FleetIndexer>>,
 }
 
 /// The concrete [`agent_core::ReviewGrounder`] (review-fleet C10): runs the wired review
@@ -1270,6 +1272,7 @@ impl Agent {
             campaign_worker_provider: None,
             graph: None,
             fleet_review_factory: None,
+            fleet_indexer: None,
         }
     }
 
@@ -1300,6 +1303,12 @@ impl Agent {
         factory: Arc<dyn agent_core::FleetReviewFactory>,
     ) -> Self {
         self.fleet_review_factory = Some(factory);
+        self
+    }
+
+    /// Attach the per-row repo indexer (review-graph 5a); see [`Self::fleet_indexer`].
+    pub fn with_fleet_indexer(mut self, indexer: Arc<dyn agent_core::FleetIndexer>) -> Self {
+        self.fleet_indexer = Some(indexer);
         self
     }
 
@@ -2162,6 +2171,13 @@ impl Agent {
     /// (the process-global [`Self::review_grounder`]).
     pub fn fleet_review_factory(&self) -> Option<Arc<dyn agent_core::FleetReviewFactory>> {
         self.fleet_review_factory.clone()
+    }
+
+    /// The per-row repo indexer (review-graph 5a): `Some` when the per-row review factory,
+    /// the search engine and `[review_fleet.index] enabled` are all present. `--serve-fleet`
+    /// queues every enabled row on it each roster pass and reports its status on the roster.
+    pub fn fleet_indexer(&self) -> Option<Arc<dyn agent_core::FleetIndexer>> {
+        self.fleet_indexer.clone()
     }
 
     /// The review renderer + persistence exposed as a [`ReviewDrafter`] for the fleet FSM

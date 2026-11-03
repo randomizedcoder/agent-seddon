@@ -189,6 +189,7 @@ rayon = "1"
 # `memfd` the compiled BPF is handed to bwrap over. See docs/design/multi-tenancy/.
 seccompiler = "0.5"
 libc = "0.2"
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"

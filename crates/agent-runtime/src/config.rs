@@ -209,6 +209,9 @@ pub struct ReviewFleetCfg {
     /// still runs).
     #[serde(default)]
     pub webhook: FleetWebhookCfg,
+    /// Index each row's repo when it is added, and keep the index fresh (review-graph 5a).
+    #[serde(default)]
+    pub index: FleetIndexCfg,
 }
 
 impl Default for ReviewFleetCfg {
@@ -223,8 +226,75 @@ impl Default for ReviewFleetCfg {
             max_per_user: 0,
             slack: FleetSlackCfg::default(),
             webhook: FleetWebhookCfg::default(),
+            index: FleetIndexCfg::default(),
         }
     }
+}
+
+/// `[review_fleet.index]` (review-graph 5a, `docs/design/review-graph/04-repo-knowledge.md`):
+/// a search index of each roster row's repo, built when the row is added and rebuilt when
+/// its default branch moves. One job runs at a time, outside the review slots. Needs a
+/// `[review_fleet] root`; without one there is nothing to index.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct FleetIndexCfg {
+    /// Build the indexes. Default `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The least time between two checks of one row's base (each check fetches the
+    /// mirror's branches). Clamped to at least 60. Default 3600.
+    #[serde(default = "default_index_refresh_secs")]
+    pub refresh_secs: u64,
+    /// Time limit for one row's build. Clamped to 60..=21600. Default 1800.
+    #[serde(default = "default_index_deadline_secs")]
+    pub deadline_secs: u64,
+    /// Index at most this many files of a repo; past it the index is marked partial.
+    /// Default 200000.
+    #[serde(default = "default_index_max_files")]
+    pub max_files: usize,
+    /// Leave out files larger than this (generated or vendored blobs). Default 1 MiB.
+    #[serde(default = "default_index_max_file_bytes")]
+    pub max_file_bytes: u64,
+    /// Pause indexing while the fleet root's filesystem has less than this percent
+    /// free (reviews continue). Clamped to 0..=90. Default 10.
+    #[serde(default = "default_index_disk_min_free_pct")]
+    pub disk_min_free_pct: u8,
+}
+
+impl Default for FleetIndexCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_secs: default_index_refresh_secs(),
+            deadline_secs: default_index_deadline_secs(),
+            max_files: default_index_max_files(),
+            max_file_bytes: default_index_max_file_bytes(),
+            disk_min_free_pct: default_index_disk_min_free_pct(),
+        }
+    }
+}
+
+fn default_index_refresh_secs() -> u64 {
+    3600
+}
+
+fn default_index_deadline_secs() -> u64 {
+    1800
+}
+
+fn default_index_max_files() -> usize {
+    200_000
+}
+
+fn default_index_max_file_bytes() -> u64 {
+    1024 * 1024
+}
+
+fn default_index_disk_min_free_pct() -> u8 {
+    10
 }
 
 /// `[review_fleet.webhook]` (forge-auth F6): where `--serve-fleet` accepts GitHub App

@@ -130,7 +130,7 @@ mode = ["dep:agent-mode"]
 # Code review flow: the ReviewCollector seam. Needs `git` for the RepoBackend the
 # collector reads, and `mode` because the in-loop hand-off reads the current mode.
 # See docs/design/code-review/.
-review = ["dep:agent-review", "git", "mode"]
+review = ["dep:agent-review", "git", "mode", "dep:rustix"]
 tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
 tool-patch = ["agent-tools/tool-patch"]
@@ -501,6 +501,8 @@ agent-slack = { workspace = true, optional = true }
 agent-theme = { workspace = true, optional = true }
 agent-mode = { workspace = true, optional = true }
 agent-review = { workspace = true, optional = true }
+# statvfs for the fleet index's free-disk guard (review-graph 5a).
+rustix = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }
 agent-pty = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }

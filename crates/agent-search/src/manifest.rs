@@ -41,11 +41,21 @@ impl Manifest {
     /// Walk `root` (gitignore-aware) and stamp every file. Blocking — call from a
     /// blocking context.
     pub fn scan(root: &Path) -> Self {
-        Self {
-            entries: scan_entries(root),
+        Self::scan_with(root, &ScanLimits::UNLIMITED).0
+    }
+
+    /// [`scan`](Self::scan) under `limits`: files over `max_file_bytes` are left out, and
+    /// the walk stops after `max_files`. The [`ScanReport`] says what was left out, so a
+    /// caller can mark its index partial instead of silently serving a truncated one.
+    /// Blocking.
+    pub fn scan_with(root: &Path, limits: &ScanLimits) -> (Self, ScanReport) {
+        let (entries, report) = scan_entries(root, limits);
+        let manifest = Self {
+            entries,
             git_head: git_head(root),
             built_ms: now_ms(),
-        }
+        };
+        (manifest, report)
     }
 
     /// A stable digest of the stamp set — a cheap over-the-wire equality check
@@ -74,9 +84,47 @@ impl Manifest {
     }
 }
 
+/// Caps on a [`Manifest::scan_with`] walk. The default is [`ScanLimits::UNLIMITED`], the
+/// walk every existing caller does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanLimits {
+    /// Stop the walk after this many files.
+    pub max_files: usize,
+    /// Leave out a file larger than this (a generated or vendored blob).
+    pub max_file_bytes: u64,
+}
+
+impl ScanLimits {
+    pub const UNLIMITED: Self = Self {
+        max_files: usize::MAX,
+        max_file_bytes: u64::MAX,
+    };
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self::UNLIMITED
+    }
+}
+
+/// What a limited scan left out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanReport {
+    /// The walk hit `max_files`, so files past it are missing.
+    pub truncated: bool,
+    /// Files left out for exceeding `max_file_bytes`.
+    pub oversized: u64,
+}
+
 /// Determine the index state of `root` given the `stored` manifest (the one saved
 /// next to the index, or `None` if no index exists yet). Blocking.
 pub fn compare(root: &Path, stored: Option<&Manifest>) -> IndexState {
+    compare_with(root, stored, &ScanLimits::UNLIMITED)
+}
+
+/// [`compare`] against a scan under the same `limits` the index was built with, so a
+/// capped index does not read as stale forever. Blocking.
+pub fn compare_with(root: &Path, stored: Option<&Manifest>, limits: &ScanLimits) -> IndexState {
     let Some(stored) = stored else {
         return IndexState::Missing;
     };
@@ -87,16 +135,22 @@ pub fn compare(root: &Path, stored: Option<&Manifest>) -> IndexState {
         }
     }
     // Fallback: stat-walk and diff the stamp sets.
-    if scan_entries(root) == stored.entries {
+    if scan_entries(root, limits).0 == stored.entries {
         IndexState::Fresh
     } else {
         IndexState::Stale
     }
 }
 
-fn scan_entries(root: &Path) -> BTreeMap<PathBuf, FileStamp> {
+fn scan_entries(root: &Path, limits: &ScanLimits) -> (BTreeMap<PathBuf, FileStamp>, ScanReport) {
     let mut entries = BTreeMap::new();
-    for result in WalkBuilder::new(root).hidden(false).build() {
+    let mut report = ScanReport::default();
+    // Sorted, so a capped walk keeps the same files every time.
+    let walk = WalkBuilder::new(root)
+        .hidden(false)
+        .sort_by_file_name(std::cmp::Ord::cmp)
+        .build();
+    for result in walk {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -111,10 +165,18 @@ fn scan_entries(root: &Path) -> BTreeMap<PathBuf, FileStamp> {
             continue;
         }
         if let Ok(meta) = entry.metadata() {
+            if meta.len() > limits.max_file_bytes {
+                report.oversized += 1;
+                continue;
+            }
+            if entries.len() >= limits.max_files {
+                report.truncated = true;
+                break;
+            }
             entries.insert(rel.to_path_buf(), stamp(&meta));
         }
     }
-    entries
+    (entries, report)
 }
 
 fn stamp(meta: &std::fs::Metadata) -> FileStamp {
@@ -233,10 +295,86 @@ mod tests {
         let dir = fixture();
         std::fs::create_dir_all(dir.join(".agent-seddon/index")).unwrap();
         std::fs::write(dir.join(".agent-seddon/index/seg.dat"), "binary").unwrap();
-        let entries = scan_entries(&dir);
+        let (entries, _) = scan_entries(&dir, &ScanLimits::UNLIMITED);
         assert!(
             !entries.keys().any(|p| p.starts_with(".agent-seddon")),
             "the index directory must not be part of the freshness manifest"
+        );
+    }
+
+    // A limited scan: files over the size cap are left out and counted; the walk stops at
+    // the file cap and says so; a capped manifest compares fresh under the same limits.
+    #[rstest]
+    #[case::positive_unlimited_keeps_all(
+        "no caps keep every file",
+        ScanLimits::UNLIMITED,
+        3,
+        ScanReport { truncated: false, oversized: 0 }
+    )]
+    #[case::negative_oversized_left_out(
+        "a file over max_file_bytes is left out and counted",
+        ScanLimits { max_files: usize::MAX, max_file_bytes: 16 },
+        2,
+        ScanReport { truncated: false, oversized: 1 }
+    )]
+    #[case::boundary_exactly_max_files_not_truncated(
+        "exactly max_files files is complete, not truncated",
+        ScanLimits { max_files: 3, max_file_bytes: u64::MAX },
+        3,
+        ScanReport { truncated: false, oversized: 0 }
+    )]
+    #[case::boundary_one_over_max_files_truncated(
+        "one file over max_files stops the walk and says so",
+        ScanLimits { max_files: 2, max_file_bytes: u64::MAX },
+        2,
+        ScanReport { truncated: true, oversized: 0 }
+    )]
+    #[case::corner_zero_files_cap(
+        "a zero file cap keeps nothing, truncated",
+        ScanLimits { max_files: 0, max_file_bytes: u64::MAX },
+        0,
+        ScanReport { truncated: true, oversized: 0 }
+    )]
+    #[case::adversarial_huge_blob_never_indexed(
+        "a huge blob is left out even with room for it in the file cap",
+        ScanLimits { max_files: 10, max_file_bytes: 1024 },
+        2,
+        ScanReport { truncated: false, oversized: 1 }
+    )]
+    fn scan_with_limits(
+        #[case] description: &str,
+        #[case] limits: ScanLimits,
+        #[case] expected_files: usize,
+        #[case] expected_report: ScanReport,
+    ) {
+        let dir = fixture();
+        // A third file, larger than the small caps above.
+        std::fs::write(dir.join("big.rs"), "x".repeat(4096)).unwrap();
+        let (m, report) = Manifest::scan_with(&dir, &limits);
+        assert_eq!(m.entries.len(), expected_files, "{description}: files");
+        assert_eq!(report, expected_report, "{description}: report");
+        assert_eq!(
+            compare_with(&dir, Some(&m), &limits),
+            IndexState::Fresh,
+            "{description}: a capped manifest is fresh under its own limits"
+        );
+    }
+
+    #[test]
+    fn capped_scan_is_deterministic() {
+        let dir = fixture();
+        for name in ["c.rs", "d.rs", "e.rs"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let limits = ScanLimits {
+            max_files: 3,
+            max_file_bytes: u64::MAX,
+        };
+        let a = Manifest::scan_with(&dir, &limits).0;
+        let b = Manifest::scan_with(&dir, &limits).0;
+        assert_eq!(
+            a.entries, b.entries,
+            "the same files survive the cap each time"
         );
     }
 }

@@ -12,9 +12,11 @@
 //! returned as [`SearchHit::path`](agent_core::SearchHit): a repo-relative path for
 //! the FS source, an opaque id (a session id) for others.
 
-use crate::{manifest, Manifest};
+use crate::{manifest, Manifest, ScanLimits, ScanReport};
 use agent_core::IndexState;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// A rendered document ready to index: its searchable `text` and a coarse `lang`
 /// label (stored in the `lang` field, used by the language filter).
@@ -42,28 +44,66 @@ pub trait DocumentSource: Send + Sync {
 /// The default corpus: every file under `root`, gitignore-aware. Reproduces the
 /// code-search backend's original inline behaviour (walk → `read_to_string` →
 /// extension-derived `lang`), now behind the [`DocumentSource`] seam.
+///
+/// [`with_limits`](Self::with_limits) caps the walk (file count, file size) for a corpus
+/// that is not the operator's own tree, such as a fleet row's repo; the last scan's
+/// [`ScanReport`] says what the caps left out.
 pub struct FsDocumentSource {
     root: PathBuf,
+    limits: ScanLimits,
+    last_scan: Mutex<ScanReport>,
 }
 
 impl FsDocumentSource {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            limits: ScanLimits::UNLIMITED,
+            last_scan: Mutex::new(ScanReport::default()),
+        }
+    }
+
+    /// Cap the walk and each file read at `limits`.
+    pub fn with_limits(mut self, limits: ScanLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// What the most recent [`scan`](DocumentSource::scan) left out.
+    pub fn last_scan(&self) -> ScanReport {
+        *self
+            .last_scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 impl DocumentSource for FsDocumentSource {
     fn scan(&self) -> Manifest {
-        Manifest::scan(&self.root)
+        let (manifest, report) = Manifest::scan_with(&self.root, &self.limits);
+        *self
+            .last_scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = report;
+        manifest
     }
 
     fn compare(&self, stored: Option<&Manifest>) -> IndexState {
-        manifest::compare(&self.root, stored)
+        manifest::compare_with(&self.root, stored, &self.limits)
     }
 
     fn load(&self, id: &Path) -> Option<SourceDoc> {
-        // Binary/unreadable files are silently skipped (as before).
-        let text = std::fs::read_to_string(self.root.join(id)).ok()?;
+        // Binary/unreadable files are silently skipped (as before). The read is capped
+        // too: a file that grew past the size cap after the scan is skipped, never
+        // buffered whole.
+        let file = std::fs::File::open(self.root.join(id)).ok()?;
+        let mut text = String::new();
+        file.take(self.limits.max_file_bytes.saturating_add(1))
+            .read_to_string(&mut text)
+            .ok()?;
+        if text.len() as u64 > self.limits.max_file_bytes {
+            return None;
+        }
         Some(SourceDoc {
             text,
             lang: lang_of(id),
@@ -147,5 +187,60 @@ mod tests {
         assert_eq!(src.compare(Some(&m)), IndexState::Fresh);
         std::fs::write(dir.join("b.rs"), "fn b() {}").unwrap();
         assert_eq!(src.compare(Some(&m)), IndexState::Stale);
+    }
+
+    // A capped source: the scan leaves out what the caps say and reports it, and a file
+    // that grew past the size cap after the scan is not loaded.
+    #[rstest]
+    #[case::positive_small_file_loads("a file under the cap loads", 4, true)]
+    #[case::boundary_exactly_cap_loads("a file exactly at the cap loads", 16, true)]
+    #[case::adversarial_grown_past_cap_skipped(
+        "a file that grew past the cap after the scan is skipped",
+        17,
+        false
+    )]
+    fn capped_source_load(
+        #[case] description: &str,
+        #[case] size: usize,
+        #[case] expected_loaded: bool,
+    ) {
+        let dir = tempdir();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let src = FsDocumentSource::new(dir.clone()).with_limits(ScanLimits {
+            max_files: usize::MAX,
+            max_file_bytes: 16,
+        });
+        assert!(src.scan().entries.contains_key(Path::new("a.txt")));
+        std::fs::write(dir.join("a.txt"), "x".repeat(size)).unwrap();
+        assert_eq!(
+            src.load(Path::new("a.txt")).is_some(),
+            expected_loaded,
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn capped_source_reports_the_last_scan() {
+        let dir = tempdir();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let src = FsDocumentSource::new(dir).with_limits(ScanLimits {
+            max_files: 2,
+            max_file_bytes: u64::MAX,
+        });
+        assert_eq!(
+            src.last_scan(),
+            ScanReport::default(),
+            "nothing scanned yet"
+        );
+        let m = src.scan();
+        assert_eq!(m.entries.len(), 2);
+        assert!(src.last_scan().truncated, "the file cap was hit");
+        assert_eq!(
+            src.compare(Some(&m)),
+            IndexState::Fresh,
+            "fresh under its own caps"
+        );
     }
 }

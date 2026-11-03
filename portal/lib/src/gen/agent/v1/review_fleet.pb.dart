@@ -36,6 +36,7 @@ class FleetSession extends $pb.GeneratedMessage {
     $fixnum.Int64? updatedAt,
     $core.String? forgeId,
     $core.String? transportId,
+    FleetIndexStatus? index,
   }) {
     final result = create();
     if (id != null) result.id = id;
@@ -55,6 +56,7 @@ class FleetSession extends $pb.GeneratedMessage {
     if (updatedAt != null) result.updatedAt = updatedAt;
     if (forgeId != null) result.forgeId = forgeId;
     if (transportId != null) result.transportId = transportId;
+    if (index != null) result.index = index;
     return result;
   }
 
@@ -88,6 +90,8 @@ class FleetSession extends $pb.GeneratedMessage {
     ..aInt64(13, _omitFieldNames ? '' : 'updatedAt')
     ..aOS(14, _omitFieldNames ? '' : 'forgeId')
     ..aOS(15, _omitFieldNames ? '' : 'transportId')
+    ..aOM<FleetIndexStatus>(16, _omitFieldNames ? '' : 'index',
+        subBuilder: FleetIndexStatus.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -261,6 +265,167 @@ class FleetSession extends $pb.GeneratedMessage {
   $core.bool hasTransportId() => $_has(14);
   @$pb.TagNumber(15)
   void clearTransportId() => $_clearField(15);
+
+  /// Output only (review-graph 5a): where the row's repo index stands. Set by List/Get
+  /// when the server indexes rows; ignored on Put.
+  @$pb.TagNumber(16)
+  FleetIndexStatus get index => $_getN(15);
+  @$pb.TagNumber(16)
+  set index(FleetIndexStatus value) => $_setField(16, value);
+  @$pb.TagNumber(16)
+  $core.bool hasIndex() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearIndex() => $_clearField(16);
+  @$pb.TagNumber(16)
+  FleetIndexStatus ensureIndex() => $_ensure(15);
+}
+
+/// A fleet row's repo index status (review-graph 5a). Mirrors
+/// `agent_core::FleetIndexStatus`.
+class FleetIndexStatus extends $pb.GeneratedMessage {
+  factory FleetIndexStatus({
+    $core.String? state,
+    $core.String? baseSha,
+    $fixnum.Int64? files,
+    $fixnum.Int64? bytes,
+    $core.bool? partial,
+    $core.String? error,
+    $fixnum.Int64? builtAt,
+    $fixnum.Int64? updatedAt,
+  }) {
+    final result = create();
+    if (state != null) result.state = state;
+    if (baseSha != null) result.baseSha = baseSha;
+    if (files != null) result.files = files;
+    if (bytes != null) result.bytes = bytes;
+    if (partial != null) result.partial = partial;
+    if (error != null) result.error = error;
+    if (builtAt != null) result.builtAt = builtAt;
+    if (updatedAt != null) result.updatedAt = updatedAt;
+    return result;
+  }
+
+  FleetIndexStatus._();
+
+  factory FleetIndexStatus.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory FleetIndexStatus.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FleetIndexStatus',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'state')
+    ..aOS(2, _omitFieldNames ? '' : 'baseSha')
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'files', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'bytes', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(5, _omitFieldNames ? '' : 'partial')
+    ..aOS(6, _omitFieldNames ? '' : 'error')
+    ..aInt64(7, _omitFieldNames ? '' : 'builtAt')
+    ..aInt64(8, _omitFieldNames ? '' : 'updatedAt')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FleetIndexStatus clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FleetIndexStatus copyWith(void Function(FleetIndexStatus) updates) =>
+      super.copyWith((message) => updates(message as FleetIndexStatus))
+          as FleetIndexStatus;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static FleetIndexStatus create() => FleetIndexStatus._();
+  @$core.override
+  FleetIndexStatus createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static FleetIndexStatus getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<FleetIndexStatus>(create);
+  static FleetIndexStatus? _defaultInstance;
+
+  /// "pending" | "indexing" | "ready" | "stale" | "failed".
+  @$pb.TagNumber(1)
+  $core.String get state => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set state($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasState() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearState() => $_clearField(1);
+
+  /// The base commit of the last good index ("" before the first one).
+  @$pb.TagNumber(2)
+  $core.String get baseSha => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set baseSha($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasBaseSha() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearBaseSha() => $_clearField(2);
+
+  /// Files and on-disk bytes of the last good index.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get files => $_getI64(2);
+  @$pb.TagNumber(3)
+  set files($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFiles() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFiles() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get bytes => $_getI64(3);
+  @$pb.TagNumber(4)
+  set bytes($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasBytes() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearBytes() => $_clearField(4);
+
+  /// The last good index hit the file cap and is missing files.
+  @$pb.TagNumber(5)
+  $core.bool get partial => $_getBF(4);
+  @$pb.TagNumber(5)
+  set partial($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasPartial() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearPartial() => $_clearField(5);
+
+  /// Why the last job failed (redacted); "" otherwise.
+  @$pb.TagNumber(6)
+  $core.String get error => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set error($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasError() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearError() => $_clearField(6);
+
+  /// Unix seconds: when the last good index was built, and when this status last changed.
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get builtAt => $_getI64(6);
+  @$pb.TagNumber(7)
+  set builtAt($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasBuiltAt() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearBuiltAt() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get updatedAt => $_getI64(7);
+  @$pb.TagNumber(8)
+  set updatedAt($fixnum.Int64 value) => $_setInt64(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasUpdatedAt() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearUpdatedAt() => $_clearField(8);
 }
 
 class FleetListRequest extends $pb.GeneratedMessage {

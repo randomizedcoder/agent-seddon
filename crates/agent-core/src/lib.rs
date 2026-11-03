@@ -6551,6 +6551,77 @@ pub trait FleetReviewFactory: Send + Sync {
     async fn build(&self, row: &FleetSession) -> Result<FleetReviewCtx>;
 }
 
+/// Where a fleet row's repo index stands (review-graph 5a,
+/// `docs/design/review-graph/04-repo-knowledge.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FleetIndexState {
+    /// Queued, or waiting for the row's mirror clone to finish.
+    #[default]
+    Pending,
+    /// The first index of the row is being built.
+    Indexing,
+    /// The index matches the base it was built from.
+    Ready,
+    /// The base moved and a refresh is running; the last good index still serves.
+    Stale,
+    /// The last job failed; the last good index (if any) still serves.
+    Failed,
+}
+
+impl FleetIndexState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Indexing => "indexing",
+            Self::Ready => "ready",
+            Self::Stale => "stale",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// A fleet row's index status (review-graph 5a). Kept on disk next to the index it
+/// describes, under the row's tenant-scoped workspace, so it survives a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetIndexStatus {
+    pub state: FleetIndexState,
+    /// The base commit of the last good index (empty before the first one).
+    #[serde(default)]
+    pub base_sha: String,
+    /// Files in the last good index.
+    #[serde(default)]
+    pub files: u64,
+    /// On-disk size of the last good index.
+    #[serde(default)]
+    pub bytes: u64,
+    /// The last good index hit a cap (file count) and is missing files.
+    #[serde(default)]
+    pub partial: bool,
+    /// Why the last job failed (redacted, capped); empty otherwise.
+    #[serde(default)]
+    pub error: String,
+    /// Unix seconds the last good index was built.
+    #[serde(default)]
+    pub built_at: i64,
+    /// Unix seconds this status last changed or was confirmed.
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// Builds and keeps fresh a per-row repo index for the review fleet (review-graph 5a).
+/// The fleet's roster sync hands it every enabled row each pass; the impl decides
+/// whether the row needs work (new row, moved base, failed last time) and does it in the
+/// background, at low priority, one job at a time.
+#[async_trait]
+pub trait FleetIndexer: Send + Sync {
+    /// Queue `row` (owned by `tenant`, `""` when the roster is unscoped) for an index
+    /// check. Coalesced per row and never blocks.
+    fn enqueue(&self, tenant: &str, row: &FleetSession);
+    /// The row's index status, or `None` when it has never been queued or indexed.
+    async fn status(&self, row: &FleetSession) -> Option<FleetIndexStatus>;
+}
+
 /// One review feedback item carried across rounds (review-fleet C15/C16). Model-authored
 /// `title`/`body` are size-capped where the record is built. Fully populated in inc 6b;
 /// declared here so [`DraftRequest`]/[`ReviewDrafter`] have a stable shape from 6a.

@@ -1273,18 +1273,25 @@ pub async fn serve_fleet(
     // diffs the forge-poll jobs. The first pass runs here; later ones every
     // `FLEET_RESYNC_SECS`, so a roster edit lands without a restart.
     let per_tenant = agent.fleet_tenants().is_some();
-    let sync = Arc::new(crate::fleet_sync::FleetSync::new(
+    // Each pass also hands every admitted row to the repo indexer (review-graph 5a), when
+    // one is wired, so a new row is indexed without waiting for its first review.
+    let mut sync = crate::fleet_sync::FleetSync::new(
         roster.clone(),
         mgr.clone() as Arc<dyn agent_core::FleetHost>,
         agent.forge_registry(),
         agent.fleet_tenants(),
-    ));
+    );
+    if let Some(indexer) = agent.fleet_indexer() {
+        sync = sync.with_indexer(indexer);
+    }
+    let sync = Arc::new(sync);
     let report = sync.sync_once().await;
     tracing::info!(
         tenants = report.tenants,
         admitted = report.admitted,
         skipped = report.skipped,
         poll_jobs = report.jobs,
+        indexed = report.indexed,
         per_tenant,
         "fleet reconciled from roster"
     );
@@ -1407,6 +1414,10 @@ pub async fn serve_fleet(
     install_authz_observer(&agent);
     let (router, health, tls) = serve_base(&agent, &listen).await?;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
+    // review-graph 5a: report each row's repo index status on List/Get.
+    if let Some(indexer) = agent.fleet_indexer() {
+        fleet_svc = fleet_svc.with_indexer(indexer);
+    }
     if let Some(triggers) = triggers {
         fleet_svc = fleet_svc.with_triggers(triggers);
     }

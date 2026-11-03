@@ -105,6 +105,14 @@ bot_token_ref = ""                         # env:NAME / file:/path — xoxb- bot
 
 [review_fleet.webhook]                     # GitHub App webhooks (forge-auth F6); empty ⇒ off
 listen = ""                                # e.g. "127.0.0.1:50110"; needs [github_app] webhook_secret_ref
+
+[review_fleet.index]                       # repo index on onboarding (review-graph 5a-i); needs `root`
+enabled           = true                   # index each enabled row's default branch
+refresh_secs      = 3600                   # re-check a row at most this often (min 60)
+deadline_secs     = 1800                   # one build's deadline (60..21600)
+max_files         = 200000                 # files per index; more ⇒ `partial`
+max_file_bytes    = 1048576                # larger files are skipped
+disk_min_free_pct = 10                     # pause indexing below this free % (max 90)
 ```
 
 Both Slack tokens are C5-style **references** (`env:`/`file:`), never raw secrets; the
@@ -516,6 +524,22 @@ GitHub's next refusal; `tiny_http` has no per-connection read timeout, so run th
 loopback behind the portal Envoy `fleet_webhook` listener (:8096), which caps the body, times out
 slow clients and forwards only `POST /webhooks/github` — with **no** edge JWT, since GitHub sends
 no bearer and the HMAC is the authentication.
+
+### Repo index on onboarding (review-graph 5a-i)
+
+With a `root` and `[review_fleet.index] enabled`, every row the sync pass admits is queued
+for an index of its default branch: `FleetIndexService`
+([`fleet_index.rs`](../../crates/agent-runtime/src/fleet_index.rs)) fetches the row's
+mirror, adds a read-only worktree at the base commit, builds a tantivy search index into
+`<root>/<user>/<id>/knowledge/<sha>/index` with a manifest, and removes the worktree. One
+job runs at a time, under the row's tenant; a row is re-checked at most every
+`refresh_secs`, and a new base sha builds a new generation (the previous one is kept). The
+status (`pending | indexing | ready | stale | failed`, base sha, files, bytes, `partial`,
+redacted error) is in `knowledge/status.json` and on `ListSessions` / `GetSession` as
+`FleetSession.index`. Metrics: `agent_fleet_index_runs_total{outcome,user,repo}`,
+`agent_fleet_index_seconds`, `agent_fleet_index_bytes`, `agent_fleet_index_files`. Reviews
+do not read the index yet (5b). Design and the remaining steps:
+[04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)
 

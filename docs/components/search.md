@@ -157,6 +157,14 @@ label (kept out of the code-search dispatch). See
 (automation demotion, per-message anchors, semantic recall, a `--serve-recall`
 worker).
 
+**Capped scans.** `FsDocumentSource::with_limits(root, ScanLimits { max_files,
+max_file_bytes })` bounds a walk for an untrusted or very large tree: entries are taken in
+file-name order (so a capped scan is deterministic), a file over `max_file_bytes` is
+skipped (and `load` reads at most that many bytes plus one, refusing a file that grew), and
+the walk stops at `max_files`. `last_scan()` returns a `ScanReport { truncated, oversized }`
+for the most recent scan, which the fleet repo index records as `partial`. `scan` and
+`compare` are unchanged and unlimited (`ScanLimits::UNLIMITED`).
+
 ## Listing files from the index (`index_ls`)
 
 Besides `query`, the `SearchBackend` seam exposes `list_files(globs)` — the

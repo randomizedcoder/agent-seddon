@@ -17,6 +17,8 @@ mod context_files;
 mod distiller;
 pub mod doctor;
 mod egress;
+#[cfg(all(feature = "review", feature = "search"))]
+mod fleet_index;
 #[cfg(feature = "review")]
 mod fleet_review;
 #[cfg(feature = "git")]

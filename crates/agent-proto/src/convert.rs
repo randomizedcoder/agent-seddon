@@ -2903,6 +2903,23 @@ impl From<agent_core::FleetSession> for pb::FleetSession {
             updated_at: s.updated_at,
             forge_id: s.forge_id,
             transport_id: s.transport_id,
+            // Output only: the server fills it from its indexer on List/Get.
+            index: None,
+        }
+    }
+}
+
+impl From<agent_core::FleetIndexStatus> for pb::FleetIndexStatus {
+    fn from(s: agent_core::FleetIndexStatus) -> Self {
+        pb::FleetIndexStatus {
+            state: s.state.as_str().to_string(),
+            base_sha: s.base_sha,
+            files: s.files,
+            bytes: s.bytes,
+            partial: s.partial,
+            error: s.error,
+            built_at: s.built_at,
+            updated_at: s.updated_at,
         }
     }
 }
