@@ -169,6 +169,14 @@ oversized, expired }` for the most recent scan; the fleet repo index records `tr
 `.git` (a worktree's `.git` file names a host path). `scan` and
 `compare` are unchanged and unlimited (`ScanLimits::UNLIMITED`).
 
+**Scoped scans.** `FsDocumentSource::with_paths(paths)` (backed by `Manifest::scan_in` and
+`manifest::compare_in`) walks only the files under `paths`, relative to the root; ids stay
+relative to the root. A path with `..`, a leading `/` or `./`, or one whose resolved path
+differs from its lexical one (a symlink on the way) is skipped, and a scope whose paths
+are all skipped scans nothing rather than the whole tree. A path inside another is walked
+once. A change outside the scope leaves the index fresh. The fleet repo index uses it for
+`[[review_fleet.index.scopes]]`.
+
 **Read-only open.** `TantivyBackend::open_read_only(index_dir)` opens an existing, finished
 index for queries only: nothing is created (an empty or missing dir errs), no writer lock
 is taken, so any number of readers share an index another process builds, and `reindex`

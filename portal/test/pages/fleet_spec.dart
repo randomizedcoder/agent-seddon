@@ -440,7 +440,7 @@ const fleetSpec = PageSpec('fleet', [
     caseClass: CaseClass.adversarial,
     name: 'reindex_unknown_outcome_clipped',
     description:
-        'an unknown, huge, markup-laden outcome shows as plain text, cut to 40 characters',
+        'an unknown, huge, markup-laden outcome shows as plain text, cut to 40 characters without splitting one',
     expectedRpc: 'agent.v1.ReviewFleetService/Reindex',
   ),
   SpecRow(

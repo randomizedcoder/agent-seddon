@@ -209,6 +209,10 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
     cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
     cfg.campaign.validate().map_err(anyhow::Error::msg)?;
     cfg.repo_graph.validate().map_err(anyhow::Error::msg)?;
+    cfg.review_fleet
+        .index
+        .validate()
+        .map_err(anyhow::Error::msg)?;
     if let Some(ga) = &cfg.github_app {
         ga.validate().map_err(anyhow::Error::msg)?;
     }

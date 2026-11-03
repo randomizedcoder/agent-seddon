@@ -364,8 +364,10 @@ class _FleetPageState extends State<FleetPage> {
     }
   }
 
-  static String _clip(String s, int max) =>
-      s.length > max ? '${s.substring(0, max)}…' : s;
+  /// [s] cut to [max] characters (runes, so a surrogate pair is never split).
+  static String _clip(String s, int max) => s.runes.length > max
+      ? '${String.fromCharCodes(s.runes.take(max))}…'
+      : s;
 
   /// A roster row's subtitle: its repo and forge card, led by the index state
   /// when the theme names states (`status_icons`), so the name is never cut off.

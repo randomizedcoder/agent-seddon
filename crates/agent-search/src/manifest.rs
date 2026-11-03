@@ -572,4 +572,47 @@ mod tests {
             );
         }
     }
+
+    /// The point of a scope: a change outside it leaves the index fresh, one inside it
+    /// makes it stale (the fixture is no git checkout, so the stat walk decides).
+    #[rstest]
+    #[case::positive_outside_change_stays_fresh(
+        "a change outside the scope is ignored",
+        "srcx/e.rs",
+        IndexState::Fresh
+    )]
+    #[case::positive_new_file_outside_stays_fresh(
+        "a new file outside the scope is ignored",
+        "other/new.rs",
+        IndexState::Fresh
+    )]
+    #[case::negative_inside_change_is_stale(
+        "a change inside the scope is stale",
+        "src/b.rs",
+        IndexState::Stale
+    )]
+    #[case::negative_new_file_inside_is_stale(
+        "a new file inside the scope is stale",
+        "src/new.rs",
+        IndexState::Stale
+    )]
+    fn scoped_freshness(
+        #[case] description: &str,
+        #[case] touched: &str,
+        #[case] expected: IndexState,
+    ) {
+        let dir = fixture();
+        std::fs::create_dir_all(dir.join("srcx")).unwrap();
+        std::fs::write(dir.join("srcx/e.rs"), "x").unwrap();
+        let paths = vec![PathBuf::from("src")];
+        let (m, _) = Manifest::scan_in(&dir, &ScanLimits::UNLIMITED, &paths);
+        let p = dir.join(touched);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "changed, and longer than before").unwrap();
+        assert_eq!(
+            compare_in(&dir, Some(&m), &ScanLimits::UNLIMITED, &paths),
+            expected,
+            "{description}"
+        );
+    }
 }

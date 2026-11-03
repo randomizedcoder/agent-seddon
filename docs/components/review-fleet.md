@@ -554,10 +554,12 @@ reviews have no search at all, for the same reason. The review session also gets
 `search` tool over that index (5b-ii), replacing any process-wide one; hits in the PR's
 changed files are flagged as pre-PR content. `Reindex` (`POST
 /v1/fleet/sessions/{id}/reindex`) rebuilds the caller's own enabled row now, at most once
-per row every `reindex_cooldown_secs` (5 minutes); builds are staged and swapped in, so the served index never goes
-away mid-build (5a-ii-a). The portal's Fleet roster shows each row's index state as a
-badge, which is also the Re-index button (5a-ii-b). A repo listed in `scopes` is indexed
-only under its paths, by default nixpkgs (5a-ii-c). Design and the remaining steps:
+per row every `reindex_cooldown_secs` (5 minutes); builds are staged and swapped in, so
+the served index never goes away mid-build (5a-ii-a). The portal's Fleet roster shows
+each row's index state as a badge, which is also the Re-index button (5a-ii-b). A repo
+listed in `scopes` is indexed only under its paths, by default nixpkgs (5a-ii-c); an
+entry with no `paths`, no `repo`, or a repo listed twice fails at load. Design and the
+remaining steps:
 [04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)

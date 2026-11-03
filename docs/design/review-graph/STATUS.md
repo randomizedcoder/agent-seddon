@@ -22,7 +22,8 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
 | 5a-ii-a | `Reindex` RPC (forced rebuild, per-row cooldown, disabled rows refused), staged builds swapped in, GC keeps the newest finished fallback, no refcount needed | [04](04-repo-knowledge.md#as-built-5a-ii-a) | ✅ | #691 |
 | 5a-ii-b | Portal index badge + Re-index button (contact sheet), #691's review items (failed-swap restore, `busy`, forced-while-waiting, wire test + client, RBAC row) | [04](04-repo-knowledge.md#as-built-5a-ii-b) | ✅ | #692 |
-| 5a-ii-c | Path-scoped indexing (nixpkgs by default), configurable Re-index cooldown, #692's review items | [04](04-repo-knowledge.md#as-built-5a-ii-c) | 🟡 | this PR |
+| 5a-ii-c | Path-scoped indexing (nixpkgs by default), configurable Re-index cooldown, #692's review items | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #693 |
+| 5a-ii-c+ | #693's review items: scope tests (fresh outside, stale inside, files after a scope change), rune-safe portal clip, scope checks at load | [04](04-repo-knowledge.md#as-built-5a-ii-c) | 🟡 | this PR |
 | 5a-ii-d | Push-webhook base-moved trigger, incremental refresh, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
 | 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
@@ -290,7 +291,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #692 (0250692f) after one fleet round with no must-fix. Its should-fix
   items are done in 5a-ii-c below.
 
-- **5a-ii-c** (this PR): path-scoped indexing, and #692's review items.
+- **5a-ii-c** (#693, 9b20d2b4): path-scoped indexing, and #692's review items.
   - `[[review_fleet.index.scopes]]` indexes a repo only under some paths; the default
     scopes `NixOS/nixpkgs` to `pkgs/by-name`, `lib` and `nixos/modules`. The walk refuses
     `..`, absolute and `./` paths and any path reached through a symlink, and a scope of
@@ -302,3 +303,16 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     unknown outcome (shown as text, clipped to 40 characters), the `busy` snack names the
     row, and the `checked` doc comment rewrapped.
 
+  Merged as #693 (9b20d2b4) after one fleet round with no must-fix. Its should-fix
+  items are done in the follow-up below.
+
+- **5a-ii-c+** (this PR): #693's review items.
+  - Scope freshness rows: a change or new file outside the scope stays `Fresh`, inside it
+    goes `Stale`. `scoped_index` also checks the file count after the second pass, so a
+    rebuild under the old scope would fail.
+  - The portal's clip of an unknown outcome counts runes, so a surrogate pair is never
+    split (the adversarial row puts an emoji across code unit 40).
+  - `[[review_fleet.index.scopes]]` is checked at load: no `paths`, an empty `repo`, or a
+    repo listed twice (either form) is an error, the repo name clipped to 80 characters.
+  - The `__` slug rule is documented on `repo`; `docs/components/search.md` has a
+    *Scoped scans* paragraph; a long line in the component doc is rewrapped.

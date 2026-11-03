@@ -826,12 +826,13 @@ void main() {
           fake.listReviewsResponse = reviews([]);
           fake.sessionListResponse =
               roster([session(id: 's1', enabled: true, index: indexed())]);
-          final hostile = '<b>pwned</b>${'x' * 10000}';
+          // An astral character straddles code unit 40: the clip keeps it whole.
+          final hostile = '<b>pwned</b>${'x' * 27}😀${'x' * 10000}';
           fake.reindexResponse = FleetReindexReply()..outcome = hostile;
           await robot.load();
           await robot.expandSessions();
           await robot.reindex('s1');
-          final shown = '${hostile.substring(0, 40)}…';
+          final shown = '<b>pwned</b>${'x' * 27}😀…';
           await robot.pumpUntil(
               () => robot.textShown('Re-index of s1: $shown.'),
               reason: 'the outcome shows as text, clipped');
