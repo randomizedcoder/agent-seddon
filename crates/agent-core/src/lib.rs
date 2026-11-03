@@ -5680,8 +5680,9 @@ pub struct ChangedFile {
     /// context budget). Bounded — it is untrusted repo content, rendered as data.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub patch: String,
-    /// For a rename, the path on the base side (repo-relative, confined). The base
-    /// branch's index has the file there, so a search hit on it is pre-PR content too.
+    /// For a rename only, the path on the base side (repo-relative, confined); `None`
+    /// for a modify, add or delete (a delete's `path` already is its base side). The
+    /// base branch's index has the file there, so a search hit on it is pre-PR too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<PathBuf>,
 }

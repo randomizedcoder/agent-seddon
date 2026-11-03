@@ -3495,13 +3495,19 @@ impl From<agent_core::ChangedFile> for pb::ReviewChangedFile {
             is_binary: f.is_binary,
             lang: f.lang,
             patch: f.patch,
+            old_path: f
+                .old_path
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
 }
 impl From<pb::ReviewChangedFile> for agent_core::ChangedFile {
     fn from(f: pb::ReviewChangedFile) -> Self {
         agent_core::ChangedFile {
-            old_path: None,
+            // Only a lookup key for the pre-PR flag (never opened or joined into a
+            // path), so an empty wire value is "none" and anything else is kept.
+            old_path: (!f.old_path.is_empty()).then(|| std::path::PathBuf::from(f.old_path)),
             path: std::path::PathBuf::from(f.path),
             change: change_kind_from_i32(f.change),
             additions: f.additions,
@@ -5834,5 +5840,27 @@ mod tests {
             (wire.error.as_str(), wire.built_at, wire.updated_at),
             ("e", 1, 2)
         );
+    }
+
+    // A rename's base-side path survives the wire both ways; none stays none, and an
+    // empty wire value reads as none.
+    #[rstest::rstest]
+    #[case::positive_rename_round_trips(Some("src/old.rs"), "src/old.rs")]
+    #[case::negative_none_is_empty(None, "")]
+    fn changed_file_old_path_round_trip(#[case] old: Option<&str>, #[case] wire: &str) {
+        let core = agent_core::ChangedFile {
+            old_path: old.map(std::path::PathBuf::from),
+            path: "src/new.rs".into(),
+            change: agent_core::ChangeKind::Renamed,
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+            lang: "rust".into(),
+            patch: String::new(),
+        };
+        let pbf = pb::ReviewChangedFile::from(core);
+        assert_eq!(pbf.old_path, wire);
+        let back = agent_core::ChangedFile::from(pbf);
+        assert_eq!(back.old_path, old.map(std::path::PathBuf::from));
     }
 }
