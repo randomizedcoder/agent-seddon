@@ -573,32 +573,49 @@ mod tests {
         }
     }
 
-    /// The point of a scope: a change outside it leaves the index fresh, one inside it
-    /// makes it stale (the fixture is no git checkout, so the stat walk decides).
+    /// The point of a scope: a change, new file or removal outside it leaves the index
+    /// fresh; one inside it makes it stale (the fixture is no git checkout, so the stat walk decides).
     #[rstest]
     #[case::positive_outside_change_stays_fresh(
         "a change outside the scope is ignored",
         "srcx/e.rs",
+        false,
         IndexState::Fresh
     )]
     #[case::positive_new_file_outside_stays_fresh(
         "a new file outside the scope is ignored",
         "other/new.rs",
+        false,
         IndexState::Fresh
     )]
     #[case::negative_inside_change_is_stale(
         "a change inside the scope is stale",
         "src/b.rs",
+        false,
         IndexState::Stale
     )]
     #[case::negative_new_file_inside_is_stale(
         "a new file inside the scope is stale",
         "src/new.rs",
+        false,
+        IndexState::Stale
+    )]
+    #[case::positive_outside_removal_stays_fresh(
+        "a removal outside the scope is ignored",
+        "srcx/e.rs",
+        true,
+        IndexState::Fresh
+    )]
+    #[case::negative_inside_removal_is_stale(
+        "a removal inside the scope is stale",
+        "src/b.rs",
+        true,
         IndexState::Stale
     )]
     fn scoped_freshness(
         #[case] description: &str,
         #[case] touched: &str,
+        #[case] remove: bool,
         #[case] expected: IndexState,
     ) {
         let dir = fixture();
@@ -607,8 +624,12 @@ mod tests {
         let paths = vec![PathBuf::from("src")];
         let (m, _) = Manifest::scan_in(&dir, &ScanLimits::UNLIMITED, &paths);
         let p = dir.join(touched);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, "changed, and longer than before").unwrap();
+        if remove {
+            std::fs::remove_file(&p).unwrap();
+        } else {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "changed, and longer than before").unwrap();
+        }
         assert_eq!(
             compare_in(&dir, Some(&m), &ScanLimits::UNLIMITED, &paths),
             expected,

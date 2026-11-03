@@ -18,6 +18,11 @@
 //!   flow (F5c2), never by a webhook.
 //! - `installation_repositories` → keep the owner's install record's repo list in sync.
 //!   This is display data; it never touches the mint gate.
+//! - `push` to the repo's default branch → queue an index check of each enabled roster row
+//!   watching it, in the owning tenant (review-graph 5a-ii-d), so the repo index follows
+//!   the base without waiting for `refresh_secs`. The check fetches and compares the base
+//!   itself; the pushed sha is only logged. Branch deletions and other branches do
+//!   nothing.
 
 use agent_core::{
     safe_segment, valid_github_login, valid_installation_id, FleetSession, FleetTrigger, Result,
@@ -58,6 +63,13 @@ pub enum WebhookEvent {
     InstallUnsuspended {
         installation: String,
     },
+    /// A push moved `repo`'s default branch to `sha`.
+    BaseMoved {
+        installation: String,
+        /// The roster's `owner__name` slug.
+        repo: String,
+        sha: String,
+    },
     /// Repos added to / removed from an installation (`owner__name` slugs).
     ReposChanged {
         installation: String,
@@ -72,10 +84,13 @@ pub enum WebhookEvent {
 pub fn parse(event: &str, body: &[u8]) -> std::result::Result<WebhookEvent, Reject> {
     match event {
         "ping" => return Ok(WebhookEvent::Ping),
-        "pull_request" | "installation" | "installation_repositories" => {}
+        "pull_request" | "installation" | "installation_repositories" | "push" => {}
         _ => return Ok(WebhookEvent::Ignored),
     }
     let v: Value = serde_json::from_slice(body).map_err(|_| Reject("body is not JSON"))?;
+    if event == "push" {
+        return parse_push(&v);
+    }
     let action = v
         .get("action")
         .and_then(Value::as_str)
@@ -134,6 +149,48 @@ pub fn parse(event: &str, body: &[u8]) -> std::result::Result<WebhookEvent, Reje
             })
         }
     }
+}
+
+/// The longest ref a push names that the fleet reads (git allows longer; none of ours are).
+const MAX_REF_LEN: usize = 255;
+
+/// A `push`: [`WebhookEvent::BaseMoved`] when it moved the default branch, else ignored.
+fn parse_push(v: &Value) -> std::result::Result<WebhookEvent, Reject> {
+    let str_at = |p: &str| v.pointer(p).and_then(Value::as_str);
+    let git_ref = str_at("/ref").ok_or(Reject("push without a ref"))?;
+    if git_ref.len() > MAX_REF_LEN {
+        return Err(Reject("push ref too long"));
+    }
+    let default = str_at("/repository/default_branch")
+        .filter(|b| !b.is_empty() && b.len() <= MAX_REF_LEN)
+        .ok_or(Reject("push without a default branch"))?;
+    let deleted = match v.get("deleted") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(Reject("push.deleted is not a bool")),
+    };
+    if deleted || git_ref.strip_prefix("refs/heads/") != Some(default) {
+        return Ok(WebhookEvent::Ignored);
+    }
+    let sha = str_at("/after")
+        .filter(|s| commit_id(s))
+        .ok_or(Reject("push after is not a commit id"))?;
+    let installation = installation_id(v)?;
+    let repo = str_at("/repository/full_name")
+        .and_then(repo_slug)
+        .ok_or(Reject("repository name is not a valid owner/name"))?;
+    Ok(WebhookEvent::BaseMoved {
+        installation,
+        repo,
+        sha: sha.to_string(),
+    })
+}
+
+/// A full SHA-1 or SHA-256 object id that is not the all-zero "no object".
+fn commit_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64)
+        && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && s.bytes().any(|b| b != b'0')
 }
 
 /// `installation.id` as the decimal string the gate and stores use.
@@ -197,6 +254,9 @@ pub trait WebhookTarget: Send + Sync {
     async fn suspend(&self, tenant: &str, installation: &str) -> Result<()>;
     /// The installation is back: restore it only if it is still verified for `tenant`.
     async fn unsuspend(&self, tenant: &str, installation: &str) -> Result<()>;
+    /// `row`'s default branch moved: queue an index check of it (no-op without an
+    /// indexer).
+    fn base_moved(&self, tenant: &str, row: &FleetSession);
     /// Apply a repo-list change to `tenant`'s record of the installation.
     async fn sync_repos(
         &self,
@@ -216,6 +276,8 @@ pub enum Dispatched {
     Unclaimed,
     /// `n` review triggers enqueued.
     Triggered(usize),
+    /// `n` rows queued for an index check.
+    Reindexing(usize),
     Revoked,
     Suspended,
     Unsuspended,
@@ -231,7 +293,8 @@ pub async fn dispatch(event: WebhookEvent, target: &dyn WebhookTarget) -> Result
         | WebhookEvent::InstallDeleted { installation }
         | WebhookEvent::InstallSuspended { installation }
         | WebhookEvent::InstallUnsuspended { installation }
-        | WebhookEvent::ReposChanged { installation, .. } => installation.clone(),
+        | WebhookEvent::ReposChanged { installation, .. }
+        | WebhookEvent::BaseMoved { installation, .. } => installation.clone(),
     };
     let Some(tenant) = target.owner_of(&installation).await? else {
         return Ok(Dispatched::Unclaimed);
@@ -252,6 +315,17 @@ pub async fn dispatch(event: WebhookEvent, target: &dyn WebhookTarget) -> Result
                 }
             }
             Dispatched::Triggered(n)
+        }
+        WebhookEvent::BaseMoved { repo, sha, .. } => {
+            let mut n = 0;
+            for row in target.github_rows(&tenant).await? {
+                if row.enabled && row.repo == repo {
+                    tracing::info!(row = %row.id, base = %sha, "fleet webhook: base moved");
+                    target.base_moved(&tenant, &row);
+                    n += 1;
+                }
+            }
+            Dispatched::Reindexing(n)
         }
         WebhookEvent::InstallDeleted { .. } => {
             target.revoke(&tenant, &installation).await?;
@@ -314,7 +388,7 @@ mod tests {
     #[case::positive_ready_for_review("pull_request", pr("ready_for_review"), Ok(want_pr()))]
     #[case::positive_ping("ping", b"not even json".to_vec(), Ok(WebhookEvent::Ping))]
     #[case::negative_closed_ignored("pull_request", pr("closed"), Ok(WebhookEvent::Ignored))]
-    #[case::negative_unknown_event_ignored("push", b"{}".to_vec(), Ok(WebhookEvent::Ignored))]
+    #[case::negative_unknown_event_ignored("watch", b"{}".to_vec(), Ok(WebhookEvent::Ignored))]
     #[case::negative_draft_ignored("pull_request", pr_body("opened", 7.into(), true.into(), "acme/web", 42.into()), Ok(WebhookEvent::Ignored))]
     #[case::corner_draft_null_is_not_draft("pull_request", pr_body("opened", 7.into(), Value::Null, "acme/web", 42.into()), Ok(want_pr()))]
     #[case::corner_repo_name_with_double_underscore("pull_request", pr_body("opened", 7.into(), false.into(), "acme/my__web", 42.into()), Ok(WebhookEvent::PullRequest { installation: "42".into(), repo: "acme__my__web".into(), pr: 7 }))]
@@ -341,6 +415,87 @@ mod tests {
         #[case] want: std::result::Result<WebhookEvent, Reject>,
     ) {
         assert_eq!(parse(event, &body), want);
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn push_body(
+        git_ref: &str,
+        default: Value,
+        after: &str,
+        deleted: Value,
+        full_name: &str,
+    ) -> Vec<u8> {
+        serde_json::json!({
+            "ref": git_ref,
+            "before": "1111111111111111111111111111111111111111",
+            "after": after,
+            "deleted": deleted,
+            "repository": { "full_name": full_name, "default_branch": default },
+            "installation": { "id": 42 },
+            "commits": [{ "message": "ignored" }],
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn push(git_ref: &str) -> Vec<u8> {
+        push_body(git_ref, "main".into(), SHA, false.into(), "acme/web")
+    }
+
+    fn moved(sha: &str) -> WebhookEvent {
+        WebhookEvent::BaseMoved {
+            installation: "42".into(),
+            repo: "acme__web".into(),
+            sha: sha.into(),
+        }
+    }
+
+    #[rstest]
+    #[case::positive_default_branch(
+        "a push to the default branch moves the base",
+        push("refs/heads/main"),
+        Ok(moved(SHA))
+    )]
+    #[case::positive_sha256("a SHA-256 commit id is accepted", push_body("refs/heads/main", "main".into(), &"a".repeat(64), false.into(), "acme/web"), Ok(moved(&"a".repeat(64))))]
+    #[case::positive_other_default_name("the default branch is the repo's own, not `main`", push_body("refs/heads/trunk", "trunk".into(), SHA, false.into(), "acme/web"), Ok(moved(SHA)))]
+    #[case::negative_other_branch(
+        "a push to another branch is ignored",
+        push("refs/heads/feature"),
+        Ok(WebhookEvent::Ignored)
+    )]
+    #[case::negative_tag(
+        "a tag push is ignored",
+        push("refs/tags/main"),
+        Ok(WebhookEvent::Ignored)
+    )]
+    #[case::negative_deleted("deleting the default branch is ignored", push_body("refs/heads/main", "main".into(), SHA, true.into(), "acme/web"), Ok(WebhookEvent::Ignored))]
+    #[case::corner_deleted_null("`deleted: null` is not a deletion", push_body("refs/heads/main", "main".into(), SHA, Value::Null, "acme/web"), Ok(moved(SHA)))]
+    #[case::corner_suffix_is_not_the_branch(
+        "`refs/heads/xmain` is not `main`",
+        push("refs/heads/xmain"),
+        Ok(WebhookEvent::Ignored)
+    )]
+    #[case::corner_nested_ref(
+        "`refs/heads/main/x` is not `main`",
+        push("refs/heads/main/x"),
+        Ok(WebhookEvent::Ignored)
+    )]
+    #[case::boundary_zero_sha("the all-zero id is no commit", push_body("refs/heads/main", "main".into(), &"0".repeat(40), false.into(), "acme/web"), Err(Reject("push after is not a commit id")))]
+    #[case::boundary_ref_too_long("an over-long ref is refused", push(&format!("refs/heads/{}", "a".repeat(MAX_REF_LEN))), Err(Reject("push ref too long")))]
+    #[case::negative_no_default_branch("a push without a default branch is refused", push_body("refs/heads/main", Value::Null, SHA, false.into(), "acme/web"), Err(Reject("push without a default branch")))]
+    #[case::adversarial_uppercase_sha("an id that is not lowercase hex is refused", push_body("refs/heads/main", "main".into(), &SHA.to_uppercase(), false.into(), "acme/web"), Err(Reject("push after is not a commit id")))]
+    #[case::adversarial_short_sha("a short id is refused", push_body("refs/heads/main", "main".into(), "abc123", false.into(), "acme/web"), Err(Reject("push after is not a commit id")))]
+    #[case::adversarial_injection_sha("an id with shell or ref text is refused", push_body("refs/heads/main", "main".into(), "$(rm -rf /)aaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false.into(), "acme/web"), Err(Reject("push after is not a commit id")))]
+    #[case::adversarial_repo_traversal("a traversal repo name is refused", push_body("refs/heads/main", "main".into(), SHA, false.into(), "acme/.."), Err(Reject("repository name is not a valid owner/name")))]
+    #[case::adversarial_deleted_string("a non-bool `deleted` is refused", push_body("refs/heads/main", "main".into(), SHA, "yes".into(), "acme/web"), Err(Reject("push.deleted is not a bool")))]
+    #[case::adversarial_no_ref("a push without a ref is refused", br#"{"after":"x"}"#.to_vec(), Err(Reject("push without a ref")))]
+    fn parse_push_cases(
+        #[case] description: &str,
+        #[case] body: Vec<u8>,
+        #[case] want: std::result::Result<WebhookEvent, Reject>,
+    ) {
+        assert_eq!(parse("push", &body), want, "{description}");
     }
 
     fn inst(action: &str, id: Value) -> Vec<u8> {
@@ -420,6 +575,7 @@ mod tests {
         rows: HashMap<String, Vec<FleetSession>>,
         log: Mutex<Vec<String>>,
         triggers: Mutex<Vec<FleetTrigger>>,
+        moved: Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
@@ -433,6 +589,12 @@ mod tests {
         fn enqueue(&self, trigger: FleetTrigger) -> TriggerOutcome {
             self.triggers.lock().unwrap().push(trigger);
             TriggerOutcome::Accepted
+        }
+        fn base_moved(&self, tenant: &str, row: &FleetSession) {
+            self.moved
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), row.id.clone()));
         }
         async fn revoke(&self, tenant: &str, installation: &str) -> Result<()> {
             self.log
@@ -558,5 +720,40 @@ mod tests {
         assert_eq!(dispatch(event, &f).await.unwrap(), want);
         assert_eq!(f.log.lock().unwrap().as_slice(), log);
         assert!(f.triggers.lock().unwrap().is_empty());
+    }
+
+    fn moved_event(installation: &str, repo: &str) -> WebhookEvent {
+        WebhookEvent::BaseMoved {
+            installation: installation.into(),
+            repo: repo.into(),
+            sha: SHA.into(),
+        }
+    }
+
+    // A moved base reaches only the owning tenant's enabled rows for that repo, and never
+    // triggers a review.
+    #[rstest]
+    #[case::positive_owner_rows_for_repo("each enabled row for the repo is queued", moved_event("42", "acme__web"), Dispatched::Reindexing(2), &[("acme", "web"), ("acme", "web-sec")])]
+    #[case::negative_no_matching_repo("a repo no row watches queues nothing", moved_event("42", "acme__nope"), Dispatched::Reindexing(0), &[])]
+    #[case::negative_unclaimed_install("an unclaimed install queues nothing", moved_event("7", "acme__web"), Dispatched::Unclaimed, &[])]
+    #[case::adversarial_other_tenants_install_only_reaches_its_owner("another tenant's install reaches only its own rows", moved_event("99", "acme__web"), Dispatched::Reindexing(1), &[("globex", "web")])]
+    #[tokio::test]
+    async fn dispatch_base_moved_routes_to_owner_tenant(
+        #[case] description: &str,
+        #[case] event: WebhookEvent,
+        #[case] want: Dispatched,
+        #[case] rows: &[(&str, &str)],
+    ) {
+        let f = fake();
+        assert_eq!(dispatch(event, &f).await.unwrap(), want, "{description}");
+        let want_rows: Vec<(String, String)> = rows
+            .iter()
+            .map(|(t, s)| (t.to_string(), s.to_string()))
+            .collect();
+        assert_eq!(*f.moved.lock().unwrap(), want_rows, "{description}");
+        assert!(
+            f.triggers.lock().unwrap().is_empty(),
+            "{description}: no review is triggered"
+        );
     }
 }

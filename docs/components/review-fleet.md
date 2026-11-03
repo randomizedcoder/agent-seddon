@@ -513,6 +513,11 @@ ignored. The PR then triggers every *enabled* row of that tenant whose `repo` is
 `opened`/`reopened`/`synchronize`/`ready_for_review` trigger; drafts don't. Without `per_tenant`
 the single roster owns every installation.
 
+A `push` to a watched repo's default branch (subscribe the App to **Push** events) queues
+an index check of each enabled row of the owning tenant that watches the repo, past the
+`refresh_secs` throttle; it never triggers a review (review-graph 5a-ii-d-i). Other
+branches, tags and branch deletions are ignored.
+
 `installation` and `installation_repositories` events drive the install lifecycle
 ([`install_lifecycle.rs`](../../crates/agent-runtime/src/install_lifecycle.rs)), which can only
 **narrow** the mint gate: `deleted` unbinds the tenant, drops the minter's cached token, and

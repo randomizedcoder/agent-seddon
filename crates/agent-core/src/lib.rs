@@ -6665,6 +6665,13 @@ pub trait FleetIndexer: Send + Sync {
     /// Re-index, review-graph 5a-ii). Coalesced per row, rate-limited per row, and never
     /// blocks. The caller has already checked that `tenant` owns `row`.
     fn reindex(&self, tenant: &str, row: &FleetSession) -> ReindexOutcome;
+    /// `row`'s default branch moved (a verified push webhook, review-graph 5a-ii-d): queue
+    /// an index check now, past the `refresh` throttle. Not forced: the check still
+    /// compares the base, so a push that did not move it costs one fetch. Coalesced per
+    /// row and never blocks. The default treats it as a plain [`Self::enqueue`].
+    fn base_moved(&self, tenant: &str, row: &FleetSession) {
+        self.enqueue(tenant, row);
+    }
 }
 
 /// What [`FleetIndexer::reindex`] did.

@@ -454,6 +454,21 @@ impl Queue {
         true
     }
 
+    /// Queue `row` for a check past the `refresh` throttle (its base moved). Coalesced
+    /// with a queued copy, which keeps a forced flag; refused only when the queue is full.
+    /// Returns whether it is queued.
+    fn nudge(&mut self, tenant: &str, row: &FleetSession) -> bool {
+        let key = (tenant.to_string(), row.id.clone());
+        if !self.rows.contains_key(&key) {
+            if self.order.len() >= MAX_QUEUED_ROWS {
+                return false;
+            }
+            self.order.push_back(key.clone());
+        }
+        self.rows.insert(key, row.clone());
+        true
+    }
+
     /// Queue `row` for a rebuild, past the `refresh` throttle. Refused within
     /// `cooldown` of the row's last request, and when the queue is full.
     fn force(
@@ -620,6 +635,20 @@ impl FleetIndexer for FleetIndexService {
             .lock()
             .expect("fleet index queue poisoned")
             .push(tenant, row, self.inner.limits.refresh, Instant::now());
+        if queued {
+            self.start_worker();
+            self.inner.wake.notify_one();
+        }
+    }
+
+    fn base_moved(&self, tenant: &str, row: &FleetSession) {
+        let queued = self
+            .inner
+            .queue
+            .lock()
+            .expect("fleet index queue poisoned")
+            .nudge(tenant, row);
+        tracing::info!(row = %row.id, queued, "fleet index: base moved");
         if queued {
             self.start_worker();
             self.inner.wake.notify_one();
@@ -2145,6 +2174,36 @@ mod tests {
         "[[scopes]]\nrepo = \"NixOS/nixpkgs\"\npaths = [\"lib\"]\n[[scopes]]\nrepo = \"nixos__NIXPKGS\"\npaths = [\"pkgs\"]\n",
         Some("twice")
     )]
+    #[case::adversarial_traversal_path(
+        "a `..` path is refused at load, not left to index nothing",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"lib\", \"../etc\"]\n",
+        Some("not a plain relative path")
+    )]
+    #[case::adversarial_absolute_path(
+        "an absolute path is refused at load",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"/etc\"]\n",
+        Some("not a plain relative path")
+    )]
+    #[case::adversarial_dot_path(
+        "a `./` path is refused at load",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"./lib\"]\n",
+        Some("not a plain relative path")
+    )]
+    #[case::boundary_empty_path_string(
+        "an empty path string is refused",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"\"]\n",
+        Some("not a plain relative path")
+    )]
+    #[case::adversarial_huge_path_clipped(
+        "a huge bad path is clipped in the error",
+        &format!("[[scopes]]\nrepo = \"acme/web\"\npaths = [\"../{}\"]\n", "a".repeat(10_000)),
+        Some("not a plain relative path")
+    )]
+    #[case::positive_nested_path_is_plain(
+        "a nested relative path loads",
+        "[[scopes]]\nrepo = \"acme/web\"\npaths = [\"pkgs/by-name\"]\n",
+        None
+    )]
     #[case::adversarial_huge_repo_name_clipped(
         "a huge repo name is clipped in the error",
         &format!("[[scopes]]\nrepo = \"{}\"\npaths = []\n", "a".repeat(10_000)),
@@ -2308,6 +2367,86 @@ mod tests {
             }
         }
         assert_eq!(got, expected, "{description}");
+    }
+
+    // A moved base queues the row past the `refresh` throttle, coalesces with a queued
+    // copy (keeping its forced flag), and is refused only by a full queue.
+    #[rstest]
+    #[case::positive_past_the_throttle(
+        "a row checked just now is queued again when its base moves",
+        true,
+        false,
+        0,
+        true,
+        1,
+        false
+    )]
+    #[case::positive_fresh_row("a row never checked is queued", false, false, 0, true, 1, false)]
+    #[case::corner_coalesces_with_forced(
+        "a queued, forced row stays one job and stays forced",
+        false,
+        true,
+        0,
+        true,
+        1,
+        true
+    )]
+    #[case::boundary_full_queue_refuses(
+        "a full queue refuses the nudge rather than grow",
+        false,
+        false,
+        MAX_QUEUED_ROWS,
+        false,
+        MAX_QUEUED_ROWS,
+        false
+    )]
+    #[case::adversarial_push_storm_is_one_job(
+        "many pushes for one row are one queued check",
+        true,
+        false,
+        0,
+        true,
+        1,
+        false
+    )]
+    fn nudge_cases(
+        #[case] description: &str,
+        #[case] checked_now: bool,
+        #[case] forced_first: bool,
+        #[case] others: usize,
+        #[case] expected_queued: bool,
+        #[case] expected_len: usize,
+        #[case] expected_forced: bool,
+    ) {
+        let refresh = Duration::from_secs(3600);
+        let now = Instant::now();
+        let mut q = Queue::default();
+        let web = row("acme", "web");
+        if checked_now {
+            q.checked("acme", &web, Outcome::Ready, false, refresh, now);
+            assert!(
+                !q.push("acme", &web, refresh, now),
+                "{description}: throttled"
+            );
+        }
+        if forced_first {
+            assert_eq!(q.force("acme", &web, COOLDOWN, now), ReindexOutcome::Queued);
+        }
+        for i in 0..others {
+            assert!(q.push("acme", &row("acme", &format!("r{i}")), refresh, now));
+        }
+        let storm = if description.contains("storm") { 50 } else { 1 };
+        let mut queued = false;
+        for _ in 0..storm {
+            queued = q.nudge("acme", &web);
+        }
+        assert_eq!(queued, expected_queued, "{description}: queued");
+        assert_eq!(q.order.len(), expected_len, "{description}: queue length");
+        if expected_queued {
+            let (_, got, forced) = q.pop().expect("queued");
+            assert_eq!(got.id, "web", "{description}");
+            assert_eq!(forced, expected_forced, "{description}: forced flag");
+        }
     }
 
     #[test]
