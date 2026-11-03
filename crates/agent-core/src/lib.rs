@@ -6498,7 +6498,10 @@ impl std::fmt::Debug for GroundedReview {
         f.debug_struct("GroundedReview")
             .field("brief", &self.brief)
             .field("facts", &self.facts)
-            .field("search", &self.search.as_ref().map(|_| "SearchBackend"))
+            .field(
+                "search",
+                &self.search.as_ref().map(|s| s.capabilities().backend),
+            )
             .finish()
     }
 }

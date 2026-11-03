@@ -58,7 +58,8 @@ impl Tool for SearchTool {
     fn schema(&self) -> ToolSchema {
         let description = if self.pre_pr.is_some() {
             "Fast full-text code search over an index of the repository's default branch \
-             (pre-PR content: it does not include this PR's changes). Use it to find callers, \
+             (its last good index, which can trail the branch; pre-PR content: it does not \
+             include this PR's changes). Use it to find callers, \
              similar code and conventions elsewhere in the repo; read the PR's own files with \
              read_file/grep. Returns `path:line<TAB>snippet` per hit, best matches first; a \
              hit in a file this PR changes is flagged `[pre-PR]`. Modes: literal (all terms), \
@@ -156,16 +157,22 @@ fn format_hits(hits: &[SearchHit], pre_pr: Option<&HashSet<PathBuf>>) -> String 
         return "(no matches)".into();
     }
     let mut out = String::new();
-    for h in hits {
-        if h.line > 0 {
-            out.push_str(&format!("{}:{}\t{}", h.path.display(), h.line, h.snippet));
+    for (i, h) in hits.iter().enumerate() {
+        let mut line = if h.line > 0 {
+            format!("{}:{}\t{}", h.path.display(), h.line, h.snippet)
         } else {
-            out.push_str(&format!("{}\t{}", h.path.display(), h.snippet));
-        }
+            format!("{}\t{}", h.path.display(), h.snippet)
+        };
         if pre_pr.is_some_and(|changed| changed.contains(&h.path)) {
-            out.push_str(PRE_PR_FLAG);
+            line.push_str(PRE_PR_FLAG);
         }
-        out.push('\n');
+        line.push('\n');
+        // Whole hits only: a cut mid-line could drop a hit's pre-PR flag.
+        if pre_pr.is_some() && out.len() + line.len() > crate::MAX_OUTPUT {
+            out.push_str(&format!("… {} more hits not shown\n", hits.len() - i));
+            return out;
+        }
+        out.push_str(&line);
     }
     truncate(out)
 }
@@ -330,6 +337,30 @@ mod tests {
             review,
             "the review description says the index is pre-PR"
         );
+    }
+
+    /// A review's output is cut between whole hits, never inside one, so no hit loses
+    /// its pre-PR flag to the output cap; the trailer says how many were left out.
+    #[tokio::test]
+    async fn boundary_review_output_cut_on_whole_hits() {
+        let long = "x".repeat(300);
+        let hits: Vec<SearchHit> = (0..200).map(|i| hit("src/a.rs", i + 1, &long)).collect();
+        let t = SearchTool::for_review(Arc::new(StubBackend { hits }), [PathBuf::from("src/a.rs")]);
+        let obs = t
+            .execute(json!({"query": "x", "limit": 200}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            obs.content.len() <= crate::MAX_OUTPUT + 64,
+            "{}",
+            obs.content.len()
+        );
+        let mut lines: Vec<&str> = obs.content.lines().collect();
+        let trailer = lines.pop().unwrap();
+        assert!(trailer.contains("more hits not shown"), "{trailer}");
+        assert!(lines
+            .iter()
+            .all(|l| l.ends_with("this PR changes this file]")));
     }
 
     #[tokio::test]

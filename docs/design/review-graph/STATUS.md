@@ -226,3 +226,11 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     the session; none without one; none after failed grounding),
     `grounding_carries_the_row_index`, `adversarial_dirs_only_tree_still_expires`,
     `adversarial_ready_without_base`.
+  - From the fleet review: `REVIEW_READONLY_TOOLS` says why `search` is not on it (the
+    process index is another tree; a review's `search` is bound per review), and the
+    seed/dispatch/bind comments say the dispatch enforces the *advertised* set;
+    `real_diff_paths_flag_pre_pr_hits` grounds a real diff end to end and checks the
+    change set's paths and the index's ids agree (a mismatch would drop the flag
+    silently); a review's output is cut between whole hits so no flag is lost to the
+    cap; the description notes a stale index can trail the branch; `GroundedReview`'s
+    Debug names the backend.

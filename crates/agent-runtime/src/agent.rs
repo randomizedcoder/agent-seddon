@@ -2998,10 +2998,10 @@ impl Agent {
                 .map(|((call, dec), vfb)| {
                     let tools = &self.tools;
                     // Fail-closed allowlist: only a tool ADVERTISED to this session may
-                    // run. A review session advertises a read-only subset (see
-                    // seed_review), so an injected `bash`/`write_file` call from a
-                    // hostile diff is refused here even though the process registry
-                    // still holds those tools.
+                    // run. A review session advertises a read-only subset (seed_review,
+                    // plus the row-index `search` bind_review_workspace adds), so an
+                    // injected `bash`/`write_file` call from a hostile diff is refused
+                    // here even though the process registry still holds those tools.
                     let advertised = tool_schemas;
                     let cwd = tool_ctx.cwd.clone();
                     // A call the verifier blocked (enforce mode) does not run — its
@@ -3734,6 +3734,12 @@ impl std::fmt::Display for BudgetExceeded {
 
 impl std::error::Error for BudgetExceeded {}
 
+/// The tools a review session is seeded with ([`Session::seed_review`]). `search` is
+/// deliberately NOT here: the process-wide index is of another tree (the fleet's own
+/// checkout), so a review only gets a `search` bound to its own repo's index, added
+/// per review by `bind_review_workspace` (review-graph 5b-ii). Adding it here would leak
+/// the other tree into every review without a row index. Dispatch enforces each
+/// session's *advertised* set, which is this list plus that one bound tool.
 const REVIEW_READONLY_TOOLS: &[&str] = &[
     "read_file",
     "grep",

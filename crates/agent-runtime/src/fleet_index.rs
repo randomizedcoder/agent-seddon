@@ -1511,6 +1511,85 @@ mod tests {
         );
     }
 
+    /// The two path spellings agree on a real diff: the change set's paths (from git)
+    /// and the index's ids (from the scan) are both repo-relative with no `./`, so the
+    /// session's `search` flags the PR's changed file. A mismatch would fail open (no
+    /// flag), so it is pinned end to end.
+    #[tokio::test]
+    async fn real_diff_paths_flag_pre_pr_hits() {
+        use agent_core::{ReviewGrounder as _, Tool as _};
+        let fx = Fixture::new(&[
+            ("a.rs", "fn needle_symbol() {}\n"),
+            ("b.rs", "fn other() { needle_symbol() }\n"),
+        ]);
+        let r = row("acme", "web");
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), limits());
+        assert_eq!(svc.run(&r).await, Outcome::Ready);
+        let base = status_of(&fx.root, &r).base_sha;
+
+        fx.commit("a.rs", "fn needle_symbol() { changed() }\n");
+        let repo = fx.repo();
+        repo.fetch().await.expect("the mirror sees the new head");
+        let head = repo
+            .resolve(&agent_core::Revision::from("HEAD"))
+            .await
+            .expect("head")
+            .0;
+        assert_ne!(head, base);
+
+        let grounder = crate::agent::WorktreeGrounder {
+            repo,
+            forge: None,
+            sandbox: None,
+            pool: None,
+            tool_provider: None,
+            review: crate::config::ReviewCfg::default(),
+            metrics: Metrics::new(),
+            budget: 64 * 1024,
+            row_index: Some(Layout::for_row(&fx.root, &r).unwrap().knowledge),
+        };
+        let grounded = grounder
+            .ground(&fx.upstream, agent_core::ReviewTarget::Revs { base, head })
+            .await
+            .expect("grounds");
+        let changed: Vec<PathBuf> = grounded
+            .facts
+            .change
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        assert_eq!(changed, vec![PathBuf::from("a.rs")], "repo-relative, no ./");
+
+        let tool =
+            agent_tools::SearchTool::for_review(grounded.search.expect("row index"), changed);
+        let obs = tool
+            .execute(
+                serde_json::json!({"query": "needle_symbol"}),
+                &agent_core::ToolContext {
+                    cwd: fx.upstream.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let line_of = |p: &str| {
+            obs.content
+                .lines()
+                .find(|l| l.starts_with(p))
+                .map(str::to_string)
+        };
+        assert!(
+            line_of("a.rs:").is_some_and(|l| l.contains("[pre-PR")),
+            "{}",
+            obs.content
+        );
+        assert!(
+            line_of("b.rs:").is_some_and(|l| !l.contains("[pre-PR")),
+            "{}",
+            obs.content
+        );
+    }
+
     /// While the mirror's first clone runs, the row waits (pending) and is retried.
     #[tokio::test]
     async fn corner_mirror_cloning_waits_pending() {
