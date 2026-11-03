@@ -114,6 +114,11 @@ max_files         = 200000                 # files per index; more ⇒ `partial`
 max_file_bytes    = 1048576                # larger files are skipped
 max_bytes         = 2147483648             # bytes read into one index; more ⇒ `partial`
 disk_min_free_pct = 10                     # pause indexing below this free % (max 90)
+reindex_cooldown_secs = 300                # one Re-index per row this often (30..86400)
+
+[[review_fleet.index.scopes]]              # index a repo only under these paths
+repo  = "NixOS/nixpkgs"                    # the default; setting any entry replaces it
+paths = ["pkgs/by-name", "lib", "nixos/modules"]
 ```
 
 Both Slack tokens are C5-style **references** (`env:`/`file:`), never raw secrets; the
@@ -549,9 +554,10 @@ reviews have no search at all, for the same reason. The review session also gets
 `search` tool over that index (5b-ii), replacing any process-wide one; hits in the PR's
 changed files are flagged as pre-PR content. `Reindex` (`POST
 /v1/fleet/sessions/{id}/reindex`) rebuilds the caller's own enabled row now, at most once
-per row every 5 minutes; builds are staged and swapped in, so the served index never goes
+per row every `reindex_cooldown_secs` (5 minutes); builds are staged and swapped in, so the served index never goes
 away mid-build (5a-ii-a). The portal's Fleet roster shows each row's index state as a
-badge, which is also the Re-index button (5a-ii-b). Design and the remaining steps:
+badge, which is also the Re-index button (5a-ii-b). A repo listed in `scopes` is indexed
+only under its paths, by default nixpkgs (5a-ii-c). Design and the remaining steps:
 [04-repo-knowledge.md](../design/review-graph/04-repo-knowledge.md#as-built-5a-i).
 
 ### The transport is now bidirectional + card-configured (config C37 / D2)

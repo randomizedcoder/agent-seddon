@@ -209,6 +209,10 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # max_file_bytes = 1048576      # larger files are skipped
 # max_bytes = 2147483648        # bytes read into one index; more ⇒ partial
 # disk_min_free_pct = 10        # pause indexing below this free % of the fleet root
+# reindex_cooldown_secs = 300   # one Re-index per row this often (30..86400)
+# [[review_fleet.index.scopes]] # index a repo only under these paths (default below;
+# repo = "NixOS/nixpkgs"        #  setting any entry replaces it, `scopes = []` = none)
+# paths = ["pkgs/by-name", "lib", "nixos/modules"]
 
 # [role] — operator-defined RBAC role cards (config C34 / C1b). Under `[auth] mode =
 # "oidc"` every RPC is gated (security-hardening S7) against the immutable built-in

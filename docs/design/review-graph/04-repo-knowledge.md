@@ -159,9 +159,23 @@ GC refcount.
   answers `busy` and spends no cooldown; a forced job that only waited is forced again on
   the next pass; `GrpcFleet::reindex` exists and the RPC has a wire round trip.
 
-Left for 5a-ii-c and later: a
-base-moved trigger from a push webhook (the `refresh_secs` poll already rebuilds on a new
-base), the incremental refresh, path-scoped nixpkgs indexing, `knowledge_max_bytes`, and
+### As built (5a-ii-c)
+
+- **Path scopes.** `[[review_fleet.index.scopes]]` entries (`repo`, `paths`) index a repo
+  only under those paths, ids still relative to the repo root. `repo` matches the roster
+  slug (`owner__name`) or `owner/name`, without regard to case. The default scopes
+  `NixOS/nixpkgs` to `pkgs/by-name`, `lib` and `nixos/modules`; setting the list replaces
+  it, and `scopes = []` indexes every repo whole.
+- **Hostile paths.** A path with `..`, a leading `/` or `./`, or one whose resolved path
+  differs from its lexical one (a symlink anywhere on the way) is skipped. A scope whose
+  paths are all skipped indexes nothing rather than the whole tree. A path inside another
+  is walked once.
+- **Rebuild on change.** The scope is recorded in the generation's manifest; a row whose
+  configured scope differs from it is rebuilt even on an unmoved base.
+- **Cooldown.** `reindex_cooldown_secs` (default 300, clamped to 30..=86400).
+
+Left for 5a-ii-d and later: a base-moved trigger from a push webhook (the `refresh_secs`
+poll already rebuilds on a new base), the incremental refresh, `knowledge_max_bytes`, and
 the language indexes, history signals and overview.
 
 ## Refresh

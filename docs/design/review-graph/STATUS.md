@@ -21,8 +21,9 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |
 | 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | ✅ | #687 |
 | 5a-ii-a | `Reindex` RPC (forced rebuild, per-row cooldown, disabled rows refused), staged builds swapped in, GC keeps the newest finished fallback, no refcount needed | [04](04-repo-knowledge.md#as-built-5a-ii-a) | ✅ | #691 |
-| 5a-ii-b | Portal index badge + Re-index button (contact sheet), #691's review items (failed-swap restore, `busy`, forced-while-waiting, wire test + client, RBAC row) | [04](04-repo-knowledge.md#as-built-5a-ii-b) | 🟡 | this PR |
-| 5a-ii-c | Push-webhook base-moved trigger, incremental refresh, nixpkgs path scoping, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-ii-b | Portal index badge + Re-index button (contact sheet), #691's review items (failed-swap restore, `busy`, forced-while-waiting, wire test + client, RBAC row) | [04](04-repo-knowledge.md#as-built-5a-ii-b) | ✅ | #692 |
+| 5a-ii-c | Path-scoped indexing (nixpkgs by default), configurable Re-index cooldown, #692's review items | [04](04-repo-knowledge.md#as-built-5a-ii-c) | 🟡 | this PR |
+| 5a-ii-d | Push-webhook base-moved trigger, incremental refresh, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
 | 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
@@ -273,7 +274,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #691 (35ce2c80) after one fleet round with no must-fix. Its should-fix
   items are done in 5a-ii-b below.
 
-- **5a-ii-b** (this PR): the portal side of Re-index, and #691's review items.
+- **5a-ii-b** (#692, 0250692f): the portal side of Re-index, and #691's review items.
   - Fleet roster rows show the index state as a distinct glyph (ready, stale, waiting,
     failed), with base, file count, `partial` and the redacted error in its tooltip.
     For a caller with `trigger:fleet` on an enabled row, the badge is the Re-index
@@ -285,4 +286,19 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - A forced job that only waited (mirror cloning, disk short) is forced again on the
     next pass.
   - `GrpcFleet::reindex` and a wire round trip over TCP and UDS; the RBAC matrix row.
+
+  Merged as #692 (0250692f) after one fleet round with no must-fix. Its should-fix
+  items are done in 5a-ii-c below.
+
+- **5a-ii-c** (this PR): path-scoped indexing, and #692's review items.
+  - `[[review_fleet.index.scopes]]` indexes a repo only under some paths; the default
+    scopes `NixOS/nixpkgs` to `pkgs/by-name`, `lib` and `nixos/modules`. The walk refuses
+    `..`, absolute and `./` paths and any path reached through a symlink, and a scope of
+    only refused paths indexes nothing (never the whole tree). The scope is in the
+    manifest, so changing it rebuilds an unmoved base.
+  - `reindex_cooldown_secs` (default 300, clamped to 30..=86400) replaces the constant.
+  - From #692's draft: a test of the `forced` prune (at and one past the cap), the
+    forced-flag lapse documented on `force`, portal rows for `coalesced`, `busy` and an
+    unknown outcome (shown as text, clipped to 40 characters), the `busy` snack names the
+    row, and the `checked` doc comment rewrapped.
 

@@ -51,6 +51,7 @@ pub trait DocumentSource: Send + Sync {
 pub struct FsDocumentSource {
     root: PathBuf,
     limits: ScanLimits,
+    paths: Vec<PathBuf>,
     last_scan: Mutex<ScanReport>,
 }
 
@@ -59,6 +60,7 @@ impl FsDocumentSource {
         Self {
             root,
             limits: ScanLimits::UNLIMITED,
+            paths: Vec::new(),
             last_scan: Mutex::new(ScanReport::default()),
         }
     }
@@ -66,6 +68,13 @@ impl FsDocumentSource {
     /// Cap the walk and each file read at `limits`.
     pub fn with_limits(mut self, limits: ScanLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Index only the files under `paths` (relative to the root, as
+    /// [`Manifest::scan_in`]); empty means the whole tree.
+    pub fn with_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.paths = paths;
         self
     }
 
@@ -80,7 +89,7 @@ impl FsDocumentSource {
 
 impl DocumentSource for FsDocumentSource {
     fn scan(&self) -> Manifest {
-        let (manifest, report) = Manifest::scan_with(&self.root, &self.limits);
+        let (manifest, report) = Manifest::scan_in(&self.root, &self.limits, &self.paths);
         *self
             .last_scan
             .lock()
@@ -89,7 +98,7 @@ impl DocumentSource for FsDocumentSource {
     }
 
     fn compare(&self, stored: Option<&Manifest>) -> IndexState {
-        manifest::compare_with(&self.root, stored, &self.limits)
+        manifest::compare_in(&self.root, stored, &self.limits, &self.paths)
     }
 
     fn load(&self, id: &Path) -> Option<SourceDoc> {

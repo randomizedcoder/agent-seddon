@@ -796,6 +796,49 @@ void main() {
               reason: 'the too-soon snack');
           await robot.settle();
 
+        case 'corner_reindex_coalesced_says_rebuilds':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          fake.reindexResponse = FleetReindexReply()..outcome = 'coalesced';
+          await robot.load();
+          await robot.expandSessions();
+          await robot.reindex('s1');
+          await robot.pumpUntil(
+              () => robot.textShown('s1 was already queued; that job now rebuilds.'),
+              reason: 'the coalesced snack');
+          await robot.settle();
+
+        case 'boundary_reindex_busy_names_row':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          fake.reindexResponse = FleetReindexReply()..outcome = 'busy';
+          await robot.load();
+          await robot.expandSessions();
+          await robot.reindex('s1');
+          await robot.pumpUntil(
+              () => robot.textShown('The index queue is full; s1 was not queued.'),
+              reason: 'the busy snack names the row');
+          await robot.settle();
+
+        case 'adversarial_reindex_unknown_outcome_clipped':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse =
+              roster([session(id: 's1', enabled: true, index: indexed())]);
+          final hostile = '<b>pwned</b>${'x' * 10000}';
+          fake.reindexResponse = FleetReindexReply()..outcome = hostile;
+          await robot.load();
+          await robot.expandSessions();
+          await robot.reindex('s1');
+          final shown = '${hostile.substring(0, 40)}…';
+          await robot.pumpUntil(
+              () => robot.textShown('Re-index of s1: $shown.'),
+              reason: 'the outcome shows as text, clipped');
+          expect(robot.textShown('x' * 100), isFalse,
+              reason: 'the rest of the outcome is cut');
+          await robot.settle();
+
         case 'negative_disabled_row_no_reindex':
           fake.listReviewsResponse = reviews([]);
           fake.sessionListResponse =
