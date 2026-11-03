@@ -285,18 +285,21 @@ pub struct FleetIndexCfg {
 )]
 pub struct FleetIndexScope {
     /// The row's repo, as `owner/name` or the roster slug `owner__name`; matched
-    /// without regard to case. A roster slug's `__` separates owner and name, so
-    /// neither may contain `__` (GitHub names never do).
+    /// without regard to case. `__` and `/` are treated alike on both sides, so a name
+    /// that itself holds `__` (`owner/my__repo`, slug `owner__my__repo`) still matches.
     pub repo: String,
-    /// Paths relative to the repo root. A path with `..`, a leading `/` or `.`, or one
-    /// reached through a symlink is skipped. An entry whose paths are all skipped
-    /// indexes nothing. Must not be empty: to index a repo whole, leave it out.
+    /// Paths relative to the repo root, each a plain relative path (no `..`, no leading
+    /// `/` or `./`); anything else fails at load. A path reached through a symlink in the
+    /// repo is skipped at index time. Must not be empty: to index a repo whole, leave the
+    /// entry out.
     pub paths: Vec<String>,
 }
 
 impl FleetIndexCfg {
-    /// Load-time checks of `scopes`: an entry with no repo or no paths, or a second
-    /// entry for one repo, is a mistake that would otherwise index the repo whole.
+    /// Load-time checks of `scopes`, each a mistake that would otherwise go unnoticed: an
+    /// entry with no paths (indexes the repo whole), an empty repo (matches nothing), a
+    /// path that is not plain relative (indexes nothing), or a second entry for one repo
+    /// (its paths ignored, as the first match wins).
     pub fn validate(&self) -> Result<(), String> {
         let mut seen = std::collections::HashSet::new();
         for s in &self.scopes {
@@ -309,6 +312,13 @@ impl FleetIndexCfg {
                 return Err(format!(
                     "`[[review_fleet.index.scopes]]` for {shown:?} has no `paths`; \
                      leave the entry out to index the repo whole"
+                ));
+            }
+            if let Some(bad) = s.paths.iter().find(|p| !plain_relative(p)) {
+                return Err(format!(
+                    "`[[review_fleet.index.scopes]]` for {shown:?} has path {:?}, which is \
+                     not a plain relative path (no `..`, leading `/` or `./`)",
+                    agent_core::campaign::truncate_chars(bad, 80)
                 ));
             }
             if !seen.insert(key) {
@@ -334,6 +344,14 @@ pub(crate) fn scope_for<'a>(scopes: &'a [FleetIndexScope], repo: &str) -> &'a [S
         .iter()
         .find(|s| scope_key(&s.repo) == key)
         .map_or(&[], |s| s.paths.as_slice())
+}
+
+/// A non-empty path of only normal components, as the index walk accepts.
+fn plain_relative(p: &str) -> bool {
+    let p = std::path::Path::new(p);
+    !p.as_os_str().is_empty()
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 fn scope_key(repo: &str) -> String {
@@ -5673,6 +5691,36 @@ mod tests {
             if let Err(e) = got {
                 assert!(e.contains("worker_model"), "{e}");
             }
+        }
+    }
+
+    // The scope checks run where every entry point loads its config, so a bad block
+    // stops the process at start rather than indexing the wrong tree.
+    #[rstest::rstest]
+    #[case::positive_no_block("no `[review_fleet.index]` block loads", "", None)]
+    #[case::positive_good_scope("a good scope loads", "[review_fleet.index]\n[[review_fleet.index.scopes]]\nrepo = \"acme/web\"\npaths = [\"src\"]\n", None)]
+    #[case::negative_empty_paths(
+        "a scope with no paths fails to load",
+        "[[review_fleet.index.scopes]]\nrepo = \"acme/web\"\npaths = []\n",
+        Some("has no `paths`")
+    )]
+    #[case::negative_duplicate("a repo listed twice fails to load", "[[review_fleet.index.scopes]]\nrepo = \"acme/web\"\npaths = [\"a\"]\n[[review_fleet.index.scopes]]\nrepo = \"acme__web\"\npaths = [\"b\"]\n", Some("twice"))]
+    #[case::adversarial_traversal(
+        "a `..` scope path fails to load",
+        "[[review_fleet.index.scopes]]\nrepo = \"acme/web\"\npaths = [\"../..\"]\n",
+        Some("not a plain relative path")
+    )]
+    fn scope_checks_run_at_load(
+        #[case] description: &str,
+        #[case] toml_src: &str,
+        #[case] expected_err: Option<&str>,
+    ) {
+        let doc =
+            format!("[agent]\nprovider = \"scripted\"\n[provider]\nmodel = \"m\"\n\n{toml_src}");
+        match (crate::parse_config(&doc), expected_err) {
+            (Ok(_), None) => {}
+            (Err(e), Some(want)) => assert!(e.to_string().contains(want), "{description}: {e}"),
+            (got, want) => panic!("{description}: got {:?}, want {want:?}", got.map(|_| ())),
         }
     }
 

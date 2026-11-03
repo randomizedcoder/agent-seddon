@@ -23,8 +23,9 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5a-ii-a | `Reindex` RPC (forced rebuild, per-row cooldown, disabled rows refused), staged builds swapped in, GC keeps the newest finished fallback, no refcount needed | [04](04-repo-knowledge.md#as-built-5a-ii-a) | ✅ | #691 |
 | 5a-ii-b | Portal index badge + Re-index button (contact sheet), #691's review items (failed-swap restore, `busy`, forced-while-waiting, wire test + client, RBAC row) | [04](04-repo-knowledge.md#as-built-5a-ii-b) | ✅ | #692 |
 | 5a-ii-c | Path-scoped indexing (nixpkgs by default), configurable Re-index cooldown, #692's review items | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #693 |
-| 5a-ii-c+ | #693's review items: scope tests (fresh outside, stale inside, files after a scope change), rune-safe portal clip, scope checks at load | [04](04-repo-knowledge.md#as-built-5a-ii-c) | 🟡 | this PR |
-| 5a-ii-d | Push-webhook base-moved trigger, incremental refresh, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-ii-c+ | #693's review items: scope tests (fresh outside, stale inside, files after a scope change), rune-safe portal clip, scope checks at load | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #694 |
+| 5a-ii-d-i | Push-webhook base-moved trigger, #694's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-i) | 🟡 | this PR |
+| 5a-ii-d-ii | Incremental refresh, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
 | 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
@@ -306,7 +307,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #693 (9b20d2b4) after one fleet round with no must-fix. Its should-fix
   items are done in the follow-up below.
 
-- **5a-ii-c+** (this PR): #693's review items.
+- **5a-ii-c+** (#694, dad01c11): #693's review items.
   - Scope freshness rows: a change or new file outside the scope stays `Fresh`, inside it
     goes `Stale`. `scoped_index` also checks the file count after the second pass, so a
     rebuild under the old scope would fail.
@@ -316,3 +317,25 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     repo listed twice (either form) is an error, the repo name clipped to 80 characters.
   - The `__` slug rule is documented on `repo`; `docs/components/search.md` has a
     *Scoped scans* paragraph; a long line in the component doc is rewrapped.
+
+  Merged as #694 (dad01c11) after one fleet round with no must-fix. Its should-fix
+  items are done in 5a-ii-d-i below.
+
+- **5a-ii-d-i** (this PR): a push to a watched repo's default branch queues its index.
+  - The webhook receiver parses `push`. Only a push whose `ref` is
+    `refs/heads/<repository.default_branch>`, not a deletion, with a full lowercase-hex
+    `after` (SHA-1 or SHA-256, not all zeros) becomes `BaseMoved`. Other branches, tags
+    and deletions are ignored; a malformed one is refused whole.
+  - `dispatch` hands each enabled GitHub row of the owning tenant that watches the repo to
+    `FleetIndexer::base_moved`. It never triggers a review. Another tenant's installation
+    reaches only its own rows.
+  - `base_moved` queues the row past the `refresh_secs` throttle but not forced: the
+    check fetches and compares the base, so a push that did not move it costs one fetch.
+    It coalesces with a queued copy (keeping a forced flag), so a push storm is one job,
+    and a full queue refuses it.
+  - The GitHub App has to subscribe to **Push** events for this; without them the
+    `refresh_secs` poll still rebuilds.
+  - From #694's draft: the `__` doc describes the symmetric normalization; scope paths
+    that are not plain relative (`..`, leading `/` or `./`, empty) fail at load; the
+    `validate` doc names each failure's harm; a test runs the checks through
+    `parse_config`; `scoped_freshness` has removal rows.

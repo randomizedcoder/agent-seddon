@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 use agent_core::pending::SeenSet;
 use agent_core::{
-    FleetRegistry, FleetSession, FleetTrigger, ForgeRegistry, GithubInstallLifecycle, Result,
-    TriggerOutcome, TriggerSink,
+    FleetIndexer, FleetRegistry, FleetSession, FleetTrigger, ForgeRegistry, GithubInstallLifecycle,
+    Result, TriggerOutcome, TriggerSink,
 };
 use agent_review_fleet::webhook::{self, Dispatched, WebhookTarget};
 use async_trait::async_trait;
@@ -121,6 +121,9 @@ pub(crate) struct FleetWebhookTarget {
     pub roster: Arc<dyn FleetRegistry>,
     pub forge_registry: Option<Arc<dyn ForgeRegistry>>,
     pub sink: Arc<dyn TriggerSink>,
+    /// The per-row repo indexer (review-graph 5a-ii-d), told when a push moves a row's
+    /// default branch. `None` when indexing is off.
+    pub indexer: Option<Arc<dyn FleetIndexer>>,
 }
 
 impl FleetWebhookTarget {
@@ -177,6 +180,12 @@ impl WebhookTarget for FleetWebhookTarget {
 
     fn enqueue(&self, trigger: FleetTrigger) -> TriggerOutcome {
         self.sink.enqueue(trigger)
+    }
+
+    fn base_moved(&self, tenant: &str, row: &FleetSession) {
+        if let Some(indexer) = &self.indexer {
+            indexer.base_moved(tenant, row);
+        }
     }
 
     async fn revoke(&self, tenant: &str, installation: &str) -> Result<()> {
@@ -460,6 +469,7 @@ mod tests {
             self.triggers.lock().unwrap().push(trigger);
             TriggerOutcome::Accepted
         }
+        fn base_moved(&self, _t: &str, _row: &FleetSession) {}
         async fn revoke(&self, _t: &str, _i: &str) -> Result<()> {
             Ok(())
         }
@@ -564,6 +574,127 @@ mod tests {
                 got[0].pr_number
             ),
             ("acme", "web", 7)
+        );
+    }
+
+    /// A flat roster (the single-operator fleet reads it unscoped).
+    struct Roster(Vec<FleetSession>);
+
+    #[async_trait]
+    impl FleetRegistry for Roster {
+        async fn list(&self) -> Result<Vec<FleetSession>> {
+            Ok(self.0.clone())
+        }
+        async fn get(&self, id: &str) -> Result<FleetSession> {
+            self.0
+                .iter()
+                .find(|r| r.id == id)
+                .cloned()
+                .ok_or_else(|| agent_core::Error::Fleet(format!("not found: {id}")))
+        }
+        async fn put(&self, s: FleetSession) -> Result<FleetSession> {
+            Ok(s)
+        }
+        async fn delete(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn set_enabled(&self, id: &str, _enabled: bool) -> Result<FleetSession> {
+            self.get(id).await
+        }
+    }
+
+    struct NoSink;
+
+    impl TriggerSink for NoSink {
+        fn enqueue(&self, _t: FleetTrigger) -> TriggerOutcome {
+            panic!("a push never triggers a review")
+        }
+    }
+
+    /// Records the rows told their base moved.
+    #[derive(Default)]
+    struct Moved(Mutex<Vec<(String, String)>>);
+
+    #[async_trait]
+    impl FleetIndexer for Moved {
+        fn enqueue(&self, _t: &str, _row: &FleetSession) {
+            panic!("a push uses base_moved, not the throttled enqueue")
+        }
+        async fn status(&self, _row: &FleetSession) -> Option<agent_core::FleetIndexStatus> {
+            None
+        }
+        fn reindex(&self, _t: &str, _row: &FleetSession) -> agent_core::ReindexOutcome {
+            panic!("a push never forces a rebuild")
+        }
+        fn base_moved(&self, tenant: &str, row: &FleetSession) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), row.id.clone()));
+        }
+    }
+
+    fn fleet_row(id: &str, repo: &str, backend: &str, enabled: bool) -> FleetSession {
+        FleetSession {
+            id: id.into(),
+            repo: repo.into(),
+            backend: backend.into(),
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    fn push_payload(git_ref: &str) -> Vec<u8> {
+        serde_json::json!({
+            "ref": git_ref,
+            "after": "0123456789abcdef0123456789abcdef01234567",
+            "repository": { "full_name": "acme/web", "default_branch": "main" },
+            "installation": { "id": 42 },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    // The whole path from a verified push to the indexer: only the enabled GitHub rows
+    // for the pushed repo are told, and with indexing off nothing is.
+    #[rstest]
+    #[case::positive_default_branch_reaches_indexer("a default-branch push tells the matching row", "refs/heads/main", true, &["web"])]
+    #[case::negative_other_branch_tells_nothing("another branch's push tells no row", "refs/heads/topic", true, &[])]
+    #[case::corner_indexing_off("with indexing off a push is handled and tells no one", "refs/heads/main", false, &[])]
+    #[tokio::test]
+    async fn push_reaches_the_indexer(
+        #[case] description: &str,
+        #[case] git_ref: &str,
+        #[case] indexing: bool,
+        #[case] expected: &[&str],
+    ) {
+        let moved = Arc::new(Moved::default());
+        let target = FleetWebhookTarget {
+            per_tenant: false,
+            lifecycle: None,
+            roster: Arc::new(Roster(vec![
+                fleet_row("web", "acme__web", "github", true),
+                fleet_row("off", "acme__web", "github", false),
+                fleet_row("lab", "acme__web", "gitlab", true),
+                fleet_row("api", "acme__api", "github", true),
+            ])),
+            forge_registry: None,
+            sink: Arc::new(NoSink),
+            indexer: indexing.then(|| moved.clone() as Arc<dyn FleetIndexer>),
+        };
+        let event = webhook::parse("push", &push_payload(git_ref)).expect("well-formed");
+        webhook::dispatch(event, &target).await.expect("dispatched");
+        let got: Vec<String> = moved
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect();
+        assert_eq!(got, expected, "{description}");
+        assert!(
+            moved.0.lock().unwrap().iter().all(|(t, _)| t.is_empty()),
+            "{description}: the single-operator tenant"
         );
     }
 }

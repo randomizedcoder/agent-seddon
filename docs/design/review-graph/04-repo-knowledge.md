@@ -177,9 +177,24 @@ GC refcount.
   the repo whole), an empty `repo`, or a second entry for one repo (`owner/name` and
   `owner__name` are the same) refuses to load.
 
-Left for 5a-ii-d and later: a base-moved trigger from a push webhook (the `refresh_secs`
-poll already rebuilds on a new base), the incremental refresh, `knowledge_max_bytes`, and
-the language indexes, history signals and overview.
+- **Load-time path checks** (from #694's review). A scope path that is not plain relative
+  (`..`, a leading `/` or `./`, or empty) also refuses to load, rather than indexing
+  nothing.
+
+### As built (5a-ii-d-i)
+
+- **Push trigger.** A verified `push` webhook whose `ref` is the repo's default branch
+  (`refs/heads/<repository.default_branch>`, not a deletion, `after` a full commit id)
+  queues an index check of every enabled row of the owning tenant that watches the repo,
+  through `FleetIndexer::base_moved`. Other branches, tags and deletions do nothing.
+- **Not forced, not throttled.** The check skips the `refresh_secs` throttle but still
+  fetches and compares the base, so a redelivered or no-op push costs one fetch. A queued
+  copy absorbs it, so a burst of pushes is one job.
+- **Setup.** The GitHub App must subscribe to Push events. Without them the
+  `refresh_secs` poll still catches a moved base.
+
+Left for 5a-ii-d-ii and later: the incremental refresh, `knowledge_max_bytes`, and the
+language indexes, history signals and overview.
 
 ## Refresh
 

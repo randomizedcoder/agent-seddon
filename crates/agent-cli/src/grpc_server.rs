@@ -1497,6 +1497,7 @@ fn start_fleet_webhook(
             roster,
             forge_registry: agent.forge_registry(),
             sink,
+            indexer: agent.fleet_indexer(),
         });
         crate::fleet_webhook::serve(server, secret, target, tokio::runtime::Handle::current());
         tracing::info!(
