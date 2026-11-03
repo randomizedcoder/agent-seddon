@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
-    FleetHost, FleetRegistry, FleetSession, FleetTenants, ForgeCard, ForgeRegistry, JobId,
-    Scheduler, SessionKey, TriggerSink,
+    FleetHost, FleetIndexer, FleetRegistry, FleetSession, FleetTenants, ForgeCard, ForgeRegistry,
+    JobId, Scheduler, SessionKey, TriggerSink,
 };
 
 /// How often a [`FleetSync`] pass re-reads the roster.
@@ -106,6 +106,8 @@ pub(crate) struct SyncReport {
     pub jobs: usize,
     pub jobs_added: usize,
     pub jobs_cancelled: usize,
+    /// Rows handed to the repo indexer (it skips the ones checked recently).
+    pub indexed: usize,
 }
 
 /// The live, tenant-aware roster driver of `--serve-fleet`: owner-session reconcile and
@@ -120,6 +122,9 @@ pub(crate) struct FleetSync {
     jobs: Mutex<HashMap<String, (JobId, u64)>>,
     /// tenant → the owner sessions admitted for it on the last pass.
     admitted: Mutex<HashMap<String, HashSet<SessionKey>>>,
+    /// The per-row repo indexer (review-graph 5a): every admitted row is handed to it
+    /// each pass. `None` ⇒ no indexing.
+    indexer: Option<Arc<dyn FleetIndexer>>,
 }
 
 impl FleetSync {
@@ -139,7 +144,14 @@ impl FleetSync {
             ),
             jobs: Mutex::new(HashMap::new()),
             admitted: Mutex::new(HashMap::new()),
+            indexer: None,
         }
+    }
+
+    /// Hand every admitted row to `indexer` on each pass (review-graph 5a).
+    pub(crate) fn with_indexer(mut self, indexer: Arc<dyn FleetIndexer>) -> Self {
+        self.indexer = Some(indexer);
+        self
     }
 
     pub(crate) fn scheduler(&self) -> Arc<agent_scheduler::LocalScheduler> {
@@ -173,7 +185,7 @@ impl FleetSync {
         let mut wanted: HashMap<String, u64> = HashMap::new();
         let mut admitted_now: HashMap<String, HashSet<SessionKey>> = HashMap::new();
         for tenant in &tenants {
-            let Some(pass) = in_tenant(tenant, self.tenant_pass()).await else {
+            let Some(pass) = in_tenant(tenant, self.tenant_pass(tenant)).await else {
                 tracing::warn!("fleet sync: refusing to drive an invalid tenant");
                 continue;
             };
@@ -182,6 +194,7 @@ impl FleetSync {
             };
             synced.insert(tenant.clone());
             report.skipped += pass.skipped;
+            report.indexed += pass.indexed;
             for (id, secs) in pass.polls {
                 wanted.insert(job_goal(tenant, &id), secs);
             }
@@ -257,7 +270,7 @@ impl FleetSync {
 
     /// The scoped half of a pass for the tenant in scope: snapshot its forge cards,
     /// reconcile its rows, and list the rows it polls. `None` if its roster read failed.
-    async fn tenant_pass(&self) -> Option<TenantPass> {
+    async fn tenant_pass(&self, tenant: &str) -> Option<TenantPass> {
         let rows = match self.roster.list().await {
             Ok(rows) => rows,
             Err(e) => {
@@ -285,7 +298,21 @@ impl FleetSync {
         };
         let report =
             agent_review_fleet::reconcile(self.roster.as_ref(), self.host.as_ref(), &check).await;
+        // An admitted row (enabled, with a forge that builds) gets a repo index; a skipped
+        // one does not, so a row with a broken credential never reaches the clone.
+        let skipped: HashSet<&str> = report.skipped.iter().map(|(id, _)| id.as_str()).collect();
+        let mut indexed = 0;
+        if let Some(indexer) = &self.indexer {
+            for row in rows
+                .iter()
+                .filter(|r| polls(r) && !skipped.contains(r.id.as_str()))
+            {
+                indexer.enqueue(tenant, row);
+                indexed += 1;
+            }
+        }
         Some(TenantPass {
+            indexed,
             admitted: report.admitted.into_iter().collect(),
             skipped: report.skipped.len(),
             polls: rows
@@ -298,6 +325,7 @@ impl FleetSync {
 }
 
 struct TenantPass {
+    indexed: usize,
     admitted: HashSet<SessionKey>,
     skipped: usize,
     polls: Vec<(String, u64)>,
@@ -554,6 +582,73 @@ mod tests {
             host,
             sync,
         }
+    }
+
+    /// Records each row handed to the repo indexer, with the tenant it came under.
+    #[derive(Default)]
+    struct Indexer(Mutex<Vec<(String, String)>>);
+
+    #[async_trait::async_trait]
+    impl FleetIndexer for Indexer {
+        fn enqueue(&self, tenant: &str, row: &FleetSession) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), row.id.clone()));
+        }
+        async fn status(&self, _row: &FleetSession) -> Option<agent_core::FleetIndexStatus> {
+            None
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum IndexRow {
+        Enabled,
+        Disabled,
+        BrokenForge,
+    }
+
+    // Which rows reach the repo indexer: admitted ones only, each under its own tenant.
+    #[rstest]
+    #[case::positive_enabled_row_indexed(
+        "an enabled row with a working forge is queued under its tenant",
+        IndexRow::Enabled,
+        true
+    )]
+    #[case::negative_disabled_row_not_indexed(
+        "a disabled row is not indexed",
+        IndexRow::Disabled,
+        false
+    )]
+    #[case::adversarial_broken_forge_never_cloned(
+        "a row naming a forge card that does not exist is skipped, so never indexed (no clone)",
+        IndexRow::BrokenForge,
+        false
+    )]
+    #[tokio::test]
+    async fn rows_reach_the_indexer(
+        #[case] description: &str,
+        #[case] kind: IndexRow,
+        #[case] expected: bool,
+    ) {
+        let Rig { roster, sync, .. } = rig(&["acme", "globex"]);
+        let indexer = Arc::new(Indexer::default());
+        let sync = sync.with_indexer(indexer.clone());
+        let mut r = row("acme", "web", !matches!(kind, IndexRow::Disabled));
+        if matches!(kind, IndexRow::BrokenForge) {
+            r.forge_id = "no-such-card".into();
+        }
+        roster.set("acme", vec![r]);
+        roster.set("globex", vec![row("globex", "api", true)]);
+        let rep = sync.sync_once().await;
+        let mut got = indexer.0.lock().unwrap().clone();
+        got.sort();
+        let mut want = vec![("globex".to_string(), "api".to_string())];
+        if expected {
+            want.insert(0, ("acme".to_string(), "web".to_string()));
+        }
+        assert_eq!(got, want, "{description}");
+        assert_eq!(rep.indexed, want.len(), "{description}: report");
     }
 
     fn goals(sync: &FleetSync) -> Vec<String> {

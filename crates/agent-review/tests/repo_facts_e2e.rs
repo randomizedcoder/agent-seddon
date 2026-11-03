@@ -64,7 +64,12 @@ async fn positive_collects_change_set_and_git_state() {
 
     // Change set: a.txt modified, b.txt added.
     assert_eq!(facts.change.files.len(), 2, "two changed files");
-    assert!(facts.change.repo_file_count >= 2);
+    // The checkout is on `main` (a.txt only); git's own `.git` data is never counted
+    // (it once was, which inflated this count by every object file).
+    assert_eq!(
+        facts.change.repo_file_count, 1,
+        "the tree's files, not .git's"
+    );
     let names: Vec<String> = facts
         .change
         .files

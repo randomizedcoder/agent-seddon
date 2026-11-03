@@ -13,9 +13,9 @@
 use std::sync::Arc;
 
 use agent_core::{
-    ApproveOutcome, FleetApprover, FleetDraftEditor, FleetDraftReader, FleetHistory, FleetRegistry,
-    FleetTrigger, PreflightProvider, ReviewDraftFilter, ReviewDraftRecord, TriggerOutcome,
-    TriggerSink, UpdateOutcome,
+    ApproveOutcome, FleetApprover, FleetDraftEditor, FleetDraftReader, FleetHistory, FleetIndexer,
+    FleetRegistry, FleetTrigger, PreflightProvider, ReviewDraftFilter, ReviewDraftRecord,
+    TriggerOutcome, TriggerSink, UpdateOutcome,
 };
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
@@ -54,6 +54,29 @@ pub struct ReviewFleetSvc {
     /// both history and a fleet root), so `UpdateReview` there is `UNIMPLEMENTED`; wired via
     /// [`Self::with_editor`]. Edits the local draft only — it never posts.
     editor: Option<Arc<dyn FleetDraftEditor>>,
+    /// The per-row repo indexer (review-graph 5a). When set, `List`/`Get` report each
+    /// row's index status; wired via [`Self::with_indexer`]. Read-only here.
+    indexer: Option<Arc<dyn FleetIndexer>>,
+}
+
+/// Index status reads `List` runs at once.
+const LIST_STATUS_CONCURRENCY: usize = 16;
+
+/// A roster row on the wire, with its repo index status when an indexer is wired. The
+/// status is looked up by the row the caller's own (tenant-scoped) roster returned, so it
+/// is never another tenant's.
+async fn session_reply(
+    row: agent_core::FleetSession,
+    indexer: Option<&Arc<dyn FleetIndexer>>,
+) -> pb::FleetSession {
+    let index = match indexer {
+        Some(ix) => ix.status(&row).await.map(Into::into),
+        None => None,
+    };
+    pb::FleetSession {
+        index,
+        ..row.into()
+    }
 }
 
 /// A persisted draft record → its wire METADATA (`ReviewSummary`). The `.md` body and the
@@ -106,7 +129,13 @@ impl ReviewFleetSvc {
             history: None,
             reader: None,
             editor: None,
+            indexer: None,
         }
+    }
+    /// Report each row's repo index status on `List`/`Get` (review-graph 5a).
+    pub fn with_indexer(mut self, indexer: Arc<dyn FleetIndexer>) -> Self {
+        self.indexer = Some(indexer);
+        self
     }
     /// Enable the `ReviewNow` RPC by attaching the orchestrator's trigger sink.
     pub fn with_triggers(mut self, triggers: Arc<dyn TriggerSink>) -> Self {
@@ -156,11 +185,18 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         let key = super::identity_key(request.metadata());
         let sp = span("fleet.list", request.metadata());
         let inner = self.inner.clone();
+        let indexer = self.indexer.clone();
         let work = async move {
             let rows = inner.list().await.map_err(|e| status_from_error(&e))?;
-            Ok(Response::new(pb::FleetSessionList {
-                sessions: rows.into_iter().map(Into::into).collect(),
-            }))
+            // Each status read is a file read on a blocking thread: run a bounded number
+            // at once, keeping the roster's order.
+            use futures_util::StreamExt as _;
+            let sessions: Vec<pb::FleetSession> = futures_util::stream::iter(rows)
+                .map(|row| session_reply(row, indexer.as_ref()))
+                .buffered(LIST_STATUS_CONCURRENCY)
+                .collect()
+                .await;
+            Ok(Response::new(pb::FleetSessionList { sessions }))
         }
         .instrument(sp);
         super::run_scoped(key, work).await
@@ -173,12 +209,13 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         let key = super::identity_key(request.metadata());
         let sp = span("fleet.get", request.metadata());
         let inner = self.inner.clone();
+        let indexer = self.indexer.clone();
         let work = async move {
             let row = inner
                 .get(&request.into_inner().id)
                 .await
                 .map_err(|e| status_from_error(&e))?;
-            Ok(Response::new(row.into()))
+            Ok(Response::new(session_reply(row, indexer.as_ref()).await))
         }
         .instrument(sp);
         super::run_scoped(key, work).await
@@ -804,5 +841,137 @@ mod tests {
             ),
             (want, "row1", 7)
         );
+    }
+
+    // A roster that returns one row `web` owned by whichever tenant is in scope, so the
+    // reply's index status is provably looked up by the caller's own row.
+    struct TenantRoster;
+    fn scoped_row() -> agent_core::FleetSession {
+        let user = agent_core::current_identity()
+            .map(|k| k.user.as_str().to_string())
+            .unwrap_or_default();
+        agent_core::FleetSession {
+            id: "web".into(),
+            user,
+            ..Default::default()
+        }
+    }
+    #[tonic::async_trait]
+    impl FleetRegistry for TenantRoster {
+        async fn list(&self) -> agent_core::Result<Vec<agent_core::FleetSession>> {
+            Ok(vec![scoped_row()])
+        }
+        async fn put(
+            &self,
+            session: agent_core::FleetSession,
+        ) -> agent_core::Result<agent_core::FleetSession> {
+            Ok(session)
+        }
+        async fn get(&self, _id: &str) -> agent_core::Result<agent_core::FleetSession> {
+            Ok(scoped_row())
+        }
+        async fn delete(&self, _id: &str) -> agent_core::Result<bool> {
+            unimplemented!()
+        }
+        async fn set_enabled(
+            &self,
+            _id: &str,
+            _enabled: bool,
+        ) -> agent_core::Result<agent_core::FleetSession> {
+            unimplemented!()
+        }
+    }
+
+    // Holds a status for exactly one (user, id); anything else has none.
+    struct OneStatus(&'static str, &'static str);
+    #[tonic::async_trait]
+    impl FleetIndexer for OneStatus {
+        fn enqueue(&self, _tenant: &str, _row: &agent_core::FleetSession) {}
+        async fn status(
+            &self,
+            row: &agent_core::FleetSession,
+        ) -> Option<agent_core::FleetIndexStatus> {
+            (row.user == self.0 && row.id == self.1).then(|| agent_core::FleetIndexStatus {
+                state: agent_core::FleetIndexState::Ready,
+                base_sha: "a".repeat(40),
+                files: 3,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Wired {
+        None,
+        Status(&'static str, &'static str),
+    }
+
+    // List and Get carry the row's index status when an indexer is wired, and only the
+    // caller's own row's status.
+    #[rstest]
+    #[case::positive_status_on_list_and_get(
+        "a wired indexer's status for the caller's row is on the reply",
+        Wired::Status("acme", "web"),
+        Some("ready")
+    )]
+    #[case::negative_no_indexer_no_status(
+        "no indexer wired: the reply has no index field",
+        Wired::None,
+        None
+    )]
+    #[case::corner_indexer_without_status(
+        "an indexer that has nothing for the row yet: no index field",
+        Wired::Status("acme", "other"),
+        None
+    )]
+    #[case::adversarial_other_tenant_status_unreachable(
+        "another tenant's same-id row status is never shown to this caller",
+        Wired::Status("globex", "web"),
+        None
+    )]
+    #[tokio::test]
+    async fn fleet_replies_carry_index_status(
+        #[case] description: &str,
+        #[case] wired: Wired,
+        #[case] expected: Option<&str>,
+    ) {
+        let mut svc = ReviewFleetSvc::new(Arc::new(TenantRoster));
+        if let Wired::Status(u, id) = wired {
+            svc = svc.with_indexer(Arc::new(OneStatus(u, id)));
+        }
+        let list = svc
+            .list(req_with(
+                pb::FleetListRequest::default(),
+                Some("acme"),
+                Some("s1"),
+            ))
+            .await
+            .expect("list")
+            .into_inner();
+        let got = svc
+            .get(req_with(
+                pb::FleetSessionRef { id: "web".into() },
+                Some("acme"),
+                Some("s1"),
+            ))
+            .await
+            .expect("get")
+            .into_inner();
+        assert_eq!(list.sessions.len(), 1, "{description}");
+        for (what, row) in [("list", &list.sessions[0]), ("get", &got)] {
+            assert_eq!(row.user, "acme", "{description}: {what} row");
+            assert_eq!(
+                row.index.as_ref().map(|i| i.state.as_str()),
+                expected,
+                "{description}: {what}"
+            );
+            if expected.is_some() {
+                assert_eq!(
+                    row.index.as_ref().unwrap().files,
+                    3,
+                    "{description}: {what}"
+                );
+            }
+        }
     }
 }

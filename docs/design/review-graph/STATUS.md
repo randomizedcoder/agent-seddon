@@ -12,14 +12,15 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 0 | Design directory | all | ✅ | #681 (+ follow-ups #683) |
 | 1 | Fix "Files changed: 0" on nixpkgs: heads+tags mirror via an atomic staged `clone --bare` (a killed clone is replaced), background clone off the review path, target-branch base fetch (`fetch_branch`) instead of a per-review `fetch --all`, process-group kill on timeout, loud unknown change set | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ✅ | #684 |
-| 1c-i | Mirror robustness (from #684's reviews): best-effort `.stale` delete after a swap plus a background sweep of a leftover one, fail closed on a `.clone-lock` that isn't a regular file, `fetch_branch` a no-op when the root isn't the mirror, the shared `agent_core::mirror_cloning` wording logged at info by auto-fetch and the fleet trigger loop, a log when an inline clone yields to a running one, `safe_branch` rejects a trailing `.` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | 🟡 | (this PR) |
-| 1c-ii | Mirror upkeep: `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, old-shape (`clone --mirror`) migration as a maintenance job, an off-path refresh of tags and non-target branches, a `.stale` sweep that renames then deletes without the clone lock, a typed `Error::MirrorCloning` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
+| 1c-i | Mirror robustness (from #684's reviews): best-effort `.stale` delete after a swap plus a background sweep of a leftover one, fail closed on a `.clone-lock` that isn't a regular file, `fetch_branch` a no-op when the root isn't the mirror, the shared `agent_core::mirror_cloning` wording logged at info by auto-fetch and the fleet trigger loop, a log when an inline clone yields to a running one, `safe_branch` rejects a trailing `.` | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ✅ | #686 |
+| 1c-ii | Mirror upkeep: `refs/fleet/pr` retention, aged `tmp_pack`/`.keep` sweep, `agent_fleet_mirror_bytes` + `mirror_max_bytes`, old-shape (`clone --mirror`) migration as a maintenance job, an off-path refresh of tags and non-target branches, a `.stale` sweep that renames then deletes without the clone lock, a typed `Error::MirrorCloning`, an async clone-lock retry (no `thread::sleep` on a worker) with a deterministic patience test, a best-effort pre-swap `.stale` delete, an unopenable foreign lock failing closed, a symlinked-root `root_is_mirror` row | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1c-iii | Remote and fallback: a `FetchBranch` RPC for `GrpcRepo`, forge file-list fallback for a failed diff, a stronger reftable readiness signal, the fleet's 30 s re-poll while a mirror clones | [05](05-nix-and-native-analysis.md#prerequisite-files-changed-0-increment-1) | ⬜ | — |
 | 1b | Work queues + worker pools: (i) in-process stage pools (fetch/ground/review/finish/index) with per-stage worker counts and per-repo/tenant caps; (ii) durable `FleetJobQueue` (memory + Postgres, SKIP LOCKED claim, leases, retries, coalescing); (iii) multi-process with affinity, graceful shutdown, portal stage view | [06](06-work-queue.md) | ⬜ | — |
 | 2 | Condensed review on the single-session path: `agent_review::condense()`, record + ClickHouse column + rows/history, proto + gen, roster `post`, approve posting switch, portal tab | [03](03-condensed-review.md) | ⬜ | — |
 | 3 | Pipeline document kind: `review_step`/`ground`/`assemble`/`condense` schema rows, validator rules, `GraphService` describe/validate | [01](01-review-graph.md) | ⬜ | — |
 | 4 | `PhaseRunner` + fleet wiring: roster `graph`, `review-fleet.textproto`, `0009_condense.md`, fallbacks, step metrics | [02](02-pipeline-executor.md) | ⬜ | — |
-| 5a | Index when a repo is added: job queue, manifest, roster index status, portal badge, metrics, incremental refresh, GC | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-i | Index when a repo is added: per-row search index of the default branch queued by the sync pass, manifest, `knowledge/status.json` + `FleetSession.index`, metrics, disk guard, GC of 2 generations | [04](04-repo-knowledge.md#as-built-5a-i) | 🟡 | (this PR) |
+| 5a-ii | Portal index badge + Re-index (contact sheet), incremental refresh, base-moved trigger (poll/webhook), language indexes, history signals, overview, `knowledge_max_bytes`, nixpkgs path scoping, GC refcount | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b | Index consumption: brief context, `find_*`/`search` step tools on the row index, overview fed as data | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
@@ -99,7 +100,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   33G half-clone to 3.8G (heads and tags, no `refs/pull`), cloned in about 8 minutes, and
   the first nixpkgs drafts report real counts (1 and 2 files changed, not 0).
 
-- **1c-i** (this PR): the robustness items #684's last reviews left.
+- **1c-i** (#686, 4f39847b): the robustness items #684's last reviews left.
   - The old mirror's delete after a swap is best-effort (warn), so a ready mirror is never
     reported as a failed clone; a leftover `<mirror>.stale` is swept in the background by
     the next fetch, under the clone lock.
@@ -120,3 +121,50 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   - Left for 1c-ii: a sweep holds the clone lock while it deletes a large `.stale`, so a
     concurrent clone attempt reads "being cloned" (rename first, then delete unlocked);
     a typed `Error::MirrorCloning` instead of the pinned message prefix.
+
+  Merged as #686 (4f39847b); the second fleet review found nothing blocking. Its
+  should-fix items moved to the 1c-ii row: the busy retry sleeps on a tokio worker (rare:
+  only cross-process or fork-window contention) and has no deterministic test; the
+  pre-swap `.stale` delete still hard-fails a clone while the others are best-effort; an
+  unopenable foreign lock (`EACCES`) degrades to the in-process claim; a symlinked root
+  reading as the mirror is untested. A PR the trigger loop skips while the mirror clones
+  stays open and unreviewed, so the next poll lists it again (nothing is dropped).
+
+- **5a-i** (this PR): index when a repo is added, the search index only.
+  - `FleetIndexService` (`agent-runtime/src/fleet_index.rs`) behind the new `FleetIndexer`
+    seam in agent-core. The fleet sync pass queues each admitted, enabled row (a skipped
+    row, such as one with a missing forge card, is never queued, so never cloned).
+  - One worker, a coalescing queue capped at 4096, each job under the row's tenant. A row
+    is re-checked at most every `refresh_secs` unless its repo, backend, base URL or forge
+    changed; a wait on a mirror clone is not counted.
+  - The job fetches the mirror, resolves `HEAD`, skips a base that is already `ready`,
+    else builds a tantivy index from a read-only `knowledge-<sha12>` worktree under a
+    deadline, writes the manifest and removes the worktree. GC keeps two generations.
+  - Deviation from 04: status is a per-row `knowledge/status.json` (atomic write, no
+    symlinks, 64 KiB cap), not a roster-store column, so the three roster backends need
+    no schema change. Served as `FleetSession.index` (proto field 16, output only).
+  - agent-search gained `ScanLimits` / `ScanReport` (name-ordered, capped, oversized files
+    skipped) for a bounded scan of an untrusted tree.
+  - Metrics `agent_fleet_index_{runs_total,seconds,bytes,files}`, retired with the row.
+  - Disk guard: indexing pauses below `disk_min_free_pct` free.
+  - From the commit security review: tantivy's reindex loop has no await point, so the
+    outer timeout could not stop it and it held a runtime worker. The build now runs on a
+    blocking thread and stops itself (the scan and every read check a deadline), with a
+    `max_bytes` read budget (default 2 GiB) and a disk re-check after the build. All scans
+    now skip `.git`, which also kept a worktree's host path out of the index and fixes the
+    review's `repo_file_count` (it counted every `.git` object file; pinned in
+    `repo_facts_e2e`).
+  - From the fleet review (approve-with-comments): no timeout ever drops the build, so no
+    orphaned blocking task can write into a generation being removed or rebuilt (only the
+    git checkout has a timeout, floored at 60 s); the throttle map is pruned of expired
+    records past 4096, so a deleted row's entry does not leak; `List` reads index statuses
+    16 at a time instead of one by one; zero caps clamp to 1; status writes refuse a
+    symlinked dir and use a unique temp name; a convert test covers the wire status.
+  - Not taken: `rustix` stays enabled by the `review` feature alone (the module needs
+    `review` + `search`; Cargo cannot express "both", and it is a small, audited crate);
+    status writes stay on the runtime thread (one small file per job). The portal
+    `index` field is 5a-ii.
+  - Tests: the job table (first build, unchanged, base moved, GC, partial, redacted forge
+    failure), last-good-serves on failure, waiting on a cloning mirror, disk guard, layout
+    confinement, other tenant unreachable (store and gRPC), queue and limits tables, a
+    torn status file, rows reaching the indexer from the sync pass.

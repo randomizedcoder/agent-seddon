@@ -21,7 +21,7 @@ or `forge_id` also queues a job.
 
 The job runs these steps in order, each fail-soft, with its own deadline:
 
-1. **Mirror.** `ensure_mirror` / refresh (`crates/agent-git/src/cli.rs:227`). Then a detached
+1. **Mirror.** `CliBackend::ensure_mirror` / `fetch` (`crates/agent-git/src/cli.rs`). Then a detached
    worktree of the default branch at `<fleet_root>/<user>/<id>/knowledge/<base-sha>/src`.
 2. **Search index.** Full-text plus symbol index (agent-search / tantivy) rooted at that
    worktree, stored at `knowledge/<base-sha>/index/`. It is **per row**, not the
@@ -69,6 +69,56 @@ Status is visible in three places:
 - Through the gRPC `ReviewFleetService`, as a new `IndexStatus` on `FleetSession`.
 - As metrics: `agent_fleet_index_seconds{tenant,repo,index,outcome}`,
   `agent_fleet_index_bytes{tenant,repo,index}` and `agent_fleet_index_status{tenant,repo,status}`.
+
+### As built (5a-i)
+
+Increment 5a is split. 5a-i (`crates/agent-runtime/src/fleet_index.rs`) builds step 2, the
+search index, end to end; the rest of this document is still the target.
+
+- **Trigger.** The fleet sync pass (at boot and every 60 s per tenant) queues each admitted,
+  enabled row with `FleetIndexer::enqueue`. A row skipped by the pass (a broken or missing
+  forge card) is never queued, so it is never cloned. The queue coalesces per
+  `(tenant, id)` and is capped at 4096; one worker runs a job at a time, under the row's
+  tenant scope. A row is re-checked at most every `refresh_secs` (default 3600) unless its
+  `repo`, `backend`, `base_url` or `forge_id` changed, which re-checks it on the next pass.
+- **Job.** Fetch the row's mirror (the same backend the reviews use), resolve `HEAD` to a
+  commit sha, and stop if the `ready` index already has that base. Otherwise add a detached
+  read-only worktree `knowledge-<sha12>` at the base, index it into
+  `knowledge/<sha>/index` with `TantivyBackend` over a capped `FsDocumentSource`, write
+  `knowledge/<sha>/manifest.json`, and remove the worktree (only the index is kept, to save
+  disk). The build runs on a blocking thread (tantivy's reindex loop has no await point)
+  and stops itself at `deadline_secs` (default 1800): the scan and every file read check
+  the deadline, and an expired build fails and keeps no generation. Nothing abandons the
+  build by a timeout (an orphaned blocking task could write into a generation being
+  removed); only the git checkout has one, at least 60 s.
+- **Waiting.** While the mirror is still being cloned the job returns at once and the row
+  shows `pending`; the next pass retries, since a wait is not counted against the throttle.
+- **Status** lives in `knowledge/status.json` beside the row's mirror, not in the roster
+  store, so the three roster backends needed no schema change. It is written atomically
+  (temp file and rename) and read back with no symlink following and a 64 KiB cap; a torn
+  or hostile file reads as no status. States are `pending | indexing | ready | stale | failed`.
+  A failure keeps the last good `base_sha`, and its error is redacted and capped at 512
+  characters.
+- **Limits.** `max_files` (default 200 000, files taken in name order so a capped index is
+  deterministic), `max_file_bytes` (default 1 MiB, larger files skipped) and `max_bytes`
+  (default 2 GiB read per index, which bounds its size on disk); a capped index is
+  `partial`. Git's own data (`.git`) is never indexed. Indexing pauses below
+  `disk_min_free_pct` (default 10 %) free on the fleet root's filesystem, and a build that
+  left the disk under it is dropped.
+- **GC** keeps the current and the previous generation and removes leftover
+  `knowledge-*` worktrees.
+- **Visible** on `ListSessions` / `GetSession` as `FleetSession.index` (`FleetIndexStatus`),
+  looked up by the row the caller's own tenant-scoped roster returned, and as metrics:
+  `agent_fleet_index_runs_total{outcome,user,repo}` (`ready`, `partial`, `unchanged`,
+  `waiting`, `failed`), `agent_fleet_index_seconds`, `agent_fleet_index_bytes` and
+  `agent_fleet_index_files`, all retired with the row's other fleet series.
+- **Config:** `[review_fleet.index]` `enabled` (default true), `refresh_secs`,
+  `deadline_secs`, `max_files`, `max_file_bytes`, `disk_min_free_pct`, each clamped.
+
+Left for 5a-ii: the portal badge and Re-index button, an incremental refresh (5a-i rebuilds
+per new base), a base-moved trigger from the poller or a push webhook, the language indexes,
+history signals and overview, `knowledge_max_bytes`, path-scoped nixpkgs indexing and the
+GC refcount.
 
 ## Refresh
 

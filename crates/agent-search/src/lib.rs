@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod manifest;
-pub use manifest::Manifest;
+pub use manifest::{Manifest, ScanLimits, ScanReport};
 
 pub mod source;
 pub use source::{DocumentSource, FsDocumentSource, SourceDoc};

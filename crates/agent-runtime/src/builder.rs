@@ -1420,6 +1420,23 @@ pub async fn build_agent_with_mode(
     #[cfg(not(feature = "review"))]
     let fleet_review_factory_seam: Option<Arc<dyn agent_core::FleetReviewFactory>> = None;
 
+    // Per-row repo index (review-graph 5a): built over the same per-row factory, so the
+    // index shares each row's mirror. Needs the factory (local review + fleet root), the
+    // search engine, and `[review_fleet.index] enabled`.
+    #[cfg(all(feature = "review", feature = "search"))]
+    let fleet_indexer_seam: Option<Arc<dyn agent_core::FleetIndexer>> =
+        match (&fleet_review_factory_seam, cfg.review_fleet.index.enabled) {
+            (Some(factory), true) => Some(Arc::new(crate::fleet_index::FleetIndexService::new(
+                std::path::PathBuf::from(expand_tilde(&cfg.review_fleet.root)),
+                Arc::new(crate::fleet_index::FactoryRepo(factory.clone())),
+                crate::fleet_index::IndexLimits::from_cfg(&cfg.review_fleet.index),
+                metrics.clone(),
+            )) as Arc<dyn agent_core::FleetIndexer>),
+            _ => None,
+        };
+    #[cfg(not(all(feature = "review", feature = "search")))]
+    let fleet_indexer_seam: Option<Arc<dyn agent_core::FleetIndexer>> = None;
+
     // The live active-personality cell shares the head base with the served
     // `PromptService` (docs/design/prompts/10-portal-selector.md). Seeded from the
     // same `(prompts.dir, agent.personality, agent.system_prompt)` as `system_prompt`
@@ -1800,6 +1817,10 @@ pub async fn build_agent_with_mode(
     };
     let agent = match fleet_review_factory_seam {
         Some(f) => agent.with_fleet_review_factory(f),
+        None => agent,
+    };
+    let agent = match fleet_indexer_seam {
+        Some(i) => agent.with_fleet_indexer(i),
         None => agent,
     };
     // Hold the shared scanner so `agent --serve-scanner` can host it.

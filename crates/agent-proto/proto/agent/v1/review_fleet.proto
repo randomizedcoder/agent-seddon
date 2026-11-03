@@ -59,6 +59,28 @@ message FleetSession {
   // the inline `slack_*` fields + the `[review_fleet.slack]` default token are used
   // (unchanged behavior). Path-safe.
   string transport_id = 15;
+  // Output only (review-graph 5a): where the row's repo index stands. Set by List/Get
+  // when the server indexes rows; ignored on Put.
+  FleetIndexStatus index = 16;
+}
+
+// A fleet row's repo index status (review-graph 5a). Mirrors
+// `agent_core::FleetIndexStatus`.
+message FleetIndexStatus {
+  // "pending" | "indexing" | "ready" | "stale" | "failed".
+  string state = 1;
+  // The base commit of the last good index ("" before the first one).
+  string base_sha = 2;
+  // Files and on-disk bytes of the last good index.
+  uint64 files = 3;
+  uint64 bytes = 4;
+  // The last good index hit the file cap and is missing files.
+  bool partial = 5;
+  // Why the last job failed (redacted); "" otherwise.
+  string error = 6;
+  // Unix seconds: when the last good index was built, and when this status last changed.
+  int64 built_at = 7;
+  int64 updated_at = 8;
 }
 
 message FleetListRequest {}

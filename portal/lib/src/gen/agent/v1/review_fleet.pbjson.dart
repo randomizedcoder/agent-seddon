@@ -46,6 +46,14 @@ const FleetSession$json = {
     {'1': 'updated_at', '3': 13, '4': 1, '5': 3, '10': 'updatedAt'},
     {'1': 'forge_id', '3': 14, '4': 1, '5': 9, '10': 'forgeId'},
     {'1': 'transport_id', '3': 15, '4': 1, '5': 9, '10': 'transportId'},
+    {
+      '1': 'index',
+      '3': 16,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.FleetIndexStatus',
+      '10': 'index'
+    },
   ],
 };
 
@@ -59,7 +67,30 @@ final $typed_data.Uint8List fleetSessionDescriptor = $convert.base64Decode(
     '5lbBIbCglwb2xsX3NlY3MYCiABKARSCHBvbGxTZWNzEhgKB2VuYWJsZWQYCyABKAhSB2VuYWJs'
     'ZWQSHQoKY3JlYXRlZF9hdBgMIAEoA1IJY3JlYXRlZEF0Eh0KCnVwZGF0ZWRfYXQYDSABKANSCX'
     'VwZGF0ZWRBdBIZCghmb3JnZV9pZBgOIAEoCVIHZm9yZ2VJZBIhCgx0cmFuc3BvcnRfaWQYDyAB'
-    'KAlSC3RyYW5zcG9ydElk');
+    'KAlSC3RyYW5zcG9ydElkEjAKBWluZGV4GBAgASgLMhouYWdlbnQudjEuRmxlZXRJbmRleFN0YX'
+    'R1c1IFaW5kZXg=');
+
+@$core.Deprecated('Use fleetIndexStatusDescriptor instead')
+const FleetIndexStatus$json = {
+  '1': 'FleetIndexStatus',
+  '2': [
+    {'1': 'state', '3': 1, '4': 1, '5': 9, '10': 'state'},
+    {'1': 'base_sha', '3': 2, '4': 1, '5': 9, '10': 'baseSha'},
+    {'1': 'files', '3': 3, '4': 1, '5': 4, '10': 'files'},
+    {'1': 'bytes', '3': 4, '4': 1, '5': 4, '10': 'bytes'},
+    {'1': 'partial', '3': 5, '4': 1, '5': 8, '10': 'partial'},
+    {'1': 'error', '3': 6, '4': 1, '5': 9, '10': 'error'},
+    {'1': 'built_at', '3': 7, '4': 1, '5': 3, '10': 'builtAt'},
+    {'1': 'updated_at', '3': 8, '4': 1, '5': 3, '10': 'updatedAt'},
+  ],
+};
+
+/// Descriptor for `FleetIndexStatus`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List fleetIndexStatusDescriptor = $convert.base64Decode(
+    'ChBGbGVldEluZGV4U3RhdHVzEhQKBXN0YXRlGAEgASgJUgVzdGF0ZRIZCghiYXNlX3NoYRgCIA'
+    'EoCVIHYmFzZVNoYRIUCgVmaWxlcxgDIAEoBFIFZmlsZXMSFAoFYnl0ZXMYBCABKARSBWJ5dGVz'
+    'EhgKB3BhcnRpYWwYBSABKAhSB3BhcnRpYWwSFAoFZXJyb3IYBiABKAlSBWVycm9yEhkKCGJ1aW'
+    'x0X2F0GAcgASgDUgdidWlsdEF0Eh0KCnVwZGF0ZWRfYXQYCCABKANSCXVwZGF0ZWRBdA==');
 
 @$core.Deprecated('Use fleetListRequestDescriptor instead')
 const FleetListRequest$json = {

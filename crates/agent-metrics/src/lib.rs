@@ -153,6 +153,12 @@ pub struct Metrics {
     fleet_approvals: IntCounterVec,
     fleet_approval_latency: HistogramVec,
     fleet_post_failures: IntCounterVec,
+    // Per-row repo index (review-graph 5a): job outcomes, build time, and the size of
+    // the last good index.
+    fleet_index_runs: IntCounterVec,
+    fleet_index_seconds: HistogramVec,
+    fleet_index_bytes: IntGaugeVec,
+    fleet_index_files: IntGaugeVec,
     /// LRU cap on distinct fleet `(user, repo)` label pairs — the lifecycle backstop
     /// for the `repo` dimension. Shared across `Metrics` clones (Arc), so an eviction
     /// removes that pair's series from the one registry.
@@ -1008,6 +1014,39 @@ impl Metrics {
             &["transport", "user", "repo"],
         )
         .unwrap();
+        let fleet_index_runs = IntCounterVec::new(
+            Opts::new(
+                "agent_fleet_index_runs_total",
+                "Review-fleet repo index jobs, by outcome (ready|partial|unchanged|waiting|failed), tenant and repo",
+            ),
+            &["outcome", "user", "repo"],
+        )
+        .unwrap();
+        let fleet_index_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_fleet_index_seconds",
+                "Review-fleet repo index build time, by tenant and repo",
+            )
+            .buckets(vec![1.0, 5.0, 15.0, 60.0, 180.0, 600.0, 1800.0]),
+            &["user", "repo"],
+        )
+        .unwrap();
+        let fleet_index_bytes = IntGaugeVec::new(
+            Opts::new(
+                "agent_fleet_index_bytes",
+                "On-disk size of a review-fleet row's last good repo index",
+            ),
+            &["user", "repo"],
+        )
+        .unwrap();
+        let fleet_index_files = IntGaugeVec::new(
+            Opts::new(
+                "agent_fleet_index_files",
+                "Files in a review-fleet row's last good repo index",
+            ),
+            &["user", "repo"],
+        )
+        .unwrap();
         let fleet_repos = Arc::new(std::sync::Mutex::new(FleetRepoLru::new(MAX_FLEET_REPOS)));
         let transport_posts = IntCounterVec::new(
             Opts::new(
@@ -1690,6 +1729,10 @@ impl Metrics {
             Box::new(fleet_approvals.clone()),
             Box::new(fleet_approval_latency.clone()),
             Box::new(fleet_post_failures.clone()),
+            Box::new(fleet_index_runs.clone()),
+            Box::new(fleet_index_seconds.clone()),
+            Box::new(fleet_index_bytes.clone()),
+            Box::new(fleet_index_files.clone()),
             Box::new(transport_posts.clone()),
             Box::new(transport_post_seconds.clone()),
             Box::new(transport_ratelimit.clone()),
@@ -1856,6 +1899,10 @@ impl Metrics {
             fleet_approvals,
             fleet_approval_latency,
             fleet_post_failures,
+            fleet_index_runs,
+            fleet_index_seconds,
+            fleet_index_bytes,
+            fleet_index_files,
             fleet_repos,
             transport_posts,
             transport_post_seconds,
@@ -2076,6 +2123,14 @@ impl Metrics {
                 .fleet_post_failures
                 .remove_label_values(&[transport, user, repo]);
         }
+        for outcome in FLEET_INDEX_OUTCOMES {
+            let _ = self
+                .fleet_index_runs
+                .remove_label_values(&[outcome, user, repo]);
+        }
+        let _ = self.fleet_index_seconds.remove_label_values(&[user, repo]);
+        let _ = self.fleet_index_bytes.remove_label_values(&[user, repo]);
+        let _ = self.fleet_index_files.remove_label_values(&[user, repo]);
     }
 
     // --- loop-level instrumentation ---------------------------------------
@@ -3684,6 +3739,44 @@ impl FleetMetrics {
             .inc();
     }
 
+    /// A repo index job finished (`outcome` is one of [`FLEET_INDEX_OUTCOMES`]; anything
+    /// else is recorded as `failed`, so a typo can't grow the label set).
+    pub fn on_index_run(&self, outcome: &str) {
+        let outcome = if FLEET_INDEX_OUTCOMES.contains(&outcome) {
+            outcome
+        } else {
+            "failed"
+        };
+        self.inner
+            .fleet_index_runs
+            .with_label_values(&[outcome, self.user.as_str(), self.repo.as_str()])
+            .inc();
+    }
+
+    /// A repo index build took `seconds`. Non-finite or negative values are dropped, as
+    /// for the approval latency.
+    pub fn observe_index_seconds(&self, seconds: f64) {
+        if seconds.is_finite() && seconds >= 0.0 {
+            self.inner
+                .fleet_index_seconds
+                .with_label_values(&self.pair())
+                .observe(seconds);
+        }
+    }
+
+    /// The size of the row's last good index. Values past `i64::MAX` saturate.
+    pub fn set_index_size(&self, bytes: u64, files: u64) {
+        let clamp = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+        self.inner
+            .fleet_index_bytes
+            .with_label_values(&self.pair())
+            .set(clamp(bytes));
+        self.inner
+            .fleet_index_files
+            .with_label_values(&self.pair())
+            .set(clamp(files));
+    }
+
     /// Retire this `(user, repo)` pair's fleet series on session end — the fleet analogue
     /// of [`SessionMetrics::retire`], so a torn-down session's counters don't linger.
     /// Idempotent: a missing series is a no-op.
@@ -3691,6 +3784,9 @@ impl FleetMetrics {
         self.inner.remove_fleet_series(&self.user, &self.repo);
     }
 }
+
+/// The `outcome` values of `agent_fleet_index_runs_total`.
+pub const FLEET_INDEX_OUTCOMES: [&str; 5] = ["ready", "partial", "unchanged", "waiting", "failed"];
 
 fn bool_label(b: bool) -> &'static str {
     if b {
@@ -4224,6 +4320,9 @@ mod tests {
         Approval,
         Latency,
         PostFailure,
+        IndexRun,
+        IndexSeconds,
+        IndexSize,
     }
 
     fn fire(fm: &FleetMetrics, ev: Ev) {
@@ -4234,6 +4333,9 @@ mod tests {
             Ev::Approval => fm.on_approval("posted"),
             Ev::Latency => fm.observe_approval_latency(2.0),
             Ev::PostFailure => fm.on_post_failure("slack"),
+            Ev::IndexRun => fm.on_index_run("ready"),
+            Ev::IndexSeconds => fm.observe_index_seconds(3.0),
+            Ev::IndexSize => fm.set_index_size(1024, 7),
         }
     }
 
@@ -4261,6 +4363,12 @@ mod tests {
     #[case::positive_latency(Ev::Latency, "agent_fleet_approval_latency_seconds_count")]
     // desc: a failed post ticks agent_fleet_post_failures_total → expect (user,repo) labels.
     #[case::positive_post_failure(Ev::PostFailure, "agent_fleet_post_failures_total")]
+    // desc: an index job ticks agent_fleet_index_runs_total → expect (user,repo) labels.
+    #[case::positive_index_run(Ev::IndexRun, "agent_fleet_index_runs_total")]
+    // desc: an index build time ticks the histogram _count series → expect (user,repo) labels.
+    #[case::positive_index_seconds(Ev::IndexSeconds, "agent_fleet_index_seconds_count")]
+    // desc: the index size sets agent_fleet_index_bytes → expect (user,repo) labels.
+    #[case::positive_index_size(Ev::IndexSize, "agent_fleet_index_bytes")]
     fn positive_fleet_event_records_with_tenant_and_repo(#[case] ev: Ev, #[case] family: &str) {
         let m = Metrics::new();
         let fm = m.for_fleet("acme", "acme__web");
@@ -4292,6 +4400,9 @@ mod tests {
             Ev::Approval,
             Ev::Latency,
             Ev::PostFailure,
+            Ev::IndexRun,
+            Ev::IndexSeconds,
+            Ev::IndexSize,
         ] {
             fire(&fm, ev);
         }
@@ -5192,6 +5303,70 @@ mod tests {
                 .lines()
                 .any(|l| l.starts_with("agent_campaign_") && l.contains("tenant=")),
             "a zero add minted a series:\n{text}"
+        );
+    }
+
+    #[rstest]
+    // desc: a known outcome is recorded as itself.
+    #[case::positive_known_outcome("partial", "partial")]
+    // desc (negative): an empty outcome is recorded as failed, not as a new label value.
+    #[case::negative_empty_outcome("", "failed")]
+    // desc (adversarial): an unknown or hostile outcome can't grow the label set.
+    #[case::adversarial_unknown_outcome("x\"} 1\nevil{", "failed")]
+    fn fleet_index_outcome_is_bounded(#[case] outcome: &str, #[case] expected: &str) {
+        let m = Metrics::new();
+        m.for_fleet("acme", "acme__web").on_index_run(outcome);
+        let text = m.encode_text();
+        let want = format!("agent_fleet_index_runs_total{{outcome=\"{expected}\"");
+        assert!(text.contains(&want), "{outcome:?} → {expected}: {text}");
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("agent_fleet_index_runs_total{"))
+                .count(),
+            1,
+            "exactly one outcome series"
+        );
+    }
+
+    #[rstest]
+    // desc: an ordinary size is recorded as is.
+    #[case::positive_small(1024, 1024.0)]
+    // desc (boundary): i64::MAX is kept (the exposition prints gauges as f64).
+    #[case::boundary_i64_max(i64::MAX as u64, i64::MAX as f64)]
+    // desc (adversarial): a size past i64::MAX saturates instead of wrapping negative.
+    #[case::adversarial_u64_max(u64::MAX, i64::MAX as f64)]
+    fn fleet_index_size_saturates(#[case] bytes: u64, #[case] expected: f64) {
+        let m = Metrics::new();
+        m.for_fleet("acme", "acme__web").set_index_size(bytes, 1);
+        let line = m
+            .encode_text()
+            .lines()
+            .find(|l| l.starts_with("agent_fleet_index_bytes{"))
+            .map(str::to_string)
+            .expect("index bytes series");
+        let got: f64 = line
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("a number");
+        assert_eq!(got, expected, "{line}");
+    }
+
+    #[test]
+    // desc (boundary): retire() also clears the index series, so an evicted repo's gauges go.
+    fn boundary_retire_removes_index_series() {
+        let m = Metrics::new();
+        let fm = m.for_fleet("acme", "acme__web");
+        fm.on_index_run("ready");
+        fm.observe_index_seconds(1.0);
+        fm.set_index_size(10, 1);
+        fm.retire();
+        let after = m.encode_text();
+        assert!(
+            !after
+                .lines()
+                .any(|l| l.starts_with("agent_fleet_index") && l.contains("repo=\"acme__web\"")),
+            "index series survived retire:\n{after}"
         );
     }
 }

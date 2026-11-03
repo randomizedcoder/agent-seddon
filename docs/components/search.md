@@ -157,6 +157,18 @@ label (kept out of the code-search dispatch). See
 (automation demotion, per-message anchors, semantic recall, a `--serve-recall`
 worker).
 
+**Capped scans.** `FsDocumentSource::with_limits(root, ScanLimits { max_files,
+max_file_bytes, max_total_bytes, deadline })` bounds a walk for an untrusted or very large
+tree: entries are taken in file-name order (so a capped scan is deterministic), a file over
+`max_file_bytes` is skipped (and `load` reads at most that many bytes plus one, refusing a
+file that grew), and the walk stops at `max_files` or before the kept files' total passes
+`max_total_bytes`. Past `deadline` the walk stops and `load` reads nothing more, so a
+reindex on a blocking thread ends near it. `last_scan()` returns a `ScanReport { truncated,
+oversized, expired }` for the most recent scan; the fleet repo index records `truncated` as
+`partial` and fails an `expired` build. Every scan skips `.agent-seddon` and git's own
+`.git` (a worktree's `.git` file names a host path). `scan` and
+`compare` are unchanged and unlimited (`ScanLimits::UNLIMITED`).
+
 ## Listing files from the index (`index_ls`)
 
 Besides `query`, the `SearchBackend` seam exposes `list_files(globs)` — the

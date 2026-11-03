@@ -196,6 +196,19 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # portal Envoy `fleet_webhook` listener (:8096). See docs/components/forge.md.
 # [review_fleet.webhook]
 # listen = "127.0.0.1:50110"   # agent_grpc::constants::FLEET_WEBHOOK_PORT
+#
+# Repo index on onboarding (review-graph 5a-i): with a `root`, each enabled roster row's
+# default branch is indexed (tantivy search) under <root>/<user>/<id>/knowledge/, and
+# the status shows on the row (FleetSession.index). Defaults shown; set enabled = false
+# to turn it off. See docs/components/review-fleet.md.
+# [review_fleet.index]
+# enabled = true
+# refresh_secs = 3600           # re-check a row at most this often (min 60)
+# deadline_secs = 1800          # one build's deadline (60..21600)
+# max_files = 200000            # files per index; more ⇒ partial
+# max_file_bytes = 1048576      # larger files are skipped
+# max_bytes = 2147483648        # bytes read into one index; more ⇒ partial
+# disk_min_free_pct = 10        # pause indexing below this free % of the fleet root
 
 # [role] — operator-defined RBAC role cards (config C34 / C1b). Under `[auth] mode =
 # "oidc"` every RPC is gated (security-hardening S7) against the immutable built-in
