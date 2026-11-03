@@ -5845,13 +5845,28 @@ mod tests {
     // A rename's base-side path survives the wire both ways; none stays none, and an
     // empty wire value reads as none.
     #[rstest::rstest]
-    #[case::positive_rename_round_trips(Some("src/old.rs"), "src/old.rs")]
-    #[case::negative_none_is_empty(None, "")]
-    fn changed_file_old_path_round_trip(#[case] old: Option<&str>, #[case] wire: &str) {
+    // The conversion ignores `change`: a peer sending an old path on a modify only
+    // ever adds a flag downstream, never corrupts the row.
+    #[case::positive_rename_round_trips(
+        Some("src/old.rs"),
+        agent_core::ChangeKind::Renamed,
+        "src/old.rs"
+    )]
+    #[case::negative_none_is_empty(None, agent_core::ChangeKind::Renamed, "")]
+    #[case::corner_old_path_on_modify_kept(
+        Some("src/old.rs"),
+        agent_core::ChangeKind::Modified,
+        "src/old.rs"
+    )]
+    fn changed_file_old_path_round_trip(
+        #[case] old: Option<&str>,
+        #[case] change: agent_core::ChangeKind,
+        #[case] wire: &str,
+    ) {
         let core = agent_core::ChangedFile {
             old_path: old.map(std::path::PathBuf::from),
             path: "src/new.rs".into(),
-            change: agent_core::ChangeKind::Renamed,
+            change,
             additions: 0,
             deletions: 0,
             is_binary: false,
@@ -5862,5 +5877,6 @@ mod tests {
         assert_eq!(pbf.old_path, wire);
         let back = agent_core::ChangedFile::from(pbf);
         assert_eq!(back.old_path, old.map(std::path::PathBuf::from));
+        assert_eq!(back.change, change);
     }
 }

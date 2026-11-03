@@ -995,6 +995,8 @@ impl RepoBackend for CliBackend {
         while let Some(status) = tokens.next() {
             let change = change_kind(status);
             match change {
+                // `-M` without `-C`: git never emits `C` today, so `Copied` is only
+                // reached if copy detection is turned on (then the base side is kept too).
                 ChangeKind::Renamed | ChangeKind::Copied => {
                     let old = tokens.next().map(PathBuf::from);
                     let new = tokens.next().map(PathBuf::from);

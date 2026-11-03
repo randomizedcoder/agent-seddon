@@ -32,9 +32,10 @@ const TRAILER_ROOM: usize = 64;
 
 /// A repo-relative path in one spelling: `/` separators, no `.` components, no empty
 /// ones (so `./a`, `a//b`, `a/./b`, `a/` and `a\\b` all read as their plain form). Both
-/// the changed set and each hit pass through it, so a spelling difference can only add
-/// a flag, never drop one (the safe direction). `..` is kept as is: it names a
-/// different file, and the end-to-end path test pins that git and the scanner agree.
+/// the changed set and each hit pass through it, so those spellings can't drop a flag.
+/// `..` is the one exception, and it fails open: `x/../src/a.rs` is not folded, so a hit
+/// spelled that way is not flagged. Neither git nor the scanner emits `..`, and the
+/// end-to-end path test pins that the two agree.
 fn normalized(p: &std::path::Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/");
     let parts: Vec<&str> = s
