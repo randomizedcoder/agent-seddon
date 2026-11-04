@@ -5541,6 +5541,19 @@ pub trait RepoBackend: Send + Sync {
             "fetch_branch unsupported by this backend".into(),
         ))
     }
+    /// The repo-relative paths whose content differs between the trees of `from` and
+    /// `to` (a two-dot tree diff, a rename as a delete plus an add), or `None` when more
+    /// than `limit` changed. The fleet index updates its previous build from this list
+    /// rather than rebuilding. Default `Ok(None)`: a backend (or a remote gRPC client)
+    /// that cannot list them makes the caller rebuild in full, which is always correct.
+    async fn changed_paths(
+        &self,
+        _from: &Revision,
+        _to: &Revision,
+        _limit: usize,
+    ) -> Result<Option<Vec<PathBuf>>> {
+        Ok(None)
+    }
     /// Fetch a forge pull/merge-request head ref into a namespaced local ref and
     /// return the resolved head oid (the C14/C15 dedup key). A `PullRequest`
     /// carries only a branch name — never a head SHA — and the forge PR head ref
@@ -6668,10 +6681,10 @@ pub trait FleetIndexer: Send + Sync {
     /// `row`'s default branch moved (a verified push webhook, review-graph 5a-ii-d): queue
     /// an index check now, past the `refresh` throttle. Not forced: the check still
     /// compares the base, so a push that did not move it costs one fetch. Coalesced per
-    /// row and never blocks. The default treats it as a plain [`Self::enqueue`].
-    fn base_moved(&self, tenant: &str, row: &FleetSession) {
-        self.enqueue(tenant, row);
-    }
+    /// row and never blocks. Returns whether the row is queued (false when the queue is
+    /// full). No default: [`Self::enqueue`] is throttled, so it would not keep this
+    /// method's promise.
+    fn base_moved(&self, tenant: &str, row: &FleetSession) -> bool;
 }
 
 /// What [`FleetIndexer::reindex`] did.

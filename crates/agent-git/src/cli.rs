@@ -1390,6 +1390,50 @@ impl RepoBackend for CliBackend {
         Ok(())
     }
 
+    async fn changed_paths(
+        &self,
+        from: &Revision,
+        to: &Revision,
+        limit: usize,
+    ) -> Result<Option<Vec<PathBuf>>> {
+        // Resolved to oids first, so neither side can be read as a `git diff` option.
+        let from = self.resolve(from).await?;
+        let to = self.resolve(to).await?;
+        // Two-dot (the trees themselves, not since the merge base), so a rewritten
+        // branch still lists every path that differs. No rename detection: a rename is
+        // its old path gone and its new path added, which is what an index needs.
+        let out = self
+            .git_bytes(
+                &self.root,
+                &[
+                    "diff",
+                    "--no-color",
+                    "--no-renames",
+                    "--no-ext-diff",
+                    "-z",
+                    "--name-only",
+                    from.as_str(),
+                    to.as_str(),
+                    "--",
+                ],
+            )
+            .await?;
+        let mut paths = Vec::new();
+        for p in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            if paths.len() == limit {
+                return Ok(None);
+            }
+            // The raw bytes, so a non-UTF-8 name still equals the path a tree walk sees.
+            #[cfg(unix)]
+            let path =
+                PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(p));
+            #[cfg(not(unix))]
+            let path = PathBuf::from(String::from_utf8_lossy(p).into_owned());
+            paths.push(path);
+        }
+        Ok(Some(paths))
+    }
+
     async fn fetch_pr(&self, number: u64) -> Result<Revision> {
         // The remote ref layout is operator-owned, never inferred from the forge:
         // an unset template is a config error, not a guess.
@@ -1772,6 +1816,7 @@ mod tests {
     #[case::log_walk("log")]
     #[case::log_touched_walk("--numstat")]
     #[case::list_tree_walk("ls-tree")]
+    #[case::changed_paths_walk("--name-only")]
     #[tokio::test]
     async fn adversarial_revision_resolved_before_walk(#[case] walk_marker: &str) {
         const HOSTILE: &str = "--output=/home/victim/.bashrc";
@@ -1789,6 +1834,9 @@ mod tests {
             }
             "ls-tree" => {
                 let _ = b.list_tree(&rev, Path::new(""), false).await;
+            }
+            "--name-only" => {
+                let _ = b.changed_paths(&rev, &rev, 10).await;
             }
             _ => unreachable!(),
         }

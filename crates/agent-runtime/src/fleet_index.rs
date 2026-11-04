@@ -36,7 +36,7 @@
 //! segments are already mapped). That is why there is no refcount: removing a generation
 //! never breaks a review that holds it.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -74,6 +74,15 @@ const INDEX_FORMAT: u32 = 1;
 const STAGING_SUFFIX: &str = ".partial";
 /// The generation a swap moves aside, removed straight after.
 const RETIRED_SUFFIX: &str = ".old";
+/// An update reads the changed paths from git; a base that moved by more than this many
+/// is rebuilt in full instead (a mass rename, a history rewrite).
+const MAX_UPDATE_CHANGES: usize = 20_000;
+/// An update is also dropped for a full build once its changes reach half the files
+/// indexed, but never below this many, so a small repo is always updated.
+const MIN_UPDATE_LIMIT: u64 = 256;
+/// Updates in a row before the next build is a full one, so a slow drift (a bug, an
+/// index that only ever grows deleted documents) cannot last.
+const MAX_UPDATE_CHAIN: u32 = 50;
 
 /// The `[review_fleet.index]` settings, clamped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +157,25 @@ struct IndexEntry {
     /// The paths indexed (`[[review_fleet.index.scopes]]`); empty means the whole repo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scope: Vec<String>,
+    /// The base whose index this one updated, rather than being built from nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_from: Option<String>,
+    /// Updates since the last full build (0 for a full build).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    chain: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// The served generation a build can update instead of indexing every file again.
+#[derive(Debug, Clone)]
+struct Previous {
+    sha: String,
+    index: PathBuf,
+    files: u64,
+    chain: u32,
 }
 
 /// A row's paths under `<fleet_root>/<user>/<id>/knowledge/`.
@@ -641,7 +669,7 @@ impl FleetIndexer for FleetIndexService {
         }
     }
 
-    fn base_moved(&self, tenant: &str, row: &FleetSession) {
+    fn base_moved(&self, tenant: &str, row: &FleetSession) -> bool {
         let queued = self
             .inner
             .queue
@@ -653,6 +681,7 @@ impl FleetIndexer for FleetIndexService {
             self.start_worker();
             self.inner.wake.notify_one();
         }
+        queued
     }
 
     async fn status(&self, row: &FleetSession) -> Option<FleetIndexStatus> {
@@ -776,10 +805,16 @@ impl Inner {
         let _ = write_json(&layout.status(), &status);
         tracing::info!(row = %row.id, base = %base, "fleet index: building");
 
+        // A forced rebuild (the portal's Re-index) always starts from nothing.
+        let previous = if force {
+            None
+        } else {
+            previous(layout, &status, &scope)
+        };
         // Never abandoned by a timeout: the reindex runs on a blocking thread that a
         // dropped future would leave writing into the generation this cleanup removes.
         // The build stops itself at the deadline instead (see `build`).
-        let built = self.build(&repo, layout, &base, scope).await;
+        let built = self.build(&repo, layout, &base, scope, previous).await;
         // The worktree is only the build's input: remove it whatever happened.
         let _ = repo.worktree_remove(&worktree_id(&base)).await;
         let built = match built {
@@ -811,7 +846,8 @@ impl Inner {
             .set_index_size(entry.bytes, entry.files);
         gc(&repo, layout, &base).await;
         tracing::info!(row = %row.id, base = %base, files = entry.files, bytes = entry.bytes,
-            partial = entry.partial, "fleet index: ready");
+            partial = entry.partial, updated_from = entry.updated_from.as_deref().unwrap_or(""),
+            "fleet index: ready");
         if entry.partial {
             Outcome::Partial
         } else {
@@ -819,13 +855,16 @@ impl Inner {
         }
     }
 
-    /// Check out `base`, index it, and write the generation's manifest.
+    /// Check out `base`, index it, and write the generation's manifest. With a
+    /// `previous` generation, its index is copied and only the files that changed since
+    /// its base are read again; when that can't be done, the build is a full one.
     async fn build(
         &self,
         repo: &Arc<dyn RepoBackend>,
         layout: &Layout,
         base: &str,
         scope: Vec<String>,
+        previous: Option<Previous>,
     ) -> Result<KnowledgeManifest> {
         let started = Instant::now();
         // The build is written aside and swapped in when complete, so a rebuild of the
@@ -864,17 +903,42 @@ impl Inner {
                 .with_limits(limits)
                 .with_paths(scope.iter().map(PathBuf::from).collect()),
         );
-        let backend = TantivyBackend::open_with_source(source.clone(), index_dir.clone())?;
-        // tantivy's reindex reads and adds documents in a loop with no await point, so
-        // it runs on a blocking thread, never a runtime worker; it ends at the deadline
-        // because the source stops reading.
-        let rt = tokio::runtime::Handle::current();
-        let files = tokio::task::spawn_blocking(move || {
-            rt.block_on(agent_core::SearchBackend::reindex(&backend, &|_| {}))
-        })
-        .await
-        .map_err(|e| agent_core::Error::Search(format!("index task panicked: {e}")))??
-        .indexed_files;
+        let changed = match &previous {
+            Some(prev) => update_plan(repo, prev, base, &scope).await,
+            None => None,
+        };
+        let mut updated_from = None;
+        let mut chain = 0;
+        let files = match (changed, previous) {
+            (Some(changed), Some(prev)) => {
+                let from = prev.index.clone();
+                let to = index_dir.clone();
+                let copied = tokio::task::spawn_blocking(move || copy_index(&from, &to))
+                    .await
+                    .map_err(|e| agent_core::Error::Repo(format!("copy task panicked: {e}")))
+                    .and_then(|r| r);
+                let updated = match copied {
+                    Ok(()) => index_files(source.clone(), &index_dir, Some(changed)).await,
+                    Err(e) => Err(e),
+                };
+                match updated {
+                    Ok(files) => {
+                        updated_from = Some(prev.sha);
+                        chain = prev.chain + 1;
+                        files
+                    }
+                    // The copy is only a shortcut: whatever went wrong with it, a full
+                    // build from nothing is still correct.
+                    Err(e) => {
+                        tracing::warn!(base, from = %prev.sha, error = %e,
+                            "fleet index: could not update the previous index; building in full");
+                        remove_dir(&index_dir).await;
+                        index_files(source.clone(), &index_dir, None).await?
+                    }
+                }
+            }
+            _ => index_files(source.clone(), &index_dir, None).await?,
+        };
         let report = source.last_scan();
         if report.expired {
             return Err(agent_core::Error::Repo(format!(
@@ -911,6 +975,8 @@ impl Inner {
                 oversized: report.oversized,
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 scope,
+                updated_from,
+                chain,
             }],
         };
         write_json(&generation.join(MANIFEST_FILE), &manifest)?;
@@ -936,6 +1002,136 @@ impl Inner {
         let _ = write_json(&layout.status(), status);
         Outcome::Failed
     }
+}
+
+/// The generation `status` serves, if a build of a later base can update it: a finished
+/// index of the same layout and paths, not too many updates from a full build.
+fn previous(layout: &Layout, status: &FleetIndexStatus, scope: &[String]) -> Option<Previous> {
+    let sha = commit_sha(&status.base_sha)?;
+    let dir = layout.generation(sha);
+    let manifest = read_json::<KnowledgeManifest>(&dir.join(MANIFEST_FILE))?;
+    let entry = manifest.indexes.first()?;
+    let index = dir.join("index");
+    let usable = manifest.format == INDEX_FORMAT
+        && manifest.base_sha == sha
+        && entry.scope == scope
+        && entry.chain < MAX_UPDATE_CHAIN
+        && std::fs::symlink_metadata(index.join("meta.json")).is_ok_and(|m| m.is_file());
+    usable.then(|| Previous {
+        sha: sha.to_string(),
+        index,
+        files: entry.files,
+        chain: entry.chain,
+    })
+}
+
+/// The files to read again when updating `prev` to `base`: those git says changed,
+/// under the row's paths. `None` (a full build) when git can't say, or when so many
+/// changed that a full build is as cheap.
+async fn update_plan(
+    repo: &Arc<dyn RepoBackend>,
+    prev: &Previous,
+    base: &str,
+    scope: &[String],
+) -> Option<HashSet<PathBuf>> {
+    let listed = repo
+        .changed_paths(
+            &Revision::from(prev.sha.as_str()),
+            &Revision::from(base),
+            MAX_UPDATE_CHANGES,
+        )
+        .await;
+    let paths = match listed {
+        Ok(Some(paths)) => paths,
+        Ok(None) => {
+            tracing::info!(base, from = %prev.sha, "fleet index: too many changes to update; building in full");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(base, from = %prev.sha, error = %e,
+                "fleet index: could not list the changes; building in full");
+            return None;
+        }
+    };
+    let changed: HashSet<PathBuf> = paths
+        .into_iter()
+        .filter(|p| scope.is_empty() || scope.iter().any(|s| p.starts_with(s)))
+        .collect();
+    let limit = (prev.files / 2).max(MIN_UPDATE_LIMIT);
+    if u64::try_from(changed.len()).unwrap_or(u64::MAX) > limit {
+        tracing::info!(base, from = %prev.sha, changed = changed.len(), limit,
+            "fleet index: half the index changed; building in full");
+        return None;
+    }
+    Some(changed)
+}
+
+/// Index `source` into `index_dir`: every file, or (with `changed`) an update of the
+/// index already there. tantivy's reindex reads and adds documents in a loop with no
+/// await point, so it runs on a blocking thread, never a runtime worker; it ends at the
+/// deadline because the source stops reading. Returns the files indexed.
+async fn index_files(
+    source: Arc<FsDocumentSource>,
+    index_dir: &Path,
+    changed: Option<HashSet<PathBuf>>,
+) -> Result<u64> {
+    let backend = TantivyBackend::open_with_source(source, index_dir.to_path_buf())?;
+    let rt = tokio::runtime::Handle::current();
+    let status = tokio::task::spawn_blocking(move || {
+        rt.block_on(async {
+            match &changed {
+                Some(changed) => backend.reindex_changed(changed, &|_| {}).await,
+                None => agent_core::SearchBackend::reindex(&backend, &|_| {}).await,
+            }
+        })
+    })
+    .await
+    .map_err(|e| agent_core::Error::Search(format!("index task panicked: {e}")))??;
+    Ok(status.indexed_files)
+}
+
+/// Copy a finished index so a build can update it. tantivy never rewrites a segment
+/// file once written, so those are hard-linked (no data copied, and the copy costs no
+/// disk); everything else (its `meta.json` and the search manifest, which an update
+/// rewrites) is copied, so the update never writes through into the generation it came
+/// from, which reviews may be reading. Lock files are left out. Anything but plain
+/// files refuses the copy, and the caller builds in full.
+fn copy_index(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let shown = name.to_string_lossy();
+        if !entry.file_type()?.is_file() {
+            return Err(agent_core::Error::Repo(format!(
+                "the previous index holds `{shown}`, which is not a plain file"
+            )));
+        }
+        if shown.ends_with(".lock") {
+            continue;
+        }
+        let dst = to.join(&name);
+        if segment_file(&shown) && std::fs::hard_link(entry.path(), &dst).is_ok() {
+            continue;
+        }
+        std::fs::copy(entry.path(), &dst)?;
+    }
+    Ok(())
+}
+
+/// A tantivy segment file: `<32 hex>.<ext>` or `<32 hex>.<opstamp>.<ext>` (deletes).
+fn segment_file(name: &str) -> bool {
+    let Some((stem, rest)) = name.split_once('.') else {
+        return false;
+    };
+    stem.len() == 32
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        && !rest.is_empty()
+        && rest
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 async fn remove_dir(dir: &Path) {
@@ -2870,5 +3066,268 @@ mod tests {
             !PathBuf::from(retired).exists(),
             "{description}: no retired copy left"
         );
+    }
+
+    // ---- updating the previous index (5a-ii-d-ii) ---------------------------------
+
+    /// What happens between the first build and the second, for [`index_update`].
+    #[derive(Debug, Clone, Copy)]
+    enum Between {
+        /// `a.rs` changes (same size): updated from the first build.
+        Modify,
+        /// `c.rs` is added and `b.rs` removed: updated, and the scan finds both.
+        AddRemove,
+        /// A commit with no file change under the scope: updated with nothing re-read.
+        OutOfScope,
+        /// The same change, but the second pass is the portal's forced rebuild.
+        Forced,
+        /// The first build is already at the chain cap, so the next one is full.
+        ChainCap,
+        /// More files change than an update is worth.
+        ManyChanges,
+        /// The previous index holds a symlink: the copy is refused, the build is full.
+        SymlinkInIndex,
+        /// The previous index's `meta.json` is garbage: the update fails, the build is full.
+        CorruptMeta,
+    }
+
+    fn commit_files(fx: &Fixture, writes: &[(&str, Option<&str>)]) {
+        for (path, body) in writes {
+            let p = fx.upstream.join(path);
+            match body {
+                Some(body) => {
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(p, body).unwrap();
+                }
+                None => std::fs::remove_file(p).unwrap(),
+            }
+        }
+        git(&fx.upstream, &["add", "-A"]);
+        git(
+            &fx.upstream,
+            &["commit", "-q", "--allow-empty", "-m", "more"],
+        );
+    }
+
+    fn manifest_of(root: &Path, r: &FleetSession, sha: &str) -> KnowledgeManifest {
+        let gen = Layout::for_row(root, r).unwrap().generation(sha);
+        read_json(&gen.join(MANIFEST_FILE)).expect("a generation manifest")
+    }
+
+    async fn hits(index: PathBuf, token: &str) -> usize {
+        let backend = TantivyBackend::open_read_only(index).unwrap();
+        agent_core::SearchBackend::query(
+            &backend,
+            &agent_core::SearchQuery {
+                text: token.into(),
+                mode: agent_core::SearchMode::Literal,
+                path_globs: vec![],
+                lang: None,
+                limit: 5,
+                fuzzy_distance: None,
+            },
+        )
+        .await
+        .unwrap()
+        .len()
+    }
+
+    #[rstest]
+    #[case::positive_modify_updates("a changed file is re-read into a copy", Between::Modify, true, &["NEWTOKEN", "BTOKEN"], &["OLDTOKEN"], 2)]
+    #[case::positive_add_remove_updates(
+        "an added and a removed file are found by the scan",
+        Between::AddRemove, true, &["OLDTOKEN", "ADDEDTOKEN"], &["BTOKEN"], 2
+    )]
+    #[case::corner_out_of_scope_commit_updates("a commit outside the scope changes nothing", Between::OutOfScope, true, &["OLDTOKEN", "BTOKEN"], &[], 2)]
+    #[case::negative_forced_is_full("a forced rebuild starts from nothing", Between::Forced, false, &["NEWTOKEN"], &["OLDTOKEN"], 2)]
+    #[case::boundary_chain_cap_is_full("at the chain cap the next build is full", Between::ChainCap, false, &["NEWTOKEN"], &["OLDTOKEN"], 2)]
+    #[case::boundary_many_changes_is_full(
+        "past the change limit the build is full",
+        Between::ManyChanges, false, &["NEWTOKEN", "MANYTOKEN"], &["OLDTOKEN"], 2 + MIN_UPDATE_LIMIT + 1
+    )]
+    #[case::adversarial_symlink_in_index_is_full(
+        "a symlink planted in the previous index refuses the copy",
+        Between::SymlinkInIndex, false, &["NEWTOKEN"], &["OLDTOKEN"], 2
+    )]
+    #[case::adversarial_corrupt_meta_falls_back(
+        "a corrupt previous index falls back to a full build",
+        Between::CorruptMeta, false, &["NEWTOKEN"], &["OLDTOKEN"], 2
+    )]
+    #[tokio::test]
+    async fn index_update(
+        #[case] description: &str,
+        #[case] between: Between,
+        #[case] expected_updated: bool,
+        #[case] found: &[&str],
+        #[case] absent: &[&str],
+        #[case] expected_files: u64,
+    ) {
+        let fx = Fixture::new(&[
+            ("src/a.rs", "OLDTOKEN\n"),
+            ("src/b.rs", "BTOKEN\n"),
+            ("docs/x.md", "outside\n"),
+        ]);
+        let r = row("acme", "web");
+        let lim = IndexLimits {
+            scopes: vec![FleetIndexScope {
+                repo: r.repo.clone(),
+                paths: vec!["src".into()],
+            }],
+            ..limits()
+        };
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim);
+        assert_eq!(
+            svc.run(&r).await,
+            Outcome::Ready,
+            "{description}: first build"
+        );
+        let first = status_of(&fx.root, &r).base_sha;
+        let layout = Layout::for_row(&fx.root, &r).unwrap();
+        let first_index = layout.generation(&first).join("index");
+
+        match between {
+            Between::Modify | Between::Forced | Between::SymlinkInIndex | Between::CorruptMeta => {
+                commit_files(&fx, &[("src/a.rs", Some("NEWTOKEN\n"))]);
+            }
+            Between::AddRemove => {
+                commit_files(
+                    &fx,
+                    &[("src/c.rs", Some("ADDEDTOKEN\n")), ("src/b.rs", None)],
+                );
+            }
+            Between::OutOfScope => commit_files(&fx, &[("docs/x.md", Some("changed\n"))]),
+            Between::ChainCap => {
+                let path = layout.generation(&first).join(MANIFEST_FILE);
+                let mut m: KnowledgeManifest = read_json(&path).unwrap();
+                m.indexes[0].chain = MAX_UPDATE_CHAIN;
+                write_json(&path, &m).unwrap();
+                commit_files(&fx, &[("src/a.rs", Some("NEWTOKEN\n"))]);
+            }
+            Between::ManyChanges => {
+                let many: Vec<(String, Option<&str>)> = (0..=MIN_UPDATE_LIMIT)
+                    .map(|i| (format!("src/many/{i}.rs"), Some("MANYTOKEN\n")))
+                    .collect();
+                let mut writes: Vec<(&str, Option<&str>)> =
+                    many.iter().map(|(p, b)| (p.as_str(), *b)).collect();
+                writes.push(("src/a.rs", Some("NEWTOKEN\n")));
+                commit_files(&fx, &writes);
+            }
+        }
+        if matches!(between, Between::SymlinkInIndex) {
+            std::os::unix::fs::symlink("/etc/passwd", first_index.join("planted")).unwrap();
+        }
+        // Kept for the end: the generation a review may hold must not change.
+        let first_meta = std::fs::read(first_index.join("meta.json")).unwrap();
+        if matches!(between, Between::CorruptMeta) {
+            // Garbage in the copy's source only after the snapshot, so the check below
+            // compares against what the update was handed.
+            std::fs::write(first_index.join("meta.json"), "{ not json").unwrap();
+        }
+
+        let outcome = svc.run_job(&r, matches!(between, Between::Forced)).await;
+        assert_eq!(outcome, Outcome::Ready, "{description}: second build");
+        let st = status_of(&fx.root, &r);
+        let second = st.base_sha.clone();
+        assert_ne!(second, first, "{description}: the base moved");
+        let entry = manifest_of(&fx.root, &r, &second).indexes[0].clone();
+        assert_eq!(
+            entry.updated_from.is_some(),
+            expected_updated,
+            "{description}: updated rather than built in full ({entry:?})"
+        );
+        if expected_updated {
+            assert_eq!(
+                entry.updated_from.as_deref(),
+                Some(first.as_str()),
+                "{description}: from"
+            );
+            assert_eq!(entry.chain, 1, "{description}: chain");
+        } else {
+            assert_eq!(
+                entry.chain, 0,
+                "{description}: a full build resets the chain"
+            );
+        }
+        assert_eq!(st.files, expected_files, "{description}: files");
+        let index = layout.generation(&second).join("index");
+        for token in found {
+            assert!(
+                hits(index.clone(), token).await > 0,
+                "{description}: `{token}` found"
+            );
+        }
+        for token in absent {
+            assert_eq!(
+                hits(index.clone(), token).await,
+                0,
+                "{description}: `{token}` gone"
+            );
+        }
+        if !matches!(between, Between::CorruptMeta | Between::SymlinkInIndex) {
+            assert_eq!(
+                std::fs::read(first_index.join("meta.json")).unwrap(),
+                first_meta,
+                "{description}: the previous generation is untouched"
+            );
+            assert!(
+                hits(first_index.clone(), "OLDTOKEN").await > 0,
+                "{description}: the previous generation still serves its base"
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::positive_segment("a segment file", "0123456789abcdef0123456789abcdef.idx", true)]
+    #[case::positive_delete_file(
+        "a segment's deletes",
+        "0123456789abcdef0123456789abcdef.17.del",
+        true
+    )]
+    #[case::negative_meta("tantivy's meta", "meta.json", false)]
+    #[case::negative_managed("tantivy's file list", ".managed.json", false)]
+    #[case::corner_no_extension("a bare id", "0123456789abcdef0123456789abcdef", false)]
+    #[case::boundary_short_id("an id one short", "0123456789abcdef0123456789abcde.idx", false)]
+    #[case::adversarial_uppercase("an uppercase id", "0123456789ABCDEF0123456789ABCDEF.idx", false)]
+    #[case::adversarial_traversal("a traversal", "0123456789abcdef0123456789abcdef.../x", false)]
+    fn segment_file_cases(#[case] description: &str, #[case] name: &str, #[case] expected: bool) {
+        assert_eq!(segment_file(name), expected, "{description}");
+    }
+
+    /// A copy shares segment files with its source and owns everything it rewrites.
+    #[test]
+    fn copy_index_links_segments_copies_the_rest() {
+        use std::os::unix::fs::MetadataExt;
+        let from = tempdir();
+        let to = tempdir().join("copy");
+        let seg = "0123456789abcdef0123456789abcdef.store";
+        for name in [seg, "meta.json", "manifest.json", ".tantivy-writer.lock"] {
+            std::fs::write(from.join(name), name).unwrap();
+        }
+        copy_index(&from, &to).unwrap();
+        let ino = |p: &Path| std::fs::metadata(p).unwrap().ino();
+        assert_eq!(
+            ino(&from.join(seg)),
+            ino(&to.join(seg)),
+            "a segment is linked"
+        );
+        for name in ["meta.json", "manifest.json"] {
+            assert_ne!(
+                ino(&from.join(name)),
+                ino(&to.join(name)),
+                "{name} is copied"
+            );
+            assert_eq!(
+                std::fs::read(to.join(name)).unwrap(),
+                name.as_bytes(),
+                "{name} content"
+            );
+        }
+        assert!(
+            !to.join(".tantivy-writer.lock").exists(),
+            "a lock file is left out"
+        );
+        // Writing the copy's meta never reaches the source.
+        std::fs::write(to.join("meta.json"), "changed").unwrap();
+        assert_eq!(std::fs::read(from.join("meta.json")).unwrap(), b"meta.json");
     }
 }

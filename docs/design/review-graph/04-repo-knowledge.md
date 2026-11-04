@@ -193,8 +193,29 @@ GC refcount.
 - **Setup.** The GitHub App must subscribe to Push events. Without them the
   `refresh_secs` poll still catches a moved base.
 
-Left for 5a-ii-d-ii and later: the incremental refresh, `knowledge_max_bytes`, and the
-language indexes, history signals and overview.
+### As built (5a-ii-d-ii-a)
+
+- **Update, not rebuild.** When the base moves and the last generation is usable (same
+  format, scope and a readable `meta.json`), the build copies it into `<sha>.partial`
+  and updates the copy. Tantivy segment files never change once written, so they are
+  hard-linked; `meta.json`, `manifest.json` and `.managed.json` are copied, lock files
+  skipped, and anything that is not a plain file refuses the copy. The generation that
+  reviews are reading is never written to, and it keeps serving until the swap.
+- **What changed comes from git.** A fresh checkout gives every file a new mtime, so the
+  manifest's mtime stamps can't tell. `RepoBackend::changed_paths(old_base, new_base)`
+  lists the paths that differ (two-dot `git diff --no-renames --name-only -z`), and
+  `TantivyBackend::reindex_changed` re-reads a file only if it is new, its size changed,
+  or git lists it. The scan still runs, so added and removed files, ignore rules and the
+  scope match a full build exactly.
+- **When it rebuilds instead:** a forced Re-index; no usable previous generation; 50
+  updates in a row (`chain`); more than 20,000 changed paths, or git can't list them;
+  in-scope changes over half the previous file count (at least 256); or a failed copy or
+  update, which is logged and followed by a full build.
+- **Manifest.** `updated_from` names the base the update started from and `chain` counts
+  updates since the last full build; both are absent after a full build.
+
+Left for 5a-ii-d-ii-b and later: `knowledge_max_bytes`, and the language indexes,
+history signals and overview.
 
 ## Refresh
 

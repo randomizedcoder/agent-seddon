@@ -574,7 +574,8 @@ mod tests {
     }
 
     /// The point of a scope: a change, new file or removal outside it leaves the index
-    /// fresh; one inside it makes it stale (the fixture is no git checkout, so the stat walk decides).
+    /// fresh; one inside it makes it stale (the fixture is no git checkout, so the stat
+    /// walk decides).
     #[rstest]
     #[case::positive_outside_change_stays_fresh(
         "a change outside the scope is ignored",

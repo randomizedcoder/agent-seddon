@@ -1436,6 +1436,21 @@ impl RepoBackend for MeteredRepo {
             .observe_repo_fetch(&self.name, start.elapsed().as_secs_f64());
         self.record("fetch_branch", start, out)
     }
+    async fn changed_paths(
+        &self,
+        from: &Revision,
+        to: &Revision,
+        limit: usize,
+    ) -> Result<Option<Vec<std::path::PathBuf>>> {
+        // Delegated explicitly: the default `None` would make every index build a full one.
+        let start = Instant::now();
+        let out = self
+            .inner
+            .changed_paths(from, to, limit)
+            .instrument(self.span("changed_paths"))
+            .await;
+        self.record("changed_paths", start, out)
+    }
     async fn fetch_pr(&self, number: u64) -> Result<Revision> {
         // A trait method with a default body must be delegated explicitly here, or
         // this decorator would silently shadow the real backend with the no-op

@@ -24,8 +24,9 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5a-ii-b | Portal index badge + Re-index button (contact sheet), #691's review items (failed-swap restore, `busy`, forced-while-waiting, wire test + client, RBAC row) | [04](04-repo-knowledge.md#as-built-5a-ii-b) | ✅ | #692 |
 | 5a-ii-c | Path-scoped indexing (nixpkgs by default), configurable Re-index cooldown, #692's review items | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #693 |
 | 5a-ii-c+ | #693's review items: scope tests (fresh outside, stale inside, files after a scope change), rune-safe portal clip, scope checks at load | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #694 |
-| 5a-ii-d-i | Push-webhook base-moved trigger, #694's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-i) | 🟡 | this PR |
-| 5a-ii-d-ii | Incremental refresh, `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
+| 5a-ii-d-i | Push-webhook base-moved trigger, #694's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-i) | ✅ | #695 |
+| 5a-ii-d-ii-a | Incremental refresh: a moved base updates a copy of the last generation from git's changed paths, #695's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-ii-a) | 🟡 | this PR |
+| 5a-ii-d-ii-b | `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
 | 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
@@ -321,7 +322,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #694 (dad01c11) after one fleet round with no must-fix. Its should-fix
   items are done in 5a-ii-d-i below.
 
-- **5a-ii-d-i** (this PR): a push to a watched repo's default branch queues its index.
+- **5a-ii-d-i** (#695, 7617d5d5): a push to a watched repo's default branch queues its index.
   - The webhook receiver parses `push`. Only a push whose `ref` is
     `refs/heads/<repository.default_branch>`, not a deletion, with a full lowercase-hex
     `after` (SHA-1 or SHA-256, not all zeros) becomes `BaseMoved`. Other branches, tags
@@ -339,3 +340,25 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     that are not plain relative (`..`, leading `/` or `./`, empty) fail at load; the
     `validate` doc names each failure's harm; a test runs the checks through
     `parse_config`; `scoped_freshness` has removal rows.
+
+  Merged as #695 (7617d5d5) after one fleet round with no must-fix. Its should-fix
+  items are done in 5a-ii-d-ii-a below.
+
+- **5a-ii-d-ii-a** (this PR): a moved base updates the last index instead of rebuilding.
+  - `RepoBackend::changed_paths(from, to, limit)` lists the paths git says differ
+    between two commits (two-dot, no rename detection, so a rename is a delete and an
+    add). Both revisions are resolved to oids first; past `limit` it returns `None`.
+  - `TantivyBackend::reindex_changed(changed)` re-reads a file only if it is new, its
+    size changed, or git lists it. The scan still runs, so added, removed, ignored and
+    out-of-scope files match a full build exactly.
+  - The build copies the previous generation into the staging dir: segment files are
+    hard-linked (tantivy never rewrites one), `meta.json` and the manifests are copied,
+    so the update never writes into the generation reviews are reading.
+  - A full build runs instead when the rebuild is forced, there is no usable previous
+    generation, the chain of updates reaches 50, git lists more than 20,000 paths, the
+    in-scope changes pass half the previous file count (at least 256), or the copy or
+    update fails. The manifest records `updated_from` and `chain`.
+  - From #695's draft: `FleetIndexer::base_moved` has no default and returns whether
+    the row was queued, so `Reindexing(n)` counts only queued rows; `parse_push` checks
+    the ref before reading `deleted`, so another branch's malformed push is ignored; the
+    scope error message names `./`; a long doc line is rewrapped.

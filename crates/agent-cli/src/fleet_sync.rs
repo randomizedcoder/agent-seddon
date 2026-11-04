@@ -602,6 +602,9 @@ mod tests {
         fn reindex(&self, _tenant: &str, _row: &FleetSession) -> agent_core::ReindexOutcome {
             agent_core::ReindexOutcome::Queued
         }
+        fn base_moved(&self, _tenant: &str, _row: &FleetSession) -> bool {
+            false
+        }
     }
 
     #[derive(Debug, Clone, Copy)]

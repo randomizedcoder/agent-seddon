@@ -177,6 +177,13 @@ are all skipped scans nothing rather than the whole tree. A path inside another 
 once. A change outside the scope leaves the index fresh. The fleet repo index uses it for
 `[[review_fleet.index.scopes]]`.
 
+**Changed-file reindex.** `TantivyBackend::reindex_changed(changed)` is `reindex` with a
+caller's list of changed paths (relative to the root): a file present in both the saved
+manifest and the scan, with the same size, is re-read only if the list names it, so an
+index copied from an older checkout (every mtime new) updates without reading every
+file. New, removed and resized files are handled as in `reindex`. The fleet repo index
+feeds it git's diff between the old and new base.
+
 **Read-only open.** `TantivyBackend::open_read_only(index_dir)` opens an existing, finished
 index for queries only: nothing is created (an empty or missing dir errs), no writer lock
 is taken, so any number of readers share an index another process builds, and `reindex`
