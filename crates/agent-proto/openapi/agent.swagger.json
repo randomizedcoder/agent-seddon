@@ -9841,6 +9841,11 @@
             "type": "object",
             "$ref": "#/definitions/agent.v1.ReviewRuleCount"
           }
+        },
+        "generated": {
+          "type": "integer",
+          "format": "int64",
+          "description": "How many of `total` are on generated code."
         }
       },
       "description": "The unified analysis digest (review-analysis-depth Stage 2): every\nReviewAnalysisReport's findings deduped, risk-ranked, and rule-bucketed into\none section. Tool-derived — no model."
@@ -9869,6 +9874,10 @@
         },
         "inChange": {
           "type": "boolean"
+        },
+        "generated": {
+          "type": "boolean",
+          "description": "The file is generated code (ranked last, tallied apart in the digest)."
         }
       },
       "description": "One static-analysis finding (a linter diagnostic). All fields are\ntool-derived and untrusted: `file` is repo-relative + confined, `message`\nbounded. `in_change` marks a finding on a file the change touched."
@@ -9964,6 +9973,11 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "changedGenerated": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Generated functions a diff hunk touched, left out of `changed_fns`."
         }
       }
     },
@@ -9993,6 +10007,19 @@
         "centrality": {
           "type": "number",
           "format": "double"
+        },
+        "endLine": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Last line (0 = unknown): with `line`, the span a diff hunk must overlap."
+        },
+        "test": {
+          "type": "boolean",
+          "description": "In a `_test.go` file."
+        },
+        "generated": {
+          "type": "boolean",
+          "description": "In a generated file (`// Code generated … DO NOT EDIT.` before `package`)."
         }
       },
       "description": "One function/method node in the call graph. Tool-derived + untrusted: `file`\nis repo-relative + confined, strings bounded."
@@ -10587,6 +10614,10 @@
           "format": "int64"
         },
         "inChange": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "generated": {
           "type": "integer",
           "format": "int64"
         }

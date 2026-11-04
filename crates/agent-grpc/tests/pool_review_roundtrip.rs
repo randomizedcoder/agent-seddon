@@ -170,6 +170,7 @@ impl ReviewCollector for FakeReview {
                     line: 1,
                     message: "Error return value is not checked".into(),
                     in_change: true,
+                    generated: false,
                 }],
             },
             signatures: agent_core::SignatureReport {
@@ -194,6 +195,9 @@ impl ReviewCollector for FakeReview {
                         file: "main.go".into(),
                         line: 5,
                         centrality: 0.5,
+                        end_line: 7,
+                        test: false,
+                        generated: false,
                     },
                     agent_core::CallGraphNode {
                         id: 1,
@@ -203,6 +207,9 @@ impl ReviewCollector for FakeReview {
                         file: "main.go".into(),
                         line: 9,
                         centrality: 1.0,
+                        end_line: 12,
+                        test: true,
+                        generated: true,
                     },
                 ],
                 edges: vec![agent_core::CallEdge {
@@ -217,6 +224,7 @@ impl ReviewCollector for FakeReview {
                     types: 0,
                 }],
                 truncated: false,
+                changed_generated: 3,
             },
             style: agent_core::StyleFacts {
                 comment_density: 0.25,
@@ -297,6 +305,7 @@ impl ReviewCollector for FakeReview {
                     line: 3,
                     message: "Double quote to prevent word splitting.".into(),
                     in_change: true,
+                    generated: false,
                 }],
             },
             go_checks: agent_core::AnalysisReport::default(),
@@ -334,6 +343,7 @@ impl ReviewCollector for FakeReview {
                     line: 1,
                     message: "Error return value is not checked".into(),
                     in_change: true,
+                    generated: true,
                 }],
                 total: 1,
                 in_change: 1,
@@ -342,7 +352,9 @@ impl ReviewCollector for FakeReview {
                     rule: "errcheck".into(),
                     count: 1,
                     in_change: 1,
+                    generated: 1,
                 }],
+                generated: 1,
             },
             digest_summary: "Mostly unchecked errors in the changed file.".into(),
         })
@@ -443,6 +455,13 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.callgraph.edges[0].callee_id, 1);
     assert_eq!(facts.callgraph.changed_fns, vec![1]);
     assert_eq!(facts.callgraph.packages[0].exported_fns, 1);
+    // The hunk span and the test/generated flags survive the wire.
+    let run = &facts.callgraph.nodes[1];
+    assert_eq!(
+        (run.line, run.end_line, run.test, run.generated),
+        (9, 12, true, true)
+    );
+    assert_eq!(facts.callgraph.changed_generated, 3);
     // Style fingerprint survives the wire round-trip.
     assert!(facts.style.indent_tabs);
     assert_eq!(facts.style.naming.functions, "pascal");
@@ -482,6 +501,12 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.digest.findings[0].rule, "errcheck");
     assert_eq!(facts.digest.rule_counts.len(), 1);
     assert_eq!(facts.digest.rule_counts[0].count, 1);
+    assert!(
+        facts.digest.findings[0].generated,
+        "finding.generated crosses the wire"
+    );
+    assert_eq!(facts.digest.rule_counts[0].generated, 1);
+    assert_eq!(facts.digest.generated, 1);
     assert_eq!(
         facts.digest_summary,
         "Mostly unchecked errors in the changed file."

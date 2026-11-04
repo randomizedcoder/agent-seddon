@@ -17,10 +17,13 @@ const MAX_GOMOD_LINES: usize = 200;
 /// Cap on a replace target echoed into a finding.
 const MAX_TARGET_CHARS: usize = 120;
 /// `go env GOVERSION` is instant; this only bounds a wedged toolchain.
-const GO_ENV_TIMEOUT_SECS: u64 = 30;
+pub(crate) const GO_ENV_TIMEOUT_SECS: u64 = 30;
 
 /// A Go version, ordered the way the toolchain orders them: the language version
-/// `1.27` < `1.27beta1` < `1.27rc2` < `1.27.0` < `1.27.3`.
+/// `1.27` < `1.27beta1` < `1.27rc2` < `1.27.0` < `1.27.3`. This is Go's own order
+/// (the `go/version` package docs: "the language version 1.21 is less than release
+/// candidate 1.21rc1, which is less than release 1.21.0"), so a `go 1.27` module
+/// loads on a 1.27rc toolchain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct GoVersion {
     major: u32,
@@ -390,6 +393,7 @@ mod tests {
     #[case::corner_climbs_back_in("climbing in then out stays inside", "replace a => ./x/../y\n", &[])]
     #[case::corner_quoted("a quoted absolute target", "replace a => \"/opt/x\"\n", &[(1, "/opt/x")])]
     #[case::corner_comment("a commented-out replace", "// replace a => /opt/x\n", &[])]
+    #[case::corner_block_no_space("`replace(` opens a block too", "replace(\n\ta => /opt/a\n)\n", &[(2, "/opt/a")])]
     #[case::corner_not_keyword("`replacement` is not the keyword", "replacement a => /opt/x\n", &[])]
     #[case::boundary_dot_dot_only("exactly `..`", "replace a => ..\n", &[(1, "..")])]
     #[case::boundary_line_cap(

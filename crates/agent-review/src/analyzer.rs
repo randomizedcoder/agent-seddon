@@ -127,7 +127,8 @@ impl FactCollector for AnalyzerCollector {
     /// Room for every planned tool to finish under `parallelism`, so the fan-out
     /// deadline never cuts off a clippy run its own timeout allows (and with it every
     /// other tool's findings). Graham's bound for any start order: the longest tool,
-    /// plus the lint tools spread over the slots, plus slack.
+    /// plus the lint tools spread over the slots, plus the go.mod preflight's
+    /// `go env` (it runs before the fan-out), plus slack.
     fn deadline(&self, default: std::time::Duration) -> std::time::Duration {
         let slots = (self.parallelism.max(1) as u64).min(MAX_LINT_TOOLS);
         let need = self
@@ -137,6 +138,7 @@ impl FactCollector for AnalyzerCollector {
                 self.timeout_secs
                     .saturating_mul(MAX_LINT_TOOLS.div_ceil(slots)),
             )
+            .saturating_add(crate::gomod::GO_ENV_TIMEOUT_SECS)
             .saturating_add(ANALYZER_DEADLINE_SLACK_SECS);
         default.max(std::time::Duration::from_secs(need))
     }
@@ -570,6 +572,7 @@ fn gomod_replace_findings(
                         r.target
                     ),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -641,7 +644,7 @@ async fn run_tool(
     };
     if out.exit_code != 0 && (found.is_empty() || load.is_some()) {
         let reason = load.unwrap_or_else(|| first_error_line(&out.stderr, &out.stdout));
-        let status = if reason.contains(GOLANGCI_GO_TOO_OLD) {
+        let status = if tool == "golangci-lint" && reason.contains(GOLANGCI_GO_TOO_OLD) {
             "skipped"
         } else {
             "failed"
@@ -754,6 +757,7 @@ fn parse_golangci(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<
                     line,
                     message: text.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -825,6 +829,7 @@ fn parse_clippy(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<An
                 line,
                 message: text.into(),
                 in_change: false,
+                generated: false,
             },
             root,
             changed,
@@ -875,6 +880,7 @@ fn parse_gosec(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
                     line,
                     message: details.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -900,6 +906,7 @@ fn parse_govet(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
                     line: ln,
                     message: msg.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -924,13 +931,22 @@ fn govet_diag(l: &str) -> Option<(&str, u32, &str)> {
     (!msg.is_empty()).then_some((file, ln, msg))
 }
 
+/// `go` progress lines that share vet's stderr and are not errors.
+const GO_PROGRESS: [&str; 3] = ["go: downloading ", "go: finding ", "go: extracting "];
+
 /// The first `go vet` stderr line that is neither a `# package` header nor a
 /// diagnostic: a load or type-check error (`go: … permission denied`, `vet: …`).
+/// `go`'s progress lines ([`GO_PROGRESS`]) share vet's stderr and are not errors.
 fn govet_load_error(stderr: &str) -> Option<String> {
     stderr
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with('#') && govet_diag(l).is_none())
+        .find(|l| {
+            !l.is_empty()
+                && !l.starts_with('#')
+                && !GO_PROGRESS.iter().any(|p| l.starts_with(p))
+                && govet_diag(l).is_none()
+        })
         .map(str::to_string)
 }
 
@@ -953,6 +969,7 @@ fn parse_gofmt(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
                     line: 0,
                     message: "file is not gofmt-formatted".into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -1036,6 +1053,7 @@ fn parse_cargo_audit(
             line: 0,
             message,
             in_change: false,
+            generated: false,
         }
     };
     // Security vulnerabilities.
@@ -1129,6 +1147,7 @@ fn parse_cargo_deny(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Ve
                 line: line_no,
                 message,
                 in_change: false,
+                generated: false,
             },
             root,
             changed,
@@ -1571,6 +1590,7 @@ mod tests {
             line: 5,
             message: "m".into(),
             in_change: true,
+            generated: false,
         };
         let mut v = vec![mk("golangci-lint"), mk("gosec"), {
             let mut o = mk("gosec");
@@ -1968,7 +1988,7 @@ mod tests {
         600,
         4,
         60,
-        (600, 705)
+        (600, 735)
     )]
     #[case::positive_lint_tool_keeps_short_timeout(
         "a linter keeps the short timeout",
@@ -1977,7 +1997,7 @@ mod tests {
         600,
         4,
         60,
-        (45, 705)
+        (45, 735)
     )]
     #[case::negative_parallelism_two_waits_for_three_waves(
         "parallelism 2: clippy may start after two Go tools run their full 45s (t=90, ends 690)",
@@ -1986,7 +2006,7 @@ mod tests {
         600,
         2,
         60,
-        (600, 750)
+        (600, 780)
     )]
     #[case::negative_parallelism_one_is_serial(
         "parallelism 1: every tool runs in turn (clippy may end at 870)",
@@ -1995,7 +2015,7 @@ mod tests {
         600,
         1,
         60,
-        (600, 885)
+        (600, 915)
     )]
     #[case::corner_parallelism_zero_means_one(
         "parallelism 0 is treated as 1",
@@ -2004,7 +2024,7 @@ mod tests {
         600,
         0,
         60,
-        (600, 885)
+        (600, 915)
     )]
     #[case::corner_build_shorter_than_lint(
         "a build timeout under the lint timeout uses the lint timeout as the longest tool",
@@ -2013,7 +2033,7 @@ mod tests {
         10,
         6,
         60,
-        (10, 105)
+        (10, 135)
     )]
     #[case::corner_default_already_longer(
         "a longer fan-out default is kept",
@@ -2031,7 +2051,7 @@ mod tests {
         1,
         1,
         0,
-        (1, 22)
+        (1, 52)
     )]
     #[case::boundary_more_slots_than_tools(
         "slots beyond the tool count don't shrink the bound below one wave",
@@ -2040,7 +2060,7 @@ mod tests {
         600,
         64,
         60,
-        (600, 660)
+        (600, 690)
     )]
     #[case::adversarial_huge_timeouts_saturate(
         "huge timeouts saturate, never overflow",
@@ -2058,7 +2078,7 @@ mod tests {
         600,
         usize::MAX,
         60,
-        (600, 660)
+        (600, 690)
     )]
     fn timeout_and_deadline_cases(
         #[case] description: &str,
@@ -2218,6 +2238,22 @@ mod tests {
         "",
         "go: downloading example.com/m v1.0.0\n",
         ("ok", "", 0)
+    )]
+    #[case::corner_govet_progress_with_findings(
+        "go's download progress next to real diagnostics is not a load error",
+        true,
+        1,
+        "",
+        "go: downloading example.com/m v1.0.0\ncmd/x/x.go:3:1: unreachable code\n",
+        ("ok", "", 1)
+    )]
+    #[case::negative_too_old_phrase_from_another_tool(
+        "only golangci-lint's own too-old message is a skip",
+        true,
+        1,
+        "",
+        "vet: x is lower than the targeted Go version\n",
+        ("failed", "lower than", 0)
     )]
     #[case::negative_json_tool_error(
         "golangci-lint with an empty JSON report and a non-zero exit is failed with stderr",

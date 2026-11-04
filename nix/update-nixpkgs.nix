@@ -27,6 +27,9 @@
 {
   pkgs,
 }:
+let
+  summary = import ./update-nixpkgs-summary.nix { inherit pkgs; };
+in
 pkgs.writeShellApplication {
   name = "update-nixpkgs";
   runtimeInputs = [
@@ -39,6 +42,7 @@ pkgs.writeShellApplication {
     pkgs.jq
     pkgs.nix
     pkgs.openssh
+    summary
   ];
   text = ''
     dry=0
@@ -61,7 +65,7 @@ pkgs.writeShellApplication {
     : "''${GIT_SSH_COMMAND:=ssh -o ControlMaster=no -o ControlPath=none}"
     export GIT_SSH_COMMAND
     # A timer may run with no git identity; the commit must not die after the gate.
-    if [ -z "$(git config user.email || true)" ]; then
+    if [ -z "$(git config user.email || true)" ] || [ -z "$(git config user.name || true)" ]; then
       export GIT_AUTHOR_NAME=update-nixpkgs GIT_AUTHOR_EMAIL=update-nixpkgs@localhost
       export GIT_COMMITTER_NAME=update-nixpkgs GIT_COMMITTER_EMAIL=update-nixpkgs@localhost
     fi
@@ -96,7 +100,13 @@ pkgs.writeShellApplication {
     }
     trap cleanup EXIT
     # A same-day rerun reuses the name (this job is the branch's only writer, so the
-    # push below forces: a stale remote copy from a failed run is replaced).
+    # push below forces: a stale remote copy from a failed run is replaced). A run
+    # that was killed (no EXIT trap) can leave a worktree holding the branch: drop
+    # it first, or `worktree add -b` dies.
+    git worktree prune
+    git worktree list --porcelain |
+      awk -v b="branch refs/heads/$branch" '/^worktree /{w=substr($0,10)} $0==b{print w}' |
+      while IFS= read -r stale; do git worktree remove --force "$stale" || true; done
     git branch -D "$branch" 2>/dev/null || true
     git worktree add -q -b "$branch" "$work" origin/main
     cd "$work"
@@ -126,12 +136,7 @@ pkgs.writeShellApplication {
     if [ -z "$stage" ]; then
       result="The gate (nix flake check --keep-going) passed."
     else
-      # nix names a failed derivation in several phrasings; take any of them.
-      failed=$(grep -oE "(Cannot build|builder for|derivation) '/nix/store/[a-z0-9]{32}-[^']+\.drv'" "$log" |
-        sed -E "s|.*/[a-z0-9]{32}-||; s|\.drv'$||" | sort -u | sed 's/^/- /' || true)
-      errors=$(grep -E '^error:' "$log" | cut -c1-300 | head -n 40 || true)
-      result=$(printf '%s Failing derivations:\n\n%s\n\nError lines (the full log is on the host that ran the job, %s):\n\n~~~\n%s\n~~~\n\nRebuild a flaky check alone before treating it as a blocker.' \
-        "$stage" "''${failed:-"- (none named)"}" "$log" "''${errors:-(none)}")
+      result=$(update-nixpkgs-summary "$stage" "$log")
     fi
     echo "$result"
 
@@ -149,8 +154,15 @@ pkgs.writeShellApplication {
     git push -q --force -u origin "$branch"
     body=$(printf 'Weekly nixpkgs bump (nix run .#update-nixpkgs).\n\n%s\n' "$result")
     # Two same-day runs (the timer and a manual one) can both pass the open-PR check;
-    # the later push then owns the branch, so its result replaces the PR's text.
+    # the later push then owns the branch, so its result replaces the PR's text —
+    # but only on this job's own PR: anyone else's is left alone, and the create
+    # error stands.
     if ! gh pr create --base main --head "$branch" --title "$title" --body "$body"; then
+      mine=$(gh pr list --state open --author "@me" --head "$branch" --json number --jq length)
+      if [ "$mine" != 1 ]; then
+        echo "update-nixpkgs: gh pr create failed, and $branch has no open PR of ours" >&2
+        exit 1
+      fi
       gh pr edit "$branch" --title "$title" --body "$body"
     fi
     # The PR holds the branch now; drop the local copy (cleanup), so a rerun works.

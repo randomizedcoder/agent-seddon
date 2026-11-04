@@ -81,6 +81,36 @@ async fn read_file_at_two_revisions() {
     assert_ne!(main.oid, feat.oid);
 }
 
+/// `read_file_capped`: the blob when it fits, `None` (never read) when it doesn't.
+/// a.txt at main is 6 bytes. Each row: revision, path, cap, expected outcome.
+#[rstest::rstest]
+#[case::positive_under_the_cap("main", "a.txt", 100, Ok(Some("hello\n")))]
+#[case::boundary_exactly_the_cap("main", "a.txt", 6, Ok(Some("hello\n")))]
+#[case::boundary_one_over_the_cap("main", "a.txt", 5, Ok(None))]
+#[case::corner_zero_cap("main", "a.txt", 0, Ok(None))]
+#[case::negative_missing_path("main", "b.txt", 100, Err(()))]
+#[case::adversarial_option_like_revision("--output=x", "a.txt", 100, Err(()))]
+#[tokio::test]
+async fn read_file_capped_cases(
+    #[case] rev: &str,
+    #[case] path: &str,
+    #[case] cap: u64,
+    #[case] want: Result<Option<&str>, ()>,
+) {
+    let dir = fixture();
+    let got = backend(&dir)
+        .read_file_capped(&Revision::from(rev), Path::new(path), cap)
+        .await;
+    match (got, want) {
+        (Ok(blob), Ok(w)) => {
+            assert_eq!(blob.map(|b| b.text).as_deref(), w, "{rev}:{path} cap {cap}");
+        }
+        (Err(_), Err(())) => {}
+        (g, w) => panic!("{rev}:{path} cap {cap}: got {g:?}, want {w:?}"),
+    }
+    assert!(!dir.join("x").exists(), "a revision is never an option");
+}
+
 #[tokio::test]
 async fn list_tree_sees_added_file_only_on_feature() {
     let dir = fixture();

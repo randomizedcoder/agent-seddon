@@ -98,6 +98,7 @@ impl FactCollector for ShellcheckCollector {
                                     MAX_MSG,
                                 ),
                                 in_change: changed_set.contains(&rel.to_string_lossy().into_owned()),
+                                generated: false,
                             });
                         }
                     }
@@ -221,6 +222,7 @@ fn parse_shellcheck_json1(
                     line,
                     message: message.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,

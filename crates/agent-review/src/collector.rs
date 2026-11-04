@@ -1,9 +1,11 @@
 //! The internal `FactCollector` abstraction the orchestrator fans out over.
 
 use agent_core::{
-    AnalysisReport, CallGraph, ChangeSet, ChurnReport, CoChangeReport, CollectStatus, GitState,
-    RepoBackend, Revision, Sandbox, SearchBackend, SignatureReport, StyleFacts, SummaryReport,
+    AnalysisReport, CallGraph, ChangeKind, ChangeSet, ChurnReport, CoChangeReport, CollectStatus,
+    GitState, RepoBackend, Revision, Sandbox, SearchBackend, SignatureReport, StyleFacts,
+    SummaryReport,
 };
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,6 +27,37 @@ pub(crate) struct CollectCtx {
     /// For collectors that run external tools (the analyzer). `None` ⇒ the
     /// analyzer is skipped fail-soft.
     pub sandbox: Option<Arc<dyn Sandbox>>,
+    /// [`CollectCtx::unproven_generated`]'s memo: probed once per review.
+    pub unproven: tokio::sync::OnceCell<Option<BTreeSet<String>>>,
+}
+
+impl CollectCtx {
+    /// The changed files whose "generated" status the PR could have made up
+    /// (`util::unproven_generated`), probed at the base once per review and shared
+    /// by the call graph and the analysis digest. `None` when the diff can't be
+    /// listed: no changed file is known, so a caller trusts no generated claim.
+    pub(crate) async fn unproven_generated(&self) -> Option<&BTreeSet<String>> {
+        self.unproven
+            .get_or_init(|| async {
+                let diff = self.repo.diff(&self.base, &self.head, &[]).await.ok()?;
+                let sides: Vec<(String, Option<String>)> = diff
+                    .files
+                    .into_iter()
+                    .filter_map(|f| {
+                        let lossy = |p: PathBuf| p.to_string_lossy().into_owned();
+                        let base_side = match f.change {
+                            ChangeKind::Added => None,
+                            _ => f.old_path.clone().or_else(|| f.new_path.clone()).map(lossy),
+                        };
+                        let path = f.new_path.or(f.old_path).map(lossy)?;
+                        Some((path, base_side))
+                    })
+                    .collect();
+                Some(crate::util::unproven_generated(self.repo.as_ref(), &self.base, sides).await)
+            })
+            .await
+            .as_ref()
+    }
 }
 
 /// A collector's typed contribution. One variant per collector; assembly into

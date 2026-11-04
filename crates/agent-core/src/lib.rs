@@ -5464,6 +5464,21 @@ pub trait RepoBackend: Send + Sync {
     async fn resolve(&self, rev: &Revision) -> Result<Oid>;
     /// Read a file's contents at a revision.
     async fn read_file(&self, rev: &Revision, path: &Path) -> Result<BlobContent>;
+    /// [`read_file`](Self::read_file), or `Ok(None)` when the blob is larger than
+    /// `max_bytes`, for a caller that only wants a small file (or a file's head) and
+    /// must not buffer a huge one the change controls. The default reads the whole
+    /// blob and then checks, so it bounds what the caller keeps, not the read; only
+    /// the git CLI asks the size first. A remote `GrpcRepo` read is bounded instead by
+    /// tonic's default 4 MiB decode limit (a bigger blob is an `Err`).
+    async fn read_file_capped(
+        &self,
+        rev: &Revision,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<BlobContent>> {
+        let blob = self.read_file(rev, path).await?;
+        Ok((blob.bytes_len <= max_bytes).then_some(blob))
+    }
     /// List a tree at a revision, optionally recursing.
     async fn list_tree(
         &self,
@@ -5880,6 +5895,11 @@ pub struct AnalysisFinding {
     pub message: String,
     /// The finding is on a file the change touched (foregrounded in the render).
     pub in_change: bool,
+    /// The file is generated code (a `Code generated … DO NOT EDIT.` / `@generated`
+    /// header, or a generated-code path): ranked last and tallied apart, since its
+    /// fix belongs in the generator, not the PR.
+    #[serde(default)]
+    pub generated: bool,
 }
 
 /// One analyzer tool invocation's outcome (self-describing, like [`CollectorStatus`]).
@@ -5951,6 +5971,16 @@ pub struct CallGraphNode {
     /// score: how much of the graph's importance flows into this function.
     #[serde(default)]
     pub centrality: f64,
+    /// The function's last line (`0` = unknown, from an older helper): with `line`,
+    /// the span a diff hunk must overlap for the function to count as changed.
+    #[serde(default)]
+    pub end_line: u32,
+    /// In a `_test.go` file.
+    #[serde(default)]
+    pub test: bool,
+    /// In a generated file (`// Code generated … DO NOT EDIT.` before `package`).
+    #[serde(default)]
+    pub generated: bool,
 }
 
 /// A syntactic caller→callee edge between two [`CallGraphNode`]s (name-resolved;
@@ -5977,9 +6007,14 @@ pub struct PackageShape {
 pub struct CallGraph {
     pub nodes: Vec<CallGraphNode>,
     pub edges: Vec<CallEdge>,
+    /// Hand-written functions a diff hunk touched (generated ones are counted in
+    /// `changed_generated` instead).
     pub changed_fns: Vec<u32>,
     pub packages: Vec<PackageShape>,
     pub truncated: bool,
+    /// Generated functions a diff hunk touched, left out of `changed_fns`.
+    #[serde(default)]
+    pub changed_generated: u32,
 }
 
 /// Naming-convention verdicts (increment 7 — code-style fingerprint). Each field is
@@ -6202,6 +6237,9 @@ pub struct RuleCount {
     pub count: u32,
     /// How many of `count` are on files the change touched.
     pub in_change: u32,
+    /// How many of `count` are on generated code.
+    #[serde(default)]
+    pub generated: u32,
 }
 
 /// The deterministic analysis digest (review-analysis-depth Stage 2): a post-fan-out
@@ -6223,6 +6261,9 @@ pub struct AnalysisDigest {
     pub in_change: u32,
     /// Per-`(tool, rule)` counts across all deduped findings, most-frequent first.
     pub rule_counts: Vec<RuleCount>,
+    /// How many of `total` are on generated code.
+    #[serde(default)]
+    pub generated: u32,
 }
 
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
@@ -8198,6 +8239,7 @@ mod tests {
             line: 10,
             message: message.into(),
             in_change: true,
+            generated: false,
         }
     }
 

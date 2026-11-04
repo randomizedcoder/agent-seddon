@@ -130,7 +130,7 @@ in
   # binaries are cached in /nix/store; the review flow shells out to them.
   # `go_latest`: Go is backward compatible, so the newest toolchain vets older
   # modules too, and a repo that targets a newer `go` directive than the pin is
-  # skipped with that reason (analyzer.rs `go_preflight`). `nix run
+  # skipped with that reason (agent-review `gomod::preflight`). `nix run
   # .#update-nixpkgs` moves it forward. The wrapper sets `GOTOOLCHAIN=local`, so
   # `go` never downloads a toolchain at review time.
   go = pkgs.go_latest;

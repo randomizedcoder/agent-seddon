@@ -646,6 +646,11 @@ const MAX_CALLERS: usize = 8;
 /// Render the call graph as a **blast radius**: for each changed function, its
 /// direct in-repo callers and its callee count. Nothing is emitted if the graph is
 /// empty (helper off/absent, or no Go source changed).
+///
+/// The changed functions are ranked so the cap keeps the load-bearing ones: code
+/// before tests, then most callers, then centrality. Callers list non-test code
+/// first and summarize tests as a count. The header says when the graph was cut by
+/// a size cap, and that callers are matched by name.
 fn render_callgraph(out: &mut String, g: &agent_core::CallGraph) {
     if g.nodes.is_empty() {
         return;
@@ -659,6 +664,31 @@ fn render_callgraph(out: &mut String, g: &agent_core::CallGraph) {
             format!("{}.{}", n.package, n.name)
         }
     };
+    // Direct callers of each node (self-calls dropped), in edge order.
+    let mut callers_of: std::collections::HashMap<u32, Vec<&agent_core::CallGraphNode>> =
+        std::collections::HashMap::new();
+    let mut calls_of: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for e in &g.edges {
+        *calls_of.entry(e.caller_id).or_default() += 1;
+        if e.caller_id != e.callee_id {
+            if let Some(c) = by_id.get(&e.caller_id) {
+                callers_of.entry(e.callee_id).or_default().push(c);
+            }
+        }
+    }
+    let mut changed: Vec<&agent_core::CallGraphNode> = g
+        .changed_fns
+        .iter()
+        .filter_map(|id| by_id.get(id).copied())
+        .collect();
+    changed.sort_by(|a, b| {
+        let callers = |n: &agent_core::CallGraphNode| callers_of.get(&n.id).map_or(0, Vec::len);
+        a.test
+            .cmp(&b.test)
+            .then(callers(b).cmp(&callers(a)))
+            .then(b.centrality.total_cmp(&a.centrality))
+            .then(a.id.cmp(&b.id))
+    });
 
     out.push_str(&format!(
         "\nCall graph — {} fn(s), {} edge(s) across {} package(s); blast radius of {} changed fn(s):\n",
@@ -667,47 +697,64 @@ fn render_callgraph(out: &mut String, g: &agent_core::CallGraph) {
         g.packages.len(),
         g.changed_fns.len(),
     ));
-    for id in g.changed_fns.iter().take(MAX_BLAST_FNS) {
-        let Some(node) = by_id.get(id) else { continue };
-        let callers: Vec<String> = g
-            .edges
-            .iter()
-            .filter(|e| e.callee_id == *id && e.caller_id != *id)
-            .filter_map(|e| by_id.get(&e.caller_id))
-            .map(|n| qual(n))
-            .collect();
-        let calls = g.edges.iter().filter(|e| e.caller_id == *id).count();
-        if callers.is_empty() {
+    out.push_str(
+        "  (callers are matched by name: a caller may be calling a same-named method of another type)\n",
+    );
+    if g.truncated {
+        out.push_str(
+            "  (graph truncated at a size cap: the changed functions' neighbourhood was kept first, \
+             but \"no in-repo callers\" may still be incomplete)\n",
+        );
+    }
+    for node in changed.iter().take(MAX_BLAST_FNS) {
+        let callers = callers_of.get(&node.id).map(Vec::as_slice).unwrap_or(&[]);
+        let (tests, code): (
+            Vec<&agent_core::CallGraphNode>,
+            Vec<&agent_core::CallGraphNode>,
+        ) = callers.iter().copied().partition(|c| c.test);
+        let calls = calls_of.get(&node.id).copied().unwrap_or(0);
+        let tag = if node.test { " [test]" } else { "" };
+        let tests_note = match tests.len() {
+            0 => String::new(),
+            1 => " · 1 test".to_string(),
+            n => format!(" · {n} tests"),
+        };
+        if code.is_empty() {
+            let who = if tests.is_empty() {
+                "no in-repo callers"
+            } else {
+                "no non-test callers"
+            };
             out.push_str(&format!(
-                "  {}  ← no in-repo callers  · calls {}\n",
-                qual(node),
-                calls
+                "  {}{tag}  ← {who}{tests_note}  · calls {calls}\n",
+                qual(node)
             ));
         } else {
-            let shown: Vec<String> = callers.iter().take(MAX_CALLERS).cloned().collect();
-            let more = callers.len().saturating_sub(shown.len());
+            let shown: Vec<String> = code.iter().take(MAX_CALLERS).map(|c| qual(c)).collect();
+            let more = code.len().saturating_sub(shown.len());
             let extra = if more > 0 {
                 format!(" (+{more} more)")
             } else {
                 String::new()
             };
             out.push_str(&format!(
-                "  {}  ← called by {}{}  · calls {}\n",
+                "  {}{tag}  ← called by {}{extra}{tests_note}  · calls {calls}\n",
                 qual(node),
                 shown.join(", "),
-                extra,
-                calls
             ));
         }
     }
-    if g.changed_fns.len() > MAX_BLAST_FNS {
+    if changed.len() > MAX_BLAST_FNS {
         out.push_str(&format!(
             "  … and {} more changed fn(s) (omitted)\n",
-            g.changed_fns.len() - MAX_BLAST_FNS
+            changed.len() - MAX_BLAST_FNS
         ));
     }
-    if g.truncated {
-        out.push_str("  (graph truncated — size cap reached)\n");
+    if g.changed_generated > 0 {
+        out.push_str(&format!(
+            "  {} generated fn(s) in the changed lines not shown (`Code generated … DO NOT EDIT.` files)\n",
+            g.changed_generated
+        ));
     }
 }
 
@@ -760,8 +807,16 @@ fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
     if d.total == 0 {
         return;
     }
+    let generated = if d.generated > 0 {
+        format!(
+            "; {} on generated code, ranked last — fix those in the generator, not the PR",
+            d.generated
+        )
+    } else {
+        String::new()
+    };
     out.push_str(&format!(
-        "\nAnalysis digest — {} finding(s) ({} on changed files), deduped across tools, risk-ranked:\n",
+        "\nAnalysis digest — {} finding(s) ({} on changed files{generated}), deduped across tools, risk-ranked:\n",
         d.total, d.in_change,
     ));
     // The bucketed rule tally, most-frequent first, before the verbatim list.
@@ -770,7 +825,10 @@ fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
             .rule_counts
             .iter()
             .take(MAX_DIGEST_RULES)
-            .map(|c| format!("{}/{} ×{}", c.tool, c.rule, c.count))
+            .map(|c| match c.generated {
+                0 => format!("{}/{} ×{}", c.tool, c.rule, c.count),
+                g => format!("{}/{} ×{} ({g} generated)", c.tool, c.rule, c.count),
+            })
             .collect();
         out.push_str(&format!("  By rule: {}", tally.join(", ")));
         if d.rule_counts.len() > MAX_DIGEST_RULES {
@@ -783,9 +841,10 @@ fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
     }
     for f in d.findings.iter().take(MAX_RENDERED_FINDINGS) {
         let scope = if f.in_change { "" } else { " [pre-existing]" };
+        let gen = if f.generated { " [generated]" } else { "" };
         out.push_str(&format!(
-            "  {} {}/{} {}:{} — {}{}\n",
-            f.severity, f.tool, f.rule, f.file, f.line, f.message, scope,
+            "  {} {}/{} {}:{} — {}{}{}\n",
+            f.severity, f.tool, f.rule, f.file, f.line, f.message, scope, gen,
         ));
     }
     // The list is capped twice (compute's cap, then the render cap); either way the
@@ -1062,6 +1121,42 @@ mod draft_tests {
     }
 
     #[test]
+    fn positive_renders_generated_findings_apart() {
+        // desc: a digest with generated-code findings says so in the header and the
+        // tally, and tags the finding. expect: all three.
+        let mut f = facts();
+        f.digest = agent_core::AnalysisDigest {
+            findings: vec![agent_core::AnalysisFinding {
+                tool: "gosec".into(),
+                rule: "G115".into(),
+                severity: "warning".into(),
+                file: "api/x.pb.go".into(),
+                line: 9,
+                message: "integer overflow conversion".into(),
+                in_change: true,
+                generated: true,
+            }],
+            total: 177,
+            in_change: 177,
+            generated: 170,
+            rule_counts: vec![agent_core::RuleCount {
+                tool: "gosec".into(),
+                rule: "G115".into(),
+                count: 177,
+                in_change: 177,
+                generated: 170,
+            }],
+        };
+        let md = render_facts(&f);
+        assert!(md.contains("170 on generated code, ranked last"), "{md}");
+        assert!(md.contains("gosec/G115 ×177 (170 generated)"), "{md}");
+        assert!(
+            md.contains("api/x.pb.go:9 — integer overflow conversion [generated]"),
+            "{md}"
+        );
+    }
+
+    #[test]
     fn positive_renders_digest_section_and_rule_tally() {
         // desc: a populated digest renders one unified section with the header, the
         // by-rule tally, and the ranked findings. expect: all three present.
@@ -1075,14 +1170,17 @@ mod draft_tests {
                 line: 3,
                 message: "unchecked error".into(),
                 in_change: true,
+                generated: false,
             }],
             total: 5,
             in_change: 4,
+            generated: 0,
             rule_counts: vec![agent_core::RuleCount {
                 tool: "golangci-lint".into(),
                 rule: "errcheck".into(),
                 count: 5,
                 in_change: 4,
+                generated: 0,
             }],
         };
         let md = render_facts(&f);
@@ -1132,6 +1230,150 @@ mod draft_tests {
         assert!(
             !md.contains("Analysis summary (cheap-LLM"),
             "no soft summary section when empty"
+        );
+    }
+
+    // ---- call-graph render (blast radius) -----------------------------------------
+
+    fn cg_node(id: u32, name: &str, test: bool, centrality: f64) -> agent_core::CallGraphNode {
+        agent_core::CallGraphNode {
+            id,
+            package: "p".into(),
+            name: name.into(),
+            file: if test {
+                "p/x_test.go".into()
+            } else {
+                "p/x.go".into()
+            },
+            line: 1,
+            end_line: 2,
+            test,
+            centrality,
+            ..Default::default()
+        }
+    }
+
+    fn cg_edge(caller_id: u32, callee_id: u32) -> agent_core::CallEdge {
+        agent_core::CallEdge {
+            caller_id,
+            callee_id,
+        }
+    }
+
+    fn rendered(g: &agent_core::CallGraph) -> String {
+        let mut out = String::new();
+        super::render_callgraph(&mut out, g);
+        out
+    }
+
+    /// Changed: Lonely (no callers), Hub (two code callers + a test) and TestHub (a
+    /// test). Each row: a tweak to the graph and the fragments expected (in order)
+    /// or forbidden.
+    #[rstest::rstest]
+    #[case::positive_ranked_by_callers(
+        "the most-called changed fn is listed first, tests last",
+        false, 0,
+        &["p.Hub  ← called by p.A, p.B · 1 test", "p.Lonely  ← no in-repo callers", "p.TestHub [test]"],
+        &[]
+    )]
+    #[case::positive_test_callers_summarized(
+        "a test caller is a count, not a name",
+        false, 0,
+        &["· 1 test"],
+        &["called by p.A, p.B, p.TestHub"]
+    )]
+    #[case::corner_truncated_note(
+        "a truncated graph says so in the header",
+        true, 0,
+        &["graph truncated at a size cap", "p.Hub"],
+        &[]
+    )]
+    #[case::negative_generated_count(
+        "generated fns are counted, not listed",
+        false, 177,
+        &["177 generated fn(s) in the changed lines not shown"],
+        &[]
+    )]
+    #[case::boundary_name_matched_note(
+        "the header says callers are name-matched",
+        false, 0,
+        &["matched by name"],
+        &["graph truncated"]
+    )]
+    fn render_callgraph_cases(
+        #[case] description: &str,
+        #[case] truncated: bool,
+        #[case] changed_generated: u32,
+        #[case] want_in_order: &[&str],
+        #[case] forbidden: &[&str],
+    ) {
+        let g = agent_core::CallGraph {
+            nodes: vec![
+                cg_node(0, "Lonely", false, 0.9),
+                cg_node(1, "Hub", false, 0.1),
+                cg_node(2, "A", false, 0.0),
+                cg_node(3, "B", false, 0.0),
+                cg_node(4, "TestHub", true, 0.0),
+            ],
+            edges: vec![cg_edge(2, 1), cg_edge(3, 1), cg_edge(4, 1)],
+            changed_fns: vec![4, 0, 1],
+            truncated,
+            changed_generated,
+            ..Default::default()
+        };
+        let out = rendered(&g);
+        let mut at = 0;
+        for want in want_in_order {
+            let found = out[at..].find(want);
+            assert!(
+                found.is_some(),
+                "{description}: `{want}` (in order) in:\n{out}"
+            );
+            at += found.unwrap() + want.len();
+        }
+        for bad in forbidden {
+            assert!(
+                !out.contains(bad),
+                "{description}: `{bad}` must not appear in:\n{out}"
+            );
+        }
+    }
+
+    /// Only test callers: say so rather than "no in-repo callers".
+    #[test]
+    fn corner_only_test_callers() {
+        let g = agent_core::CallGraph {
+            nodes: vec![cg_node(0, "F", false, 0.0), cg_node(1, "TestF", true, 0.0)],
+            edges: vec![cg_edge(1, 0)],
+            changed_fns: vec![0],
+            ..Default::default()
+        };
+        let out = rendered(&g);
+        assert!(out.contains("p.F  ← no non-test callers · 1 test"), "{out}");
+    }
+
+    /// A hostile graph: changed ids that name no node, and more changed fns than the
+    /// cap, render bounded and without panicking.
+    #[test]
+    fn adversarial_unknown_ids_and_many_changed() {
+        let nodes: Vec<_> = (0..200)
+            .map(|i| cg_node(i, &format!("F{i}"), false, 0.0))
+            .collect();
+        let mut changed: Vec<u32> = (0..200).collect();
+        changed.extend([9999, u32::MAX]);
+        let g = agent_core::CallGraph {
+            nodes,
+            changed_fns: changed,
+            ..Default::default()
+        };
+        let out = rendered(&g);
+        assert!(
+            out.contains("… and 160 more changed fn(s) (omitted)"),
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("← no in-repo callers").count(),
+            super::MAX_BLAST_FNS
         );
     }
 }

@@ -60,8 +60,13 @@ pub(crate) fn confined_relative(root: &Path, rel: &Path) -> Option<PathBuf> {
 /// the file changed, by how much) rather than flooding the context. Filename +
 /// suffix based, deliberately conservative (only well-known noise).
 pub(crate) fn is_noisy(path: &Path) -> bool {
+    is_lockfile(path) || is_generated_path(path)
+}
+
+/// A dependency lockfile (`Cargo.lock`, `go.sum`, `*.lock`, …).
+fn is_lockfile(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if matches!(
+    matches!(
         name,
         "Cargo.lock"
             | "package-lock.json"
@@ -72,12 +77,15 @@ pub(crate) fn is_noisy(path: &Path) -> bool {
             | "poetry.lock"
             | "Gemfile.lock"
             | "composer.lock"
-    ) {
-        return true;
-    }
+    ) || name.ends_with(".lock")
+}
+
+/// A path that is generated code by naming convention (protobuf/gRPC stubs,
+/// minified bundles, `_generated.go`, a `generated/` dir). Unlike [`is_noisy`],
+/// lockfiles are not code: a finding on `Cargo.lock` (an advisory) is real.
+pub(crate) fn is_generated_path(path: &Path) -> bool {
     let s = path.to_str().unwrap_or("");
-    name.ends_with(".lock")
-        || s.ends_with(".pb.go")
+    s.ends_with(".pb.go")
         || s.ends_with(".pb.rs")
         || s.ends_with("_pb2.py")
         || s.ends_with("_pb2.pyi")
@@ -85,6 +93,131 @@ pub(crate) fn is_noisy(path: &Path) -> bool {
         || s.ends_with(".min.css")
         || s.ends_with("_generated.go")
         || s.contains("/generated/")
+}
+
+/// How much of a file's head [`is_generated`] reads.
+pub(crate) const GENERATED_HEAD_BYTES: usize = 1024;
+
+/// Whether a file is generated code: [`is_generated_path`], or a generator's
+/// marker in its first [`GENERATED_HEAD_BYTES`] — Go's `// Code generated … DO NOT
+/// EDIT.` line (golang.org/s/generatedcode) before the `package` clause, or a
+/// comment line carrying `@generated` (prost, buf, many JS tools). `head` is
+/// untrusted file content; only whole comment lines count.
+pub(crate) fn is_generated(path: &Path, head: &[u8]) -> bool {
+    // Cargo.lock says `@generated`, but a finding on a lockfile (an advisory) is
+    // about the PR's dependencies, not generator output.
+    if is_lockfile(path) {
+        return false;
+    }
+    if is_generated_path(path) {
+        return true;
+    }
+    let head = &head[..head.len().min(GENERATED_HEAD_BYTES)];
+    let text = String::from_utf8_lossy(head);
+    for line in text.lines() {
+        let l = line.trim_end_matches('\r');
+        if l.starts_with("package ") {
+            break; // Go: the marker must come before the package clause
+        }
+        if is_marker_line(l) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A generator's marker line: Go's `// Code generated … DO NOT EDIT.`, or a
+/// comment line carrying `@generated`.
+fn is_marker_line(l: &str) -> bool {
+    if l.strip_prefix("// Code generated ")
+        .is_some_and(|rest| rest.ends_with(" DO NOT EDIT."))
+    {
+        return true;
+    }
+    let t = l.trim_start();
+    ["//", "#", "/*", "*"].iter().any(|c| t.starts_with(c)) && t.contains("@generated")
+}
+
+/// How many changed files [`unproven_generated`] reads at the base; past it, the
+/// rest are unproven (listed as hand-written).
+pub(crate) const MAX_BASE_PROBES: usize = 1024;
+
+/// How many base reads [`unproven_generated`] runs at once.
+const BASE_PROBE_PARALLELISM: usize = 8;
+
+/// The largest base blob [`unproven_generated`] reads for its head; a bigger file
+/// whose path doesn't decide it is unproven (listed as hand-written).
+pub(crate) const MAX_BASE_BLOB_BYTES: u64 = 8 << 20;
+
+/// The changed files (`(path, base-side path)`, the base side `None` for a file
+/// the change adds) whose generated status the PR could have made up: the base
+/// version wasn't already generated, or can't be read. A new file, a rename into a
+/// generated path, or a marker the PR adds — however it is spelled — is the
+/// change's own claim, so such a file is reviewed as hand-written; otherwise
+/// stamping a file "generated" would hide its changes from the call graph and rank
+/// its findings last. The base side's path rules decide without a read; only an
+/// undecided file's head is read, capped at [`MAX_BASE_BLOB_BYTES`].
+pub(crate) async fn unproven_generated(
+    repo: &dyn agent_core::RepoBackend,
+    base: &agent_core::Revision,
+    files: Vec<(String, Option<String>)>,
+) -> std::collections::BTreeSet<String> {
+    use futures_util::StreamExt;
+    let mut out = std::collections::BTreeSet::new();
+    let mut undecided: Vec<(String, String)> = Vec::new();
+    for (path, base_side) in files {
+        let Some(base_path) = base_side else {
+            out.insert(path); // added: no base side to prove it
+            continue;
+        };
+        let bp = Path::new(&base_path);
+        // The path rules decide most files without a read: a lockfile is never
+        // generated, and a generated path at the base is proven.
+        if is_lockfile(bp) {
+            out.insert(path);
+        } else if is_generated_path(bp) {
+            // proven
+        } else if undecided.len() < MAX_BASE_PROBES {
+            undecided.push((path, base_path));
+        } else {
+            out.insert(path);
+        }
+    }
+    let read: Vec<(String, bool)> = futures_util::stream::iter(undecided)
+        .map(|(path, base_path)| async move {
+            let bp = Path::new(&base_path);
+            let proven = match repo.read_file_capped(base, bp, MAX_BASE_BLOB_BYTES).await {
+                Ok(Some(blob)) if !blob.is_binary => {
+                    let head = blob.text.as_bytes();
+                    is_generated(bp, &head[..head.len().min(GENERATED_HEAD_BYTES)])
+                }
+                _ => false,
+            };
+            (path, proven)
+        })
+        .buffer_unordered(BASE_PROBE_PARALLELISM)
+        .collect()
+        .await;
+    out.extend(read.into_iter().filter(|(_, p)| !p).map(|(path, _)| path));
+    out
+}
+
+/// Read up to [`GENERATED_HEAD_BYTES`] of a repo file for [`is_generated`]. The
+/// path is untrusted: it is `confine`d, and only a regular file is opened (a FIFO
+/// or device would block or never end). `None` when it can't be read.
+pub(crate) fn read_head(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let full = agent_core::confine(root, rel).ok()?;
+    if !std::fs::metadata(&full).ok()?.is_file() {
+        return None;
+    }
+    let mut buf = Vec::with_capacity(GENERATED_HEAD_BYTES);
+    std::fs::File::open(&full)
+        .ok()?
+        .take(GENERATED_HEAD_BYTES as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
 }
 
 /// Truncate untrusted text to a byte-ish char budget, appending an honest marker.
@@ -175,6 +308,250 @@ pub(crate) fn forge_host(host: &str) -> ForgeHost {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// Each row: a path, its first bytes, and whether it is generated code.
+    #[rstest]
+    #[case::positive_go_header(
+        "Go's generator line",
+        "x/a.go",
+        "// Code generated by protoc-gen-go. DO NOT EDIT.\n\npackage x\n",
+        true
+    )]
+    #[case::positive_after_license(
+        "the marker under a license block",
+        "x/a.go",
+        "// Copyright 2026\n\n// Code generated by stringer; DO NOT EDIT.\npackage x\n",
+        true
+    )]
+    #[case::positive_at_generated(
+        "an @generated comment (prost)",
+        "src/a.rs",
+        "// This file is @generated by prost-build.\n",
+        true
+    )]
+    #[case::positive_path_rule(
+        "a .pb.go path, whatever its content",
+        "x/a.pb.go",
+        "package x\n",
+        true
+    )]
+    #[case::positive_generated_dir("a nested generated/ dir", "api/generated/a.go", "", true)]
+    #[case::negative_hand_written(
+        "an ordinary file",
+        "x/a.go",
+        "package x\n\nfunc F() {}\n",
+        false
+    )]
+    #[case::negative_lockfile(
+        "a lockfile is not generated code",
+        "Cargo.lock",
+        "# This file is automatically @generated by Cargo.\n",
+        false
+    )]
+    #[case::negative_after_package(
+        "the Go marker after package does not count",
+        "x/a.go",
+        "package x\n\n// Code generated by x. DO NOT EDIT.\n",
+        false
+    )]
+    #[case::corner_crlf(
+        "a CRLF header still counts",
+        "x/a.go",
+        "// Code generated by x. DO NOT EDIT.\r\npackage x\r\n",
+        true
+    )]
+    #[case::boundary_missing_period(
+        "the Go line must end with `DO NOT EDIT.`",
+        "x/a.go",
+        "// Code generated by x. DO NOT EDIT\npackage x\n",
+        false
+    )]
+    #[case::adversarial_marker_in_code(
+        "@generated inside code, not a comment",
+        "x/a.go",
+        "var s = \"@generated\"\n",
+        false
+    )]
+    #[case::adversarial_marker_past_head("a marker past the head is not read", "x/a.js", &format!("{}\n// @generated\n", "x".repeat(2000)), false)]
+    fn is_generated_cases(
+        #[case] description: &str,
+        #[case] path: &str,
+        #[case] head: &str,
+        #[case] want: bool,
+    ) {
+        assert_eq!(
+            is_generated(Path::new(path), head.as_bytes()),
+            want,
+            "{description}"
+        );
+    }
+
+    /// A base repo for [`unproven_generated`]: `x/gen.go` was generated at the base,
+    /// `x/hand.go` was not, `gen/old.go` was generated (a rename's old side).
+    fn base_repo() -> agent_testkit::FixtureRepo {
+        let gen = "// Code generated by x. DO NOT EDIT.\n\npackage x\n";
+        agent_testkit::FixtureRepo::new()
+            .with_blob("base", "x/gen.go", gen)
+            .with_blob("base", "x/hand.go", "package x\n")
+            .with_blob("base", "gen/old.go", gen)
+            .with_blob(
+                "base",
+                "x/lit.go",
+                "package x\n\nvar s = \"// @generated\"\n",
+            )
+    }
+
+    #[rstest]
+    #[case::positive_generated_at_base(
+        "already generated before the PR",
+        "x/gen.go",
+        Some("x/gen.go"),
+        false
+    )]
+    #[case::positive_rename_of_generated(
+        "a rename keeps its base side's status",
+        "y/new.go",
+        Some("gen/old.go"),
+        false
+    )]
+    #[case::positive_generated_path_needs_no_read(
+        "a generated path at the base is proven by its path",
+        "p/api.pb.go",
+        Some("p/api.pb.go"),
+        false
+    )]
+    #[case::negative_hand_written_at_base(
+        "the PR stamps a hand-written file",
+        "x/hand.go",
+        Some("x/hand.go"),
+        true
+    )]
+    #[case::negative_new_file(
+        "a file the PR adds has no base to prove it",
+        "x/added.go",
+        None,
+        true
+    )]
+    #[case::negative_lockfile(
+        "a lockfile is never generated",
+        "Cargo.lock",
+        Some("Cargo.lock"),
+        true
+    )]
+    #[case::corner_rename_into_generated_path(
+        "a rename into a generated path is the PR's claim",
+        "z/evil.pb.go",
+        Some("x/hand.go"),
+        true
+    )]
+    #[case::adversarial_new_file_with_generated_name(
+        "a file the PR adds under a generated name is still its own claim",
+        "x/added.pb.go",
+        None,
+        true
+    )]
+    #[case::adversarial_marker_in_string(
+        "a marker inside a string at the base is not a marker",
+        "x/lit.go",
+        Some("x/lit.go"),
+        true
+    )]
+    #[case::adversarial_traversal(
+        "a base path that climbs out reads nothing",
+        "x/a.go",
+        Some("../../etc/passwd"),
+        true
+    )]
+    #[tokio::test]
+    async fn unproven_generated_cases(
+        #[case] description: &str,
+        #[case] path: &str,
+        #[case] base_side: Option<&str>,
+        #[case] unproven: bool,
+    ) {
+        let repo = base_repo();
+        let got = unproven_generated(
+            &repo,
+            &agent_core::Revision::from("base".to_string()),
+            vec![(path.to_string(), base_side.map(str::to_string))],
+        )
+        .await;
+        assert_eq!(got.contains(path), unproven, "{description}");
+    }
+
+    #[tokio::test]
+    async fn boundary_probes_past_the_cap_are_unproven() {
+        // desc: only MAX_BASE_PROBES files are read; the rest stay hand-written.
+        let repo = base_repo();
+        let files =
+            vec![("x/gen.go".to_string(), Some("x/gen.go".to_string())); MAX_BASE_PROBES + 1];
+        let first = unproven_generated(
+            &repo,
+            &agent_core::Revision::from("base".to_string()),
+            files,
+        )
+        .await;
+        assert!(
+            first.contains("x/gen.go"),
+            "the file past the cap is unproven"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_base_blob_over_the_cap_is_unproven() {
+        // desc: a marked base file bigger than MAX_BASE_BLOB_BYTES is not read, so it
+        // stays hand-written; one byte under is read and proven.
+        let marked = |n: usize| {
+            let mut s = "// Code generated by x. DO NOT EDIT.\n\npackage x\n".to_string();
+            s.push_str(&"/".repeat(n - s.len()));
+            s
+        };
+        let cap = MAX_BASE_BLOB_BYTES as usize;
+        let repo = agent_testkit::FixtureRepo::new()
+            .with_blob("base", "x/big.go", marked(cap + 1))
+            .with_blob("base", "x/fits.go", marked(cap));
+        let side = |p: &str| (p.to_string(), Some(p.to_string()));
+        let got = unproven_generated(
+            &repo,
+            &agent_core::Revision::from("base".to_string()),
+            vec![side("x/big.go"), side("x/fits.go")],
+        )
+        .await;
+        assert!(got.contains("x/big.go"), "over the cap: unproven");
+        assert!(!got.contains("x/fits.go"), "at the cap: read and proven");
+    }
+
+    /// Each row: what the path names, and whether a head is read from it.
+    #[rstest]
+    #[case::positive_file("a regular file", "a.go", true)]
+    #[case::negative_missing("a missing file", "nope.go", false)]
+    #[case::negative_dir("a directory", "d", false)]
+    #[case::adversarial_traversal("a path out of the repo", "../outside.go", false)]
+    #[case::adversarial_absolute("an absolute path", "/etc/passwd", false)]
+    fn read_head_cases(#[case] description: &str, #[case] rel: &str, #[case] want: bool) {
+        let dir = agent_testkit::tempdir();
+        let root = dir.join("repo");
+        std::fs::create_dir_all(root.join("d")).unwrap();
+        std::fs::write(root.join("a.go"), "x".repeat(5000)).unwrap();
+        std::fs::write(dir.join("outside.go"), "secret").unwrap();
+        let got = read_head(&root, rel);
+        assert_eq!(got.is_some(), want, "{description}");
+        if let Some(b) = got {
+            assert_eq!(b.len(), GENERATED_HEAD_BYTES, "{description}: capped");
+        }
+    }
+
+    /// A symlink in the repo that points out of it is not read.
+    #[cfg(unix)]
+    #[test]
+    fn adversarial_read_head_symlink_escape() {
+        let dir = agent_testkit::tempdir();
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.join("secret.go"), "// @generated").unwrap();
+        std::os::unix::fs::symlink(dir.join("secret.go"), root.join("link.go")).unwrap();
+        assert!(read_head(&root, "link.go").is_none());
+    }
 
     #[rstest]
     #[case::positive_https(

@@ -17,8 +17,8 @@
 //! the render cap — the tail is summarized, never silently dropped.
 
 use agent_core::{
-    AnalysisDigest, AnalysisFinding, CompletionRequest, LlmPool, Message, ReviewFacts, RouteHint,
-    RouteRole, RuleCount,
+    AnalysisDigest, AnalysisFinding, AnalysisReport, CompletionRequest, LlmPool, Message,
+    ReviewFacts, RouteHint, RouteRole, RuleCount,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -48,19 +48,68 @@ fn severity_rank(sev: &str) -> u8 {
     }
 }
 
-/// Fold every analysis report's findings into one deduped, risk-ranked, bucketed
-/// digest. Empty when nothing produced a finding.
-pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
-    // Every source of static-analysis findings, in a stable order (so dedup keeps a
-    // deterministic first-seen when the same finding appears in two reports).
-    let reports = [
+/// Every source of static-analysis findings, in a stable order (so dedup keeps a
+/// deterministic first-seen when the same finding appears in two reports). The one
+/// list both [`tag_generated`] and [`compute`] walk, so a new report is either
+/// tagged and folded, or neither. Keep [`reports_mut`] in the same order.
+fn reports(facts: &ReviewFacts) -> [&AnalysisReport; 4] {
+    [
         &facts.analysis,
         &facts.shellcheck,
         &facts.go_checks,
         &facts.nearby,
-    ];
+    ]
+}
+
+/// [`reports`], mutably.
+fn reports_mut(facts: &mut ReviewFacts) -> [&mut AnalysisReport; 4] {
+    [
+        &mut facts.analysis,
+        &mut facts.shellcheck,
+        &mut facts.go_checks,
+        &mut facts.nearby,
+    ]
+}
+
+/// How many distinct files [`tag_generated`] reads a head from; past it, only the
+/// path rules apply.
+const MAX_GENERATED_PROBES: usize = 4096;
+
+/// Tag every analysis finding on generated code (`util::is_generated`: the path
+/// rules, or a generator marker in the file's head under `root`). Runs after the
+/// fan-out so every collector's findings get the same rule, once per file. A
+/// changed file whose base side wasn't already generated (`unproven`, see
+/// `util::unproven_generated`) is the PR's own claim and is not tagged.
+pub(crate) fn tag_generated(
+    facts: &mut ReviewFacts,
+    root: &std::path::Path,
+    unproven: &BTreeSet<String>,
+) {
+    let mut cache: HashMap<String, bool> = HashMap::new();
+    for report in reports_mut(facts) {
+        for f in &mut report.findings {
+            if unproven.contains(&f.file) {
+                continue;
+            }
+            let probes = cache.len();
+            f.generated = *cache.entry(f.file.clone()).or_insert_with(|| {
+                let path = std::path::Path::new(&f.file);
+                let head = if probes < MAX_GENERATED_PROBES {
+                    crate::util::read_head(root, &f.file).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                crate::util::is_generated(path, &head)
+            });
+        }
+    }
+}
+
+/// Fold every analysis report's findings into one deduped, risk-ranked, bucketed
+/// digest. Empty when nothing produced a finding.
+pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
     let mut all: Vec<AnalysisFinding> = Vec::new();
-    for r in reports {
+    for r in reports(facts) {
         all.extend(r.findings.iter().cloned());
     }
     if all.is_empty() {
@@ -82,11 +131,13 @@ pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
     let risk_of =
         |f: &AnalysisFinding| -> f64 { risk_by_file.get(f.file.as_str()).copied().unwrap_or(0.0) };
 
-    // Rank: changed-file first, then higher risk-file score, then error before
-    // warning, then a stable (file, line, tool, rule) tiebreak for determinism.
+    // Rank: hand-written before generated (a generated file's fix is in its
+    // generator), then changed-file first, then higher risk-file score, then error
+    // before warning, then a stable (file, line, tool, rule) tiebreak.
     all.sort_by(|a, b| {
-        b.in_change
-            .cmp(&a.in_change)
+        a.generated
+            .cmp(&b.generated)
+            .then_with(|| b.in_change.cmp(&a.in_change))
             .then_with(|| {
                 risk_of(b)
                     .partial_cmp(&risk_of(a))
@@ -101,25 +152,30 @@ pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
 
     let total = all.len() as u32;
     let in_change = all.iter().filter(|f| f.in_change).count() as u32;
+    let generated = all.iter().filter(|f| f.generated).count() as u32;
 
     // Per-(tool, rule) tally over the whole deduped set — most-frequent first.
-    let mut counts: BTreeMap<(String, String), (u32, u32)> = BTreeMap::new();
+    let mut counts: BTreeMap<(String, String), (u32, u32, u32)> = BTreeMap::new();
     for f in &all {
         let e = counts
             .entry((f.tool.clone(), f.rule.clone()))
-            .or_insert((0, 0));
+            .or_insert((0, 0, 0));
         e.0 += 1;
         if f.in_change {
             e.1 += 1;
         }
+        if f.generated {
+            e.2 += 1;
+        }
     }
     let mut rule_counts: Vec<RuleCount> = counts
         .into_iter()
-        .map(|((tool, rule), (count, in_change))| RuleCount {
+        .map(|((tool, rule), (count, in_change, generated))| RuleCount {
             tool,
             rule,
             count,
             in_change,
+            generated,
         })
         .collect();
     rule_counts.sort_by(|a, b| {
@@ -137,6 +193,7 @@ pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
         total,
         in_change,
         rule_counts,
+        generated,
     }
 }
 
@@ -190,13 +247,13 @@ pub(crate) async fn summarize(pool: Arc<dyn LlmPool>, d: &AnalysisDigest) -> Str
 /// the whole set without the raw diff.
 fn summary_prompt(d: &AnalysisDigest) -> String {
     let mut p = format!(
-        "{} static-analysis finding(s), {} on changed files.\n\nBy rule (most frequent first):\n",
-        d.total, d.in_change
+        "{} static-analysis finding(s), {} on changed files, {} on generated code.\n\nBy rule (most frequent first):\n",
+        d.total, d.in_change, d.generated
     );
     for c in d.rule_counts.iter().take(SUMMARY_PROMPT_RULES) {
         p.push_str(&format!(
-            "  {}/{}: {} ({} on changed files)\n",
-            c.tool, c.rule, c.count, c.in_change
+            "  {}/{}: {} ({} on changed files, {} generated)\n",
+            c.tool, c.rule, c.count, c.in_change, c.generated
         ));
     }
     p.push_str("\nTop findings (changed-file / high-risk first):\n");
@@ -236,6 +293,7 @@ mod tests {
             line,
             message: format!("{rule} at {file}:{line}"),
             in_change,
+            generated: false,
         }
     }
 
@@ -370,6 +428,83 @@ mod tests {
         assert_eq!(d.rule_counts[0].count, 3);
         assert_eq!(d.rule_counts[0].in_change, 2);
         assert_eq!(d.rule_counts[1].rule, "gocritic");
+    }
+
+    #[test]
+    fn positive_generated_ranked_last_and_tallied() {
+        // desc: a generated-code finding on a changed, high-risk file still ranks
+        // below a hand-written pre-existing one, and is tallied apart. expect: order
+        // [hand.rs, gen.pb.go]; digest and rule tallies count 1 generated.
+        let mut gen = finding("gosec", "G115", "error", "gen.pb.go", 1, true);
+        gen.generated = true;
+        let f = facts_with(
+            vec![
+                gen,
+                finding("gosec", "G115", "warning", "hand.go", 1, false),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![("gen.pb.go", 0.9)],
+        );
+        let d = compute(&f);
+        let order: Vec<&str> = d.findings.iter().map(|x| x.file.as_str()).collect();
+        assert_eq!(order, vec!["hand.go", "gen.pb.go"]);
+        assert_eq!(d.generated, 1);
+        assert_eq!((d.rule_counts[0].count, d.rule_counts[0].generated), (2, 1));
+    }
+
+    /// Each row: a finding's file (written under the root with `body`, unless
+    /// `None`), whether the PR added its marker, and whether it is tagged.
+    #[rstest]
+    #[case::positive_header(
+        "a Go generator header",
+        "x/a.go",
+        Some("// Code generated by x. DO NOT EDIT.\n\npackage x\n"),
+        false,
+        true
+    )]
+    #[case::positive_path_rule("a .pb.go path, even unread", "x/a.pb.go", None, false, true)]
+    #[case::negative_hand_written("an ordinary file", "x/b.go", Some("package x\n"), false, false)]
+    #[case::negative_missing_file("a file not in the checkout", "x/gone.go", None, false, false)]
+    #[case::adversarial_unproven_by_base(
+        "the PR stamped it generated; its base was not",
+        "x/c.go",
+        Some("// Code generated by x. DO NOT EDIT.\npackage x\n"),
+        true,
+        false
+    )]
+    #[case::adversarial_traversal(
+        "a path out of the repo is not read",
+        "../escape.go",
+        None,
+        false,
+        false
+    )]
+    fn tag_generated_cases(
+        #[case] description: &str,
+        #[case] file: &str,
+        #[case] body: Option<&str>,
+        #[case] stamped: bool,
+        #[case] want: bool,
+    ) {
+        let dir = agent_testkit::tempdir();
+        let root = dir.join("repo");
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        std::fs::write(dir.join("escape.go"), "// @generated\n").unwrap();
+        if let Some(b) = body {
+            std::fs::write(root.join(file), b).unwrap();
+        }
+        let mut f = facts_with(
+            vec![],
+            vec![finding("shellcheck", "SC1", "warning", file, 1, true)],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let marker: BTreeSet<String> = stamped.then(|| file.to_string()).into_iter().collect();
+        tag_generated(&mut f, &root, &marker);
+        assert_eq!(f.shellcheck.findings[0].generated, want, "{description}");
     }
 
     #[test]
@@ -521,11 +656,13 @@ mod tests {
                 .collect(),
             total,
             in_change: total,
+            generated: 0,
             rule_counts: vec![RuleCount {
                 tool: "gosec".into(),
                 rule: "G204".into(),
                 count: total,
                 in_change: total,
+                generated: 0,
             }],
         }
     }

@@ -7,3 +7,6 @@ Hold the change to the conventions of the language it's written in:
   propose the small refactor that shares it.
 - Nearby similar code — this PR changes one part of the codebase; check whether the
   same changes need to be applied to other nearby similar code, and call out where.
+  When the brief says the repo index is ready, use the `search` tool to find the
+  callers of a changed function and similar code outside the PR's files; the call
+  graph's callers are matched by name only.

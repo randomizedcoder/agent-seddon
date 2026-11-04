@@ -437,6 +437,7 @@ impl ReviewCollector for ReviewOrchestrator {
             search: self.search.clone(),
             branch_names: r.branch_names,
             sandbox: self.sandbox.clone(),
+            unproven: Default::default(),
         };
 
         let span = tracing::info_span!(
@@ -444,11 +445,18 @@ impl ReviewCollector for ReviewOrchestrator {
             base = %ctx.base_label,
             head = %ctx.head_label,
         );
-        let outputs = async {
-            futures_util::future::join_all(
-                self.collectors
-                    .iter()
-                    .map(|c| run_one(c.as_ref(), &ctx, c.deadline(self.deadline))),
+        // The base-side generated probe runs beside the collectors, under the
+        // fan-out default deadline (the call graph shares it); the digest below
+        // only reads what it found, so it never adds time after the fan-out.
+        let probe = tokio::time::timeout(self.deadline, ctx.unproven_generated());
+        let (outputs, _) = async {
+            futures_util::future::join(
+                futures_util::future::join_all(
+                    self.collectors
+                        .iter()
+                        .map(|c| run_one(c.as_ref(), &ctx, c.deadline(self.deadline))),
+                ),
+                probe,
             )
             .await
         }
@@ -599,6 +607,13 @@ impl ReviewCollector for ReviewOrchestrator {
         // Analysis digest: fold every analysis report's findings into one deduped,
         // risk-ranked, rule-bucketed section. Runs last — it reads the assembled
         // findings AND the risk scores computed just above. Purely tool-derived.
+        // Generated code first: its findings rank last and are tallied apart. A
+        // changed file is trusted as generated only if its base side already was
+        // (probed during the fan-out, shared with the call graph); with no diff, or
+        // a probe that didn't finish in time, nothing is.
+        if let Some(Some(unproven)) = ctx.unproven.get() {
+            crate::digest::tag_generated(&mut facts, &self.repo_root, unproven);
+        }
         facts.digest = crate::digest::compute(&facts);
 
         // Stage 3 (Inc 4): on a findings-heavy PR, add a cheap local-LLM prose
@@ -693,6 +708,8 @@ mod tests {
         fetched: Arc<Mutex<Vec<u64>>>,
         /// The head oid `fetch_pr` (and a present `resolve`) yields.
         head_oid: String,
+        /// Every file read hangs (a stuck base probe).
+        hang_reads: bool,
     }
 
     impl PrFakeRepo {
@@ -702,6 +719,7 @@ mod tests {
                 pr_present,
                 fetched: Arc::new(Mutex::new(Vec::new())),
                 head_oid: "a".repeat(40),
+                hang_reads: false,
             }
         }
     }
@@ -726,6 +744,9 @@ mod tests {
             self.inner.fetch_branch(branch).await
         }
         async fn read_file(&self, rev: &Revision, path: &Path) -> Result<agent_core::BlobContent> {
+            if self.hang_reads {
+                std::future::pending::<()>().await;
+            }
             self.inner.read_file(rev, path).await
         }
         async fn list_tree(
@@ -927,6 +948,37 @@ mod tests {
         );
         assert_eq!(r.head.as_str(), head_oid, "head from the present local ref");
     }
+    /// A base read that never returns can't hold `collect` past the fan-out: the
+    /// generated probe runs beside the collectors under the same deadline, and the
+    /// digest only reads what it found.
+    #[tokio::test]
+    async fn adversarial_hanging_base_probe_is_bounded() {
+        let mut repo = PrFakeRepo::new(true);
+        repo.inner = repo.inner.with_diff(vec![agent_core::FileDiff {
+            change: agent_core::ChangeKind::Modified,
+            old_path: Some("x/a.go".into()),
+            new_path: Some("x/a.go".into()),
+            old_oid: None,
+            new_oid: None,
+            additions: 1,
+            deletions: 0,
+            patch: "@@ -1 +1 @@\n+a\n".into(),
+        }]);
+        repo.hang_reads = true;
+        let o = orchestrator(Arc::new(repo)).with_deadline(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let facts = tokio::time::timeout(Duration::from_secs(10), o.collect(&ReviewTarget::Pr(7)))
+            .await
+            .expect("collect is bounded by the fan-out deadline")
+            .expect("collect");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(facts.analysis.findings.iter().all(|f| !f.generated));
+    }
+
     /// A collector that takes `takes` and asks for `wants` (or the default).
     struct Sleepy {
         takes: Duration,
@@ -958,6 +1010,7 @@ mod tests {
             repo: Arc::new(agent_testkit::FixtureRepo::new()),
             search: None,
             branch_names: Vec::new(),
+            unproven: Default::default(),
             sandbox: None,
         }
     }
@@ -1018,23 +1071,23 @@ mod tests {
         45,
         600,
         4,
-        705
+        735
     )]
-    #[case::boundary_zeros_raise_to_one("zero timeouts and parallelism become 1", 0, 0, 0, 22)]
+    #[case::boundary_zeros_raise_to_one("zero timeouts and parallelism become 1", 0, 0, 0, 52)]
     #[case::boundary_build_at_cap(
         "a build timeout of exactly the cap is kept",
         45,
         3_600,
         4,
-        3_705
+        3_735
     )]
-    #[case::boundary_build_over_cap("one second over the cap is clamped", 45, 3_601, 4, 3_705)]
+    #[case::boundary_build_over_cap("one second over the cap is clamped", 45, 3_601, 4, 3_735)]
     #[case::adversarial_huge_build_timeout(
         "u64::MAX build timeout is capped at an hour",
         45,
         u64::MAX,
         4,
-        3_705
+        3_735
     )]
     fn with_analyzer_clamp_cases(
         #[case] description: &str,
@@ -1063,10 +1116,10 @@ mod tests {
     /// `collect_deadline` is the slowest collector's deadline, never under the default.
     #[rstest::rstest]
     #[case::positive_analyzer_stretches(
-        "the analyzer's 705s outlasts a 60s default",
+        "the analyzer's 735s outlasts a 60s default",
         60,
         true,
-        705
+        735
     )]
     #[case::positive_no_stretch("without the analyzer the default is the bound", 60, false, 60)]
     #[case::corner_default_wins("a default above the analyzer's deadline is kept", 900, true, 900)]
@@ -1074,7 +1127,7 @@ mod tests {
         "a zero default still allows the analyzer its time",
         0,
         true,
-        705
+        735
     )]
     #[case::adversarial_huge_default(
         "a huge default is returned, not overflowed",

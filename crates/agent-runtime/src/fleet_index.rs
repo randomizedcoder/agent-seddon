@@ -285,7 +285,7 @@ pub(crate) async fn open_row_search(
                 other => format!("; the row is {}, so this is the last good index", other.as_str()),
             };
             let note = format!(
-                "Repo index: the default branch at {} ({files} files{partial}{stale}). Search hits are pre-PR content.",
+                "Repo index: the default branch at {} ({files} files{partial}{stale}). Use the `search` tool to find callers, similar code and conventions outside the PR's files; its hits are pre-PR content.",
                 &base_sha[..12]
             );
             match TantivyBackend::open_read_only(dir) {
