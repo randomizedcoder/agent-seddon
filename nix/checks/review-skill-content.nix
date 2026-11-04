@@ -56,6 +56,11 @@ pkgs.runCommand "agent-review-skill-content"
       || fail "OS-silence rule lost"
     grep -qi "untrusted"          "$frag/0007_security.md"          || fail "security bar lost"
     grep -qi "order the written review" "$frag/0008_output_order.md" || fail "output-order lost"
+    # Found on xtcp2: callers missed without the index, and a wrong kernel constant
+    # stated as the main finding.
+    grep -qi "search. tool to find the" "$frag/0004_idioms_and_dry.md" \
+      || fail "use-search-for-callers rule lost"
+    grep -qi "marked unverified"  "$frag/0008_output_order.md"  || fail "external-fact rule lost"
 
     # The code-review SKILL.md: discoverable frontmatter + the mechanizable checklist.
     sk=${skill}

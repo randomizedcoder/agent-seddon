@@ -92,6 +92,7 @@ impl FactCollector for NearbyCollector {
                                 MAX_MSG,
                             ),
                             in_change: false,
+                            generated: false,
                         });
                         if findings.len() >= MAX_FINDINGS {
                             break;

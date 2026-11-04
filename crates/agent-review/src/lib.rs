@@ -807,8 +807,16 @@ fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
     if d.total == 0 {
         return;
     }
+    let generated = if d.generated > 0 {
+        format!(
+            "; {} on generated code, ranked last — fix those in the generator, not the PR",
+            d.generated
+        )
+    } else {
+        String::new()
+    };
     out.push_str(&format!(
-        "\nAnalysis digest — {} finding(s) ({} on changed files), deduped across tools, risk-ranked:\n",
+        "\nAnalysis digest — {} finding(s) ({} on changed files{generated}), deduped across tools, risk-ranked:\n",
         d.total, d.in_change,
     ));
     // The bucketed rule tally, most-frequent first, before the verbatim list.
@@ -817,7 +825,10 @@ fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
             .rule_counts
             .iter()
             .take(MAX_DIGEST_RULES)
-            .map(|c| format!("{}/{} ×{}", c.tool, c.rule, c.count))
+            .map(|c| match c.generated {
+                0 => format!("{}/{} ×{}", c.tool, c.rule, c.count),
+                g => format!("{}/{} ×{} ({g} generated)", c.tool, c.rule, c.count),
+            })
             .collect();
         out.push_str(&format!("  By rule: {}", tally.join(", ")));
         if d.rule_counts.len() > MAX_DIGEST_RULES {
@@ -830,9 +841,10 @@ fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
     }
     for f in d.findings.iter().take(MAX_RENDERED_FINDINGS) {
         let scope = if f.in_change { "" } else { " [pre-existing]" };
+        let gen = if f.generated { " [generated]" } else { "" };
         out.push_str(&format!(
-            "  {} {}/{} {}:{} — {}{}\n",
-            f.severity, f.tool, f.rule, f.file, f.line, f.message, scope,
+            "  {} {}/{} {}:{} — {}{}{}\n",
+            f.severity, f.tool, f.rule, f.file, f.line, f.message, scope, gen,
         ));
     }
     // The list is capped twice (compute's cap, then the render cap); either way the
@@ -1109,6 +1121,39 @@ mod draft_tests {
     }
 
     #[test]
+    fn positive_renders_generated_findings_apart() {
+        // desc: a digest with generated-code findings says so in the header and the
+        // tally, and tags the finding. expect: all three.
+        let mut f = facts();
+        f.digest = agent_core::AnalysisDigest {
+            findings: vec![agent_core::AnalysisFinding {
+                tool: "gosec".into(),
+                rule: "G115".into(),
+                severity: "warning".into(),
+                file: "api/x.pb.go".into(),
+                line: 9,
+                message: "integer overflow conversion".into(),
+                in_change: true,
+                generated: true,
+            }],
+            total: 177,
+            in_change: 177,
+            generated: 170,
+            rule_counts: vec![agent_core::RuleCount {
+                tool: "gosec".into(),
+                rule: "G115".into(),
+                count: 177,
+                in_change: 177,
+                generated: 170,
+            }],
+        };
+        let md = render_facts(&f);
+        assert!(md.contains("170 on generated code, ranked last"), "{md}");
+        assert!(md.contains("gosec/G115 ×177 (170 generated)"), "{md}");
+        assert!(md.contains("api/x.pb.go:9 — integer overflow conversion [generated]"), "{md}");
+    }
+
+    #[test]
     fn positive_renders_digest_section_and_rule_tally() {
         // desc: a populated digest renders one unified section with the header, the
         // by-rule tally, and the ranked findings. expect: all three present.
@@ -1122,14 +1167,17 @@ mod draft_tests {
                 line: 3,
                 message: "unchecked error".into(),
                 in_change: true,
+                generated: false,
             }],
             total: 5,
             in_change: 4,
+            generated: 0,
             rule_counts: vec![agent_core::RuleCount {
                 tool: "golangci-lint".into(),
                 rule: "errcheck".into(),
                 count: 5,
                 in_change: 4,
+                generated: 0,
             }],
         };
         let md = render_facts(&f);

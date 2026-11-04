@@ -170,6 +170,7 @@ impl ReviewCollector for FakeReview {
                     line: 1,
                     message: "Error return value is not checked".into(),
                     in_change: true,
+                    generated: false,
                 }],
             },
             signatures: agent_core::SignatureReport {
@@ -304,6 +305,7 @@ impl ReviewCollector for FakeReview {
                     line: 3,
                     message: "Double quote to prevent word splitting.".into(),
                     in_change: true,
+                    generated: false,
                 }],
             },
             go_checks: agent_core::AnalysisReport::default(),
@@ -341,6 +343,7 @@ impl ReviewCollector for FakeReview {
                     line: 1,
                     message: "Error return value is not checked".into(),
                     in_change: true,
+                    generated: true,
                 }],
                 total: 1,
                 in_change: 1,
@@ -349,7 +352,9 @@ impl ReviewCollector for FakeReview {
                     rule: "errcheck".into(),
                     count: 1,
                     in_change: 1,
+                    generated: 1,
                 }],
+                generated: 1,
             },
             digest_summary: "Mostly unchecked errors in the changed file.".into(),
         })
@@ -496,6 +501,9 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.digest.findings[0].rule, "errcheck");
     assert_eq!(facts.digest.rule_counts.len(), 1);
     assert_eq!(facts.digest.rule_counts[0].count, 1);
+    assert!(facts.digest.findings[0].generated, "finding.generated crosses the wire");
+    assert_eq!(facts.digest.rule_counts[0].generated, 1);
+    assert_eq!(facts.digest.generated, 1);
     assert_eq!(
         facts.digest_summary,
         "Mostly unchecked errors in the changed file."

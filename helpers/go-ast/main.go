@@ -51,6 +51,8 @@ const (
 	maxEdges = 50000
 	// Cap on functions held while parsing (the emitted set is chosen from these).
 	maxScanNodes = 200000
+	// Cap on caller→candidate pairs examined while resolving edges.
+	maxEdgeWork = 4000000
 	// Caps on the focus list read from the environment.
 	maxFocusPaths = 4000
 	maxFocusBytes = 256 * 1024
@@ -212,12 +214,14 @@ func analyze(root string, focus map[string]bool, nodeCap, edgeCap int) output {
 					shape.ExportedFns++
 				}
 				nodes = append(nodes, node{
-					Package:   pkgKey,
-					Name:      name,
-					Exported:  exported,
-					File:      rel,
-					Line:      fset.Position(dd.Pos()).Line,
-					EndLine:   fset.Position(dd.End()).Line,
+					Package:  pkgKey,
+					Name:     name,
+					Exported: exported,
+					File:     rel,
+					// Physical lines (PositionFor(…, false)): a `//line`
+					// directive must not move a fn away from the diff's hunks.
+					Line:      fset.PositionFor(dd.Pos(), false).Line,
+					EndLine:   fset.PositionFor(dd.End(), false).Line,
 					Test:      test,
 					Generated: generated,
 				})
@@ -395,9 +399,24 @@ func resolveEdges(order []int, calls [][]string, nodes []node, newID map[int]int
 	}
 	buckets := make([][]edge, rankRest+1)
 	total := 0
+	work := 0
 	dedup := map[[2]int]struct{}{}
+scan:
 	for _, caller := range order {
+		seen := map[string]bool{}
 		for _, name := range calls[caller] {
+			if seen[name] {
+				continue // a name called from many sites costs its candidates once
+			}
+			seen[name] = true
+			// Bound the scan itself, not just its output: a name shared by many
+			// fns, called by many fns, is a product. `order` is best rank first,
+			// so stopping keeps the edges that matter.
+			work += len(byName[name])
+			if work > maxEdgeWork {
+				*truncated = true
+				break scan
+			}
 			for _, callee := range byName[name] {
 				if callee == caller {
 					continue // ignore self-recursion — no blast-radius signal

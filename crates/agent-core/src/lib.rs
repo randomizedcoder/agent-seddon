@@ -5880,6 +5880,11 @@ pub struct AnalysisFinding {
     pub message: String,
     /// The finding is on a file the change touched (foregrounded in the render).
     pub in_change: bool,
+    /// The file is generated code (a `Code generated … DO NOT EDIT.` / `@generated`
+    /// header, or a generated-code path): ranked last and tallied apart, since its
+    /// fix belongs in the generator, not the PR.
+    #[serde(default)]
+    pub generated: bool,
 }
 
 /// One analyzer tool invocation's outcome (self-describing, like [`CollectorStatus`]).
@@ -6217,6 +6222,9 @@ pub struct RuleCount {
     pub count: u32,
     /// How many of `count` are on files the change touched.
     pub in_change: u32,
+    /// How many of `count` are on generated code.
+    #[serde(default)]
+    pub generated: u32,
 }
 
 /// The deterministic analysis digest (review-analysis-depth Stage 2): a post-fan-out
@@ -6238,6 +6246,9 @@ pub struct AnalysisDigest {
     pub in_change: u32,
     /// Per-`(tool, rule)` counts across all deduped findings, most-frequent first.
     pub rule_counts: Vec<RuleCount>,
+    /// How many of `total` are on generated code.
+    #[serde(default)]
+    pub generated: u32,
 }
 
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
@@ -8213,6 +8224,7 @@ mod tests {
             line: 10,
             message: message.into(),
             in_change: true,
+            generated: false,
         }
     }
 

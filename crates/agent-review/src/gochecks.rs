@@ -263,6 +263,7 @@ fn parse_races(out: &str, root: &Path) -> Vec<AnalysisFinding> {
             line: ln,
             message: "data race detected under `go test -race`".into(),
             in_change: false,
+            generated: false,
         };
         // Confine any extracted path; drop just the path if it escapes (keep the finding).
         if !f.file.is_empty() && agent_core::confine(root, &f.file).is_err() {
@@ -310,6 +311,7 @@ fn parse_benches(out: &str) -> Vec<AnalysisFinding> {
             line: 0,
             message: bound(&format!("{name}: {ns} ns/op"), MAX_MSG),
             in_change: false,
+            generated: false,
         });
     }
     findings
@@ -415,6 +417,7 @@ fn cov_finding(rule: &str, file: String, in_change: bool, message: String) -> An
         line: 0,
         message: bound(&message, MAX_MSG),
         in_change,
+        generated: false,
     }
 }
 

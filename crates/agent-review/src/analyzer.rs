@@ -570,6 +570,7 @@ fn gomod_replace_findings(
                         r.target
                     ),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -754,6 +755,7 @@ fn parse_golangci(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<
                     line,
                     message: text.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -825,6 +827,7 @@ fn parse_clippy(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<An
                 line,
                 message: text.into(),
                 in_change: false,
+                generated: false,
             },
             root,
             changed,
@@ -875,6 +878,7 @@ fn parse_gosec(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
                     line,
                     message: details.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -900,6 +904,7 @@ fn parse_govet(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
                     line: ln,
                     message: msg.into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -953,6 +958,7 @@ fn parse_gofmt(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
                     line: 0,
                     message: "file is not gofmt-formatted".into(),
                     in_change: false,
+                    generated: false,
                 },
                 root,
                 changed,
@@ -1036,6 +1042,7 @@ fn parse_cargo_audit(
             line: 0,
             message,
             in_change: false,
+            generated: false,
         }
     };
     // Security vulnerabilities.
@@ -1129,6 +1136,7 @@ fn parse_cargo_deny(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Ve
                 line: line_no,
                 message,
                 in_change: false,
+                generated: false,
             },
             root,
             changed,
@@ -1571,6 +1579,7 @@ mod tests {
             line: 5,
             message: "m".into(),
             in_change: true,
+            generated: false,
         };
         let mut v = vec![mk("golangci-lint"), mk("gosec"), {
             let mut o = mk("gosec");

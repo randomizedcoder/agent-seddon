@@ -16,9 +16,9 @@
 //! untrusted — node paths are `confine`d, strings bounded, counts capped.
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::{bound, lang_of};
+use crate::util::{adds_generated_marker, bound, lang_of};
 use agent_core::{CallEdge, CallGraph, CallGraphNode, ExecSpec, PackageShape};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 /// The pinned helper binary (on PATH via the flake dev shell / check inputs).
@@ -56,13 +56,20 @@ impl FactCollector for CallGraphCollector {
 
         // Which files did the change touch? (Collectors run in parallel — recompute
         // the cached diff.) Only run the Go helper if a `.go` file changed.
+        // A file whose diff adds a generator marker is the PR's own claim, so its
+        // fns stay listed (see `util::adds_generated_marker`).
+        let mut marker_added = BTreeSet::new();
         let changed: ChangedLines = match ctx.repo.diff(&ctx.base, &ctx.head, &[]).await {
             Ok(d) => d
                 .files
                 .into_iter()
                 .filter_map(|f| {
-                    let path = f.new_path.or(f.old_path)?;
-                    Some((path.to_string_lossy().into_owned(), hunk_ranges(&f.patch)))
+                    let path = f.new_path.or(f.old_path)?.to_string_lossy().into_owned();
+                    if adds_generated_marker(&f.patch) {
+                        marker_added.insert(path.clone());
+                    }
+                    let ranges = hunk_ranges(&f.patch);
+                    Some((path, ranges))
                 })
                 .collect(),
             Err(e) => {
@@ -107,7 +114,7 @@ impl FactCollector for CallGraphCollector {
             );
         }
 
-        match parse_graph(&out.stdout, &ctx.repo_root, &changed) {
+        match parse_graph(&out.stdout, &ctx.repo_root, &changed, &marker_added) {
             Some(graph) => CollectorOutput::ok(FactFragment::CallGraph { graph }),
             None => CollectorOutput::partial(empty_graph(), "call-graph helper output unparseable"),
         }
@@ -203,7 +210,12 @@ fn focus_list<'a>(paths: impl Iterator<Item = &'a String>) -> String {
 /// Parse the helper's JSON into a bounded, confined [`CallGraph`], marking the nodes
 /// the change touched. Defensive over `serde_json::Value`; a node whose path escapes
 /// the repo is dropped (and its edges with it).
-fn parse_graph(stdout: &str, root: &Path, changed: &ChangedLines) -> Option<CallGraph> {
+fn parse_graph(
+    stdout: &str,
+    root: &Path,
+    changed: &ChangedLines,
+    marker_added: &BTreeSet<String>,
+) -> Option<CallGraph> {
     let v: serde_json::Value = serde_json::from_str(stdout).ok()?;
     let truncated = v
         .get("truncated")
@@ -237,7 +249,7 @@ fn parse_graph(stdout: &str, root: &Path, changed: &ChangedLines) -> Option<Call
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
             };
-            let generated = flag("generated");
+            let generated = flag("generated") && !marker_added.contains(file);
             if changed
                 .get(file)
                 .is_some_and(|ranges| touched(line, end_line, ranges))
@@ -408,7 +420,7 @@ mod tests {
 
     #[test]
     fn positive_parses_nodes_edges_and_marks_changed() {
-        let g = parse_graph(SAMPLE, &root(), &changed()).unwrap();
+        let g = parse_graph(SAMPLE, &root(), &changed(), &BTreeSet::new()).unwrap();
         assert_eq!(g.nodes.len(), 2);
         assert_eq!(g.edges.len(), 1);
         assert_eq!(g.edges[0].caller_id, 0);
@@ -430,7 +442,7 @@ mod tests {
             {"id":1,"name":"B","file":"pkg/t.go","line":2},
             {"id":2,"name":"Hub","file":"pkg/t.go","line":3}
         ],"edges":[{"caller_id":0,"callee_id":2},{"caller_id":1,"callee_id":2}]}"#;
-        let g = parse_graph(json, &root(), &changed()).unwrap();
+        let g = parse_graph(json, &root(), &changed(), &BTreeSet::new()).unwrap();
         let hub = g.nodes.iter().find(|n| n.name == "Hub").unwrap();
         let a = g.nodes.iter().find(|n| n.name == "A").unwrap();
         assert!(
@@ -446,7 +458,7 @@ mod tests {
     #[test]
     fn corner_pagerank_noop_for_tiny_graph() {
         let json = r#"{"nodes":[{"id":0,"name":"Solo","file":"pkg/t.go","line":1}],"edges":[]}"#;
-        let g = parse_graph(json, &root(), &changed()).unwrap();
+        let g = parse_graph(json, &root(), &changed(), &BTreeSet::new()).unwrap();
         assert_eq!(g.nodes[0].centrality, 0.0, "<2 nodes ⇒ no ranking");
     }
 
@@ -456,7 +468,7 @@ mod tests {
             {"id":0,"name":"Ok","file":"a.go","line":1},
             {"id":1,"name":"Evil","file":"../../etc/passwd","line":1}
         ],"edges":[{"caller_id":0,"callee_id":1},{"caller_id":0,"callee_id":0}]}"#;
-        let g = parse_graph(json, &root(), &changed()).unwrap();
+        let g = parse_graph(json, &root(), &changed(), &BTreeSet::new()).unwrap();
         assert_eq!(g.nodes.len(), 1, "escaping node dropped");
         assert_eq!(g.nodes[0].name, "Ok");
         // The edge to the dropped node is gone; the self-edge (0→0) survives.
@@ -470,17 +482,17 @@ mod tests {
         let json = format!(
             r#"{{"nodes":[{{"id":0,"name":"{big}","package":"{big}","file":"a.go","line":1}}],"edges":[]}}"#
         );
-        let g = parse_graph(&json, &root(), &changed()).unwrap();
+        let g = parse_graph(&json, &root(), &changed(), &BTreeSet::new()).unwrap();
         assert!(g.nodes[0].name.chars().count() <= MAX_STR + 20);
         assert!(g.nodes[0].package.chars().count() <= MAX_STR + 20);
-        assert!(parse_graph("not json", &root(), &changed()).is_none());
+        assert!(parse_graph("not json", &root(), &changed(), &BTreeSet::new()).is_none());
     }
 
     #[test]
     fn corner_edges_referencing_unknown_nodes_are_dropped() {
         let json = r#"{"nodes":[{"id":5,"name":"A","file":"a.go","line":1}],
             "edges":[{"caller_id":5,"callee_id":99},{"caller_id":42,"callee_id":5}]}"#;
-        let g = parse_graph(json, &root(), &changed()).unwrap();
+        let g = parse_graph(json, &root(), &changed(), &BTreeSet::new()).unwrap();
         assert_eq!(g.nodes.len(), 1);
         assert!(g.edges.is_empty(), "both edges reference a missing node");
     }
@@ -563,7 +575,7 @@ mod tests {
             {"id":3,"name":"Other","file":"main.go","line":1,"end_line":40}
         ],"edges":[]}"#;
         let changed: ChangedLines = [("pkg/t.go".to_string(), ranges)].into_iter().collect();
-        let g = parse_graph(json, &root(), &changed).unwrap();
+        let g = parse_graph(json, &root(), &changed, &BTreeSet::new()).unwrap();
         let names: Vec<&str> = g
             .changed_fns
             .iter()
@@ -574,13 +586,32 @@ mod tests {
         assert_eq!(g.changed_generated, want_generated, "{description}");
     }
 
+    /// A file the PR itself stamped generated is reviewed as hand-written: its
+    /// changed fn is listed, not counted away.
+    #[test]
+    fn adversarial_marker_added_in_the_change_is_not_trusted() {
+        let json = r#"{"nodes":[
+            {"id":0,"name":"Hidden","file":"pkg/t.go","line":3,"end_line":5,"generated":true}
+        ],"edges":[]}"#;
+        let changed: ChangedLines = [("pkg/t.go".to_string(), Some(vec![(4, 4)]))]
+            .into_iter()
+            .collect();
+        let stamped: BTreeSet<String> = ["pkg/t.go".to_string()].into_iter().collect();
+        let g = parse_graph(json, &root(), &changed, &stamped).unwrap();
+        assert_eq!(g.changed_fns, vec![0], "the stamped fn is listed");
+        assert_eq!(g.changed_generated, 0);
+        assert!(!g.nodes[0].generated, "the PR's own marker is not trusted");
+        let g = parse_graph(json, &root(), &changed, &BTreeSet::new()).unwrap();
+        assert_eq!(g.changed_generated, 1, "an existing marker is trusted");
+    }
+
     /// An older helper (no `end_line`) keeps file-level marking.
     #[test]
     fn corner_old_helper_without_end_line_marks_the_file() {
         let changed: ChangedLines = [("pkg/t.go".to_string(), Some(vec![(100, 100)]))]
             .into_iter()
             .collect();
-        let g = parse_graph(SAMPLE, &root(), &changed).unwrap();
+        let g = parse_graph(SAMPLE, &root(), &changed, &BTreeSet::new()).unwrap();
         assert_eq!(g.changed_fns, vec![1]);
     }
 
@@ -589,7 +620,7 @@ mod tests {
     #[test]
     fn adversarial_node_fields_are_clamped() {
         let json = r#"{"nodes":[{"id":0,"name":"A","file":"a.go","line":99999999999,"end_line":"x","test":"yes"}],"edges":[]}"#;
-        let g = parse_graph(json, &root(), &changed()).unwrap();
+        let g = parse_graph(json, &root(), &changed(), &BTreeSet::new()).unwrap();
         let n = &g.nodes[0];
         assert_eq!(
             (n.line, n.end_line, n.test, n.generated),

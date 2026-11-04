@@ -125,6 +125,8 @@ message ReviewAnalysisFinding {
   uint32 line = 5;
   string message = 6;
   bool in_change = 7;
+  // The file is generated code (ranked last, tallied apart in the digest).
+  bool generated = 8;
 }
 
 // The outcome of one linter invocation (`status`: ok | skipped | timeout |
@@ -321,6 +323,7 @@ message ReviewRuleCount {
   string rule = 2;
   uint32 count = 3;
   uint32 in_change = 4;
+  uint32 generated = 5;
 }
 
 // The unified analysis digest (review-analysis-depth Stage 2): every
@@ -331,6 +334,8 @@ message ReviewAnalysisDigest {
   uint32 total = 2;
   uint32 in_change = 3;
   repeated ReviewRuleCount rule_counts = 4;
+  // How many of `total` are on generated code.
+  uint32 generated = 5;
 }
 
 message ReviewFacts {

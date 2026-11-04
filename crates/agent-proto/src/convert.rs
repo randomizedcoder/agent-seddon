@@ -3598,6 +3598,7 @@ impl From<agent_core::AnalysisFinding> for pb::ReviewAnalysisFinding {
             line: f.line,
             message: f.message,
             in_change: f.in_change,
+            generated: f.generated,
         }
     }
 }
@@ -3611,6 +3612,7 @@ impl From<pb::ReviewAnalysisFinding> for agent_core::AnalysisFinding {
             line: f.line,
             message: f.message,
             in_change: f.in_change,
+            generated: f.generated,
         }
     }
 }
@@ -3664,6 +3666,7 @@ impl From<agent_core::RuleCount> for pb::ReviewRuleCount {
             rule: c.rule,
             count: c.count,
             in_change: c.in_change,
+            generated: c.generated,
         }
     }
 }
@@ -3674,6 +3677,7 @@ impl From<pb::ReviewRuleCount> for agent_core::RuleCount {
             rule: c.rule,
             count: c.count,
             in_change: c.in_change,
+            generated: c.generated,
         }
     }
 }
@@ -3685,6 +3689,7 @@ impl From<agent_core::AnalysisDigest> for pb::ReviewAnalysisDigest {
             total: d.total,
             in_change: d.in_change,
             rule_counts: d.rule_counts.into_iter().map(Into::into).collect(),
+            generated: d.generated,
         }
     }
 }
@@ -3695,6 +3700,7 @@ impl From<pb::ReviewAnalysisDigest> for agent_core::AnalysisDigest {
             total: d.total,
             in_change: d.in_change,
             rule_counts: d.rule_counts.into_iter().map(Into::into).collect(),
+            generated: d.generated,
         }
     }
 }

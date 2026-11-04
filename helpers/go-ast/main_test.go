@@ -71,6 +71,7 @@ func TestNodeFieldCases(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"a/a.go":      "package a\n\nfunc One() {}\n\nfunc Three() int {\n\tx := 1\n\treturn x\n}\n",
 		"a/a_test.go": "package a\n\nfunc TestOne() {\n\tOne()\n}\n",
+		"a/l.go":      "package a\n\n//line other.go:900\nfunc Moved() {\n}\n",
 	})
 	out := analyze(root, nil, maxNodes, maxEdges)
 	cases := []struct {
@@ -81,6 +82,7 @@ func TestNodeFieldCases(t *testing.T) {
 		{"positive_one_line", "a one-line function ends where it starts", "One", 3, 3, false},
 		{"positive_multi_line", "a function's last line is its closing brace", "Three", 5, 8, false},
 		{"corner_test_file", "a _test.go function is marked test", "TestOne", 3, 5, true},
+		{"adversarial_line_directive", "a //line directive does not move the physical lines", "Moved", 4, 5, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -221,5 +223,33 @@ func TestPriorityAdversarialFanout(t *testing.T) {
 		if rank[i] != rankHop1 {
 			t.Fatalf("M #%d rank = %d, want hop1", i, rank[i])
 		}
+	}
+}
+
+// Many callers of a name many fns share: the edge scan stops at its work budget
+// (marked truncated) instead of examining every pair, and still emits the focus
+// fn's edges first.
+func TestResolveEdgesWorkBudget(t *testing.T) {
+	const fns = 2100 // 2100 callers × 2100 sharers > maxEdgeWork
+	nodes := make([]node, fns)
+	calls := make([][]string, fns)
+	order := make([]int, fns)
+	rank := make([]int, fns)
+	newID := map[int]int{}
+	for i := range nodes {
+		nodes[i] = node{Name: "M"}
+		calls[i] = []string{"M", "M", "M"} // repeated sites cost once
+		order[i] = i
+		rank[i] = rankRest
+		newID[i] = i
+	}
+	rank[0] = rankFocus
+	truncated := false
+	edges := resolveEdges(order, calls, nodes, newID, rank, maxEdges, &truncated)
+	if !truncated {
+		t.Errorf("the scan should stop at its budget and say so")
+	}
+	if len(edges) == 0 || edges[0].CallerID != 0 {
+		t.Errorf("the focus fn's edges should come first, got %d edges", len(edges))
 	}
 }

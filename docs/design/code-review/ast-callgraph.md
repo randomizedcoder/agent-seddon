@@ -62,6 +62,13 @@ blast radius was wrong in two ways, and both are fixed:
   line comment before `package`). A fn is changed only when a new-side hunk overlaps
   `[line, end_line]`; a node with no `end_line` (an older helper) falls back to the
   file. Generated fns are counted in `changed_generated`, not listed.
+- **Untrusted inputs:** a file whose diff *adds* the generator marker is the PR's
+  own claim, so its fns stay listed (`util::adds_generated_marker`); otherwise
+  stamping a file "generated" would hide its changes. Lines are physical
+  (`PositionFor(…, false)`), so a `//line` directive can't move a fn away from the
+  hunks. Only `+` lines (and a deletion's neighbours) count, never the hunk's
+  context lines. The helper bounds its own work: hop-1 ranks each fn once, and the
+  edge scan stops at 4M caller×candidate pairs (`truncated`; best ranks first).
 - **Render:** changed fns ranked (tests last, then caller count, then centrality);
   callers are code callers by name plus "· N test(s)"; a header says callers are
   matched by name (a same-named method can match) and when the graph was truncated;
