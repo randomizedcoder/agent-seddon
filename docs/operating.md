@@ -161,12 +161,31 @@ comes from the flake's one `nixpkgs` input. A stale pin can't analyze a repo tha
 targets a newer toolchain; nixpkgs still carries older versions, so newer is
 the safe direction. `nix run .#update-nixpkgs` is the weekly bump:
 
-- it skips when an update PR is already open or the disk is under `MIN_FREE_PCT`
-  (default 10);
-- it updates `flake.lock` in a throwaway worktree of `origin/main`, runs the gate
-  with `--keep-going`, and opens a `chore(deps): nixpkgs <old> -> <new>` PR whose
-  body lists the failing derivations, if any. It never merges;
+- it skips when one of its own update PRs (`chore/nixpkgs-*`, opened by the same
+  `gh` user) is already open, or when this checkout's disk or `/nix/store` is under
+  `MIN_FREE_PCT` (default 10);
+- it updates `nixpkgs` and `advisory-db` (cargo-audit's data) in `flake.lock`, in a
+  throwaway worktree of `origin/main`, regenerates the OpenAPI document (newer protoc
+  plugins change it), runs the gate with `--keep-going`, and opens a
+  `chore(deps): nixpkgs <old> -> <new>` PR whose body lists the failing derivations
+  and the gate's `error:` lines. The full log stays in
+  `$XDG_STATE_HOME/update-nixpkgs/` on the host that ran it. It never merges;
+- a red update PR is normal, not a broken job: a Flutter bump can move the portal
+  goldens a few pixels, and whether to regenerate them (font-rendering noise) or
+  not (a real visual change) is a human call (regenerate command below);
+- with no git identity configured (a bare timer) it commits as `update-nixpkgs`;
 - `--dry-run` stops before the push and the PR.
+
+To regenerate the goldens from the `portal-visual` check's own build:
+
+```sh
+nix build --impure --expr 'let f = builtins.getFlake (toString ./.); in
+  f.checks.x86_64-linux.portal-visual.overrideAttrs (_: {
+    buildPhase = "flutter test --no-pub --update-goldens test/visual";
+    installPhase = "mkdir -p $out && cp -r test/visual/goldens $out/";
+  })'
+cp result/goldens/themes/*.png portal/test/visual/goldens/themes/
+```
 
 On l2 a weekly systemd user timer runs it; the fleet reviews the PR like any other.
 

@@ -127,9 +127,16 @@ in
   hey = pkgs.hey;
   # Go static-analysis toolchain for the code-review analyzer (increment 5). The
   # binaries are cached in /nix/store; the review flow shells out to them.
-  go = pkgs.go_1_25 or pkgs.go;
+  # `go_latest`: Go is backward compatible, so the newest toolchain vets older
+  # modules too (an old pin is the wrong direction: it can't load a module whose
+  # `go` directive is newer). `nix run .#update-nixpkgs` moves it forward.
+  go = pkgs.go_latest;
+  # nixpkgs builds golangci-lint with the newest Go it supports (`buildGo127Module`
+  # at 0bb2eedc); leave that choice to nixpkgs, since golangci-lint needs code
+  # changes per Go release. It must be at least the repo's `go` to load packages.
   golangci-lint = pkgs.golangci-lint;
-  gosec = pkgs.gosec;
+  # gosec loads packages with the Go it was built with; build it with `go` above.
+  gosec = pkgs.gosec.override { buildGoModule = pkgs.buildGoLatestModule; };
   # SCIP indexers for the AstBackend `scip` engine (docs/components/ast.md). `scip-go`
   # emits a `.scip` index (symbols + implicit interface implementations) the engine
   # ingests; `rust-analyzer scip` covers Rust (reuses the pin above). Others

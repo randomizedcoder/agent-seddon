@@ -378,6 +378,7 @@ testChecks
   # CLI-surface smoke (hermes-style): `agent --help` stays runnable and keeps
   # advertising the full `--serve-<seam>` / serve interface. Offline.
   cli-help = agentCheck ./cli-help.nix { };
+  update-nixpkgs = import ./update-nixpkgs.nix { inherit pkgs; };
   # Config-roundtrip (hermes-style): representative `agent.toml` fixtures load +
   # build via `agent --check-config` and select the right impls; broken ones fail
   # closed. Offline (dry run — no model, no socket).
