@@ -31,7 +31,8 @@ extension points intact:
   deadline stretches to fit it (a cold run of four of our crates took ~52 s on l2).
   The stretch covers any start order under `analyze_parallelism`: the longest tool
   plus the six lint tools spread over the slots, `max(build, lint) + ⌈6/p⌉·lint`,
-  plus 15 s slack (705 s at the defaults, 885 s with `analyze_parallelism = 1`).
+  plus the go.mod preflight's 30 s `go env` and 15 s slack (735 s at the defaults, 915 s with
+  `analyze_parallelism = 1`).
   The engine reports that stretch (`ReviewCollector::time_budget`, the slowest
   collector's deadline), and the fleet bounds its inline grounding step by its
   5-minute forge prep timeout **plus** that budget (capped at 2 h), so a cold clippy

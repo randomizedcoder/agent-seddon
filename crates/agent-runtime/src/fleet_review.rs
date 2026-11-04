@@ -644,10 +644,11 @@ mod tests {
         // Both seams are wired.
         let _ = ctx.repo;
         // The grounder reports the default analyzer's deadline (45s lints, 600s build,
-        // 4 slots), so the fleet's grounding timeout lets a cold clippy build finish.
+        // 4 slots, the 30s go.mod preflight), so the fleet's grounding timeout lets a
+        // cold clippy build finish.
         assert_eq!(
             ctx.grounder.time_budget(),
-            Some(std::time::Duration::from_secs(705))
+            Some(std::time::Duration::from_secs(735))
         );
     }
 

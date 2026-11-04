@@ -45,9 +45,9 @@ pkgs.runCommand "agent-cli-help"
     # The campaign subcommand (docs/design/campaigns, CP-04).
     require "campaign"
     require "repo <verb>"
-    agent repo --help | grep -q "recover"
+    agent repo --help | grep "recover" >/dev/null
     require "fleet <verb>"
-    agent fleet --help | grep -q "dry-run"
+    agent fleet --help | grep "dry-run" >/dev/null
 
     # A representative slice of the per-seam gRPC surface (`<seam> = a|b|c|...`).
     # Not the full 28 — enough to catch a gross `flag_names()` regression without

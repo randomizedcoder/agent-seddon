@@ -1035,23 +1035,23 @@ mod tests {
         45,
         600,
         4,
-        705
+        735
     )]
-    #[case::boundary_zeros_raise_to_one("zero timeouts and parallelism become 1", 0, 0, 0, 22)]
+    #[case::boundary_zeros_raise_to_one("zero timeouts and parallelism become 1", 0, 0, 0, 52)]
     #[case::boundary_build_at_cap(
         "a build timeout of exactly the cap is kept",
         45,
         3_600,
         4,
-        3_705
+        3_735
     )]
-    #[case::boundary_build_over_cap("one second over the cap is clamped", 45, 3_601, 4, 3_705)]
+    #[case::boundary_build_over_cap("one second over the cap is clamped", 45, 3_601, 4, 3_735)]
     #[case::adversarial_huge_build_timeout(
         "u64::MAX build timeout is capped at an hour",
         45,
         u64::MAX,
         4,
-        3_705
+        3_735
     )]
     fn with_analyzer_clamp_cases(
         #[case] description: &str,
@@ -1080,10 +1080,10 @@ mod tests {
     /// `collect_deadline` is the slowest collector's deadline, never under the default.
     #[rstest::rstest]
     #[case::positive_analyzer_stretches(
-        "the analyzer's 705s outlasts a 60s default",
+        "the analyzer's 735s outlasts a 60s default",
         60,
         true,
-        705
+        735
     )]
     #[case::positive_no_stretch("without the analyzer the default is the bound", 60, false, 60)]
     #[case::corner_default_wins("a default above the analyzer's deadline is kept", 900, true, 900)]
@@ -1091,7 +1091,7 @@ mod tests {
         "a zero default still allows the analyzer its time",
         0,
         true,
-        705
+        735
     )]
     #[case::adversarial_huge_default(
         "a huge default is returned, not overflowed",
