@@ -9964,6 +9964,11 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "changedGenerated": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Generated functions a diff hunk touched, left out of `changed_fns`."
         }
       }
     },
@@ -9993,6 +9998,19 @@
         "centrality": {
           "type": "number",
           "format": "double"
+        },
+        "endLine": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Last line (0 = unknown): with `line`, the span a diff hunk must overlap."
+        },
+        "test": {
+          "type": "boolean",
+          "description": "In a `_test.go` file."
+        },
+        "generated": {
+          "type": "boolean",
+          "description": "In a generated file (`// Code generated … DO NOT EDIT.` before `package`)."
         }
       },
       "description": "One function/method node in the call graph. Tool-derived + untrusted: `file`\nis repo-relative + confined, strings bounded."

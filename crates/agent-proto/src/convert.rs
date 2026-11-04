@@ -3753,6 +3753,9 @@ impl From<agent_core::CallGraphNode> for pb::ReviewCallGraphNode {
             file: n.file,
             line: n.line,
             centrality: n.centrality,
+            end_line: n.end_line,
+            test: n.test,
+            generated: n.generated,
         }
     }
 }
@@ -3766,6 +3769,9 @@ impl From<pb::ReviewCallGraphNode> for agent_core::CallGraphNode {
             file: n.file,
             line: n.line,
             centrality: n.centrality,
+            end_line: n.end_line,
+            test: n.test,
+            generated: n.generated,
         }
     }
 }
@@ -3816,6 +3822,7 @@ impl From<agent_core::CallGraph> for pb::ReviewCallGraph {
             changed_fns: g.changed_fns,
             packages: g.packages.into_iter().map(Into::into).collect(),
             truncated: g.truncated,
+            changed_generated: g.changed_generated,
         }
     }
 }
@@ -3827,6 +3834,7 @@ impl From<pb::ReviewCallGraph> for agent_core::CallGraph {
             changed_fns: g.changed_fns,
             packages: g.packages.into_iter().map(Into::into).collect(),
             truncated: g.truncated,
+            changed_generated: g.changed_generated,
         }
     }
 }

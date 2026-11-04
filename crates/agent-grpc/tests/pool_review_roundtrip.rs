@@ -194,6 +194,9 @@ impl ReviewCollector for FakeReview {
                         file: "main.go".into(),
                         line: 5,
                         centrality: 0.5,
+                        end_line: 7,
+                        test: false,
+                        generated: false,
                     },
                     agent_core::CallGraphNode {
                         id: 1,
@@ -203,6 +206,9 @@ impl ReviewCollector for FakeReview {
                         file: "main.go".into(),
                         line: 9,
                         centrality: 1.0,
+                        end_line: 12,
+                        test: true,
+                        generated: true,
                     },
                 ],
                 edges: vec![agent_core::CallEdge {
@@ -217,6 +223,7 @@ impl ReviewCollector for FakeReview {
                     types: 0,
                 }],
                 truncated: false,
+                changed_generated: 3,
             },
             style: agent_core::StyleFacts {
                 comment_density: 0.25,
@@ -443,6 +450,13 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.callgraph.edges[0].callee_id, 1);
     assert_eq!(facts.callgraph.changed_fns, vec![1]);
     assert_eq!(facts.callgraph.packages[0].exported_fns, 1);
+    // The hunk span and the test/generated flags survive the wire.
+    let run = &facts.callgraph.nodes[1];
+    assert_eq!(
+        (run.line, run.end_line, run.test, run.generated),
+        (9, 12, true, true)
+    );
+    assert_eq!(facts.callgraph.changed_generated, 3);
     // Style fingerprint survives the wire round-trip.
     assert!(facts.style.indent_tabs);
     assert_eq!(facts.style.naming.functions, "pascal");

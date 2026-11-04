@@ -43,11 +43,39 @@ the changed functions* (blast radius) — via a **stdlib-only Go helper**, chose
   parser tests (escaping-path node dropped with its edges, hostile strings bounded,
   garbage rejected, dangling edges dropped).
 
+**Accuracy pass (review-analysis-depth "Accurate call graph").** On xtcp2's drafts the
+blast radius was wrong in two ways, and both are fixed:
+
+- **Caps dropped the change.** The helper emitted nodes in walk order and edges in
+  caller order, then stopped at 10k nodes / 50k edges; on a large repo the changed
+  functions lost their edges ("no in-repo callers" for a fn called elsewhere). The
+  collector now passes the change's Go files in `AGENT_GO_AST_FOCUS` (a newline list,
+  set via `ExecSpec::env_set`, so it survives `EnvPolicy::Scrub`; at most 2000 paths /
+  96 KiB, absolute, `..`, control-character and non-`.go` entries dropped, and the
+  helper re-checks the same and only matches it against walked paths). The helper
+  builds the whole graph, then emits by rank — focus fns, their callers and callees,
+  callers of those, the rest — and keeps edges by the same rank (past the cap a
+  better-ranked edge evicts one from the worst bucket). Node ids are emission
+  positions. No focus = the old order.
+- **"Changed" meant "in a changed file".** Nodes now carry `end_line`, `test` (a
+  `_test.go` fn) and `generated` (the file has a `// Code generated … DO NOT EDIT.`
+  line comment before `package`). A fn is changed only when a new-side hunk overlaps
+  `[line, end_line]`; a node with no `end_line` (an older helper) falls back to the
+  file. Generated fns are counted in `changed_generated`, not listed.
+- **Render:** changed fns ranked (tests last, then caller count, then centrality);
+  callers are code callers by name plus "· N test(s)"; a header says callers are
+  matched by name (a same-named method can match) and when the graph was truncated;
+  a `[test]` tag and an "N generated fn(s) in the changed lines not shown" line.
+- **Wire:** additive `ReviewCallGraphNode` fields 8–10 and `ReviewCallGraph` field 6.
+  **Gate:** `review-callgraph` adds an untouched fn in the changed file, a regenerated
+  `*.pb.go` and a test caller; the helper's own table tests (`main_test.go`) run in its
+  build.
+
 **Still deferred (the design below):** precise **CHA/RTA** edges via `x/tools`
 (needs the target to build + vendoring x/tools); a dedicated `AstBackend` seam +
-`AstService`/`--serve-ast`; Rust call-graph; `signature_hash` on nodes; the
-one-hop-neighborhood scoping (the helper currently graphs the whole repo, bounded by
-caps). The stdlib helper is the deterministic, dependency-free first cut.
+`AstService`/`--serve-ast`; Rust call-graph; `signature_hash` on nodes; a
+type-aware resolver (callers are still matched by name; precomputing the
+`agent-go-graph` at index time is review-graph 5a-ii-d-ii-b). The stdlib helper is the deterministic, dependency-free first cut.
 
 ## Implementation — signature-diff subset (increment 6)
 

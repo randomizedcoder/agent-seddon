@@ -5951,6 +5951,16 @@ pub struct CallGraphNode {
     /// score: how much of the graph's importance flows into this function.
     #[serde(default)]
     pub centrality: f64,
+    /// The function's last line (`0` = unknown, from an older helper): with `line`,
+    /// the span a diff hunk must overlap for the function to count as changed.
+    #[serde(default)]
+    pub end_line: u32,
+    /// In a `_test.go` file.
+    #[serde(default)]
+    pub test: bool,
+    /// In a generated file (`// Code generated … DO NOT EDIT.` before `package`).
+    #[serde(default)]
+    pub generated: bool,
 }
 
 /// A syntactic caller→callee edge between two [`CallGraphNode`]s (name-resolved;
@@ -5977,9 +5987,14 @@ pub struct PackageShape {
 pub struct CallGraph {
     pub nodes: Vec<CallGraphNode>,
     pub edges: Vec<CallEdge>,
+    /// Hand-written functions a diff hunk touched (generated ones are counted in
+    /// `changed_generated` instead).
     pub changed_fns: Vec<u32>,
     pub packages: Vec<PackageShape>,
     pub truncated: bool,
+    /// Generated functions a diff hunk touched, left out of `changed_fns`.
+    #[serde(default)]
+    pub changed_generated: u32,
 }
 
 /// Naming-convention verdicts (increment 7 — code-style fingerprint). Each field is

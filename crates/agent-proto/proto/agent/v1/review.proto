@@ -170,6 +170,12 @@ message ReviewCallGraphNode {
   string file = 5;
   uint32 line = 6;
   double centrality = 7;
+  // Last line (0 = unknown): with `line`, the span a diff hunk must overlap.
+  uint32 end_line = 8;
+  // In a `_test.go` file.
+  bool test = 9;
+  // In a generated file (`// Code generated … DO NOT EDIT.` before `package`).
+  bool generated = 10;
 }
 
 message ReviewCallEdge {
@@ -190,6 +196,8 @@ message ReviewCallGraph {
   repeated uint32 changed_fns = 3;
   repeated ReviewPackageShape packages = 4;
   bool truncated = 5;
+  // Generated functions a diff hunk touched, left out of `changed_fns`.
+  uint32 changed_generated = 6;
 }
 
 // Naming-convention verdicts (case-style strings, not identifier lists).
