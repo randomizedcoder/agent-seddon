@@ -147,6 +147,8 @@ struct Pending {
     /// head (or none). The popped trigger then drops its hint and fetches the real head, so
     /// a webhook folded into a poll trigger for a now-stale head can't read as up to date.
     head_sha: Option<String>,
+    /// Whether any trigger folded into this one was forced.
+    force: bool,
 }
 
 /// The producer half of the orchestrator's **bounded, coalescing** trigger queue,
@@ -208,6 +210,7 @@ impl TriggerSink for TriggerQueue {
             if p.head_sha.as_deref() != Some(trigger.head_sha.as_str()) {
                 p.head_sha = None;
             }
+            p.force |= trigger.force;
             // Folded into the pending review, but its requester is kept (S19): a second
             // person asking for the same PR is attributed, not silently dropped.
             let dropped = merge_requesters(&mut p.requesters, trigger.requested_by);
@@ -233,6 +236,7 @@ impl TriggerSink for TriggerQueue {
                     Pending {
                         requesters,
                         head_sha: Some(trigger.head_sha),
+                        force: trigger.force,
                     },
                 );
                 TriggerOutcome::Accepted
@@ -268,6 +272,7 @@ impl TriggerReceiver {
             if p.head_sha.is_none() {
                 trigger.head_sha.clear();
             }
+            trigger.force = p.force;
         }
         Some(trigger)
     }
@@ -733,7 +738,7 @@ impl FleetOrchestrator {
         // forge traffic (no base fetch, no head fetch) — an unchanged PR then costs one
         // list call per poll, not two git fetches. The hint is never trusted further: an
         // empty or different hint falls through to the fetch and the precise check below.
-        if !trigger.head_sha.is_empty() && up_to_date(&prior, &trigger.head_sha) {
+        if !trigger.force && !trigger.head_sha.is_empty() && up_to_date(&prior, &trigger.head_sha) {
             tracing::debug!(session_id = %trigger.session_id, pr, head = %trigger.head_sha,
                 "fleet: listed head already reviewed (up to date, nothing fetched)");
             if let Some(fm) = &fm {
@@ -776,8 +781,9 @@ impl FleetOrchestrator {
         let head_oid = head.0.clone();
 
         // Precise dedup: this exact head oid already has a (live, non-superseded) draft ⇒
-        // nothing to do. Upgrades the coarse poll-time PR# guard from inc 4 (C16).
-        if up_to_date(&prior, &head_oid) {
+        // nothing to do. Upgrades the coarse poll-time PR# guard from inc 4 (C16). A forced
+        // trigger reviews it again.
+        if !trigger.force && up_to_date(&prior, &head_oid) {
             tracing::debug!(session_id = %trigger.session_id, pr, head = %head_oid,
                 "fleet: head already reviewed (up to date)");
             if let Some(fm) = &fm {
@@ -814,10 +820,12 @@ impl FleetOrchestrator {
             .await?;
 
         // A new head arrived while a prior round was still `drafted` (awaiting approval) ⇒
-        // mark that draft superseded (C16); its `.md` no longer reflects the code. Fail-soft,
-        // and only when a drafter is wired (no persistence otherwise).
+        // mark that draft superseded (C16); its `.md` no longer reflects the code. A forced
+        // round supersedes a draft of the same head too: the new round replaces it.
+        // Fail-soft, and only when a drafter is wired (no persistence otherwise).
         if let (Some(drafter), Some(last)) = (&self.drafter, &prior.last_draft) {
-            if last.head_sha != head_oid && last.status == draft_status::DRAFTED {
+            if (last.head_sha != head_oid || trigger.force) && last.status == draft_status::DRAFTED
+            {
                 let mut sup = last.clone();
                 sup.status = draft_status::SUPERSEDED.to_string();
                 if let Err(e) = drafter.supersede(sup).await {
@@ -1611,6 +1619,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -1670,6 +1679,7 @@ mod tests {
         let o = orch(roster, repo.clone(), host.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -1764,6 +1774,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -1827,6 +1838,7 @@ mod tests {
 
         for id in ["web-sec", "web-style"] {
             o.handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: id.into(),
                 pr_number: 42,
@@ -1871,6 +1883,7 @@ mod tests {
         let o = orch(roster, repo.clone(), host.clone());
 
         let t = || FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 7,
@@ -1901,6 +1914,7 @@ mod tests {
         let host = Arc::new(FakeHost::gated());
         let o = orch(roster, repo, host);
         let t = || FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -1930,6 +1944,7 @@ mod tests {
         let host = Arc::new(FakeHost::gated());
         let o = orch(roster, repo, host.clone());
         let t = || FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -1979,6 +1994,7 @@ mod tests {
         let o = orch(roster, repo.clone(), host.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2004,6 +2020,7 @@ mod tests {
         let o = orch(roster, repo.clone(), host.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2042,6 +2059,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -2069,6 +2087,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 7,
@@ -2093,6 +2112,7 @@ mod tests {
         let o = orch(roster, repo.clone(), host.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2132,6 +2152,7 @@ mod tests {
         let o = orch(roster, repo.clone(), host.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2172,6 +2193,7 @@ mod tests {
 
         let err = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "ghost".into(),
                 pr_number: 1,
@@ -2199,6 +2221,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 9,
@@ -2234,6 +2257,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -2277,6 +2301,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 8,
@@ -2312,6 +2337,7 @@ mod tests {
         let o = orch(roster, repo, host).with_grounder(grounder.clone());
 
         let t = || FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 3,
@@ -2340,6 +2366,7 @@ mod tests {
 
         let err = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "ghost".into(),
                 pr_number: 1,
@@ -2382,6 +2409,7 @@ mod tests {
         let o = orch(roster, repo, host).with_grounder(grounder.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2417,6 +2445,7 @@ mod tests {
         let o = orch(roster, repo, host).with_grounder(grounder.clone());
 
         let t = || FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 7,
@@ -2445,6 +2474,7 @@ mod tests {
         let o = orch(roster, repo, host).with_grounder(grounder.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 5,
@@ -2454,6 +2484,7 @@ mod tests {
         .await
         .expect("web ok");
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "api".into(),
             pr_number: 5,
@@ -2519,6 +2550,7 @@ mod tests {
 
         for s in sessions {
             o.handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: (*s).into(),
                 pr_number: pr,
@@ -2588,6 +2620,7 @@ mod tests {
         };
         let o = orch(roster, repo, host.clone()).with_grounder(grounder);
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 7,
@@ -2612,6 +2645,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "../../etc/web".into(),
                 pr_number: 1,
@@ -2639,6 +2673,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "../../etc/web".into(),
                 pr_number: 1,
@@ -2672,6 +2707,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2706,6 +2742,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 9,
@@ -2743,6 +2780,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2789,6 +2827,7 @@ mod tests {
             .with_progress(progress.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -2844,6 +2883,7 @@ mod tests {
             .with_progress(progress.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 9,
@@ -2876,6 +2916,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 5,
@@ -2900,6 +2941,7 @@ mod tests {
         let o = orch(roster, repo, host.clone()).with_grounder(grounder);
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 6,
@@ -2923,6 +2965,7 @@ mod tests {
         let o = orch(roster, repo, host.clone()).with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 4,
@@ -2961,6 +3004,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3046,6 +3090,7 @@ mod tests {
         };
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha,
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3101,6 +3146,7 @@ mod tests {
     ) {
         let (q, mut rx) = TriggerQueue::channel(8);
         let t = |head: &str| FleetTrigger {
+            force: false,
             head_sha: head.into(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3132,6 +3178,7 @@ mod tests {
             .with_history(history);
         let (q, mut rx) = TriggerQueue::channel(8);
         let t = |head: &str| FleetTrigger {
+            force: false,
             head_sha: head.into(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3172,6 +3219,7 @@ mod tests {
             .with_grounder(FakeGrounder::ok("brief"))
             .with_history(history.clone());
         let trigger = FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3217,6 +3265,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3232,6 +3281,153 @@ mod tests {
         assert_eq!(sup[0].head_sha, "OLD_HEAD");
         assert!(o.join("web", 42).await);
         assert_eq!(host.reviews_len(), 1, "the fresh review ran");
+    }
+
+    /// desc: `ReviewNow { force }` on a PR whose head already has a draft. Each row: the
+    /// trigger's force and listed-head hint, the prior draft's head and status. expect:
+    /// whether a round runs, and which prior drafts are superseded (only a `drafted` one,
+    /// never a posted or skipped one).
+    #[rstest]
+    #[case::positive_forced_same_head_reruns_and_supersedes(
+        "forced: the same head reviews again; its draft is superseded",
+        true, "", None, "drafted", true, &["drafted-same"]
+    )]
+    #[case::negative_unforced_same_head_up_to_date(
+        "unforced: the same head stays up to date", false, "", None, "drafted", false, &[]
+    )]
+    #[case::corner_forced_posted_draft_kept(
+        "forced over a posted draft: a round runs, the posted record is left alone",
+        true, "", None, "posted", true, &[]
+    )]
+    #[case::corner_forced_skipped_draft_kept(
+        "forced over a skipped draft: a round runs, nothing superseded",
+        true, "", None, "skipped", true, &[]
+    )]
+    #[case::boundary_forced_with_matching_hint_still_fetches(
+        "forced: a listed head that has a draft never short-circuits",
+        true, "HEAD", None, "drafted", true, &["drafted-same"]
+    )]
+    #[case::boundary_forced_new_head_supersedes_once(
+        "forced on a moved head: the old draft is superseded once, as unforced",
+        true, "", Some("OLD_HEAD"), "drafted", true, &["drafted-old"]
+    )]
+    #[case::negative_unforced_hint_short_circuits(
+        "unforced with the listed head drafted: up to date before any fetch",
+        false, "HEAD", None, "drafted", false, &[]
+    )]
+    #[tokio::test]
+    async fn forced_trigger_cases(
+        #[case] desc: &str,
+        #[case] force: bool,
+        #[case] hint: &str,
+        #[case] prior_head: Option<&str>,
+        #[case] prior_status: &str,
+        #[case] runs: bool,
+        #[case] superseded: &[&str],
+    ) {
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let drafter = FakeDrafter::ok();
+        // FixtureRepo resolves PR 42's head to pr_local_ref(42).
+        let head = agent_core::pr_local_ref(42);
+        let prior_head = prior_head.map_or(head.clone(), str::to_string);
+        let history = FakeHistory::with_prior(PriorReview {
+            last_draft: Some(draft_rec(&prior_head, prior_status)),
+            open_items: vec![],
+        });
+        let o = orch(roster, repo.clone(), host.clone())
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_drafter(drafter.clone())
+            .with_history(history);
+        let got = o
+            .handle(FleetTrigger {
+                force,
+                head_sha: if hint == "HEAD" {
+                    head.clone()
+                } else {
+                    hint.into()
+                },
+                session_id: "web".into(),
+                pr_number: 42,
+                requested_by: Vec::new(),
+                tenant: String::new(),
+            })
+            .await
+            .expect("handle ok");
+        assert_eq!(
+            matches!(got, Handled::Reviewing { .. }),
+            runs,
+            "{desc}: {got:?}"
+        );
+        assert_eq!(matches!(got, Handled::UpToDate), !runs, "{desc}: {got:?}");
+        let sup: Vec<String> = drafter
+            .supersedes()
+            .iter()
+            .map(|r| {
+                assert_eq!(r.status, "superseded", "{desc}");
+                let which = if r.head_sha == head { "same" } else { "old" };
+                format!("drafted-{which}")
+            })
+            .collect();
+        assert_eq!(sup, superseded, "{desc}: superseded drafts");
+        if runs {
+            assert!(o.join("web", 42).await, "{desc}");
+        }
+        assert_eq!(host.reviews_len(), usize::from(runs), "{desc}: reviews run");
+    }
+
+    #[tokio::test]
+    async fn adversarial_forced_unknown_row_fails_closed() {
+        // desc: a forced trigger naming no roster row. expect: an error, with nothing
+        // fetched and no review run (force skips the dedup, never the row lookup).
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone()).with_grounder(FakeGrounder::ok("b"));
+        let got = o
+            .handle(FleetTrigger {
+                force: true,
+                head_sha: String::new(),
+                session_id: "../web".into(),
+                pr_number: 42,
+                requested_by: Vec::new(),
+                tenant: String::new(),
+            })
+            .await;
+        assert!(got.is_err(), "unknown row fails closed: {got:?}");
+        assert!(repo.fetch_pr_calls().is_empty(), "nothing fetched");
+        assert_eq!(host.reviews_len(), 0, "no review run");
+    }
+
+    /// desc: a forced and an unforced trigger for one pending PR coalesce. expect: the
+    /// popped trigger is forced when any folded trigger was, in either order.
+    #[rstest]
+    #[case::positive_forced_then_poll(true, Some(false), true)]
+    #[case::positive_poll_then_forced(false, Some(true), true)]
+    #[case::negative_two_unforced(false, Some(false), false)]
+    #[case::boundary_lone_forced(true, None, true)]
+    #[case::corner_two_forced(true, Some(true), true)]
+    #[tokio::test]
+    async fn coalesced_force_cases(
+        #[case] first: bool,
+        #[case] second: Option<bool>,
+        #[case] popped: bool,
+    ) {
+        let (q, mut rx) = TriggerQueue::channel(8);
+        let t = |force: bool| FleetTrigger {
+            force,
+            head_sha: String::new(),
+            session_id: "web".into(),
+            pr_number: 42,
+            requested_by: Vec::new(),
+            tenant: String::new(),
+        };
+        assert_eq!(q.enqueue(t(first)), TriggerOutcome::Accepted);
+        if let Some(second) = second {
+            assert_eq!(q.enqueue(t(second)), TriggerOutcome::Coalesced);
+        }
+        assert_eq!(rx.recv().await.expect("popped").force, popped);
     }
 
     #[tokio::test]
@@ -3253,6 +3449,7 @@ mod tests {
             .with_history(history);
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3289,6 +3486,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3316,6 +3514,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3426,6 +3625,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3435,6 +3635,7 @@ mod tests {
         .await
         .expect("web handle ok");
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "api".into(),
             pr_number: 97,
@@ -3484,6 +3685,7 @@ mod tests {
             .with_review_factory(factory.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3520,6 +3722,7 @@ mod tests {
 
         let got = o
             .handle(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3555,6 +3758,7 @@ mod tests {
         let o = orch(roster, global, host).with_review_factory(factory.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 1,
@@ -3565,6 +3769,7 @@ mod tests {
         .expect("pr1 ok");
         assert!(o.join("web", 1).await);
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 2,
@@ -3598,6 +3803,7 @@ mod tests {
             .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3619,6 +3825,7 @@ mod tests {
     async fn positive_enqueue_then_recv_roundtrips() {
         let (q, mut rx) = TriggerQueue::channel(8);
         let t = FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 3,
@@ -3666,6 +3873,7 @@ mod tests {
     ) {
         let (q, mut rx) = TriggerQueue::channel_for(8, per_tenant);
         let t = |tenant: &str| FleetTrigger {
+            force: false,
             head_sha: String::new(),
             tenant: tenant.into(),
             session_id: "web".into(),
@@ -3683,6 +3891,7 @@ mod tests {
         // second coalesces (folded into the pending one), not a second queue entry.
         let (q, mut rx) = TriggerQueue::channel(8);
         let t = FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 5,
@@ -3700,6 +3909,7 @@ mod tests {
         // second coalesces on overflow (bounded) — never a silent drop or a panic.
         let (q, mut rx) = TriggerQueue::channel(1);
         let a = FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 1,
@@ -3707,6 +3917,7 @@ mod tests {
             tenant: String::new(),
         };
         let b = FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 2,
@@ -3728,6 +3939,7 @@ mod tests {
         // mark cleared) — a genuine second round, not a coalesce.
         let (q, mut rx) = TriggerQueue::channel(8);
         let t = FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 4,
@@ -3748,6 +3960,7 @@ mod tests {
 
     fn requested(pr: u64, by: &[&str]) -> FleetTrigger {
         FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: pr,
@@ -3820,6 +4033,7 @@ mod tests {
             .with_grounder(FakeGrounder::ok("brief"))
             .with_drafter(drafter.clone());
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3866,6 +4080,7 @@ mod tests {
         // ReviewNow, twice, as the gRPC intake would enqueue them.
         assert_eq!(
             q.enqueue(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "web".into(),
                 pr_number: 42,
@@ -3876,6 +4091,7 @@ mod tests {
         );
         assert_eq!(
             q.enqueue(FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "api".into(),
                 pr_number: 97,
@@ -3938,6 +4154,7 @@ mod tests {
             .with_drafter(FakeDrafter::ok())
             .with_metrics(metrics.clone());
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,
@@ -3984,6 +4201,7 @@ mod tests {
             .with_drafter(drafter.clone())
             .with_metrics(metrics.clone());
         o.handle(FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "web".into(),
             pr_number: 42,

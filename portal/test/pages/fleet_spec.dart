@@ -357,6 +357,20 @@ const fleetSpec = PageSpec('fleet', [
     expectedRpc: 'agent.v1.ReviewFleetService/ReviewNow',
   ),
   SpecRow(
+    elementId: 'fleet.reviewNow.force',
+    caseClass: CaseClass.positive,
+    name: 'review_now_force_sent',
+    description: 'ticking Review again sends ReviewNow {force: true}',
+    expectedRpc: 'agent.v1.ReviewFleetService/ReviewNow',
+  ),
+  SpecRow(
+    elementId: 'fleet.reviewNow.force',
+    caseClass: CaseClass.negative,
+    name: 'review_now_unforced_by_default',
+    description: 'left unticked, ReviewNow is sent with force: false',
+    expectedRpc: 'agent.v1.ReviewFleetService/ReviewNow',
+  ),
+  SpecRow(
     elementId: 'fleet.reviewNow.cancel',
     caseClass: CaseClass.positive,
     name: 'review_now_cancel_no_rpc',

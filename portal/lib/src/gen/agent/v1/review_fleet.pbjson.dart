@@ -192,13 +192,14 @@ const ReviewNowRequest$json = {
   '2': [
     {'1': 'session_id', '3': 1, '4': 1, '5': 9, '10': 'sessionId'},
     {'1': 'pr_number', '3': 2, '4': 1, '5': 4, '10': 'prNumber'},
+    {'1': 'force', '3': 3, '4': 1, '5': 8, '10': 'force'},
   ],
 };
 
 /// Descriptor for `ReviewNowRequest`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List reviewNowRequestDescriptor = $convert.base64Decode(
     'ChBSZXZpZXdOb3dSZXF1ZXN0Eh0KCnNlc3Npb25faWQYASABKAlSCXNlc3Npb25JZBIbCglwcl'
-    '9udW1iZXIYAiABKARSCHByTnVtYmVy');
+    '9udW1iZXIYAiABKARSCHByTnVtYmVyEhQKBWZvcmNlGAMgASgIUgVmb3JjZQ==');
 
 @$core.Deprecated('Use reviewNowReplyDescriptor instead')
 const ReviewNowReply$json = {

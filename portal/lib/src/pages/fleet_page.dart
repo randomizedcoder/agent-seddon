@@ -295,34 +295,56 @@ class _FleetPageState extends State<FleetPage> {
 
   Future<void> _reviewNow(FleetSession s) async {
     final controller = TextEditingController();
+    // Review again even when this head already has a draft (that draft, if still
+    // `drafted`, is superseded). Off by default: a plain queue of an unchanged PR is a
+    // no-op on the server.
+    var force = false;
     final prText = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Review now — ${s.id}'),
-        content: TextField(
-          key: const Key('fleet.reviewNow.prNumber'),
-          controller: controller,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            labelText: 'PR number',
-            helperText: 'Queue a review of this PR now',
-            border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('Review now — ${s.id}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                key: const Key('fleet.reviewNow.prNumber'),
+                controller: controller,
+                autofocus: true,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'PR number',
+                  helperText: 'Queue a review of this PR now',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (v) => Navigator.pop(ctx, v),
+              ),
+              CheckboxListTile(
+                key: const Key('fleet.reviewNow.force'),
+                value: force,
+                onChanged: (v) => setDialogState(() => force = v ?? false),
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: const Text('Review again'),
+                subtitle: const Text(
+                    'Even if this head already has a draft (it is superseded)'),
+              ),
+            ],
           ),
-          onSubmitted: (v) => Navigator.pop(ctx, v),
+          actions: [
+            TextButton(
+              key: const Key('fleet.reviewNow.cancel'),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const Key('fleet.reviewNow.queue'),
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('Queue'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            key: const Key('fleet.reviewNow.cancel'),
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            key: const Key('fleet.reviewNow.queue'),
-            onPressed: () => Navigator.pop(ctx, controller.text),
-            child: const Text('Queue'),
-          ),
-        ],
       ),
     );
     controller.dispose();
@@ -332,10 +354,11 @@ class _FleetPageState extends State<FleetPage> {
       final reply = await widget.clients.fleet.reviewNow(
         ReviewNowRequest()
           ..sessionId = s.id
-          ..prNumber = Int64(pr),
+          ..prNumber = Int64(pr)
+          ..force = force,
       );
       _snack(reply.accepted
-          ? 'Queued review of PR #$pr on ${s.id}.'
+          ? 'Queued ${force ? 'a fresh review' : 'review'} of PR #$pr on ${s.id}.'
           : 'PR #$pr already pending/in-flight — coalesced.');
       await _reload();
     } catch (e) {

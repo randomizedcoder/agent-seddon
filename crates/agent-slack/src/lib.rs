@@ -125,6 +125,7 @@ impl SlackWatch {
         for sub in subs {
             if let Some(pr_number) = parse_pr_link(&msg.text, &sub.expect) {
                 sink.enqueue(FleetTrigger {
+                    force: false,
                     head_sha: String::new(),
                     session_id: sub.session_id.clone(),
                     pr_number,
@@ -284,6 +285,7 @@ mod tests {
         assert_eq!(
             got.as_slice(),
             &[FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "acme:web-pr".into(),
                 pr_number: 5,
@@ -343,6 +345,7 @@ mod tests {
         assert_eq!(n, 2);
         let got = sink.got.lock().unwrap();
         assert!(got.contains(&FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "s-web".into(),
             pr_number: 1,
@@ -350,6 +353,7 @@ mod tests {
             tenant: String::new(),
         }));
         assert!(got.contains(&FleetTrigger {
+            force: false,
             head_sha: String::new(),
             session_id: "s-api".into(),
             pr_number: 2,
@@ -381,6 +385,7 @@ mod tests {
         assert_eq!(
             got.as_slice(),
             &[FleetTrigger {
+                force: false,
                 head_sha: String::new(),
                 session_id: "acme:web-pr".into(),
                 pr_number: 12,

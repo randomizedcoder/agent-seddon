@@ -823,10 +823,12 @@ class ReviewNowRequest extends $pb.GeneratedMessage {
   factory ReviewNowRequest({
     $core.String? sessionId,
     $fixnum.Int64? prNumber,
+    $core.bool? force,
   }) {
     final result = create();
     if (sessionId != null) result.sessionId = sessionId;
     if (prNumber != null) result.prNumber = prNumber;
+    if (force != null) result.force = force;
     return result;
   }
 
@@ -847,6 +849,7 @@ class ReviewNowRequest extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(
         2, _omitFieldNames ? '' : 'prNumber', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'force')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -885,6 +888,15 @@ class ReviewNowRequest extends $pb.GeneratedMessage {
   $core.bool hasPrNumber() => $_has(1);
   @$pb.TagNumber(2)
   void clearPrNumber() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.bool get force => $_getBF(2);
+  @$pb.TagNumber(3)
+  set force($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasForce() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearForce() => $_clearField(3);
 }
 
 /// Whether the trigger was queued or folded into one already pending/in-flight (the

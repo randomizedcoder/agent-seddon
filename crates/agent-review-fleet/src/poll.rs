@@ -86,6 +86,7 @@ pub async fn poll_session(
                 return Ok(report);
             }
             sink.enqueue(FleetTrigger {
+                force: false,
                 // The listed head lets the orchestrator skip an unchanged PR unfetched.
                 head_sha: pr.head_sha.clone(),
                 session_id: session_id.to_string(),

@@ -367,3 +367,9 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     buffering bound is documented at the call; a `GrpcRepo`-backed fleet always builds
     in full (now said in 04); `index_update` gained the `ListFails` and `ScopeChanged`
     rows.
+- `ReviewNow { force }` (after the #699 deploy, 2026-11-04): re-checking xtcp2 #284/#285
+  on the new fleet did nothing, because both heads already had drafts. A forced
+  `ReviewNow` (the portal's **Review again** box) skips the head dedup and supersedes a
+  still-`drafted` draft of that head; posted and skipped drafts are left alone. Coalescing
+  keeps the flag. Tables: `forced_trigger_cases`, `coalesced_force_cases`, and the wire
+  round trip.

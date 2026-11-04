@@ -38,9 +38,21 @@ impl GrpcFleet {
     /// into a pending/in-flight one (`false`); a bare control-plane endpoint (no
     /// orchestrator) answers `UNIMPLEMENTED`.
     pub async fn review_now(&self, session_id: &str, pr_number: u64) -> Result<bool> {
+        self.review_now_with(session_id, pr_number, false).await
+    }
+
+    /// [`Self::review_now`], and with `force` review again even when the PR's head already
+    /// has a draft (that draft, if still `drafted`, is superseded).
+    pub async fn review_now_with(
+        &self,
+        session_id: &str,
+        pr_number: u64,
+        force: bool,
+    ) -> Result<bool> {
         let req = pb::ReviewNowRequest {
             session_id: session_id.to_string(),
             pr_number,
+            force,
         };
         let resp = unary!(self, review_now, req).map_err(status_to_err)?;
         Ok(resp.into_inner().accepted)
