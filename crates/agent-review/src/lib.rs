@@ -14,6 +14,7 @@ mod cochange;
 mod collector;
 mod digest;
 mod gochecks;
+mod gomod;
 mod nearby;
 mod orchestrator;
 mod repo_facts;

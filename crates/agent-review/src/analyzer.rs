@@ -11,6 +11,10 @@
 //! sources) — review-analysis-depth Inc 5a.
 //! The tools **fan out concurrently** under a parallelism budget (each Go tool's
 //! `GOMAXPROCS` capped to `cpus / parallelism`), and their findings are union-deduped.
+//! Every Go tool runs with `GOTOOLCHAIN=local` (never a toolchain download), after a
+//! preflight: a module whose `go` directive is newer than the toolbox's Go skips the
+//! package-loading tools with both versions named (`gomod::preflight`), and a
+//! `replace` pointing outside the repo becomes a `go.mod` finding.
 //!
 //! Runs by default but is **fail-soft**: a missing tool, a timeout, or a parse
 //! failure becomes a recorded `skipped`/`timeout`/`failed` run, never a blocked
@@ -102,6 +106,10 @@ struct ToolTask {
     parser: Parser,
     /// Diagnostics stream to parse — `go vet` writes to stderr; the JSON tools to stdout.
     parse_stderr: bool,
+    /// For a tool whose diagnostics share a stream with its errors (`go vet`): the
+    /// first line that is an error rather than a diagnostic, so a package that failed
+    /// to load makes the run `failed` instead of a silent "ok".
+    load_error: Option<LoadError>,
     /// Network the tool runs with. Most linters keep `On` (clippy may resolve deps on a
     /// cold worktree); the Rust supply-chain tools (Inc 5a) run `Off` as defense-in-depth
     /// (they are already offline via `--db`/`-n`/`--offline`).
@@ -159,7 +167,21 @@ impl FactCollector for AnalyzerCollector {
             return CollectorOutput::skipped("no analyzable (.go/.rs) changes");
         }
 
-        let (mut runs, tasks) = self.plan(&ctx.repo_root, &changed, has_go, has_rust).await;
+        let (mut runs, mut tasks) = self.plan(&ctx.repo_root, &changed, has_go, has_rust).await;
+        let mut gomod_findings = Vec::new();
+        if has_go {
+            let gomod = crate::gomod::read_gomod(&ctx.repo_root).unwrap_or_default();
+            if let Some(required) = crate::gomod::go_directive(&gomod) {
+                let have = match self.resolve_head("go").await {
+                    Some(head) => crate::gomod::toolbox_go(&sandbox, &ctx.repo_root, &head).await,
+                    None => None,
+                };
+                if let Some(reason) = crate::gomod::preflight(Some(required), have) {
+                    tasks = skip_go_loaders(tasks, &mut runs, &reason);
+                }
+            }
+            gomod_findings = gomod_replace_findings(&gomod, &ctx.repo_root, &changed_set);
+        }
         let parallelism = self.parallelism.max(1);
 
         // Fan the resolved tools out concurrently under the parallelism budget: each
@@ -181,6 +203,7 @@ impl FactCollector for AnalyzerCollector {
                         changed_set,
                         t.parser,
                         t.parse_stderr,
+                        t.load_error,
                         t.network,
                     )
                     .await
@@ -190,7 +213,7 @@ impl FactCollector for AnalyzerCollector {
             .collect()
             .await;
 
-        let mut findings = Vec::new();
+        let mut findings = gomod_findings;
         for (r, mut f) in ran {
             runs.push(r);
             findings.append(&mut f);
@@ -244,7 +267,10 @@ impl AnalyzerCollector {
             .map(std::num::NonZero::get)
             .unwrap_or(4);
         let gomaxprocs = (cpus / parallelism).max(1);
-        let go_env = format!("GOMAXPROCS={gomaxprocs} ");
+        // `GOTOOLCHAIN=local`: use the toolbox's Go, never download the one a go.mod
+        // `toolchain` line asks for (the wrapper sets it too; this covers a provider
+        // or a plain binary).
+        let go_env = format!("GOMAXPROCS={gomaxprocs} GOTOOLCHAIN=local ");
 
         if has_go {
             // Scope dirs derive from attacker-controlled diff paths: `go_scope` drops any
@@ -273,7 +299,7 @@ impl AnalyzerCollector {
                 "golangci-lint",
                 &go_env,
                 &format!(
-                    "run {config_arg}--output.json.path stdout --timeout {}s {dir_args}",
+                    "run {config_arg}--output.json.path stdout --show-stats=false --timeout {}s {dir_args}",
                     self.timeout_secs
                 ),
                 parse_golangci,
@@ -311,7 +337,7 @@ impl AnalyzerCollector {
                     &mut tasks,
                     "gofmt",
                     "gofmt",
-                    "", // gofmt is cheap and single-threaded — no GOMAXPROCS cap
+                    "", // gofmt is cheap, single-threaded and loads no packages
                     &format!("-l {}", go_files.join(" ")),
                     parse_gofmt,
                     false,
@@ -341,6 +367,7 @@ impl AnalyzerCollector {
                             cmd,
                             parser: parse_clippy,
                             parse_stderr: false,
+                            load_error: None,
                             // clippy may resolve/build deps on a cold worktree — keep net On.
                             network: NetworkPolicy::On,
                             builds: true,
@@ -432,6 +459,7 @@ impl AnalyzerCollector {
                 cmd: format!("{env}{head} {args}"),
                 parser,
                 parse_stderr,
+                load_error: (tool == "govet").then_some(govet_load_error as LoadError),
                 network: NetworkPolicy::On,
                 builds: false,
             }),
@@ -463,6 +491,7 @@ impl AnalyzerCollector {
                 cmd: format!("{head} {args}"),
                 parser,
                 parse_stderr,
+                load_error: None,
                 network: NetworkPolicy::Off,
                 builds: false,
             }),
@@ -494,6 +523,60 @@ impl AnalyzerCollector {
 }
 
 type Parser = fn(&str, &Path, &BTreeSet<String>) -> Vec<AnalysisFinding>;
+/// The first error line (not a diagnostic) in a tool's diagnostics stream, if any.
+type LoadError = fn(&str) -> Option<String>;
+
+/// The tools that load the module's packages, so can't run on a `go` directive newer
+/// than the toolbox's Go. `gofmt` only formats files, so it still runs.
+const GO_LOADERS: &[&str] = &["golangci-lint", "gosec", "govet"];
+
+/// Wording golangci-lint uses when it was built with an older Go than the module
+/// targets. Its own version check, so it is the same skip as [`crate::gomod::preflight`].
+const GOLANGCI_GO_TOO_OLD: &str = "is lower than the targeted Go version";
+
+/// Move every package-loading Go tool out of `tasks` into a `skipped` run with `reason`.
+fn skip_go_loaders(
+    tasks: Vec<ToolTask>,
+    runs: &mut Vec<AnalyzerRun>,
+    reason: &str,
+) -> Vec<ToolTask> {
+    let (skip, keep): (Vec<_>, Vec<_>) = tasks
+        .into_iter()
+        .partition(|t| GO_LOADERS.contains(&t.tool));
+    runs.extend(skip.iter().map(|t| skipped_run(t.tool, reason)));
+    keep
+}
+
+/// A `go.mod` finding per `replace` whose target is absolute or leaves the repo: the
+/// packages importing it can't be loaded by the review (or by anyone else's checkout).
+fn gomod_replace_findings(
+    gomod: &str,
+    root: &Path,
+    changed: &BTreeSet<String>,
+) -> Vec<AnalysisFinding> {
+    crate::gomod::outside_replaces(gomod)
+        .into_iter()
+        .filter_map(|r| {
+            finalize(
+                AnalysisFinding {
+                    tool: "go.mod".into(),
+                    rule: "replace-outside-repo".into(),
+                    severity: "warning".into(),
+                    file: "go.mod".into(),
+                    line: r.line,
+                    message: format!(
+                        "replace points outside the repository ({}); packages that import \
+                         it can't be loaded or analyzed from a clean checkout",
+                        r.target
+                    ),
+                    in_change: false,
+                },
+                root,
+                changed,
+            )
+        })
+        .collect()
+}
 
 /// Run one linter and **return** its outcome + findings (so callers can fan tools out
 /// concurrently). Fail-soft: a missing tool (exit 127), a timeout, or an unparseable
@@ -509,6 +592,7 @@ async fn run_tool(
     changed: &BTreeSet<String>,
     parse: Parser,
     parse_stderr: bool,
+    load_error: Option<LoadError>,
     network: NetworkPolicy,
 ) -> (AnalyzerRun, Vec<AnalysisFinding>) {
     let started = Instant::now();
@@ -545,21 +629,55 @@ async fn run_tool(
         &out.stdout
     };
     let found = parse(diag, root, changed);
-    // A non-zero exit with no parseable findings and an empty diagnostics stream is a
-    // real failure (e.g. a build error) — reported with the (bounded) other stream,
-    // never silently "clean".
-    if found.is_empty() && out.exit_code != 0 && diag.trim().is_empty() {
-        let other = if out.stderr.trim().is_empty() {
-            out.stdout.trim()
+    // A non-zero exit with no parseable findings is a real failure (a build or load
+    // error, a version mismatch), never silently "clean": reported with the first
+    // line of its error output, bounded. A stream that mixes errors with diagnostics
+    // (`go vet`) is `failed` on an error line even when other packages had findings,
+    // which are kept.
+    let load = if out.exit_code != 0 {
+        load_error.and_then(|f| f(diag))
+    } else {
+        None
+    };
+    if out.exit_code != 0 && (found.is_empty() || load.is_some()) {
+        let reason = load.unwrap_or_else(|| first_error_line(&out.stderr, &out.stdout));
+        let status = if reason.contains(GOLANGCI_GO_TOO_OLD) {
+            "skipped"
         } else {
-            out.stderr.trim()
+            "failed"
         };
-        return (run(tool, "failed", &bound(other, 200), started), Vec::new());
+        let mut r = run(tool, status, &bound(&reason, 200), started);
+        r.finding_count = found.len().min(u32::MAX as usize) as u32;
+        return (r, found);
     }
     let n = found.len();
     let mut r = run(tool, "ok", "", started);
     r.finding_count = n.min(u32::MAX as usize) as u32;
     (r, found)
+}
+
+/// The first non-blank line of `stderr`, else of `stdout`, else a placeholder.
+fn first_error_line(stderr: &str, stdout: &str) -> String {
+    // golangci-lint logs `level=warning msg=…` / `level=info` lines that are not
+    // why it failed; prefer any other line, and fall back to them only when
+    // they are all there is.
+    let noise = |l: &str| {
+        ["level=warning", "level=info", "level=debug"]
+            .iter()
+            .any(|p| l.starts_with(p))
+    };
+    let lines = || {
+        [stderr, stdout]
+            .into_iter()
+            .flat_map(str::lines)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+    };
+    lines()
+        .find(|l| !noise(l))
+        .or_else(|| lines().next())
+        .unwrap_or("exited non-zero with no output")
+        .to_string()
 }
 
 /// Drop findings that more than one tool reported at the same `(file, line, rule)`.
@@ -596,11 +714,16 @@ fn skipped_run(tool: &str, reason: &str) -> AnalyzerRun {
 }
 
 /// golangci-lint v2 JSON (`--output.json.path stdout`): `{ "Issues": [ { FromLinter,
-/// Text, Severity, Pos:{Filename,Line} } ] }`. Defensive (serde_json::Value).
+/// Text, Severity, Pos:{Filename,Line} } ] }`. Defensive (serde_json::Value). Only
+/// the first JSON value is read: golangci-lint 2.x prints a text stats summary
+/// ("2 issues: …") after it unless `--show-stats=false`, and a trailer must not
+/// turn the findings into a parse error.
 fn parse_golangci(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<AnalysisFinding> {
-    let v: serde_json::Value = match serde_json::from_str(stdout) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let first = serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .next();
+    let Some(Ok(v)) = first else {
+        return Vec::new();
     };
     let issues = v.get("Issues").and_then(|i| i.as_array());
     let Some(issues) = issues else {
@@ -767,21 +890,7 @@ fn parse_govet(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
     stderr
         .lines()
         .filter_map(|line| {
-            let l = line.trim();
-            if l.is_empty() || l.starts_with('#') {
-                return None;
-            }
-            let (file, rest) = l.split_once(':')?;
-            let (line_str, rest2) = rest.split_once(':')?;
-            let ln = line_str.trim().parse::<u32>().ok()?;
-            // rest2 is either "<col>: msg" or " msg".
-            let msg = match rest2.split_once(':') {
-                Some((col, m)) if col.trim().chars().all(|c| c.is_ascii_digit()) => m.trim(),
-                _ => rest2.trim(),
-            };
-            if msg.is_empty() {
-                return None;
-            }
+            let (file, ln, msg) = govet_diag(line.trim())?;
             finalize(
                 AnalysisFinding {
                     tool: "govet".into(),
@@ -797,6 +906,32 @@ fn parse_govet(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
             )
         })
         .collect()
+}
+
+/// One `go vet` diagnostic line, `file:line[:col]: msg`, as `(file, line, msg)`.
+fn govet_diag(l: &str) -> Option<(&str, u32, &str)> {
+    if l.is_empty() || l.starts_with('#') {
+        return None;
+    }
+    let (file, rest) = l.split_once(':')?;
+    let (line_str, rest2) = rest.split_once(':')?;
+    let ln = line_str.trim().parse::<u32>().ok()?;
+    // rest2 is either "<col>: msg" or " msg".
+    let msg = match rest2.split_once(':') {
+        Some((col, m)) if col.trim().chars().all(|c| c.is_ascii_digit()) => m.trim(),
+        _ => rest2.trim(),
+    };
+    (!msg.is_empty()).then_some((file, ln, msg))
+}
+
+/// The first `go vet` stderr line that is neither a `# package` header nor a
+/// diagnostic: a load or type-check error (`go: … permission denied`, `vet: …`).
+fn govet_load_error(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#') && govet_diag(l).is_none())
+        .map(str::to_string)
 }
 
 /// `gofmt -l` output (stdout): one path per line, each a file that is not gofmt-clean.
@@ -1208,6 +1343,67 @@ mod tests {
             f[0].message.chars().count() <= MAX_MSG + 20,
             "message not bounded"
         );
+    }
+
+    /// golangci-lint 2.x stdout. Each row: what follows the JSON, and the
+    /// findings read.
+    #[rstest::rstest]
+    #[case::positive_bare_json("the JSON alone", "", 1)]
+    #[case::positive_stats_trailer(
+        "2.15's text stats summary after the JSON",
+        "\n1 issues:\n* errcheck: 1\n",
+        1
+    )]
+    #[case::corner_second_value("a second JSON value is not read", "\n{\"Issues\":[]}", 1)]
+    #[case::adversarial_injected_trailer(
+        "a trailer can't add findings",
+        "\n{\"Issues\":[{\"FromLinter\":\"x\",\"Text\":\"t\",\"Pos\":{\"Filename\":\"cmd/y/y.go\",\"Line\":1}}]}",
+        1
+    )]
+    fn golangci_stdout_trailer_cases(
+        #[case] description: &str,
+        #[case] trailer: &str,
+        #[case] want: usize,
+    ) {
+        let json = r#"{"Issues":[{"FromLinter":"errcheck","Text":"t","Pos":{"Filename":"cmd/x/x.go","Line":1}}],"Report":{}}"#;
+        let f = parse_golangci(&format!("{json}{trailer}"), &root(), &changed());
+        assert_eq!(f.len(), want, "{description}");
+    }
+
+    /// The reason a failed run records. Each row: stderr, stdout and the line picked.
+    #[rstest::rstest]
+    #[case::positive_first_stderr_line("the first stderr line", "boom\nmore", "", "boom")]
+    #[case::positive_skips_log_warnings(
+        "golangci's level=warning lines are not the reason",
+        "level=warning msg=\"no need to disable\"\nlevel=error msg=\"can't load config\"",
+        "",
+        "level=error msg=\"can't load config\""
+    )]
+    #[case::corner_stdout_when_stderr_is_noise(
+        "a stdout line beats stderr warnings",
+        "level=warning msg=x",
+        "typecheck failed",
+        "typecheck failed"
+    )]
+    #[case::corner_only_warnings(
+        "with only warnings, the first one",
+        "level=info msg=a\nlevel=warning msg=b",
+        "",
+        "level=info msg=a"
+    )]
+    #[case::negative_no_output(
+        "nothing on either stream",
+        "\n  \n",
+        "",
+        "exited non-zero with no output"
+    )]
+    fn first_error_line_cases(
+        #[case] description: &str,
+        #[case] stderr: &str,
+        #[case] stdout: &str,
+        #[case] want: &str,
+    ) {
+        assert_eq!(first_error_line(stderr, stdout), want, "{description}");
     }
 
     #[test]
@@ -1709,6 +1905,7 @@ mod tests {
             &changed(),
             parse_cargo_audit,
             false,
+            None,
             NetworkPolicy::Off,
         )
         .await;
@@ -1742,6 +1939,7 @@ mod tests {
             &changed(),
             parse_cargo_audit,
             false,
+            None,
             NetworkPolicy::Off,
         )
         .await;
@@ -1956,5 +2154,246 @@ mod tests {
             "{description}: {lints} lint tools planned, but the deadline assumes at most \
              {MAX_LINT_TOOLS}; raise MAX_LINT_TOOLS with the new tool"
         );
+    }
+
+    /// A sandbox that answers every exec with one scripted output.
+    struct ScriptedSandbox {
+        stdout: String,
+        stderr: String,
+        exit: i32,
+    }
+    #[async_trait::async_trait]
+    impl agent_core::Sandbox for ScriptedSandbox {
+        async fn exec(&self, _spec: &ExecSpec) -> agent_core::Result<agent_core::ExecOutput> {
+            Ok(agent_core::ExecOutput {
+                stdout: self.stdout.clone(),
+                stdout_bytes: self.stdout.clone().into_bytes(),
+                stderr: self.stderr.clone(),
+                exit_code: self.exit,
+                timed_out: false,
+            })
+        }
+        fn capabilities(&self) -> agent_core::SandboxCapabilities {
+            agent_core::SandboxCapabilities {
+                backend: "fake".into(),
+                available: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    /// How `run_tool` turns a tool's exit + streams into a status. Each row: the tool,
+    /// whether it is `go vet` (stderr diagnostics + load-error detection), its exit
+    /// code, stdout, stderr, and the expected (status, reason fragment, finding count).
+    #[rstest::rstest]
+    #[case::positive_govet_clean("go vet with nothing to say is ok", true, 0, "", "", ("ok", "", 0))]
+    #[case::positive_govet_findings(
+        "go vet's own exit 1 with diagnostics is ok",
+        true,
+        1,
+        "",
+        "# example.com/x\ncmd/x/x.go:3:1: unreachable code\n",
+        ("ok", "", 1)
+    )]
+    #[case::negative_govet_load_error(
+        "a package that can't load is failed with the cause, not a silent ok",
+        true,
+        1,
+        "",
+        "go: github.com/x/giouring@v0.0.0: reading /home/das/Downloads/giouring/go.mod: permission denied\n",
+        ("failed", "permission denied", 0)
+    )]
+    #[case::corner_govet_load_error_with_findings(
+        "a load error next to other packages' diagnostics is failed, and keeps them",
+        true,
+        1,
+        "",
+        "cmd/x/x.go:3:1: unreachable code\nvet: pkg/y/y.go:9:2: undefined: Foo\n",
+        ("failed", "undefined: Foo", 1)
+    )]
+    #[case::boundary_govet_noise_on_success(
+        "stderr chatter on a zero exit is not an error",
+        true,
+        0,
+        "",
+        "go: downloading example.com/m v1.0.0\n",
+        ("ok", "", 0)
+    )]
+    #[case::negative_json_tool_error(
+        "golangci-lint with an empty JSON report and a non-zero exit is failed with stderr",
+        false,
+        3,
+        "{\"Issues\":[]}",
+        "level=error msg=\"[linters_context] typechecking error: pattern ./...: permission denied\"\n",
+        ("failed", "typechecking error", 0)
+    )]
+    #[case::corner_golangci_go_too_old(
+        "golangci-lint built with an older Go than the module is skipped, with its words",
+        false,
+        3,
+        "",
+        "Error: can't load config: the Go language version (go1.26) used to build golangci-lint is lower than the targeted Go version (1.27.0)\n",
+        ("skipped", "1.27.0", 0)
+    )]
+    #[case::negative_silent_failure(
+        "a non-zero exit with no output at all says so",
+        false,
+        2,
+        "",
+        "",
+        ("failed", "no output", 0)
+    )]
+    #[tokio::test]
+    async fn run_tool_load_failure_cases(
+        #[case] description: &str,
+        #[case] govet: bool,
+        #[case] exit: i32,
+        #[case] stdout: &str,
+        #[case] stderr: &str,
+        #[case] (want_status, want_reason, want_findings): (&str, &str, usize),
+    ) {
+        let sandbox: std::sync::Arc<dyn agent_core::Sandbox> =
+            std::sync::Arc::new(ScriptedSandbox {
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+                exit,
+            });
+        let (tool, parser, load): (&str, Parser, Option<LoadError>) = if govet {
+            ("govet", parse_govet, Some(govet_load_error))
+        } else {
+            ("golangci-lint", parse_golangci, None)
+        };
+        let (r, found) = run_tool(
+            &sandbox,
+            &root(),
+            tool,
+            "x",
+            5,
+            &changed(),
+            parser,
+            govet,
+            load,
+            NetworkPolicy::On,
+        )
+        .await;
+        assert_eq!(r.status, want_status, "{description}: {}", r.reason);
+        assert!(
+            r.reason.contains(want_reason),
+            "{description}: {}",
+            r.reason
+        );
+        assert_eq!(found.len(), want_findings, "{description}");
+        assert_eq!(r.finding_count as usize, want_findings, "{description}");
+    }
+
+    /// A hostile tool can't splice an unbounded failure reason downstream.
+    #[tokio::test]
+    async fn adversarial_load_error_reason_is_bounded() {
+        let sandbox: std::sync::Arc<dyn agent_core::Sandbox> =
+            std::sync::Arc::new(ScriptedSandbox {
+                stdout: String::new(),
+                stderr: format!("go: {}\n", "x".repeat(10_000)),
+                exit: 1,
+            });
+        let (r, _) = run_tool(
+            &sandbox,
+            &root(),
+            "govet",
+            "x",
+            5,
+            &changed(),
+            parse_govet,
+            true,
+            Some(govet_load_error),
+            NetworkPolicy::On,
+        )
+        .await;
+        assert_eq!(r.status, "failed");
+        assert!(
+            r.reason.chars().count() <= 213,
+            "{} chars",
+            r.reason.chars().count()
+        );
+    }
+
+    /// The preflight's skip applies to the package-loading tools only, and every Go
+    /// command runs with `GOTOOLCHAIN=local`. Each row: the skip reason (if any) and
+    /// the (tasks left, skipped runs) after it.
+    #[rstest::rstest]
+    #[case::positive_no_skip("a compatible module runs all four Go tools", None, (4, 0))]
+    #[case::negative_newer_module(
+        "a newer module skips golangci-lint, gosec and go vet; gofmt still runs",
+        Some("the repo targets go 1.27.0; the review toolbox has go 1.26.4"),
+        (1, 3)
+    )]
+    #[tokio::test]
+    async fn go_preflight_plan_cases(
+        #[case] description: &str,
+        #[case] reason: Option<&str>,
+        #[case] (want_tasks, want_skipped): (usize, usize),
+    ) {
+        let tmp = agent_testkit::tempdir();
+        let changed = vec![PathBuf::from("cmd/x/x.go")];
+        let (mut runs, mut tasks) = collector("")
+            .plan(tmp.as_path(), &changed, true, false)
+            .await;
+        for t in tasks.iter().filter(|t| GO_LOADERS.contains(&t.tool)) {
+            assert!(
+                t.cmd.contains("GOTOOLCHAIN=local "),
+                "{description}: {}",
+                t.cmd
+            );
+        }
+        if let Some(reason) = reason {
+            tasks = skip_go_loaders(tasks, &mut runs, reason);
+        }
+        assert_eq!(
+            (tasks.len(), runs.len()),
+            (want_tasks, want_skipped),
+            "{description}"
+        );
+        assert!(
+            tasks.iter().all(|t| reason.is_none() || t.tool == "gofmt"),
+            "{description}"
+        );
+        for r in &runs {
+            assert_eq!(r.status, "skipped", "{description}");
+            assert_eq!(Some(r.reason.as_str()), reason, "{description}");
+        }
+    }
+
+    /// The `go.mod` replace facts as findings. Each row: the go.mod, the changed set,
+    /// and the expected (count, in_change of the first).
+    #[rstest::rstest]
+    #[case::positive_outside_replace(
+        "an absolute replace is a go.mod finding",
+        "module m\nreplace github.com/x/giouring => /home/das/Downloads/giouring\n",
+        false,
+        (1, false)
+    )]
+    #[case::corner_gomod_changed("a replace added by this change is in_change", "replace a => ../a\n", true, (1, true))]
+    #[case::negative_inside_replace("a vendored replace is not", "replace a => ./third_party/a\n", false, (0, false))]
+    #[case::negative_no_gomod("no go.mod, no finding", "", false, (0, false))]
+    fn gomod_replace_finding_cases(
+        #[case] description: &str,
+        #[case] gomod: &str,
+        #[case] gomod_changed: bool,
+        #[case] (want_n, want_in_change): (usize, bool),
+    ) {
+        let mut changed = changed();
+        if gomod_changed {
+            changed.insert("go.mod".into());
+        }
+        let f = gomod_replace_findings(gomod, &root(), &changed);
+        assert_eq!(f.len(), want_n, "{description}");
+        if let Some(first) = f.first() {
+            assert_eq!(first.file, "go.mod", "{description}");
+            assert_eq!(first.rule, "replace-outside-repo", "{description}");
+            assert!(
+                first.message.contains("outside the repository"),
+                "{description}"
+            );
+            assert_eq!(first.in_change, want_in_change, "{description}");
+        }
     }
 }

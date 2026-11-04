@@ -160,6 +160,36 @@ without discarding the latter (they're still facts).
 tools that did run. A repo that doesn't build still yields the findings of the
 tools that tolerate it (`gofmt`, some `staticcheck`). Never blocks the bundle.
 
+**A failure is never "ok".** A tool that exits non-zero with no findings is
+`failed`, with the first line of its error output (bounded) as the reason. `go vet`
+writes errors and diagnostics to the same stream, so a line that is neither a
+diagnostic nor a `# package` header (a package that couldn't load, such as a
+`replace` into a directory the sandbox can't read) makes it `failed` even when other
+packages produced findings, which are kept. Before this, such a load error was
+dropped by the parser and the run read "ok, 0 findings".
+The reason skips golangci-lint's `level=warning`/`level=info` log lines when
+any other line is there. golangci-lint 2.x prints a text stats summary after its
+JSON, so it runs with `--show-stats=false` and the parser reads only the first
+JSON value: a trailer must not turn its findings into "failed, 0 findings" (the
+toolbox bump to 2.15 did exactly that, caught by the `review-analyze` check).
+
+**Go version preflight.** Every Go tool runs with `GOTOOLCHAIN=local`: the wrapper
+forces it, and the analyzer and go-checks also put it on each command line. So `go`
+never downloads the toolchain a go.mod asks for. The repo-root `go.mod`'s `go`
+directive (read bounded, never through a symlink) is compared with the toolbox's
+`go env GOVERSION`. If the module is newer, golangci-lint, gosec and `go vet` are
+`skipped` with both versions named ("the repo targets go 1.27.0; the review toolbox
+has go 1.26.4"), and so is go-checks. `gofmt` loads no packages and still runs.
+golangci-lint's own "lower than the targeted Go version" error gets the same
+`skipped`. The toolbox's `go` is `go_latest`, and `nix run .#update-nixpkgs` keeps it
+current.
+
+**`go.mod` replace facts.** A `replace` whose local target is absolute or climbs out
+of the repo becomes a `go.mod` finding (`replace-outside-repo`). The packages that
+import it can't be loaded from a clean checkout, which is also why the analysis tools
+miss them. The target is judged lexically and never opened, and it is echoed
+bounded, with control characters dropped.
+
 ## Protobuf
 
 ```proto

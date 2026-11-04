@@ -3089,6 +3089,101 @@ mod tests {
         SymlinkInIndex,
         /// The previous index's `meta.json` is garbage: the update fails, the build is full.
         CorruptMeta,
+        /// git can't list the changes (an error, not `None`): the build is full.
+        ListFails,
+        /// The row's paths change between builds: the old index's scope no longer
+        /// matches, so the build is full and counts the files under the new paths.
+        ScopeChanged,
+    }
+
+    /// A repo whose `changed_paths` errs; everything else is the real one.
+    struct ChangesFail(Arc<dyn RepoBackend>);
+
+    #[async_trait]
+    impl RepoBackend for ChangesFail {
+        async fn resolve(&self, rev: &Revision) -> Result<agent_core::Oid> {
+            self.0.resolve(rev).await
+        }
+        async fn read_file(&self, rev: &Revision, path: &Path) -> Result<agent_core::BlobContent> {
+            self.0.read_file(rev, path).await
+        }
+        async fn list_tree(
+            &self,
+            rev: &Revision,
+            path: &Path,
+            recursive: bool,
+        ) -> Result<Vec<agent_core::TreeEntry>> {
+            self.0.list_tree(rev, path, recursive).await
+        }
+        async fn diff(
+            &self,
+            base: &Revision,
+            target: &Revision,
+            path_globs: &[String],
+        ) -> Result<agent_core::DiffResult> {
+            self.0.diff(base, target, path_globs).await
+        }
+        async fn grep(
+            &self,
+            rev: &Revision,
+            pattern: &str,
+            path_globs: &[String],
+            limit: usize,
+        ) -> Result<Vec<agent_core::GrepHit>> {
+            self.0.grep(rev, pattern, path_globs, limit).await
+        }
+        async fn log(
+            &self,
+            rev: &Revision,
+            path: Option<&Path>,
+            limit: usize,
+        ) -> Result<Vec<agent_core::CommitInfo>> {
+            self.0.log(rev, path, limit).await
+        }
+        async fn branches(&self) -> Result<Vec<(String, agent_core::Oid)>> {
+            self.0.branches().await
+        }
+        async fn status(&self) -> Result<agent_core::RepoStatus> {
+            self.0.status().await
+        }
+        async fn fetch(&self) -> Result<agent_core::RepoStatus> {
+            self.0.fetch().await
+        }
+        async fn fetch_branch(&self, branch: &str) -> Result<()> {
+            self.0.fetch_branch(branch).await
+        }
+        async fn changed_paths(
+            &self,
+            _from: &Revision,
+            _to: &Revision,
+            _limit: usize,
+        ) -> Result<Option<Vec<PathBuf>>> {
+            Err(agent_core::Error::Repo(
+                "git diff: fatal: bad object".into(),
+            ))
+        }
+        async fn worktree_add(
+            &self,
+            spec: &agent_core::WorktreeSpec,
+        ) -> Result<agent_core::WorktreeHandle> {
+            self.0.worktree_add(spec).await
+        }
+        async fn worktree_list(&self) -> Result<Vec<agent_core::WorktreeHandle>> {
+            self.0.worktree_list().await
+        }
+        async fn worktree_remove(&self, id: &str) -> Result<()> {
+            self.0.worktree_remove(id).await
+        }
+        async fn checkpoint(
+            &self,
+            worktree_id: &str,
+            name: &str,
+        ) -> Result<agent_core::Checkpoint> {
+            self.0.checkpoint(worktree_id, name).await
+        }
+        async fn push(&self, checkpoint: &agent_core::Checkpoint, remote_ref: &str) -> Result<()> {
+            self.0.push(checkpoint, remote_ref).await
+        }
     }
 
     fn commit_files(fx: &Fixture, writes: &[(&str, Option<&str>)]) {
@@ -3153,6 +3248,14 @@ mod tests {
         "a corrupt previous index falls back to a full build",
         Between::CorruptMeta, false, &["NEWTOKEN"], &["OLDTOKEN"], 2
     )]
+    #[case::negative_list_fails_is_full(
+        "git failing to list the changes falls back to a full build",
+        Between::ListFails, false, &["NEWTOKEN"], &["OLDTOKEN"], 2
+    )]
+    #[case::corner_scope_change_is_full(
+        "new paths for the row rebuild in full, counting the files under them",
+        Between::ScopeChanged, false, &["NEWTOKEN", "outside"], &["OLDTOKEN"], 3
+    )]
     #[tokio::test]
     async fn index_update(
         #[case] description: &str,
@@ -3175,7 +3278,7 @@ mod tests {
             }],
             ..limits()
         };
-        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim);
+        let svc = inner(fx.root.clone(), Arc::new(FixedRepo(fx.repo())), lim.clone());
         assert_eq!(
             svc.run(&r).await,
             Outcome::Ready,
@@ -3186,7 +3289,12 @@ mod tests {
         let first_index = layout.generation(&first).join("index");
 
         match between {
-            Between::Modify | Between::Forced | Between::SymlinkInIndex | Between::CorruptMeta => {
+            Between::Modify
+            | Between::Forced
+            | Between::SymlinkInIndex
+            | Between::CorruptMeta
+            | Between::ListFails
+            | Between::ScopeChanged => {
                 commit_files(&fx, &[("src/a.rs", Some("NEWTOKEN\n"))]);
             }
             Between::AddRemove => {
@@ -3224,6 +3332,26 @@ mod tests {
             std::fs::write(first_index.join("meta.json"), "{ not json").unwrap();
         }
 
+        // The second build sees a different repo or different paths for these rows.
+        let svc = match between {
+            Between::ListFails => inner(
+                fx.root.clone(),
+                Arc::new(FixedRepo(Arc::new(ChangesFail(fx.repo())))),
+                lim,
+            ),
+            Between::ScopeChanged => inner(
+                fx.root.clone(),
+                Arc::new(FixedRepo(fx.repo())),
+                IndexLimits {
+                    scopes: vec![FleetIndexScope {
+                        repo: r.repo.clone(),
+                        paths: vec!["src".into(), "docs".into()],
+                    }],
+                    ..lim
+                },
+            ),
+            _ => svc,
+        };
         let outcome = svc.run_job(&r, matches!(between, Between::Forced)).await;
         assert_eq!(outcome, Outcome::Ready, "{description}: second build");
         let st = status_of(&fx.root, &r);

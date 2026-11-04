@@ -23,6 +23,9 @@ const MAX_FINDINGS: usize = 200;
 const MAX_MSG: usize = 400;
 /// Cap on a run's failure reason (it comes from the reviewed code's build output).
 const MAX_REASON: usize = 160;
+/// Use the toolbox's Go; never download the toolchain a go.mod asks for (the network
+/// is off anyway, so a download would only turn into a confusing failure).
+const GO_ENV: &str = "GOTOOLCHAIN=local ";
 
 pub(crate) struct GoChecksCollector {
     pub timeout_secs: u64,
@@ -61,6 +64,17 @@ impl FactCollector for GoChecksCollector {
         if !ctx.repo_root.join("go.mod").exists() {
             return CollectorOutput::skipped("no go.mod at repo root");
         }
+        // A module targeting a newer Go than the toolbox's can't build here: say so,
+        // rather than three `failed` runs with a toolchain error each.
+        let required = crate::gomod::read_gomod(&ctx.repo_root)
+            .as_deref()
+            .and_then(crate::gomod::go_directive);
+        if required.is_some() {
+            let have = crate::gomod::toolbox_go(&sandbox, &ctx.repo_root, "go").await;
+            if let Some(reason) = crate::gomod::preflight(required, have) {
+                return CollectorOutput::skipped(reason);
+            }
+        }
         // The scope args derive from attacker-controlled diff paths, so each is
         // single-quote-escaped before it reaches `sh -c` (blocks command injection via a
         // path like `d/$(cmd)`), and every entry is constructed with a leading `./` (so it
@@ -81,7 +95,7 @@ impl FactCollector for GoChecksCollector {
 
         if self.race_bench {
             // `go test -race`: data races. `-count=1` disables the test cache so it runs.
-            let race_cmd = format!("go test -race -count=1 -run . -vet=off {scope}");
+            let race_cmd = format!("{GO_ENV}go test -race -count=1 -run . -vet=off {scope}");
             let started = now();
             let out = run_go(&sandbox, &ctx.repo_root, &race_cmd, self.timeout_secs).await;
             record(
@@ -94,7 +108,8 @@ impl FactCollector for GoChecksCollector {
             );
 
             // `go test -bench`: run benchmarks (no unit tests: `-run=^$`), surface ns/op.
-            let bench_cmd = format!("go test -bench=. -benchmem -run=^$ -count=1 -vet=off {scope}");
+            let bench_cmd =
+                format!("{GO_ENV}go test -bench=. -benchmem -run=^$ -count=1 -vet=off {scope}");
             let started = now();
             let out = run_go(&sandbox, &ctx.repo_root, &bench_cmd, self.timeout_secs).await;
             record(
@@ -112,7 +127,7 @@ impl FactCollector for GoChecksCollector {
             // below the threshold (and changed packages with no test files). `-run .`
             // runs the tests; `-vet=off` keeps it to coverage, not vet diagnostics.
             let module = module_path(&ctx.repo_root);
-            let cover_cmd = format!("go test -cover -run . -count=1 -vet=off {scope}");
+            let cover_cmd = format!("{GO_ENV}go test -cover -run . -count=1 -vet=off {scope}");
             let started = now();
             let out = run_go(&sandbox, &ctx.repo_root, &cover_cmd, self.timeout_secs).await;
             record(

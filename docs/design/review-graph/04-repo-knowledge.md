@@ -210,7 +210,9 @@ GC refcount.
 - **When it rebuilds instead:** a forced Re-index; no usable previous generation; 50
   updates in a row (`chain`); more than 20,000 changed paths, or git can't list them;
   in-scope changes over half the previous file count (at least 256); or a failed copy or
-  update, which is logged and followed by a full build.
+  update, which is logged and followed by a full build. A fleet whose repo backend is
+  the gRPC client (`GrpcRepo`) has no `ChangedPaths` RPC, so it gets the trait's
+  default `Ok(None)` and always builds in full. That is correct, only slower.
 - **Manifest.** `updated_from` names the base the update started from and `chain` counts
   updates since the last full build; both are absent after a full build.
 

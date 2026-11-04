@@ -25,7 +25,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5a-ii-c | Path-scoped indexing (nixpkgs by default), configurable Re-index cooldown, #692's review items | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #693 |
 | 5a-ii-c+ | #693's review items: scope tests (fresh outside, stale inside, files after a scope change), rune-safe portal clip, scope checks at load | [04](04-repo-knowledge.md#as-built-5a-ii-c) | ✅ | #694 |
 | 5a-ii-d-i | Push-webhook base-moved trigger, #694's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-i) | ✅ | #695 |
-| 5a-ii-d-ii-a | Incremental refresh: a moved base updates a copy of the last generation from git's changed paths, #695's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-ii-a) | 🟡 | this PR |
+| 5a-ii-d-ii-a | Incremental refresh: a moved base updates a copy of the last generation from git's changed paths, #695's review items | [04](04-repo-knowledge.md#as-built-5a-ii-d-ii-a) | ✅ | #696 |
 | 5a-ii-d-ii-b | `knowledge_max_bytes`, language indexes, history signals, overview | [04](04-repo-knowledge.md) | ⬜ | — |
 | 5b-i | Index consumption, grounding: each fleet review's `nearby` searches its row's index (read-only open, never the shared backend), and the brief names the index used or why there is none | [04](04-repo-knowledge.md#as-built-5b-i) | ✅ | #688 |
 | 5b-ii | The review session's `search` tool on the row index, hits in changed files flagged pre-PR, replacing any process-wide `search` | [04](04-repo-knowledge.md#as-built-5b-ii) | ✅ | #689, #690 |
@@ -344,7 +344,7 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   Merged as #695 (7617d5d5) after one fleet round with no must-fix. Its should-fix
   items are done in 5a-ii-d-ii-a below.
 
-- **5a-ii-d-ii-a** (this PR): a moved base updates the last index instead of rebuilding.
+- **5a-ii-d-ii-a** (#696, feca8f84): a moved base updates the last index instead of rebuilding.
   - `RepoBackend::changed_paths(from, to, limit)` lists the paths git says differ
     between two commits (two-dot, no rename detection, so a rename is a delete and an
     add). Both revisions are resolved to oids first; past `limit` it returns `None`.
@@ -362,3 +362,8 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
     the row was queued, so `Reindexing(n)` counts only queued rows; `parse_push` checks
     the ref before reading `deleted`, so another branch's malformed push is ignored; the
     scope error message names `./`; a long doc line is rewrapped.
+  - Its fleet draft's should-fix items landed in the Go-toolchain fix PR that followed
+    (review-analysis-depth STATUS, "Honest Go tool status"): the `changed_paths`
+    buffering bound is documented at the call; a `GrpcRepo`-backed fleet always builds
+    in full (now said in 04); `index_update` gained the `ListFails` and `ScopeChanged`
+    rows.

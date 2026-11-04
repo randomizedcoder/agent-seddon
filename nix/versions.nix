@@ -129,8 +129,10 @@ in
   # Go static-analysis toolchain for the code-review analyzer (increment 5). The
   # binaries are cached in /nix/store; the review flow shells out to them.
   # `go_latest`: Go is backward compatible, so the newest toolchain vets older
-  # modules too (an old pin is the wrong direction: it can't load a module whose
-  # `go` directive is newer). `nix run .#update-nixpkgs` moves it forward.
+  # modules too, and a repo that targets a newer `go` directive than the pin is
+  # skipped with that reason (analyzer.rs `go_preflight`). `nix run
+  # .#update-nixpkgs` moves it forward. The wrapper sets `GOTOOLCHAIN=local`, so
+  # `go` never downloads a toolchain at review time.
   go = pkgs.go_latest;
   # nixpkgs builds golangci-lint with the newest Go it supports (`buildGo127Module`
   # at 0bb2eedc); leave that choice to nixpkgs, since golangci-lint needs code
