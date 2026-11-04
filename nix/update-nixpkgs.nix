@@ -9,7 +9,8 @@
 #      checkout's and /nix/store's) is under the floor;
 #   2. makes a throwaway worktree of origin/main on `chore/nixpkgs-<date>`;
 #   3. runs `nix flake update nixpkgs advisory-db` there (stops if nothing moved),
-#      then the deterministic offline regen (`gen-openapi`) the gate checks;
+#      then the deterministic offline regen (`gen-openapi`) the gate checks — a
+#      regen that fails (the flake no longer evaluates) is reported like a red gate;
 #   4. runs the gate (`nix flake check --keep-going`) and notes the failing checks;
 #      the full log is kept under $XDG_STATE_HOME/update-nixpkgs/, and its error
 #      lines go in the PR body;
@@ -102,25 +103,35 @@ pkgs.writeShellApplication {
 
     rev() { jq -r '.nodes.nixpkgs.locked | "\(.rev[0:8]) (\(.lastModified | todate | .[0:10]))"' flake.lock; }
     old=$(rev)
-    nix flake update nixpkgs advisory-db
+    if ! nix flake update nixpkgs advisory-db >"$log" 2>&1; then
+      echo "update-nixpkgs: nix flake update failed (log: $log)" >&2
+      exit 1
+    fi
     if git diff --quiet flake.lock; then
       echo "update-nixpkgs: nixpkgs and advisory-db are already current ($old)"
       exit 0
     fi
     new=$(rev)
-    # The newer protoc plugins can change the generated OpenAPI; the gate checks it.
-    nix run .#gen-openapi
-    echo "update-nixpkgs: nixpkgs $old -> $new; running the gate (log: $log)"
+    echo "update-nixpkgs: nixpkgs $old -> $new; regenerating and running the gate (log: $log)"
 
-    if nix flake check --max-jobs "''${MAX_JOBS:-8}" --cores "''${CORES:-4}" --keep-going >"$log" 2>&1; then
+    # The newer protoc plugins can change the generated OpenAPI; the gate checks it.
+    # A pin that drops an attr this flake uses fails here, at eval: that is the
+    # failure most worth a PR, so it is reported like a red gate, not lost.
+    stage=""
+    if ! nix run .#gen-openapi >>"$log" 2>&1; then
+      stage="The OpenAPI regen (nix run .#gen-openapi) failed, so the gate did not run; the flake may no longer evaluate at this pin."
+    elif ! nix flake check --max-jobs "''${MAX_JOBS:-8}" --cores "''${CORES:-4}" --keep-going >>"$log" 2>&1; then
+      stage="The gate (nix flake check --keep-going) failed."
+    fi
+    if [ -z "$stage" ]; then
       result="The gate (nix flake check --keep-going) passed."
     else
       # nix names a failed derivation in several phrasings; take any of them.
       failed=$(grep -oE "(Cannot build|builder for|derivation) '/nix/store/[a-z0-9]{32}-[^']+\.drv'" "$log" |
         sed -E "s|.*/[a-z0-9]{32}-||; s|\.drv'$||" | sort -u | sed 's/^/- /' || true)
       errors=$(grep -E '^error:' "$log" | cut -c1-300 | head -n 40 || true)
-      result=$(printf 'The gate failed. Failing derivations:\n\n%s\n\nError lines (the full log is on the host that ran the job, %s):\n\n~~~\n%s\n~~~\n\nRebuild a flaky check alone before treating it as a blocker.' \
-        "''${failed:-"- (none named)"}" "$log" "''${errors:-(none)}")
+      result=$(printf '%s Failing derivations:\n\n%s\n\nError lines (the full log is on the host that ran the job, %s):\n\n~~~\n%s\n~~~\n\nRebuild a flaky check alone before treating it as a blocker.' \
+        "$stage" "''${failed:-"- (none named)"}" "$log" "''${errors:-(none)}")
     fi
     echo "$result"
 
@@ -136,7 +147,12 @@ pkgs.writeShellApplication {
       exit 0
     fi
     git push -q --force -u origin "$branch"
-    gh pr create --base main --head "$branch" --title "$title" --body "$(printf 'Weekly nixpkgs bump (nix run .#update-nixpkgs).\n\n%s\n' "$result")"
+    body=$(printf 'Weekly nixpkgs bump (nix run .#update-nixpkgs).\n\n%s\n' "$result")
+    # Two same-day runs (the timer and a manual one) can both pass the open-PR check;
+    # the later push then owns the branch, so its result replaces the PR's text.
+    if ! gh pr create --base main --head "$branch" --title "$title" --body "$body"; then
+      gh pr edit "$branch" --title "$title" --body "$body"
+    fi
     # The PR holds the branch now; drop the local copy (cleanup), so a rerun works.
   '';
 }

@@ -88,6 +88,7 @@ in
   # `llvm-tools` toolchain component (added above). Its own test suite is skipped:
   # on nixpkgs 0bb2eedc its fixture workspaces SIGSEGV under nixpkgs' cargo 1.99
   # (14 of 20 fail in the sandbox); our `coverage` check exercises the binary.
+  # Revisit on each nixpkgs bump: drop the override once upstream's suite passes.
   cargo-llvm-cov = pkgs.cargo-llvm-cov.overrideAttrs { doCheck = false; };
   # `sccache`: a compilation cache used in the dev shell as `RUSTC_WRAPPER`. Reuses
   # compiled units across feature-set changes and `cargo clean`, with a hard size

@@ -169,7 +169,12 @@ the safe direction. `nix run .#update-nixpkgs` is the weekly bump:
   plugins change it), runs the gate with `--keep-going`, and opens a
   `chore(deps): nixpkgs <old> -> <new>` PR whose body lists the failing derivations
   and the gate's `error:` lines. The full log stays in
-  `$XDG_STATE_HOME/update-nixpkgs/` on the host that ran it. It never merges;
+  `$XDG_STATE_HOME/update-nixpkgs/` on the host that ran it. If the regen
+  fails (the new pin dropped an attr the flake uses, so it no longer evaluates),
+  the PR still opens, with the eval error in its body. It never merges;
+- only the OpenAPI document is regenerated: `buf` breakage shows in the gate, but
+  the committed Dart (`portal/lib/src/gen/`) is not checked for drift, so a bump
+  that moves `protoc-gen-dart` needs a human `nix run .#gen-dart`;
 - a red update PR is normal, not a broken job: a Flutter bump can move the portal
   goldens a few pixels, and whether to regenerate them (font-rendering noise) or
   not (a real visual change) is a human call (regenerate command below);
@@ -180,7 +185,7 @@ To regenerate the goldens from the `portal-visual` check's own build:
 
 ```sh
 nix build --impure --expr 'let f = builtins.getFlake (toString ./.); in
-  f.checks.x86_64-linux.portal-visual.overrideAttrs (_: {
+  f.checks.${builtins.currentSystem}.portal-visual.overrideAttrs (_: {
     buildPhase = "flutter test --no-pub --update-goldens test/visual";
     installPhase = "mkdir -p $out && cp -r test/visual/goldens $out/";
   })'
