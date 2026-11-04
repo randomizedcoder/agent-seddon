@@ -154,6 +154,46 @@ nix fmt                     # format all .nix files
 `cargo-audit`, nix-fmt, generated-constant drift, `buf lint`, `buf breaking`, and
 the bench + leak suites ([`benchmarking.md`](benchmarking.md)).
 
+### Keeping nixpkgs current (`nix run .#update-nixpkgs`)
+
+Every tool the agent and its reviews run (go, golangci-lint, gosec, shellcheck, …)
+comes from the flake's one `nixpkgs` input. A stale pin can't analyze a repo that
+targets a newer toolchain; nixpkgs still carries older versions, so newer is
+the safe direction. `nix run .#update-nixpkgs` is the weekly bump:
+
+- it skips when one of its own update PRs (`chore/nixpkgs-*`, opened by the same
+  `gh` user) is already open, or when this checkout's disk or `/nix/store` is under
+  `MIN_FREE_PCT` (default 10);
+- it updates `nixpkgs` and `advisory-db` (cargo-audit's data) in `flake.lock`, in a
+  throwaway worktree of `origin/main`, regenerates the OpenAPI document (newer protoc
+  plugins change it), runs the gate with `--keep-going`, and opens a
+  `chore(deps): nixpkgs <old> -> <new>` PR whose body lists the failing derivations
+  and the gate's `error:` lines. The full log stays in
+  `$XDG_STATE_HOME/update-nixpkgs/` on the host that ran it. If the regen
+  fails (the new pin dropped an attr the flake uses, so it no longer evaluates),
+  the PR still opens, with the eval error in its body. It never merges;
+- only the OpenAPI document is regenerated: `buf` breakage shows in the gate, but
+  the committed Dart (`portal/lib/src/gen/`) is not checked for drift, so a bump
+  that moves `protoc-gen-dart` needs a human `nix run .#gen-dart`;
+- a red update PR is normal, not a broken job: a Flutter bump can move the portal
+  goldens a few pixels, and whether to regenerate them (font-rendering noise) or
+  not (a real visual change) is a human call (regenerate command below);
+- with no git identity configured (a bare timer) it commits as `update-nixpkgs`;
+- `--dry-run` stops before the push and the PR.
+
+To regenerate the goldens from the `portal-visual` check's own build:
+
+```sh
+nix build --impure --expr 'let f = builtins.getFlake (toString ./.); in
+  f.checks.${builtins.currentSystem}.portal-visual.overrideAttrs (_: {
+    buildPhase = "flutter test --no-pub --update-goldens test/visual";
+    installPhase = "mkdir -p $out && cp -r test/visual/goldens $out/";
+  })'
+cp result/goldens/themes/*.png portal/test/visual/goldens/themes/
+```
+
+On l2 a weekly systemd user timer runs it; the fleet reviews the PR like any other.
+
 ### Does it actually work? (`nix run .#e2e-live`)
 
 The gate proves the binary, the wire format and the tool path against a

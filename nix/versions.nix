@@ -85,8 +85,11 @@ in
   rust-analyzer = pkgs.rust-analyzer;
   # `cargo-llvm-cov`: source-based test-coverage. Drives the `nix run .#coverage`
   # app (local lcov + HTML report) and the non-gating `coverage` check. Needs the
-  # `llvm-tools` toolchain component (added above).
-  cargo-llvm-cov = pkgs.cargo-llvm-cov;
+  # `llvm-tools` toolchain component (added above). Its own test suite is skipped:
+  # on nixpkgs 0bb2eedc its fixture workspaces SIGSEGV under nixpkgs' cargo 1.99
+  # (14 of 20 fail in the sandbox); our `coverage` check exercises the binary.
+  # Revisit on each nixpkgs bump: drop the override once upstream's suite passes.
+  cargo-llvm-cov = pkgs.cargo-llvm-cov.overrideAttrs { doCheck = false; };
   # `sccache`: a compilation cache used in the dev shell as `RUSTC_WRAPPER`. Reuses
   # compiled units across feature-set changes and `cargo clean`, with a hard size
   # cap so it can't balloon like the incremental cache did. Requires
@@ -125,9 +128,16 @@ in
   hey = pkgs.hey;
   # Go static-analysis toolchain for the code-review analyzer (increment 5). The
   # binaries are cached in /nix/store; the review flow shells out to them.
-  go = pkgs.go_1_25 or pkgs.go;
+  # `go_latest`: Go is backward compatible, so the newest toolchain vets older
+  # modules too (an old pin is the wrong direction: it can't load a module whose
+  # `go` directive is newer). `nix run .#update-nixpkgs` moves it forward.
+  go = pkgs.go_latest;
+  # nixpkgs builds golangci-lint with the newest Go it supports (`buildGo127Module`
+  # at 0bb2eedc); leave that choice to nixpkgs, since golangci-lint needs code
+  # changes per Go release. It must be at least the repo's `go` to load packages.
   golangci-lint = pkgs.golangci-lint;
-  gosec = pkgs.gosec;
+  # gosec loads packages with the Go it was built with; build it with `go` above.
+  gosec = pkgs.gosec.override { buildGoModule = pkgs.buildGoLatestModule; };
   # SCIP indexers for the AstBackend `scip` engine (docs/components/ast.md). `scip-go`
   # emits a `.scip` index (symbols + implicit interface implementations) the engine
   # ingests; `rust-analyzer scip` covers Rust (reuses the pin above). Others

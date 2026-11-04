@@ -239,7 +239,7 @@ testChecks
   # suite instrumented and emits lcov.info. Non-gating on the number (no
   # `--fail-under`); the human report is `nix run .#coverage`. See
   # docs/components/testing.md.
-  coverage = craneCheck ./coverage.nix { inherit pkgs renderedK3s; };
+  coverage = craneCheck ./coverage.nix { inherit pkgs versions renderedK3s; };
   # Model-free smoke of the load/overload harness: it compiles, sheds
   # RESOURCE_EXHAUSTED under overload, and the ramp path runs (no perf assertions).
   loadtest-smoke = craneCheck ./loadtest-smoke.nix { inherit cargoArtifacts; };
@@ -378,6 +378,7 @@ testChecks
   # CLI-surface smoke (hermes-style): `agent --help` stays runnable and keeps
   # advertising the full `--serve-<seam>` / serve interface. Offline.
   cli-help = agentCheck ./cli-help.nix { };
+  update-nixpkgs = import ./update-nixpkgs.nix { inherit pkgs; };
   # Config-roundtrip (hermes-style): representative `agent.toml` fixtures load +
   # build via `agent --check-config` and select the right impls; broken ones fail
   # closed. Offline (dry run — no model, no socket).

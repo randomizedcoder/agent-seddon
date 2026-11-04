@@ -22,12 +22,15 @@
 #
 {
   pkgs,
+  versions,
   craneLib,
   commonArgs,
   renderedK3s,
 }:
 
-craneLib.cargoLlvmCov (
+# crane's `cargoLlvmCov` takes `cargo-llvm-cov` from its scope (plain nixpkgs);
+# point it at the pinned one so the check and `nix run .#coverage` agree.
+(craneLib.overrideScope (_: _: { inherit (versions) cargo-llvm-cov; })).cargoLlvmCov (
   commonArgs
   // {
     cargoArtifacts = null;

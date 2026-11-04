@@ -16,19 +16,23 @@
       "name": "AstService"
     },
     {
-      "name": "AuthService"
+      "name": "AuthService",
+      "description": "REST mappings (docs/design/rest-openapi/), under /v1/auth/. Token-minting and\nmutations → POST body:* (Exchange, Begin, Refresh, Logout, PutBinding); reads → GET\n(Issuers, Jwks, WhoAmI, the list/get RPCs, with `tenant` as a query param);\nsession/binding removals → DELETE by id (the id is a path param, other scalars ride\nas query params). Every field in these requests is untrusted — Envoy hands it to the\nsame gRPC handler behind the same AuthLayer, so REST bypasses none of the authz."
     },
     {
       "name": "ConfigService"
     },
     {
-      "name": "ContextService"
+      "name": "ContextService",
+      "description": "Named `ContextService` (not `Context`) to avoid colliding with\n`std::task::Context` in tonic's generated Tower `Service` impls.\n\nREST mappings (docs/design/rest-openapi/), under /v1/context/. Both RPCs carry a\nnested request (a `ContextInput` / a `WorkingSet`+budget) → POST body:*; Compact\nalso mutates the working set."
     },
     {
-      "name": "DigestService"
+      "name": "DigestService",
+      "description": "REST mappings (docs/design/rest-openapi/), under /v1/digests/. Put writes a row →\nPOST body:*. Query is a ledger read keyed by `session_id` (the identifier) → GET\nwith the session as a `{session_id}` path param; the `kind`/`since_seq`/`limit`\nscalars and the repeated-scalar `keywords_any` FILTER all ride as query params\n(repeated-scalar filters stay GET — content-payload-vs-filter refinement)."
     },
     {
-      "name": "DimensionService"
+      "name": "DimensionService",
+      "description": "REST mappings (docs/design/rest-openapi/), under /v1/dimensions/. Summarize\ncarries a repeated nested episodic window → POST body:*. Recall is a bounded read\nkeyed by the `dimension` slug (a `safe_segment` identifier) → GET with the slug as\na `{dimension}` path param and `limit` as a query param."
     },
     {
       "name": "EmbedService"
@@ -46,37 +50,47 @@
       "name": "TaskService"
     },
     {
-      "name": "ForgeRegistryService"
+      "name": "ForgeRegistryService",
+      "description": "The forge control plane (mirrors ProviderRegistryService: one process holds the\nforge store while any number of clients drive it). Mutations are gated by the RBAC\nenforcement core (C1) — a caller needs a role granting `(write|delete,\nforge_registry)`."
     },
     {
-      "name": "GithubInstallRegistryService"
+      "name": "GithubInstallRegistryService",
+      "description": "The GitHub-App install control plane (mirrors ForgeRegistryService). Mutations are\ngated by the RBAC enforcement core (C1) on `(write|delete, forge_registry)`."
     },
     {
-      "name": "GraphService"
+      "name": "GraphService",
+      "description": "REST mappings (docs/design/rest-openapi/), under /v1/graph/. Get and Put share the\n/v1/graph resource, disambiguated by verb (GET reads the document, POST replaces\nit); Validate carries the whole document → POST body:* (nested-body-read), and\nDescribeNodeTypes (empty request) reads the schema registry → GET."
     },
     {
       "name": "LlmPoolService"
     },
     {
-      "name": "LspService"
+      "name": "LspService",
+      "description": "REST mappings (docs/design/rest-openapi/), under /v1/lsp/. Open (carries a file's\n`text`) and Request (nested method/position, and rename mutates) → POST body:*;\nShutdown is an action → POST; Capabilities is a read whose only field is a scalar\n`language` → GET (query param)."
     },
     {
-      "name": "Memory"
+      "name": "Memory",
+      "description": "The whole-store facade (agent-core `MemoryStore`).\n\nREST mappings (docs/design/rest-openapi/), under /v1/memory/. Recall carries a\nnested `RecallQuery` → POST body:* (nested-body-read convention); Append is a\nwrite and Distill an action → POST body:*."
     },
     {
-      "name": "Episodic"
+      "name": "Episodic",
+      "description": "The append-only \"what happened\" layer (agent-core `EpisodicStore`).\n\nREST mappings under /v1/episodic/. Append is a write → POST body:*; Recent is a\nbounded read whose only field is a scalar `limit` → GET (rides as a query param)."
     },
     {
-      "name": "Semantic"
+      "name": "Semantic",
+      "description": "The \"what is true\" layer (agent-core `SemanticStore`).\n\nREST mappings under /v1/semantic/. Recall carries a nested `RecallQuery` and\nDistill a repeated nested episodic window → both POST body:*."
     },
     {
-      "name": "MetricsProxyService"
+      "name": "MetricsProxyService",
+      "description": "REST mappings (docs/design/rest-openapi/), under /v1/metrics/. Both RPCs are pure\nreads (they only read Prometheus). The PromQL `query` is a SELECTOR expression over\nstored series, not a content payload, so — like Prometheus's own /api/v1/query — it\nstays GET and rides as a query param (with the time/range/step scalars); the string\nlives in the query string, never in a path template."
     },
     {
-      "name": "ModeService"
+      "name": "ModeService",
+      "description": "REST mapping (docs/design/rest-openapi/), under /v1/mode/. Classify carries a\nprompt + nested `history` (a content payload the server bounds/hashes) → POST\nbody:*, not a query read."
     },
     {
-      "name": "Policy"
+      "name": "Policy",
+      "description": "REST mapping (docs/design/rest-openapi/), under /v1/policy/. Authorize carries a\nnested `ToolCall` to gate → POST body:* (nested-body)."
     },
     {
       "name": "PromptService"
@@ -85,22 +99,27 @@
       "name": "Provider"
     },
     {
-      "name": "ReferenceService"
+      "name": "ReferenceService",
+      "description": "REST mapping (docs/design/rest-openapi/), under /v1/references/. Resolve carries a\nwhole `prompt` (a content payload, not a URL-friendly selector) → POST body:* per\nthe content-payload refinement, even though it is side-effect-free."
     },
     {
       "name": "RepoService"
     },
     {
-      "name": "FactCollectorService"
+      "name": "FactCollectorService",
+      "description": "REST mapping (docs/design/rest-openapi/), under /v1/review/. Collect is a fail-soft\nread (grounded fact collection). Its `target` (`pr:<n>` | `branch:<name>` |\n`worktree`) can contain `:` and `/`, so — like RepoService.ReadFile's revision — it\nrides as a query param, never a `{param}` path capture: GET /v1/review/facts."
     },
     {
-      "name": "ReviewFleetService"
+      "name": "ReviewFleetService",
+      "description": "The roster control plane (mirrors ProviderRegistryService: one process holds\nthe roster while any number of clients drive it). `token_ref` rides as a\nreference; the server never resolves it."
     },
     {
-      "name": "RoleService"
+      "name": "RoleService",
+      "description": "The role control plane (mirrors ProviderRegistryService: one process holds the\nrole store while any number of clients drive it). Mutations are gated by the RBAC\nenforcement core (C1) — a caller needs a role granting `(write|delete, role)`."
     },
     {
-      "name": "ScannerService"
+      "name": "ScannerService",
+      "description": "REST mapping (docs/design/rest-openapi/), under /v1/scanner/. Scan carries the\n`content` to inspect — an untrusted CONTENT payload, not a URL-friendly selector →\nPOST body:* (content-payload refinement)."
     },
     {
       "name": "SchedulerService"
@@ -112,7 +131,8 @@
       "name": "SessionRegistryService"
     },
     {
-      "name": "ThemeService"
+      "name": "ThemeService",
+      "description": "User themes and the caller's active theme (docs/design/visual/03, 04), gated by\n`(read|write|delete|approve, theme)`. A theme the caller may not see is reported\nas missing, never as forbidden."
     },
     {
       "name": "TokenizerService"
@@ -121,10 +141,12 @@
       "name": "ToolService"
     },
     {
-      "name": "TransportRegistryService"
+      "name": "TransportRegistryService",
+      "description": "The transport control plane (mirrors ForgeRegistryService: one process holds the\ntransport store while any number of clients drive it). Mutations are gated by the\nRBAC enforcement core (C1) — a caller needs a role granting `(write|delete,\ntransport_registry)`."
     },
     {
-      "name": "ProviderRegistryService"
+      "name": "ProviderRegistryService",
+      "description": "The registry control plane (mirrors PromptService / SchedulerService: one\nprocess holds the fleet while any number of agents drive it)."
     },
     {
       "name": "WebService"
@@ -12762,7 +12784,7 @@
           "type": "string"
         }
       },
-      "additionalProperties": {}
+      "additionalProperties": true
     },
     "google.rpc.Status": {
       "type": "object",

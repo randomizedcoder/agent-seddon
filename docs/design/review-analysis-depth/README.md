@@ -149,6 +149,8 @@ nix flake check               # re-gate: clippy/tests + the review-* checks re-r
 # → nix/versions.nix pins float → review-toolbox derivation rehashes → wrapped agent rebuilds
 ```
 
+`nix run .#update-nixpkgs` does this weekly and opens a PR with the gate result
+([operating.md](../../operating.md#keeping-nixpkgs-current-nix-run-update-nixpkgs)).
 One input bump moves **every** analysis tool together, reproducibly (the new set is captured in
 `flake.lock`), and the existing `nix/checks/review-*.nix` gate (`review-analyze`, `review-callgraph`,
 `review-salience`, `review-gate`) proves the pipeline still parses each tool's output before the
