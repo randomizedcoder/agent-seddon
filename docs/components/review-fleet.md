@@ -516,7 +516,9 @@ the single roster owns every installation.
 A `push` to a watched repo's default branch (subscribe the App to **Push** events) queues
 an index check of each enabled row of the owning tenant that watches the repo, past the
 `refresh_secs` throttle; it never triggers a review (review-graph 5a-ii-d-i). Other
-branches, tags and branch deletions are ignored.
+branches, tags and branch deletions are ignored. When the base has moved, the new index is
+an update of the last one from git's changed paths rather than a rebuild (review-graph
+5a-ii-d-ii-a); the old one serves until the swap.
 
 `installation` and `installation_repositories` events drive the install lifecycle
 ([`install_lifecycle.rs`](../../crates/agent-runtime/src/install_lifecycle.rs)), which can only

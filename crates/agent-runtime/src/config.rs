@@ -317,7 +317,7 @@ impl FleetIndexCfg {
             if let Some(bad) = s.paths.iter().find(|p| !plain_relative(p)) {
                 return Err(format!(
                     "`[[review_fleet.index.scopes]]` for {shown:?} has path {:?}, which is \
-                     not a plain relative path (no `..`, leading `/` or `./`)",
+                     not a plain relative path (no `..`, and no leading `/` or `./`)",
                     agent_core::campaign::truncate_chars(bad, 80)
                 ));
             }

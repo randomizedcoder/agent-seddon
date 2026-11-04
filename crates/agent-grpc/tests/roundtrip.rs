@@ -2304,6 +2304,9 @@ impl agent_core::FleetIndexer for RecordingIndexer {
             .push((tenant.to_string(), row.id.clone()));
         self.reply
     }
+    fn base_moved(&self, _tenant: &str, _row: &agent_core::FleetSession) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

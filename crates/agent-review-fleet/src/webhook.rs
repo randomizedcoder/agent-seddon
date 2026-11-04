@@ -164,12 +164,17 @@ fn parse_push(v: &Value) -> std::result::Result<WebhookEvent, Reject> {
     let default = str_at("/repository/default_branch")
         .filter(|b| !b.is_empty() && b.len() <= MAX_REF_LEN)
         .ok_or(Reject("push without a default branch"))?;
+    // Every other branch is ignored before any of the payload's other fields is read,
+    // so a malformed field only refuses a push that would have been acted on.
+    if git_ref.strip_prefix("refs/heads/") != Some(default) {
+        return Ok(WebhookEvent::Ignored);
+    }
     let deleted = match v.get("deleted") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err(Reject("push.deleted is not a bool")),
     };
-    if deleted || git_ref.strip_prefix("refs/heads/") != Some(default) {
+    if deleted {
         return Ok(WebhookEvent::Ignored);
     }
     let sha = str_at("/after")
@@ -254,9 +259,9 @@ pub trait WebhookTarget: Send + Sync {
     async fn suspend(&self, tenant: &str, installation: &str) -> Result<()>;
     /// The installation is back: restore it only if it is still verified for `tenant`.
     async fn unsuspend(&self, tenant: &str, installation: &str) -> Result<()>;
-    /// `row`'s default branch moved: queue an index check of it (no-op without an
-    /// indexer).
-    fn base_moved(&self, tenant: &str, row: &FleetSession);
+    /// `row`'s default branch moved: queue an index check of it. Returns whether it was
+    /// queued (false without an indexer, or when its queue is full).
+    fn base_moved(&self, tenant: &str, row: &FleetSession) -> bool;
     /// Apply a repo-list change to `tenant`'s record of the installation.
     async fn sync_repos(
         &self,
@@ -276,7 +281,7 @@ pub enum Dispatched {
     Unclaimed,
     /// `n` review triggers enqueued.
     Triggered(usize),
-    /// `n` rows queued for an index check.
+    /// `n` rows queued for an index check (a row the indexer turned away is not counted).
     Reindexing(usize),
     Revoked,
     Suspended,
@@ -320,9 +325,9 @@ pub async fn dispatch(event: WebhookEvent, target: &dyn WebhookTarget) -> Result
             let mut n = 0;
             for row in target.github_rows(&tenant).await? {
                 if row.enabled && row.repo == repo {
-                    tracing::info!(row = %row.id, base = %sha, "fleet webhook: base moved");
-                    target.base_moved(&tenant, &row);
-                    n += 1;
+                    let queued = target.base_moved(&tenant, &row);
+                    tracing::info!(row = %row.id, base = %sha, queued, "fleet webhook: base moved");
+                    n += usize::from(queued);
                 }
             }
             Dispatched::Reindexing(n)
@@ -488,6 +493,11 @@ mod tests {
     #[case::adversarial_short_sha("a short id is refused", push_body("refs/heads/main", "main".into(), "abc123", false.into(), "acme/web"), Err(Reject("push after is not a commit id")))]
     #[case::adversarial_injection_sha("an id with shell or ref text is refused", push_body("refs/heads/main", "main".into(), "$(rm -rf /)aaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false.into(), "acme/web"), Err(Reject("push after is not a commit id")))]
     #[case::adversarial_repo_traversal("a traversal repo name is refused", push_body("refs/heads/main", "main".into(), SHA, false.into(), "acme/.."), Err(Reject("repository name is not a valid owner/name")))]
+    #[case::corner_other_branch_malformed_ignored(
+        "another branch is ignored whatever its other fields hold",
+        push_body("refs/heads/feature", "main".into(), "nope", "yes".into(), "acme/web"),
+        Ok(WebhookEvent::Ignored)
+    )]
     #[case::adversarial_deleted_string("a non-bool `deleted` is refused", push_body("refs/heads/main", "main".into(), SHA, "yes".into(), "acme/web"), Err(Reject("push.deleted is not a bool")))]
     #[case::adversarial_no_ref("a push without a ref is refused", br#"{"after":"x"}"#.to_vec(), Err(Reject("push without a ref")))]
     fn parse_push_cases(
@@ -576,6 +586,8 @@ mod tests {
         log: Mutex<Vec<String>>,
         triggers: Mutex<Vec<FleetTrigger>>,
         moved: Mutex<Vec<(String, String)>>,
+        /// The indexer's queue is full: every row is offered and turned away.
+        full: bool,
     }
 
     #[async_trait]
@@ -590,11 +602,12 @@ mod tests {
             self.triggers.lock().unwrap().push(trigger);
             TriggerOutcome::Accepted
         }
-        fn base_moved(&self, tenant: &str, row: &FleetSession) {
+        fn base_moved(&self, tenant: &str, row: &FleetSession) -> bool {
             self.moved
                 .lock()
                 .unwrap()
                 .push((tenant.to_string(), row.id.clone()));
+            !self.full
         }
         async fn revoke(&self, tenant: &str, installation: &str) -> Result<()> {
             self.log
@@ -733,18 +746,23 @@ mod tests {
     // A moved base reaches only the owning tenant's enabled rows for that repo, and never
     // triggers a review.
     #[rstest]
-    #[case::positive_owner_rows_for_repo("each enabled row for the repo is queued", moved_event("42", "acme__web"), Dispatched::Reindexing(2), &[("acme", "web"), ("acme", "web-sec")])]
-    #[case::negative_no_matching_repo("a repo no row watches queues nothing", moved_event("42", "acme__nope"), Dispatched::Reindexing(0), &[])]
-    #[case::negative_unclaimed_install("an unclaimed install queues nothing", moved_event("7", "acme__web"), Dispatched::Unclaimed, &[])]
-    #[case::adversarial_other_tenants_install_only_reaches_its_owner("another tenant's install reaches only its own rows", moved_event("99", "acme__web"), Dispatched::Reindexing(1), &[("globex", "web")])]
+    #[case::positive_owner_rows_for_repo("each enabled row for the repo is queued", moved_event("42", "acme__web"), Dispatched::Reindexing(2), &[("acme", "web"), ("acme", "web-sec")], false)]
+    #[case::boundary_full_queue_counts_nothing(
+        "rows the indexer turns away are offered but not counted",
+        moved_event("42", "acme__web"), Dispatched::Reindexing(0), &[("acme", "web"), ("acme", "web-sec")], true
+    )]
+    #[case::negative_no_matching_repo("a repo no row watches queues nothing", moved_event("42", "acme__nope"), Dispatched::Reindexing(0), &[], false)]
+    #[case::negative_unclaimed_install("an unclaimed install queues nothing", moved_event("7", "acme__web"), Dispatched::Unclaimed, &[], false)]
+    #[case::adversarial_other_tenants_install_only_reaches_its_owner("another tenant's install reaches only its own rows", moved_event("99", "acme__web"), Dispatched::Reindexing(1), &[("globex", "web")], false)]
     #[tokio::test]
     async fn dispatch_base_moved_routes_to_owner_tenant(
         #[case] description: &str,
         #[case] event: WebhookEvent,
         #[case] want: Dispatched,
         #[case] rows: &[(&str, &str)],
+        #[case] full: bool,
     ) {
-        let f = fake();
+        let f = Fake { full, ..fake() };
         assert_eq!(dispatch(event, &f).await.unwrap(), want, "{description}");
         let want_rows: Vec<(String, String)> = rows
             .iter()

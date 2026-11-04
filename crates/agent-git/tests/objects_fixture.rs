@@ -482,11 +482,17 @@ async fn adversarial_revision_arg_injection_cannot_write_a_file() {
         b.list_tree(&rev, Path::new(""), false).await.is_err(),
         "list_tree must reject a leading-dash revision"
     );
+    assert!(
+        b.changed_paths(&rev, &Revision::from("main"), 10)
+            .await
+            .is_err(),
+        "changed_paths must reject a leading-dash revision"
+    );
 
     assert_eq!(
         std::fs::read_to_string(&victim).unwrap(),
         "ORIGINAL",
-        "the victim file must be untouched by any of the three walks"
+        "the victim file must be untouched by any of the walks"
     );
 }
 
@@ -773,4 +779,105 @@ async fn negative_unfinished_partial_is_recloned_not_recovered() {
         fetch.lines().collect::<Vec<_>>(),
         agent_git::MIRROR_REFSPECS
     );
+}
+
+/// What `feature` holds beyond `main`, for [`changed_paths_cases`].
+#[derive(Debug, Clone, Copy)]
+enum Tree {
+    /// The fixture's feature: a.txt modified, b.txt added.
+    Feature,
+    /// a.txt renamed to c.txt on top of feature.
+    Renamed,
+    /// `main` against itself.
+    Same,
+    /// feature rewritten from an older root (a force-push): the two trees still differ.
+    Rewritten,
+    /// A file name that is not UTF-8.
+    NonUtf8,
+}
+
+/// The paths whose content differs between two commits (the fleet index's update list).
+#[rstest::rstest]
+#[case::positive_modify_and_add("a modify and an add", Tree::Feature, 10, Some(vec!["a.txt", "b.txt"]))]
+#[case::positive_rename_is_delete_and_add("a rename lists both sides", Tree::Renamed, 10, Some(vec!["a.txt", "b.txt", "c.txt"]))]
+#[case::negative_same_commit_lists_nothing("a commit against itself", Tree::Same, 10, Some(vec![]))]
+#[case::boundary_at_the_limit("exactly the limit is listed", Tree::Feature, 2, Some(vec!["a.txt", "b.txt"]))]
+#[case::boundary_past_the_limit("one past the limit is None", Tree::Feature, 1, None)]
+#[case::corner_rewritten_branch_two_dot(
+    "a rewritten branch lists the tree difference, not since the merge base",
+    Tree::Rewritten, 10, Some(vec!["a.txt", "z.txt"])
+)]
+#[case::adversarial_non_utf8_name_kept_raw(
+    "a non-UTF-8 name keeps its bytes",
+    Tree::NonUtf8,
+    10,
+    None
+)]
+#[tokio::test]
+async fn changed_paths_cases(
+    #[case] description: &str,
+    #[case] tree: Tree,
+    #[case] limit: usize,
+    #[case] expected: Option<Vec<&str>>,
+) {
+    let dir = fixture();
+    let (from, to) = match tree {
+        Tree::Feature => ("main", "feature"),
+        Tree::Same => ("main", "main"),
+        Tree::Renamed => {
+            git(&dir, &["switch", "-q", "feature"]);
+            git(&dir, &["mv", "a.txt", "c.txt"]);
+            git(&dir, &["commit", "-q", "-m", "rename"]);
+            git(&dir, &["switch", "-q", "main"]);
+            ("main", "feature")
+        }
+        Tree::Rewritten => {
+            // `old` is main plus z.txt; `new` is main with a.txt changed. Neither
+            // descends from the other, and a three-dot diff would miss z.txt.
+            git(&dir, &["switch", "-q", "-c", "old", "main"]);
+            std::fs::write(dir.join("z.txt"), "z\n").unwrap();
+            git(&dir, &["add", "-A"]);
+            git(&dir, &["commit", "-q", "-m", "z"]);
+            git(&dir, &["switch", "-q", "-c", "new", "main"]);
+            std::fs::write(dir.join("a.txt"), "rewritten\n").unwrap();
+            git(&dir, &["add", "-A"]);
+            git(&dir, &["commit", "-q", "-m", "rewrite"]);
+            git(&dir, &["switch", "-q", "main"]);
+            ("old", "new")
+        }
+        Tree::NonUtf8 => {
+            use std::os::unix::ffi::OsStrExt;
+            git(&dir, &["switch", "-q", "feature"]);
+            let name = std::ffi::OsStr::from_bytes(b"bad\xffname.txt");
+            std::fs::write(dir.join(name), "x\n").unwrap();
+            git(&dir, &["add", "-A"]);
+            git(&dir, &["commit", "-q", "-m", "odd name"]);
+            git(&dir, &["switch", "-q", "main"]);
+            let got = backend(&dir)
+                .changed_paths(&Revision::from("main"), &Revision::from("feature"), limit)
+                .await
+                .unwrap()
+                .expect("within the limit");
+            assert!(
+                got.iter().any(|p| p.as_os_str() == name),
+                "{description}: {got:?}"
+            );
+            assert_eq!(expected, None, "{description}: checked above");
+            return;
+        }
+    };
+    let got = backend(&dir)
+        .changed_paths(&Revision::from(from), &Revision::from(to), limit)
+        .await
+        .unwrap();
+    let mut got = got.map(|v| {
+        v.into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    });
+    if let Some(v) = got.as_mut() {
+        v.sort();
+    }
+    let expected = expected.map(|v| v.into_iter().map(String::from).collect::<Vec<_>>());
+    assert_eq!(got, expected, "{description}");
 }

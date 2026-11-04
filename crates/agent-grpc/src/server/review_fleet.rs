@@ -945,6 +945,9 @@ mod tests {
         fn reindex(&self, _tenant: &str, _row: &agent_core::FleetSession) -> ReindexOutcome {
             ReindexOutcome::Queued
         }
+        fn base_moved(&self, _tenant: &str, _row: &agent_core::FleetSession) -> bool {
+            false
+        }
     }
 
     /// A roster of one row, `web`, owned by the caller (as a tenant-scoped store is):
@@ -1005,6 +1008,9 @@ mod tests {
                 .unwrap()
                 .push((tenant.into(), row.user.clone(), row.id.clone()));
             self.reply
+        }
+        fn base_moved(&self, _tenant: &str, _row: &agent_core::FleetSession) -> bool {
+            false
         }
     }
 

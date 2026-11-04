@@ -182,10 +182,10 @@ impl WebhookTarget for FleetWebhookTarget {
         self.sink.enqueue(trigger)
     }
 
-    fn base_moved(&self, tenant: &str, row: &FleetSession) {
-        if let Some(indexer) = &self.indexer {
-            indexer.base_moved(tenant, row);
-        }
+    fn base_moved(&self, tenant: &str, row: &FleetSession) -> bool {
+        self.indexer
+            .as_ref()
+            .is_some_and(|indexer| indexer.base_moved(tenant, row))
     }
 
     async fn revoke(&self, tenant: &str, installation: &str) -> Result<()> {
@@ -469,7 +469,9 @@ mod tests {
             self.triggers.lock().unwrap().push(trigger);
             TriggerOutcome::Accepted
         }
-        fn base_moved(&self, _t: &str, _row: &FleetSession) {}
+        fn base_moved(&self, _t: &str, _row: &FleetSession) -> bool {
+            false
+        }
         async fn revoke(&self, _t: &str, _i: &str) -> Result<()> {
             Ok(())
         }
@@ -626,11 +628,12 @@ mod tests {
         fn reindex(&self, _t: &str, _row: &FleetSession) -> agent_core::ReindexOutcome {
             panic!("a push never forces a rebuild")
         }
-        fn base_moved(&self, tenant: &str, row: &FleetSession) {
+        fn base_moved(&self, tenant: &str, row: &FleetSession) -> bool {
             self.0
                 .lock()
                 .unwrap()
                 .push((tenant.to_string(), row.id.clone()));
+            true
         }
     }
 

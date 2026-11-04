@@ -18,6 +18,7 @@ use agent_core::{
     SearchHit, SearchMode, SearchQuery,
 };
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -224,7 +225,7 @@ impl SearchBackend for TantivyBackend {
             return Err(Error::Search("this index is open read-only".into()));
         }
         self.building.store(true, Ordering::Relaxed);
-        let result = self.reindex_inner(progress).await;
+        let result = self.reindex_inner(progress, None).await;
         self.building.store(false, Ordering::Relaxed);
         result
     }
@@ -269,7 +270,32 @@ impl SearchBackend for TantivyBackend {
 }
 
 impl TantivyBackend {
-    async fn reindex_inner(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+    /// [`reindex`](SearchBackend::reindex) of an index whose files moved since it was
+    /// built: a copy of an earlier build, now pointed at a fresh checkout of a later
+    /// commit, where every file's mtime is new. `changed` is the authoritative list of
+    /// files whose content differs (from git), so a file outside it with the same size
+    /// keeps its document. Added and removed files are still found by the scan, so the
+    /// result holds the same documents as a full rebuild. With no saved manifest it is a
+    /// full rebuild, as `reindex` is.
+    pub async fn reindex_changed(
+        &self,
+        changed: &HashSet<PathBuf>,
+        progress: ProgressFn<'_>,
+    ) -> Result<IndexStatus> {
+        if self.write.is_none() {
+            return Err(Error::Search("this index is open read-only".into()));
+        }
+        self.building.store(true, Ordering::Relaxed);
+        let result = self.reindex_inner(progress, Some(changed)).await;
+        self.building.store(false, Ordering::Relaxed);
+        result
+    }
+
+    async fn reindex_inner(
+        &self,
+        progress: ProgressFn<'_>,
+        changed: Option<&HashSet<PathBuf>>,
+    ) -> Result<IndexStatus> {
         let Some(write) = &self.write else {
             return Err(Error::Search("this index is open read-only".into()));
         };
@@ -280,7 +306,7 @@ impl TantivyBackend {
             .map_err(|e| Error::Search(format!("scan task panicked: {e}")))?;
 
         let stored = Manifest::load(&self.manifest_path());
-        let (upserts, deletes) = diff(stored.as_ref(), &current);
+        let (upserts, deletes) = diff(stored.as_ref(), &current, changed);
 
         let mut writer = write.writer.lock().await;
         if stored.is_none() {
@@ -363,15 +389,26 @@ impl TantivyBackend {
 }
 
 /// Paths to (re)index and paths to delete, given the prior manifest and the
-/// freshly-scanned one. With no prior manifest, everything is an upsert.
-fn diff(stored: Option<&Manifest>, current: &Manifest) -> (Vec<PathBuf>, Vec<PathBuf>) {
+/// freshly-scanned one. With no prior manifest, everything is an upsert. With
+/// `changed` (see [`TantivyBackend::reindex_changed`]), a file in both whose stamp
+/// differs is re-read only if it is listed or its size moved: its mtime alone says
+/// nothing in a fresh checkout.
+fn diff(
+    stored: Option<&Manifest>,
+    current: &Manifest,
+    changed: Option<&HashSet<PathBuf>>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let Some(stored) = stored else {
         return (current.entries.keys().cloned().collect(), Vec::new());
     };
     let upserts = current
         .entries
         .iter()
-        .filter(|(p, st)| stored.entries.get(*p) != Some(*st))
+        .filter(|(p, st)| match (stored.entries.get(*p), changed) {
+            (None, _) => true,
+            (Some(old), None) => old != *st,
+            (Some(old), Some(changed)) => old.size != st.size || changed.contains(*p),
+        })
         .map(|(p, _)| p.clone())
         .collect();
     let deletes = stored
@@ -1025,5 +1062,121 @@ mod tests {
             "read-only never reindexes"
         );
         assert!(!ro.capabilities().incremental, "and does not claim to");
+    }
+
+    /// What the later tree differs in, for [`reindex_changed_cases`].
+    #[derive(Debug, Clone, Copy)]
+    enum Edit {
+        /// `a.rs` gets new content of the same size, listed as changed.
+        SameSizeListed,
+        /// The same edit, not listed: the list is trusted over the mtime.
+        SameSizeUnlisted,
+        /// `a.rs` grows, not listed: a size change is always re-read.
+        GrewUnlisted,
+        /// A new `c.rs`, not listed: the scan finds it.
+        AddedUnlisted,
+        /// `b.rs` is gone, not listed: the scan drops it.
+        Removed,
+        /// No earlier build to update: a full one.
+        NoManifest,
+        /// The list names paths outside the tree.
+        HostileList,
+    }
+
+    /// An index built from one tree, then pointed at a fresh copy of a later version of
+    /// it (every mtime new) and updated from a list of changed files.
+    #[rstest]
+    #[case::positive_listed_change_reread("a listed file is re-read", Edit::SameSizeListed, &["NEWTOKEN"], &["OLDTOKEN"], 2)]
+    #[case::corner_unlisted_same_size_trusts_the_list(
+        "an unlisted file of the same size keeps its document",
+        Edit::SameSizeUnlisted, &["OLDTOKEN"], &["NEWTOKEN"], 2
+    )]
+    #[case::corner_size_change_reread("an unlisted file that changed size is re-read", Edit::GrewUnlisted, &["GROWNTOKEN"], &["OLDTOKEN"], 2)]
+    #[case::positive_added_file_found("an added file is indexed though unlisted", Edit::AddedUnlisted, &["ADDEDTOKEN", "OLDTOKEN"], &[], 3)]
+    #[case::positive_removed_file_dropped("a removed file leaves the index", Edit::Removed, &["OLDTOKEN"], &["BTOKEN"], 1)]
+    #[case::boundary_no_manifest_is_full("with no earlier build everything is indexed", Edit::NoManifest, &["OLDTOKEN", "BTOKEN"], &[], 2)]
+    #[case::adversarial_hostile_list_ignored(
+        "paths outside the tree in the list add nothing",
+        Edit::HostileList, &["OLDTOKEN", "BTOKEN"], &["root:x"], 2
+    )]
+    #[tokio::test]
+    async fn reindex_changed_cases(
+        #[case] description: &str,
+        #[case] edit: Edit,
+        #[case] found: &[&str],
+        #[case] absent: &[&str],
+        #[case] expected_files: u64,
+    ) {
+        let write = |dir: &std::path::Path, files: &[(&str, &str)]| {
+            std::fs::create_dir_all(dir).unwrap();
+            for (p, body) in files {
+                std::fs::write(dir.join(p), body).unwrap();
+            }
+        };
+        let before = tempdir();
+        write(&before, &[("a.rs", "OLDTOKEN\n"), ("b.rs", "BTOKEN\n")]);
+        let index = tempdir().join("index");
+        if !matches!(edit, Edit::NoManifest) {
+            let first = TantivyBackend::open(before.clone(), index.clone()).unwrap();
+            first.reindex(&|_p| {}).await.unwrap();
+        }
+
+        let after = tempdir();
+        let mut changed: HashSet<PathBuf> = HashSet::new();
+        match edit {
+            Edit::SameSizeListed => {
+                write(&after, &[("a.rs", "NEWTOKEN\n"), ("b.rs", "BTOKEN\n")]);
+                changed.insert("a.rs".into());
+            }
+            Edit::SameSizeUnlisted => {
+                write(&after, &[("a.rs", "NEWTOKEN\n"), ("b.rs", "BTOKEN\n")]);
+            }
+            Edit::GrewUnlisted => write(&after, &[("a.rs", "GROWNTOKEN\n"), ("b.rs", "BTOKEN\n")]),
+            Edit::AddedUnlisted => write(
+                &after,
+                &[
+                    ("a.rs", "OLDTOKEN\n"),
+                    ("b.rs", "BTOKEN\n"),
+                    ("c.rs", "ADDEDTOKEN\n"),
+                ],
+            ),
+            Edit::Removed => {
+                write(&after, &[("a.rs", "OLDTOKEN\n")]);
+                changed.insert("b.rs".into());
+            }
+            Edit::NoManifest => write(&after, &[("a.rs", "OLDTOKEN\n"), ("b.rs", "BTOKEN\n")]),
+            Edit::HostileList => {
+                write(&after, &[("a.rs", "OLDTOKEN\n"), ("b.rs", "BTOKEN\n")]);
+                for p in ["../../../../etc/passwd", "/etc/passwd", "a.rs/../../x"] {
+                    changed.insert(p.into());
+                }
+            }
+        }
+
+        let backend = TantivyBackend::open(after, index).unwrap();
+        let status = backend.reindex_changed(&changed, &|_p| {}).await.unwrap();
+        assert_eq!(status.indexed_files, expected_files, "{description}: files");
+        for token in found {
+            let hits = backend
+                .query(&query(token, SearchMode::Literal))
+                .await
+                .unwrap();
+            assert!(!hits.is_empty(), "{description}: `{token}` should be found");
+        }
+        for token in absent {
+            let hits = backend
+                .query(&query(token, SearchMode::Literal))
+                .await
+                .unwrap();
+            assert!(
+                hits.is_empty(),
+                "{description}: `{token}` should be gone: {hits:?}"
+            );
+        }
+        assert_eq!(
+            backend.status().await.unwrap().state,
+            IndexState::Fresh,
+            "{description}: the saved manifest matches the later tree"
+        );
     }
 }
