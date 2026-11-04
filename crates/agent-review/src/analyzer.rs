@@ -1349,7 +1349,11 @@ mod tests {
     /// findings read.
     #[rstest::rstest]
     #[case::positive_bare_json("the JSON alone", "", 1)]
-    #[case::positive_stats_trailer("2.15's text stats summary after the JSON", "\n1 issues:\n* errcheck: 1\n", 1)]
+    #[case::positive_stats_trailer(
+        "2.15's text stats summary after the JSON",
+        "\n1 issues:\n* errcheck: 1\n",
+        1
+    )]
     #[case::corner_second_value("a second JSON value is not read", "\n{\"Issues\":[]}", 1)]
     #[case::adversarial_injected_trailer(
         "a trailer can't add findings",
@@ -1381,8 +1385,18 @@ mod tests {
         "typecheck failed",
         "typecheck failed"
     )]
-    #[case::corner_only_warnings("with only warnings, the first one", "level=info msg=a\nlevel=warning msg=b", "", "level=info msg=a")]
-    #[case::negative_no_output("nothing on either stream", "\n  \n", "", "exited non-zero with no output")]
+    #[case::corner_only_warnings(
+        "with only warnings, the first one",
+        "level=info msg=a\nlevel=warning msg=b",
+        "",
+        "level=info msg=a"
+    )]
+    #[case::negative_no_output(
+        "nothing on either stream",
+        "\n  \n",
+        "",
+        "exited non-zero with no output"
+    )]
     fn first_error_line_cases(
         #[case] description: &str,
         #[case] stderr: &str,
