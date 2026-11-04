@@ -600,15 +600,22 @@ impl ReviewCollector for ReviewOrchestrator {
         // risk-ranked, rule-bucketed section. Runs last — it reads the assembled
         // findings AND the risk scores computed just above. Purely tool-derived.
         // Generated code first: its findings rank last and are tallied apart. A
-        // file whose diff adds a generator marker is not trusted as generated.
-        let marker_added: std::collections::BTreeSet<String> = facts
+        // changed file is trusted as generated only if its base side already was.
+        let sides: Vec<(String, Option<String>)> = facts
             .change
             .files
             .iter()
-            .filter(|f| crate::util::adds_generated_marker(&f.patch))
-            .map(|f| f.path.to_string_lossy().into_owned())
+            .map(|f| {
+                (
+                    f.path.to_string_lossy().into_owned(),
+                    f.old_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                )
+            })
             .collect();
-        crate::digest::tag_generated(&mut facts, &self.repo_root, &marker_added);
+        let unproven = crate::util::unproven_generated(ctx.repo.as_ref(), &ctx.base, sides).await;
+        crate::digest::tag_generated(&mut facts, &self.repo_root, &unproven);
         facts.digest = crate::digest::compute(&facts);
 
         // Stage 3 (Inc 4): on a findings-heavy PR, add a cheap local-LLM prose

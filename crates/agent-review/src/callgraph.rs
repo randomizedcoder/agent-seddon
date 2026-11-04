@@ -16,7 +16,7 @@
 //! untrusted — node paths are `confine`d, strings bounded, counts capped.
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::{adds_generated_marker, bound, lang_of};
+use crate::util::{bound, lang_of, unproven_generated};
 use agent_core::{CallEdge, CallGraph, CallGraphNode, ExecSpec, PackageShape};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -56,18 +56,18 @@ impl FactCollector for CallGraphCollector {
 
         // Which files did the change touch? (Collectors run in parallel — recompute
         // the cached diff.) Only run the Go helper if a `.go` file changed.
-        // A file whose diff adds a generator marker is the PR's own claim, so its
-        // fns stay listed (see `util::adds_generated_marker`).
-        let mut marker_added = BTreeSet::new();
+        let mut sides: Vec<(String, Option<String>)> = Vec::new();
         let changed: ChangedLines = match ctx.repo.diff(&ctx.base, &ctx.head, &[]).await {
             Ok(d) => d
                 .files
                 .into_iter()
                 .filter_map(|f| {
-                    let path = f.new_path.or(f.old_path)?.to_string_lossy().into_owned();
-                    if adds_generated_marker(&f.patch) {
-                        marker_added.insert(path.clone());
-                    }
+                    let old = f.old_path.map(|p| p.to_string_lossy().into_owned());
+                    let path = f
+                        .new_path
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .or_else(|| old.clone())?;
+                    sides.push((path.clone(), old));
                     let ranges = hunk_ranges(&f.patch);
                     Some((path, ranges))
                 })
@@ -82,6 +82,10 @@ impl FactCollector for CallGraphCollector {
         if !changed.keys().any(|p| lang_of(Path::new(p)) == "go") {
             return CollectorOutput::skipped("no Go source changes");
         }
+        // The helper's `generated` flag reads the head, which the PR controls: a
+        // changed Go file counts as generated only if its base side already was.
+        sides.retain(|(p, _)| lang_of(Path::new(p)) == "go");
+        let unproven = unproven_generated(ctx.repo.as_ref(), &ctx.base, sides).await;
 
         // Static command — no untrusted input reaches the shell (the helper walks the
         // tree itself; the changed set is matched Rust-side). The focus list is a
@@ -114,7 +118,7 @@ impl FactCollector for CallGraphCollector {
             );
         }
 
-        match parse_graph(&out.stdout, &ctx.repo_root, &changed, &marker_added) {
+        match parse_graph(&out.stdout, &ctx.repo_root, &changed, &unproven) {
             Some(graph) => CollectorOutput::ok(FactFragment::CallGraph { graph }),
             None => CollectorOutput::partial(empty_graph(), "call-graph helper output unparseable"),
         }
@@ -209,12 +213,13 @@ fn focus_list<'a>(paths: impl Iterator<Item = &'a String>) -> String {
 
 /// Parse the helper's JSON into a bounded, confined [`CallGraph`], marking the nodes
 /// the change touched. Defensive over `serde_json::Value`; a node whose path escapes
-/// the repo is dropped (and its edges with it).
+/// the repo is dropped (and its edges with it). A node in an `unproven` file (see
+/// `util::unproven_generated`) is never generated, whatever the helper says.
 fn parse_graph(
     stdout: &str,
     root: &Path,
     changed: &ChangedLines,
-    marker_added: &BTreeSet<String>,
+    unproven: &BTreeSet<String>,
 ) -> Option<CallGraph> {
     let v: serde_json::Value = serde_json::from_str(stdout).ok()?;
     let truncated = v
@@ -249,7 +254,7 @@ fn parse_graph(
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
             };
-            let generated = flag("generated") && !marker_added.contains(file);
+            let generated = flag("generated") && !unproven.contains(file);
             if changed
                 .get(file)
                 .is_some_and(|ranges| touched(line, end_line, ranges))
@@ -522,7 +527,11 @@ mod tests {
         Some(vec![(1, 1)])
     )]
     #[case::negative_no_hunks("an empty patch gives no ranges", "", None)]
-    #[case::negative_context_only("a hunk with no + or - lines changes nothing", "@@ -1,2 +1,2 @@\n a\n b\n", None)]
+    #[case::negative_context_only(
+        "a hunk with no + or - lines changes nothing",
+        "@@ -1,2 +1,2 @@\n a\n b\n",
+        None
+    )]
     #[case::negative_binary(
         "a binary patch gives no ranges",
         "Binary files a/x and b/x differ\n",
@@ -586,10 +595,10 @@ mod tests {
         assert_eq!(g.changed_generated, want_generated, "{description}");
     }
 
-    /// A file the PR itself stamped generated is reviewed as hand-written: its
-    /// changed fn is listed, not counted away.
+    /// A file the PR itself stamped generated (its base wasn't) is reviewed as
+    /// hand-written: its changed fn is listed, not counted away.
     #[test]
-    fn adversarial_marker_added_in_the_change_is_not_trusted() {
+    fn adversarial_unproven_generated_is_not_trusted() {
         let json = r#"{"nodes":[
             {"id":0,"name":"Hidden","file":"pkg/t.go","line":3,"end_line":5,"generated":true}
         ],"edges":[]}"#;

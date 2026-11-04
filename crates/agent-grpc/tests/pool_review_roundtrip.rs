@@ -501,7 +501,10 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.digest.findings[0].rule, "errcheck");
     assert_eq!(facts.digest.rule_counts.len(), 1);
     assert_eq!(facts.digest.rule_counts[0].count, 1);
-    assert!(facts.digest.findings[0].generated, "finding.generated crosses the wire");
+    assert!(
+        facts.digest.findings[0].generated,
+        "finding.generated crosses the wire"
+    );
     assert_eq!(facts.digest.rule_counts[0].generated, 1);
     assert_eq!(facts.digest.generated, 1);
     assert_eq!(

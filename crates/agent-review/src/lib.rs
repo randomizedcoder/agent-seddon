@@ -1150,7 +1150,10 @@ mod draft_tests {
         let md = render_facts(&f);
         assert!(md.contains("170 on generated code, ranked last"), "{md}");
         assert!(md.contains("gosec/G115 ×177 (170 generated)"), "{md}");
-        assert!(md.contains("api/x.pb.go:9 — integer overflow conversion [generated]"), "{md}");
+        assert!(
+            md.contains("api/x.pb.go:9 — integer overflow conversion [generated]"),
+            "{md}"
+        );
     }
 
     #[test]

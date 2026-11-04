@@ -62,9 +62,12 @@ blast radius was wrong in two ways, and both are fixed:
   line comment before `package`). A fn is changed only when a new-side hunk overlaps
   `[line, end_line]`; a node with no `end_line` (an older helper) falls back to the
   file. Generated fns are counted in `changed_generated`, not listed.
-- **Untrusted inputs:** a file whose diff *adds* the generator marker is the PR's
-  own claim, so its fns stay listed (`util::adds_generated_marker`); otherwise
-  stamping a file "generated" would hide its changes. Lines are physical
+- **Untrusted inputs:** the head is the PR's, so a changed file counts as
+  generated only if its base side (the old path, for a rename) already was
+  (`util::unproven_generated`, read from git at the base). A new file, a rename
+  into a `*.pb.go` path, or an added marker (in any spelling) stays listed;
+  otherwise stamping a file "generated" would hide its changes. The same rule
+  gates the digest's `[generated]` tag. Lines are physical
   (`PositionFor(…, false)`), so a `//line` directive can't move a fn away from the
   hunks. Only `+` lines (and a deletion's neighbours) count, never the hunk's
   context lines. The helper bounds its own work: hop-1 ranks each fn once, and the
