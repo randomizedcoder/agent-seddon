@@ -3494,6 +3494,11 @@ pub struct FleetTrigger {
     /// fetch, so an unchanged PR costs the forge nothing per poll. When it is empty, or
     /// the head moved, the orchestrator fetches and dedups on the real head as before.
     pub head_sha: String,
+    /// Review even when the head already has a draft (`ReviewNow { force }` only; the
+    /// poller, webhook and Slack never set it). A still-`drafted` draft for that head is
+    /// superseded by the new round. Coalescing keeps it: a forced trigger folded into a
+    /// pending one makes the pending one forced.
+    pub force: bool,
 }
 
 /// Whether a [`FleetTrigger`] was queued or folded into one already pending.

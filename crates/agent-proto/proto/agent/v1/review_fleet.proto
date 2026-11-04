@@ -122,6 +122,10 @@ message FleetSetEnabledRequest {
 message ReviewNowRequest {
   string session_id = 1;
   uint64 pr_number = 2;
+  // Review again even when the PR's head already has a draft: a still-`drafted` draft
+  // for that head is marked `superseded` and a fresh round runs. For re-checking a PR
+  // after the fleet itself changed (a deploy). Drafts only, as always; nothing posts.
+  bool force = 3;
 }
 
 // Whether the trigger was queued or folded into one already pending/in-flight (the

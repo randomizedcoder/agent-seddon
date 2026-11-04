@@ -1119,6 +1119,7 @@ async fn review_now_and_approve_are_attributed_to_the_caller(
     fleet
         .review_now(fleet_req(
             pb::ReviewNowRequest {
+                force: false,
                 session_id: "web".into(),
                 pr_number: 7,
             },
@@ -1159,6 +1160,7 @@ async fn negative_denied_review_now_records_nothing() {
     let err = ReviewFleetServiceClient::new(h.channel.clone())
         .review_now(fleet_req(
             pb::ReviewNowRequest {
+                force: false,
                 session_id: "web".into(),
                 pr_number: 7,
             },

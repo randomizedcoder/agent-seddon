@@ -2447,10 +2447,17 @@ async fn fleet_review_now_reaches_the_sink(#[case] transport: Transport) {
     let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
 
     assert!(client.review_now("web", 42).await.unwrap(), "accepted");
+    assert!(
+        client.review_now_with("web", 43, true).await.unwrap(),
+        "forced accepted"
+    );
     let seen = sink.seen.lock().unwrap();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.len(), 2);
     assert_eq!(seen[0].session_id, "web");
     assert_eq!(seen[0].pr_number, 42);
+    // `force` survives the hop, and a plain ReviewNow never forces.
+    assert!(!seen[0].force, "plain ReviewNow is not forced");
+    assert_eq!((seen[1].pr_number, seen[1].force), (43, true));
     // No auth on this server ⇒ no verified caller to attribute (S19).
     assert!(
         seen[0].requested_by.is_empty(),

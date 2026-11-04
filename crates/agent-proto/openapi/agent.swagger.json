@@ -10385,6 +10385,10 @@
         "prNumber": {
           "type": "string",
           "format": "uint64"
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Review again even when the PR's head already has a draft: a still-`drafted` draft\nfor that head is marked `superseded` and a fresh round runs. For re-checking a PR\nafter the fleet itself changed (a deploy). Drafts only, as always; nothing posts."
         }
       },
       "description": "Manually queue a review for one roster session's PR (review-fleet C8). Until the\nreal triggers land (forge poll C6 / Slack watch C7, increment 4), this is how a\nreview is kicked off. `session_id` names the roster row; `pr_number` the PR to\nreview."

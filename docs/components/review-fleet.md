@@ -208,7 +208,12 @@ duplicate or over-capacity trigger folds into the pending one and is logged, nev
 silently dropped — and one review runs per `(session, pr)` (head-oid–aware re-review is
 inc 6, C14). The `ReviewNow` RPC injects a trigger manually (for testing, or a portal
 button); it is **opt-in** (only the `--serve-fleet` process wires the orchestrator's
-sink — the bare seam answers `UNIMPLEMENTED`).
+sink — the bare seam answers `UNIMPLEMENTED`). A head that already has a draft is up to date, so a
+plain `ReviewNow` of an unchanged PR does nothing; `ReviewNow { force: true }` (the portal's
+**Review again** box) reviews it anyway, marking a still-`drafted` draft of that head
+`superseded` (a posted or skipped one is left as it is). Use it to re-check a PR after the
+fleet itself changed. The poller, webhook and Slack never force; a forced trigger folded
+into a pending one makes that one forced. The new round is a draft like any other.
 
 **Review engine (C10, inc 5c)** grounds the `reviewing` step. When a review engine is wired
 (`[review] backend`), `serve_fleet` attaches it to the orchestrator as a

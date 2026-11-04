@@ -674,6 +674,32 @@ void main() {
           expect((call!.request as ReviewNowRequest).prNumber.toInt(), 123);
           await robot.settle();
 
+        case 'positive_review_now_force_sent':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse = roster([session(id: 's1')]);
+          fake.reviewNowResponse = ReviewNowReply()..accepted = true;
+          await robot.load();
+          await robot.expandSessions();
+          await robot.openReviewNow('s1');
+          await robot.queueReviewNow('42', force: true);
+          final call = robot.log.last(reviewNowRpc);
+          final req = call!.request as ReviewNowRequest;
+          expect(req.prNumber.toInt(), 42);
+          expect(req.force, isTrue);
+          await robot.settle();
+
+        case 'negative_review_now_unforced_by_default':
+          fake.listReviewsResponse = reviews([]);
+          fake.sessionListResponse = roster([session(id: 's1')]);
+          fake.reviewNowResponse = ReviewNowReply()..accepted = true;
+          await robot.load();
+          await robot.expandSessions();
+          await robot.openReviewNow('s1');
+          await robot.queueReviewNow('42');
+          final call = robot.log.last(reviewNowRpc);
+          expect((call!.request as ReviewNowRequest).force, isFalse);
+          await robot.settle();
+
         case 'positive_review_now_cancel_no_rpc':
           fake.listReviewsResponse = reviews([]);
           fake.sessionListResponse = roster([session(id: 's1')]);

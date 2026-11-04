@@ -274,8 +274,12 @@ class FleetRobot extends Robot {
 
   Future<void> _unmount() => tester.pumpWidget(const SizedBox());
 
-  Future<void> queueReviewNow(String pr) async {
+  Future<void> queueReviewNow(String pr, {bool force = false}) async {
     await enterText('fleet.reviewNow.prNumber', pr);
+    if (force) {
+      await tester.tap(byKey('fleet.reviewNow.force'));
+      await tester.pump();
+    }
     await tester.tap(byKey('fleet.reviewNow.queue'));
     await _drainReal(until: () => log.fired(_reviewNow));
     await _unmount();

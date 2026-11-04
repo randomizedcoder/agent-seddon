@@ -351,6 +351,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 head_sha: String::new(),
                 session_id: req.session_id,
                 pr_number: req.pr_number,
+                force: req.force,
                 requested_by: requester.into_iter().collect(),
                 tenant: agent_core::scoped_tenant().unwrap_or_default(),
             });
@@ -864,6 +865,7 @@ mod tests {
             ReviewFleetSvc::new(Arc::new(TenantProbeFleet::default())).with_triggers(sink.clone());
         let req = req_with(
             pb::ReviewNowRequest {
+                force: false,
                 session_id: "row1".into(),
                 pr_number: 7,
             },

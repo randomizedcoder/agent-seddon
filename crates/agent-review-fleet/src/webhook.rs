@@ -310,6 +310,7 @@ pub async fn dispatch(event: WebhookEvent, target: &dyn WebhookTarget) -> Result
             for row in target.github_rows(&tenant).await? {
                 if row.enabled && row.repo == repo {
                     target.enqueue(FleetTrigger {
+                        force: false,
                         head_sha: String::new(),
                         tenant: tenant.clone(),
                         session_id: row.id,
