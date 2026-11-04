@@ -1402,6 +1402,11 @@ impl RepoBackend for CliBackend {
         // Two-dot (the trees themselves, not since the merge base), so a rewritten
         // branch still lists every path that differs. No rename detection: a rename is
         // its old path gone and its new path added, which is what an index needs.
+        // The whole name list is buffered before `limit` applies: it is names only
+        // (about 64 bytes a path, so ~1.3 MB at the index's 20k-change fallback; a
+        // larger diff costs memory in proportion before it returns `None`), bounded in
+        // time by git's own exec timeout. The repo is the operator's mirror, not model
+        // input; a streaming read would need an output cap on `ExecSpec`.
         let out = self
             .git_bytes(
                 &self.root,

@@ -221,13 +221,45 @@ let
   rows = pkgs.lib.concatMapStrings (
     c: "${c.name}\t${c.program}\t${c.expected}\t${c.description}\n"
   ) cases;
+  # Environment the wrapper must set. name, description, var, preset (the caller's
+  # value before the wrapper runs), expected (what the agent sees). "-" = unset or
+  # empty: `read` merges adjacent tabs, so an empty field would shift the columns.
+  envCases = [
+    {
+      name = "positive_gotoolchain_local";
+      description = "the review's `go` never downloads the toolchain a go.mod asks for";
+      var = "GOTOOLCHAIN";
+      preset = "-";
+      expected = "local";
+    }
+    {
+      name = "adversarial_gotoolchain_override";
+      description = "a caller's GOTOOLCHAIN=auto can't turn toolchain downloads back on";
+      var = "GOTOOLCHAIN";
+      preset = "auto";
+      expected = "local";
+    }
+    {
+      name = "negative_unset_var";
+      description = "a variable the wrapper doesn't set stays unset (the probe reads the wrapper, not the builder)";
+      var = "AGENT_SEDDON_NO_SUCH_VAR";
+      preset = "-";
+      expected = "-";
+    }
+  ];
+  envRows = pkgs.lib.concatMapStrings (
+    c: "${c.name}\t${c.var}\t${c.preset}\t${c.expected}\t${c.description}\n"
+  ) envCases;
 in
 pkgs.runCommand "agent-runtime-path"
   {
     # `hello` is the builder-only program the negative row looks for.
     nativeBuildInputs = [ pkgs.hello ];
-    inherit rows;
-    passAsFile = [ "rows" ];
+    inherit rows envRows;
+    passAsFile = [
+      "rows"
+      "envRows"
+    ];
   }
   ''
     set -eu
@@ -262,7 +294,26 @@ pkgs.runCommand "agent-runtime-path"
         failed=1
       fi
     done < "$rowsPath"
+
+    # The environment the agent gets: the same wrapper, printing one variable where
+    # it would exec the binary, from an empty environment (plus the row's preset).
+    while IFS="$(printf '\t')" read -r name var preset expected description; do
+      [ -n "$name" ] || continue
+      sed "s/^exec .*/printf '%s' \"\''${$var:-}\"/" ${agent}/bin/agent > wrapper-env.sh
+      if [ "$preset" = - ]; then
+        got="$(${pkgs.coreutils}/bin/env -i ${pkgs.runtimeShell} wrapper-env.sh)"
+      else
+        got="$(${pkgs.coreutils}/bin/env -i "$var=$preset" ${pkgs.runtimeShell} wrapper-env.sh)"
+      fi
+      [ -n "$got" ] || got=-
+      if [ "$got" = "$expected" ]; then
+        echo "ok   $name: $var='$got'"
+      else
+        echo "FAIL $name: $var is '$got', expected '$expected' — $description" >&2
+        failed=1
+      fi
+    done < "$envRowsPath"
     [ "$failed" = 0 ] || exit 1
 
-    echo "OK: every program the agent runs is on its own runtime PATH" > "$out"
+    echo "OK: every program the agent runs is on its own runtime PATH, and its environment is set" > "$out"
   ''

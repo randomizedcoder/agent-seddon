@@ -212,10 +212,13 @@ let
         # tools `k8s-secrets` (crates/agent-k8s-secrets) and `k8s-status`
         # (crates/agent-k8s-status), but those run on the deployer's workstation, not
         # in the agent runtime/image — they are wrapped separately below.
+        # `GOTOOLCHAIN=local` (forced, not a default): the review's `go` is the
+        # toolbox's, and never downloads the toolchain a reviewed go.mod asks for.
         makeWrapper "${unwrapped}/bin/agent" "$out/bin/agent" \
           --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
           --set-default AGENT_ADVISORY_DB ${advisory-db} \
-          --set-default AGENT_NIXPKGS_FLAKEREF "${nixpkgsFlakeRef}"
+          --set-default AGENT_NIXPKGS_FLAKEREF "${nixpkgsFlakeRef}" \
+          --set GOTOOLCHAIN local
       '';
 
   agent = wrapAgent "agent" agent-unwrapped;
@@ -252,12 +255,14 @@ let
   # the AstBackend `go` engine via the Sandbox. Unlike go-ast it uses
   # golang.org/x/tools (go/packages + go/types.Implements + go/callgraph/cha over
   # SSA), so it vendors those deps — hence a real `vendorHash` (bump it with the
-  # error-reported hash when go.mod changes). Binary: `agent-go-graph`.
-  go-graph = pkgs.buildGoModule {
+  # error-reported hash when go.mod changes). Binary: `agent-go-graph`. Built with
+  # the same Go as `versions.go`: go/packages runs that `go`, and a go/types older
+  # than the toolchain whose export data it reads loads no types (no `implements`).
+  go-graph = pkgs.buildGoLatestModule {
     pname = "agent-go-graph";
     version = "0.1.0";
     src = ../helpers/go-graph;
-    vendorHash = "sha256-XZRy+J+JY9zELD9kydqOz+YdNSLyiVN+uxlvqD5yfkE=";
+    vendorHash = "sha256-wd3snjAhZN2QRz/5ySwapyI37/r5qeakv+x0QBhNq80=";
   };
 
   # The review static-analysis tool suite (golangci-lint / gosec / go / gofmt) as one
