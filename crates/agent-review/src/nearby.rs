@@ -297,6 +297,7 @@ mod tests {
             search,
             branch_names: vec![],
             sandbox: None,
+            unproven: Default::default(),
         }
     }
 

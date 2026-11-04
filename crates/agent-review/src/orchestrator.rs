@@ -437,6 +437,7 @@ impl ReviewCollector for ReviewOrchestrator {
             search: self.search.clone(),
             branch_names: r.branch_names,
             sandbox: self.sandbox.clone(),
+            unproven: Default::default(),
         };
 
         let span = tracing::info_span!(
@@ -600,22 +601,11 @@ impl ReviewCollector for ReviewOrchestrator {
         // risk-ranked, rule-bucketed section. Runs last — it reads the assembled
         // findings AND the risk scores computed just above. Purely tool-derived.
         // Generated code first: its findings rank last and are tallied apart. A
-        // changed file is trusted as generated only if its base side already was.
-        let sides: Vec<(String, Option<String>)> = facts
-            .change
-            .files
-            .iter()
-            .map(|f| {
-                (
-                    f.path.to_string_lossy().into_owned(),
-                    f.old_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        let unproven = crate::util::unproven_generated(ctx.repo.as_ref(), &ctx.base, sides).await;
-        crate::digest::tag_generated(&mut facts, &self.repo_root, &unproven);
+        // changed file is trusted as generated only if its base side already was
+        // (probed once, shared with the call graph); with no diff, nothing is.
+        if let Some(unproven) = ctx.unproven_generated().await {
+            crate::digest::tag_generated(&mut facts, &self.repo_root, unproven);
+        }
         facts.digest = crate::digest::compute(&facts);
 
         // Stage 3 (Inc 4): on a findings-heavy PR, add a cheap local-LLM prose
@@ -975,6 +965,7 @@ mod tests {
             repo: Arc::new(agent_testkit::FixtureRepo::new()),
             search: None,
             branch_names: Vec::new(),
+            unproven: Default::default(),
             sandbox: None,
         }
     }

@@ -797,6 +797,35 @@ impl CliBackend {
         let bytes = self.git_bytes(cwd, args).await?;
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
+
+    /// The oid of `path` at `rev` (`rev:path` stays one `--verify` argument, so a
+    /// leading-dash revision is never read as an option).
+    async fn blob_oid(&self, rev: &Revision, path: &Path) -> Result<Oid> {
+        let spec = format!("{}:{}", rev.as_str(), path.to_string_lossy());
+        Ok(Oid(self
+            .git_str(&self.root, &["rev-parse", "--verify", &spec])
+            .await?))
+    }
+
+    /// Read a blob by oid.
+    async fn read_blob(&self, oid: Oid, path: &Path) -> Result<BlobContent> {
+        let bytes = self
+            .git_bytes(&self.root, &["cat-file", "blob", oid.as_str()])
+            .await?;
+        let is_binary = bytes.iter().take(8000).any(|&b| b == 0);
+        let text = if is_binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        Ok(BlobContent {
+            oid,
+            path: path.to_path_buf(),
+            bytes_len: bytes.len() as u64,
+            is_binary,
+            text,
+        })
+    }
 }
 
 /// Whether a git invocation talks to the remote, and so needs the credential.
@@ -900,26 +929,25 @@ impl RepoBackend for CliBackend {
     }
 
     async fn read_file(&self, rev: &Revision, path: &Path) -> Result<BlobContent> {
-        let spec = format!("{}:{}", rev.as_str(), path.to_string_lossy());
-        let oid = Oid(self
-            .git_str(&self.root, &["rev-parse", "--verify", &spec])
-            .await?);
-        let bytes = self
-            .git_bytes(&self.root, &["cat-file", "blob", oid.as_str()])
+        let oid = self.blob_oid(rev, path).await?;
+        self.read_blob(oid, path).await
+    }
+
+    async fn read_file_capped(
+        &self,
+        rev: &Revision,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<BlobContent>> {
+        // Ask the size first, so a huge blob is never buffered.
+        let oid = self.blob_oid(rev, path).await?;
+        let size = self
+            .git_str(&self.root, &["cat-file", "-s", oid.as_str()])
             .await?;
-        let is_binary = bytes.iter().take(8000).any(|&b| b == 0);
-        let text = if is_binary {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&bytes).into_owned()
-        };
-        Ok(BlobContent {
-            oid,
-            path: path.to_path_buf(),
-            bytes_len: bytes.len() as u64,
-            is_binary,
-            text,
-        })
+        match size.parse::<u64>() {
+            Ok(n) if n <= max_bytes => Ok(Some(self.read_blob(oid, path).await?)),
+            _ => Ok(None),
+        }
     }
 
     async fn list_tree(

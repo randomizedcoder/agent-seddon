@@ -5464,6 +5464,20 @@ pub trait RepoBackend: Send + Sync {
     async fn resolve(&self, rev: &Revision) -> Result<Oid>;
     /// Read a file's contents at a revision.
     async fn read_file(&self, rev: &Revision, path: &Path) -> Result<BlobContent>;
+    /// [`read_file`](Self::read_file), or `Ok(None)` when the blob is larger than
+    /// `max_bytes`, for a caller that only wants a small file (or a file's head) and
+    /// must not buffer a huge one the change controls. The default reads the whole
+    /// blob and then checks, so it bounds what the caller keeps, not the read; a
+    /// backend that can ask the size first (the git CLI) overrides it.
+    async fn read_file_capped(
+        &self,
+        rev: &Revision,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<BlobContent>> {
+        let blob = self.read_file(rev, path).await?;
+        Ok((blob.bytes_len <= max_bytes).then_some(blob))
+    }
     /// List a tree at a revision, optionally recursing.
     async fn list_tree(
         &self,

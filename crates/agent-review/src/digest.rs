@@ -17,8 +17,8 @@
 //! the render cap — the tail is summarized, never silently dropped.
 
 use agent_core::{
-    AnalysisDigest, AnalysisFinding, CompletionRequest, LlmPool, Message, ReviewFacts, RouteHint,
-    RouteRole, RuleCount,
+    AnalysisDigest, AnalysisFinding, AnalysisReport, CompletionRequest, LlmPool, Message,
+    ReviewFacts, RouteHint, RouteRole, RuleCount,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -48,6 +48,29 @@ fn severity_rank(sev: &str) -> u8 {
     }
 }
 
+/// Every source of static-analysis findings, in a stable order (so dedup keeps a
+/// deterministic first-seen when the same finding appears in two reports). The one
+/// list both [`tag_generated`] and [`compute`] walk, so a new report is either
+/// tagged and folded, or neither. Keep [`reports_mut`] in the same order.
+fn reports(facts: &ReviewFacts) -> [&AnalysisReport; 4] {
+    [
+        &facts.analysis,
+        &facts.shellcheck,
+        &facts.go_checks,
+        &facts.nearby,
+    ]
+}
+
+/// [`reports`], mutably.
+fn reports_mut(facts: &mut ReviewFacts) -> [&mut AnalysisReport; 4] {
+    [
+        &mut facts.analysis,
+        &mut facts.shellcheck,
+        &mut facts.go_checks,
+        &mut facts.nearby,
+    ]
+}
+
 /// How many distinct files [`tag_generated`] reads a head from; past it, only the
 /// path rules apply.
 const MAX_GENERATED_PROBES: usize = 4096;
@@ -63,12 +86,7 @@ pub(crate) fn tag_generated(
     unproven: &BTreeSet<String>,
 ) {
     let mut cache: HashMap<String, bool> = HashMap::new();
-    for report in [
-        &mut facts.analysis,
-        &mut facts.shellcheck,
-        &mut facts.go_checks,
-        &mut facts.nearby,
-    ] {
+    for report in reports_mut(facts) {
         for f in &mut report.findings {
             if unproven.contains(&f.file) {
                 continue;
@@ -90,16 +108,8 @@ pub(crate) fn tag_generated(
 /// Fold every analysis report's findings into one deduped, risk-ranked, bucketed
 /// digest. Empty when nothing produced a finding.
 pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
-    // Every source of static-analysis findings, in a stable order (so dedup keeps a
-    // deterministic first-seen when the same finding appears in two reports).
-    let reports = [
-        &facts.analysis,
-        &facts.shellcheck,
-        &facts.go_checks,
-        &facts.nearby,
-    ];
     let mut all: Vec<AnalysisFinding> = Vec::new();
-    for r in reports {
+    for r in reports(facts) {
         all.extend(r.findings.iter().cloned());
     }
     if all.is_empty() {

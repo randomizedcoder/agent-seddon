@@ -20,6 +20,10 @@ import 'review.pb.dart' as $0;
 
 export 'review.pb.dart';
 
+/// REST mapping (docs/design/rest-openapi/), under /v1/review/. Collect is a fail-soft
+/// read (grounded fact collection). Its `target` (`pr:<n>` | `branch:<name>` |
+/// `worktree`) can contain `:` and `/`, so — like RepoService.ReadFile's revision — it
+/// rides as a query param, never a `{param}` path capture: GET /v1/review/facts.
 @$pb.GrpcServiceName('agent.v1.FactCollectorService')
 class FactCollectorServiceClient extends $grpc.Client {
   /// The hostname for this service.

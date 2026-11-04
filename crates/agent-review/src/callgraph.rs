@@ -16,7 +16,7 @@
 //! untrusted — node paths are `confine`d, strings bounded, counts capped.
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::{bound, lang_of, unproven_generated};
+use crate::util::{bound, is_generated_path, lang_of};
 use agent_core::{CallEdge, CallGraph, CallGraphNode, ExecSpec, PackageShape};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -56,18 +56,15 @@ impl FactCollector for CallGraphCollector {
 
         // Which files did the change touch? (Collectors run in parallel — recompute
         // the cached diff.) Only run the Go helper if a `.go` file changed.
-        let mut sides: Vec<(String, Option<String>)> = Vec::new();
         let changed: ChangedLines = match ctx.repo.diff(&ctx.base, &ctx.head, &[]).await {
             Ok(d) => d
                 .files
                 .into_iter()
                 .filter_map(|f| {
-                    let old = f.old_path.map(|p| p.to_string_lossy().into_owned());
                     let path = f
                         .new_path
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .or_else(|| old.clone())?;
-                    sides.push((path.clone(), old));
+                        .or(f.old_path)
+                        .map(|p| p.to_string_lossy().into_owned())?;
                     let ranges = hunk_ranges(&f.patch);
                     Some((path, ranges))
                 })
@@ -84,8 +81,16 @@ impl FactCollector for CallGraphCollector {
         }
         // The helper's `generated` flag reads the head, which the PR controls: a
         // changed Go file counts as generated only if its base side already was.
-        sides.retain(|(p, _)| lang_of(Path::new(p)) == "go");
-        let unproven = unproven_generated(ctx.repo.as_ref(), &ctx.base, sides).await;
+        // Probed once per review (the digest reuses it); if it can't be, every
+        // changed file is unproven.
+        let all_changed: BTreeSet<String>;
+        let unproven = match ctx.unproven_generated().await {
+            Some(u) => u,
+            None => {
+                all_changed = changed.keys().cloned().collect();
+                &all_changed
+            }
+        };
 
         // Static command — no untrusted input reaches the shell (the helper walks the
         // tree itself; the changed set is matched Rust-side). The focus list is a
@@ -118,7 +123,7 @@ impl FactCollector for CallGraphCollector {
             );
         }
 
-        match parse_graph(&out.stdout, &ctx.repo_root, &changed, &unproven) {
+        match parse_graph(&out.stdout, &ctx.repo_root, &changed, unproven) {
             Some(graph) => CollectorOutput::ok(FactFragment::CallGraph { graph }),
             None => CollectorOutput::partial(empty_graph(), "call-graph helper output unparseable"),
         }
@@ -254,7 +259,9 @@ fn parse_graph(
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
             };
-            let generated = flag("generated") && !unproven.contains(file);
+            // The path rules too, so the call graph and the digest agree on a file.
+            let generated = (flag("generated") || is_generated_path(Path::new(file)))
+                && !unproven.contains(file);
             if changed
                 .get(file)
                 .is_some_and(|ranges| touched(line, end_line, ranges))
@@ -612,6 +619,32 @@ mod tests {
         assert!(!g.nodes[0].generated, "the PR's own marker is not trusted");
         let g = parse_graph(json, &root(), &changed, &BTreeSet::new()).unwrap();
         assert_eq!(g.changed_generated, 1, "an existing marker is trusted");
+    }
+
+    /// The path rules apply as in the digest: a `.pb.go` without a marker is
+    /// generated, unless the PR made it so (the file is unproven).
+    #[rstest::rstest]
+    #[case::positive_generated_path("an existing .pb.go is counted, not listed", false, 0, 1)]
+    #[case::adversarial_unproven_path("a .pb.go the PR made is listed", true, 1, 0)]
+    fn generated_path_cases(
+        #[case] description: &str,
+        #[case] stamped: bool,
+        #[case] listed: usize,
+        #[case] counted: u32,
+    ) {
+        let json = r#"{"nodes":[
+            {"id":0,"name":"Marshal","file":"api/x.pb.go","line":3,"end_line":5}
+        ],"edges":[]}"#;
+        let changed: ChangedLines = [("api/x.pb.go".to_string(), Some(vec![(4, 4)]))]
+            .into_iter()
+            .collect();
+        let unproven: BTreeSet<String> = stamped
+            .then(|| "api/x.pb.go".to_string())
+            .into_iter()
+            .collect();
+        let g = parse_graph(json, &root(), &changed, &unproven).unwrap();
+        assert_eq!(g.changed_fns.len(), listed, "{description}");
+        assert_eq!(g.changed_generated, counted, "{description}");
     }
 
     /// An older helper (no `end_line`) keeps file-level marking.

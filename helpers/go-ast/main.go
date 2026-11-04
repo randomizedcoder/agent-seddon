@@ -401,9 +401,10 @@ func resolveEdges(order []int, calls [][]string, nodes []node, newID map[int]int
 	total := 0
 	work := 0
 	dedup := map[[2]int]struct{}{}
+	seen := map[string]bool{} // reused per caller: one map, not one per fn
 scan:
 	for _, caller := range order {
-		seen := map[string]bool{}
+		clear(seen)
 		for _, name := range calls[caller] {
 			if seen[name] {
 				continue // a name called from many sites costs its candidates once

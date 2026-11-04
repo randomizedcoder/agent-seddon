@@ -1314,6 +1314,21 @@ impl RepoBackend for MeteredRepo {
             .await;
         self.record("read_file", start, out)
     }
+    async fn read_file_capped(
+        &self,
+        rev: &Revision,
+        path: &std::path::Path,
+        max_bytes: u64,
+    ) -> Result<Option<BlobContent>> {
+        // Delegated explicitly: the default would read the whole blob through `read_file`.
+        let start = Instant::now();
+        let out = self
+            .inner
+            .read_file_capped(rev, path, max_bytes)
+            .instrument(self.span("read_file"))
+            .await;
+        self.record("read_file", start, out)
+    }
     async fn list_tree(
         &self,
         rev: &Revision,

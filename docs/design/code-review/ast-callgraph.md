@@ -67,7 +67,12 @@ blast radius was wrong in two ways, and both are fixed:
   (`util::unproven_generated`, read from git at the base). A new file, a rename
   into a `*.pb.go` path, or an added marker (in any spelling) stays listed;
   otherwise stamping a file "generated" would hide its changes. The same rule
-  gates the digest's `[generated]` tag. Lines are physical
+  gates the digest's `[generated]` tag, and the call graph applies the same path
+  rules as the digest, so the two agree on a file. The base side is probed once per
+  review (`CollectCtx::unproven_generated`, shared by both): its path rules decide
+  without a read, and an undecided file's base is read through
+  `RepoBackend::read_file_capped` (8 MiB; the git CLI asks the size first), so a
+  huge file in the PR is never buffered. Lines are physical
   (`PositionFor(…, false)`), so a `//line` directive can't move a fn away from the
   hunks. Only `+` lines (and a deletion's neighbours) count, never the hunk's
   context lines. The helper bounds its own work: hop-1 ranks each fn once, and the

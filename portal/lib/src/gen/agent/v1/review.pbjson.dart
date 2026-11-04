@@ -285,6 +285,7 @@ const ReviewAnalysisFinding$json = {
     {'1': 'line', '3': 5, '4': 1, '5': 13, '10': 'line'},
     {'1': 'message', '3': 6, '4': 1, '5': 9, '10': 'message'},
     {'1': 'in_change', '3': 7, '4': 1, '5': 8, '10': 'inChange'},
+    {'1': 'generated', '3': 8, '4': 1, '5': 8, '10': 'generated'},
   ],
 };
 
@@ -293,7 +294,7 @@ final $typed_data.Uint8List reviewAnalysisFindingDescriptor = $convert.base64Dec
     'ChVSZXZpZXdBbmFseXNpc0ZpbmRpbmcSEgoEdG9vbBgBIAEoCVIEdG9vbBISCgRydWxlGAIgAS'
     'gJUgRydWxlEhoKCHNldmVyaXR5GAMgASgJUghzZXZlcml0eRISCgRmaWxlGAQgASgJUgRmaWxl'
     'EhIKBGxpbmUYBSABKA1SBGxpbmUSGAoHbWVzc2FnZRgGIAEoCVIHbWVzc2FnZRIbCglpbl9jaG'
-    'FuZ2UYByABKAhSCGluQ2hhbmdl');
+    'FuZ2UYByABKAhSCGluQ2hhbmdlEhwKCWdlbmVyYXRlZBgIIAEoCFIJZ2VuZXJhdGVk');
 
 @$core.Deprecated('Use reviewAnalyzerRunDescriptor instead')
 const ReviewAnalyzerRun$json = {
@@ -396,6 +397,9 @@ const ReviewCallGraphNode$json = {
     {'1': 'file', '3': 5, '4': 1, '5': 9, '10': 'file'},
     {'1': 'line', '3': 6, '4': 1, '5': 13, '10': 'line'},
     {'1': 'centrality', '3': 7, '4': 1, '5': 1, '10': 'centrality'},
+    {'1': 'end_line', '3': 8, '4': 1, '5': 13, '10': 'endLine'},
+    {'1': 'test', '3': 9, '4': 1, '5': 8, '10': 'test'},
+    {'1': 'generated', '3': 10, '4': 1, '5': 8, '10': 'generated'},
   ],
 };
 
@@ -404,7 +408,8 @@ final $typed_data.Uint8List reviewCallGraphNodeDescriptor = $convert.base64Decod
     'ChNSZXZpZXdDYWxsR3JhcGhOb2RlEg4KAmlkGAEgASgNUgJpZBIYCgdwYWNrYWdlGAIgASgJUg'
     'dwYWNrYWdlEhIKBG5hbWUYAyABKAlSBG5hbWUSGgoIZXhwb3J0ZWQYBCABKAhSCGV4cG9ydGVk'
     'EhIKBGZpbGUYBSABKAlSBGZpbGUSEgoEbGluZRgGIAEoDVIEbGluZRIeCgpjZW50cmFsaXR5GA'
-    'cgASgBUgpjZW50cmFsaXR5');
+    'cgASgBUgpjZW50cmFsaXR5EhkKCGVuZF9saW5lGAggASgNUgdlbmRMaW5lEhIKBHRlc3QYCSAB'
+    'KAhSBHRlc3QSHAoJZ2VuZXJhdGVkGAogASgIUglnZW5lcmF0ZWQ=');
 
 @$core.Deprecated('Use reviewCallEdgeDescriptor instead')
 const ReviewCallEdge$json = {
@@ -467,6 +472,13 @@ const ReviewCallGraph$json = {
       '10': 'packages'
     },
     {'1': 'truncated', '3': 5, '4': 1, '5': 8, '10': 'truncated'},
+    {
+      '1': 'changed_generated',
+      '3': 6,
+      '4': 1,
+      '5': 13,
+      '10': 'changedGenerated'
+    },
   ],
 };
 
@@ -476,7 +488,8 @@ final $typed_data.Uint8List reviewCallGraphDescriptor = $convert.base64Decode(
     'JhcGhOb2RlUgVub2RlcxIuCgVlZGdlcxgCIAMoCzIYLmFnZW50LnYxLlJldmlld0NhbGxFZGdl'
     'UgVlZGdlcxIfCgtjaGFuZ2VkX2ZucxgDIAMoDVIKY2hhbmdlZEZucxI4CghwYWNrYWdlcxgEIA'
     'MoCzIcLmFnZW50LnYxLlJldmlld1BhY2thZ2VTaGFwZVIIcGFja2FnZXMSHAoJdHJ1bmNhdGVk'
-    'GAUgASgIUgl0cnVuY2F0ZWQ=');
+    'GAUgASgIUgl0cnVuY2F0ZWQSKwoRY2hhbmdlZF9nZW5lcmF0ZWQYBiABKA1SEGNoYW5nZWRHZW'
+    '5lcmF0ZWQ=');
 
 @$core.Deprecated('Use reviewNamingFactsDescriptor instead')
 const ReviewNamingFacts$json = {
@@ -836,13 +849,15 @@ const ReviewRuleCount$json = {
     {'1': 'rule', '3': 2, '4': 1, '5': 9, '10': 'rule'},
     {'1': 'count', '3': 3, '4': 1, '5': 13, '10': 'count'},
     {'1': 'in_change', '3': 4, '4': 1, '5': 13, '10': 'inChange'},
+    {'1': 'generated', '3': 5, '4': 1, '5': 13, '10': 'generated'},
   ],
 };
 
 /// Descriptor for `ReviewRuleCount`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List reviewRuleCountDescriptor = $convert.base64Decode(
     'Cg9SZXZpZXdSdWxlQ291bnQSEgoEdG9vbBgBIAEoCVIEdG9vbBISCgRydWxlGAIgASgJUgRydW'
-    'xlEhQKBWNvdW50GAMgASgNUgVjb3VudBIbCglpbl9jaGFuZ2UYBCABKA1SCGluQ2hhbmdl');
+    'xlEhQKBWNvdW50GAMgASgNUgVjb3VudBIbCglpbl9jaGFuZ2UYBCABKA1SCGluQ2hhbmdlEhwK'
+    'CWdlbmVyYXRlZBgFIAEoDVIJZ2VuZXJhdGVk');
 
 @$core.Deprecated('Use reviewAnalysisDigestDescriptor instead')
 const ReviewAnalysisDigest$json = {
@@ -866,6 +881,7 @@ const ReviewAnalysisDigest$json = {
       '6': '.agent.v1.ReviewRuleCount',
       '10': 'ruleCounts'
     },
+    {'1': 'generated', '3': 5, '4': 1, '5': 13, '10': 'generated'},
   ],
 };
 
@@ -874,7 +890,8 @@ final $typed_data.Uint8List reviewAnalysisDigestDescriptor = $convert.base64Deco
     'ChRSZXZpZXdBbmFseXNpc0RpZ2VzdBI7CghmaW5kaW5ncxgBIAMoCzIfLmFnZW50LnYxLlJldm'
     'lld0FuYWx5c2lzRmluZGluZ1IIZmluZGluZ3MSFAoFdG90YWwYAiABKA1SBXRvdGFsEhsKCWlu'
     'X2NoYW5nZRgDIAEoDVIIaW5DaGFuZ2USOgoLcnVsZV9jb3VudHMYBCADKAsyGS5hZ2VudC52MS'
-    '5SZXZpZXdSdWxlQ291bnRSCnJ1bGVDb3VudHM=');
+    '5SZXZpZXdSdWxlQ291bnRSCnJ1bGVDb3VudHMSHAoJZ2VuZXJhdGVkGAUgASgNUglnZW5lcmF0'
+    'ZWQ=');
 
 @$core.Deprecated('Use reviewFactsDescriptor instead')
 const ReviewFacts$json = {

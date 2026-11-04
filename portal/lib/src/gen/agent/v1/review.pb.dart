@@ -27,7 +27,7 @@ class ReviewCollectRequest extends $pb.GeneratedMessage {
   factory ReviewCollectRequest({
     $core.String? target,
   }) {
-    final result = create();
+    final result = ReviewCollectRequest._();
     if (target != null) result.target = target;
     return result;
   }
@@ -36,15 +36,15 @@ class ReviewCollectRequest extends $pb.GeneratedMessage {
 
   factory ReviewCollectRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCollectRequest()..mergeFromBuffer(data, registry);
   factory ReviewCollectRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCollectRequest()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCollectRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCollectRequest.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'target')
     ..hasRequiredFields = false;
 
@@ -59,12 +59,16 @@ class ReviewCollectRequest extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewCollectRequest() / ReviewCollectRequest.new instead')
   static ReviewCollectRequest create() => ReviewCollectRequest._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCollectRequest._();
   @$core.override
-  ReviewCollectRequest createEmptyInstance() => create();
+  ReviewCollectRequest createEmptyInstance() => ReviewCollectRequest._();
   @$core.pragma('dart2js:noInline')
   static ReviewCollectRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCollectRequest>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCollectRequest>(
+          ReviewCollectRequest.$_createMessage);
   static ReviewCollectRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -84,7 +88,7 @@ class ReviewCollectorStatus extends $pb.GeneratedMessage {
     $core.String? reason,
     $core.int? durationMs,
   }) {
-    final result = create();
+    final result = ReviewCollectorStatus._();
     if (collector != null) result.collector = collector;
     if (status != null) result.status = status;
     if (reason != null) result.reason = reason;
@@ -96,15 +100,15 @@ class ReviewCollectorStatus extends $pb.GeneratedMessage {
 
   factory ReviewCollectorStatus.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCollectorStatus()..mergeFromBuffer(data, registry);
   factory ReviewCollectorStatus.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCollectorStatus()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCollectorStatus',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCollectorStatus.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'collector')
     ..aE<ReviewCollectStatus>(2, _omitFieldNames ? '' : 'status',
         enumValues: ReviewCollectStatus.values)
@@ -124,12 +128,16 @@ class ReviewCollectorStatus extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewCollectorStatus() / ReviewCollectorStatus.new instead')
   static ReviewCollectorStatus create() => ReviewCollectorStatus._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCollectorStatus._();
   @$core.override
-  ReviewCollectorStatus createEmptyInstance() => create();
+  ReviewCollectorStatus createEmptyInstance() => ReviewCollectorStatus._();
   @$core.pragma('dart2js:noInline')
   static ReviewCollectorStatus getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCollectorStatus>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCollectorStatus>(
+          ReviewCollectorStatus.$_createMessage);
   static ReviewCollectorStatus? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -177,7 +185,7 @@ class ReviewMeta extends $pb.GeneratedMessage {
     $core.int? totalMs,
     $core.Iterable<ReviewCollectorStatus>? collectors,
   }) {
-    final result = create();
+    final result = ReviewMeta._();
     if (repoHash != null) result.repoHash = repoHash;
     if (baseRev != null) result.baseRev = baseRev;
     if (headRev != null) result.headRev = headRev;
@@ -190,21 +198,21 @@ class ReviewMeta extends $pb.GeneratedMessage {
 
   factory ReviewMeta.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewMeta()..mergeFromBuffer(data, registry);
   factory ReviewMeta.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewMeta()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewMeta',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewMeta.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'repoHash')
     ..aOS(2, _omitFieldNames ? '' : 'baseRev')
     ..aOS(3, _omitFieldNames ? '' : 'headRev')
     ..aI(4, _omitFieldNames ? '' : 'totalMs', fieldType: $pb.PbFieldType.OU3)
     ..pPM<ReviewCollectorStatus>(5, _omitFieldNames ? '' : 'collectors',
-        subBuilder: ReviewCollectorStatus.create)
+        subBuilder: ReviewCollectorStatus.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -217,12 +225,14 @@ class ReviewMeta extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewMeta() / ReviewMeta.new instead')
   static ReviewMeta create() => ReviewMeta._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewMeta._();
   @$core.override
-  ReviewMeta createEmptyInstance() => create();
+  ReviewMeta createEmptyInstance() => ReviewMeta._();
   @$core.pragma('dart2js:noInline')
   static ReviewMeta getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewMeta>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewMeta>(ReviewMeta.$_createMessage);
   static ReviewMeta? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -276,7 +286,7 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
     $core.String? patch,
     $core.String? oldPath,
   }) {
-    final result = create();
+    final result = ReviewChangedFile._();
     if (path != null) result.path = path;
     if (change != null) result.change = change;
     if (additions != null) result.additions = additions;
@@ -292,15 +302,15 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
 
   factory ReviewChangedFile.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewChangedFile()..mergeFromBuffer(data, registry);
   factory ReviewChangedFile.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewChangedFile()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewChangedFile',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewChangedFile.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'path')
     ..aE<$1.ChangeKind>(2, _omitFieldNames ? '' : 'change',
         enumValues: $1.ChangeKind.values)
@@ -323,12 +333,15 @@ class ReviewChangedFile extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewChangedFile() / ReviewChangedFile.new instead')
   static ReviewChangedFile create() => ReviewChangedFile._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewChangedFile._();
   @$core.override
-  ReviewChangedFile createEmptyInstance() => create();
+  ReviewChangedFile createEmptyInstance() => ReviewChangedFile._();
   @$core.pragma('dart2js:noInline')
-  static ReviewChangedFile getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewChangedFile>(create);
+  static ReviewChangedFile getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewChangedFile>(
+          ReviewChangedFile.$_createMessage);
   static ReviewChangedFile? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -415,7 +428,7 @@ class ReviewCommit extends $pb.GeneratedMessage {
     $core.String? author,
     $core.int? ageDays,
   }) {
-    final result = create();
+    final result = ReviewCommit._();
     if (short != null) result.short = short;
     if (summary != null) result.summary = summary;
     if (body != null) result.body = body;
@@ -428,15 +441,15 @@ class ReviewCommit extends $pb.GeneratedMessage {
 
   factory ReviewCommit.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCommit()..mergeFromBuffer(data, registry);
   factory ReviewCommit.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCommit()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCommit',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCommit.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'short')
     ..aOS(2, _omitFieldNames ? '' : 'summary')
     ..aOS(3, _omitFieldNames ? '' : 'body')
@@ -455,12 +468,15 @@ class ReviewCommit extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewCommit() / ReviewCommit.new instead')
   static ReviewCommit create() => ReviewCommit._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCommit._();
   @$core.override
-  ReviewCommit createEmptyInstance() => create();
+  ReviewCommit createEmptyInstance() => ReviewCommit._();
   @$core.pragma('dart2js:noInline')
-  static ReviewCommit getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCommit>(create);
+  static ReviewCommit getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewCommit>(
+          ReviewCommit.$_createMessage);
   static ReviewCommit? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -517,7 +533,7 @@ class ReviewChangeSet extends $pb.GeneratedMessage {
     $core.int? repoFileCount,
     $core.Iterable<ReviewCommit>? commits,
   }) {
-    final result = create();
+    final result = ReviewChangeSet._();
     if (baseRev != null) result.baseRev = baseRev;
     if (headRev != null) result.headRev = headRev;
     if (files != null) result.files.addAll(files);
@@ -530,23 +546,23 @@ class ReviewChangeSet extends $pb.GeneratedMessage {
 
   factory ReviewChangeSet.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewChangeSet()..mergeFromBuffer(data, registry);
   factory ReviewChangeSet.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewChangeSet()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewChangeSet',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewChangeSet.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'baseRev')
     ..aOS(2, _omitFieldNames ? '' : 'headRev')
     ..pPM<ReviewChangedFile>(3, _omitFieldNames ? '' : 'files',
-        subBuilder: ReviewChangedFile.create)
+        subBuilder: ReviewChangedFile.$_createMessage)
     ..aI(4, _omitFieldNames ? '' : 'repoFileCount',
         fieldType: $pb.PbFieldType.OU3)
     ..pPM<ReviewCommit>(5, _omitFieldNames ? '' : 'commits',
-        subBuilder: ReviewCommit.create)
+        subBuilder: ReviewCommit.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -560,12 +576,15 @@ class ReviewChangeSet extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewChangeSet() / ReviewChangeSet.new instead')
   static ReviewChangeSet create() => ReviewChangeSet._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewChangeSet._();
   @$core.override
-  ReviewChangeSet createEmptyInstance() => create();
+  ReviewChangeSet createEmptyInstance() => ReviewChangeSet._();
   @$core.pragma('dart2js:noInline')
-  static ReviewChangeSet getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewChangeSet>(create);
+  static ReviewChangeSet getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewChangeSet>(
+          ReviewChangeSet.$_createMessage);
   static ReviewChangeSet? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -610,7 +629,7 @@ class ReviewGitState extends $pb.GeneratedMessage {
     $core.String? defaultBranch,
     ReviewRepoLanguage? project,
   }) {
-    final result = create();
+    final result = ReviewGitState._();
     if (remoteUrlHash != null) result.remoteUrlHash = remoteUrlHash;
     if (host != null) result.host = host;
     if (relationship != null) result.relationship = relationship;
@@ -623,15 +642,15 @@ class ReviewGitState extends $pb.GeneratedMessage {
 
   factory ReviewGitState.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewGitState()..mergeFromBuffer(data, registry);
   factory ReviewGitState.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewGitState()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewGitState',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewGitState.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'remoteUrlHash')
     ..aE<ReviewForgeHost>(2, _omitFieldNames ? '' : 'host',
         enumValues: ReviewForgeHost.values)
@@ -653,12 +672,15 @@ class ReviewGitState extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewGitState() / ReviewGitState.new instead')
   static ReviewGitState create() => ReviewGitState._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewGitState._();
   @$core.override
-  ReviewGitState createEmptyInstance() => create();
+  ReviewGitState createEmptyInstance() => ReviewGitState._();
   @$core.pragma('dart2js:noInline')
-  static ReviewGitState getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewGitState>(create);
+  static ReviewGitState getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewGitState>(
+          ReviewGitState.$_createMessage);
   static ReviewGitState? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -719,8 +741,9 @@ class ReviewAnalysisFinding extends $pb.GeneratedMessage {
     $core.int? line,
     $core.String? message,
     $core.bool? inChange,
+    $core.bool? generated,
   }) {
-    final result = create();
+    final result = ReviewAnalysisFinding._();
     if (tool != null) result.tool = tool;
     if (rule != null) result.rule = rule;
     if (severity != null) result.severity = severity;
@@ -728,6 +751,7 @@ class ReviewAnalysisFinding extends $pb.GeneratedMessage {
     if (line != null) result.line = line;
     if (message != null) result.message = message;
     if (inChange != null) result.inChange = inChange;
+    if (generated != null) result.generated = generated;
     return result;
   }
 
@@ -735,15 +759,15 @@ class ReviewAnalysisFinding extends $pb.GeneratedMessage {
 
   factory ReviewAnalysisFinding.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewAnalysisFinding()..mergeFromBuffer(data, registry);
   factory ReviewAnalysisFinding.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewAnalysisFinding()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewAnalysisFinding',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewAnalysisFinding.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'tool')
     ..aOS(2, _omitFieldNames ? '' : 'rule')
     ..aOS(3, _omitFieldNames ? '' : 'severity')
@@ -751,6 +775,7 @@ class ReviewAnalysisFinding extends $pb.GeneratedMessage {
     ..aI(5, _omitFieldNames ? '' : 'line', fieldType: $pb.PbFieldType.OU3)
     ..aOS(6, _omitFieldNames ? '' : 'message')
     ..aOB(7, _omitFieldNames ? '' : 'inChange')
+    ..aOB(8, _omitFieldNames ? '' : 'generated')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -765,12 +790,16 @@ class ReviewAnalysisFinding extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewAnalysisFinding() / ReviewAnalysisFinding.new instead')
   static ReviewAnalysisFinding create() => ReviewAnalysisFinding._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewAnalysisFinding._();
   @$core.override
-  ReviewAnalysisFinding createEmptyInstance() => create();
+  ReviewAnalysisFinding createEmptyInstance() => ReviewAnalysisFinding._();
   @$core.pragma('dart2js:noInline')
   static ReviewAnalysisFinding getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisFinding>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisFinding>(
+          ReviewAnalysisFinding.$_createMessage);
   static ReviewAnalysisFinding? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -835,6 +864,16 @@ class ReviewAnalysisFinding extends $pb.GeneratedMessage {
   $core.bool hasInChange() => $_has(6);
   @$pb.TagNumber(7)
   void clearInChange() => $_clearField(7);
+
+  /// The file is generated code (ranked last, tallied apart in the digest).
+  @$pb.TagNumber(8)
+  $core.bool get generated => $_getBF(7);
+  @$pb.TagNumber(8)
+  set generated($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasGenerated() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearGenerated() => $_clearField(8);
 }
 
 /// The outcome of one linter invocation (`status`: ok | skipped | timeout |
@@ -847,7 +886,7 @@ class ReviewAnalyzerRun extends $pb.GeneratedMessage {
     $core.int? durationMs,
     $core.int? findingCount,
   }) {
-    final result = create();
+    final result = ReviewAnalyzerRun._();
     if (tool != null) result.tool = tool;
     if (status != null) result.status = status;
     if (reason != null) result.reason = reason;
@@ -860,15 +899,15 @@ class ReviewAnalyzerRun extends $pb.GeneratedMessage {
 
   factory ReviewAnalyzerRun.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewAnalyzerRun()..mergeFromBuffer(data, registry);
   factory ReviewAnalyzerRun.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewAnalyzerRun()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewAnalyzerRun',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewAnalyzerRun.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'tool')
     ..aOS(2, _omitFieldNames ? '' : 'status')
     ..aOS(3, _omitFieldNames ? '' : 'reason')
@@ -888,12 +927,15 @@ class ReviewAnalyzerRun extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewAnalyzerRun() / ReviewAnalyzerRun.new instead')
   static ReviewAnalyzerRun create() => ReviewAnalyzerRun._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewAnalyzerRun._();
   @$core.override
-  ReviewAnalyzerRun createEmptyInstance() => create();
+  ReviewAnalyzerRun createEmptyInstance() => ReviewAnalyzerRun._();
   @$core.pragma('dart2js:noInline')
-  static ReviewAnalyzerRun getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewAnalyzerRun>(create);
+  static ReviewAnalyzerRun getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewAnalyzerRun>(
+          ReviewAnalyzerRun.$_createMessage);
   static ReviewAnalyzerRun? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -948,7 +990,7 @@ class ReviewAnalysisReport extends $pb.GeneratedMessage {
     $core.Iterable<ReviewAnalyzerRun>? runs,
     $core.Iterable<ReviewAnalysisFinding>? findings,
   }) {
-    final result = create();
+    final result = ReviewAnalysisReport._();
     if (language != null) result.language = language;
     if (runs != null) result.runs.addAll(runs);
     if (findings != null) result.findings.addAll(findings);
@@ -959,20 +1001,20 @@ class ReviewAnalysisReport extends $pb.GeneratedMessage {
 
   factory ReviewAnalysisReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewAnalysisReport()..mergeFromBuffer(data, registry);
   factory ReviewAnalysisReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewAnalysisReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewAnalysisReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewAnalysisReport.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'language')
     ..pPM<ReviewAnalyzerRun>(2, _omitFieldNames ? '' : 'runs',
-        subBuilder: ReviewAnalyzerRun.create)
+        subBuilder: ReviewAnalyzerRun.$_createMessage)
     ..pPM<ReviewAnalysisFinding>(3, _omitFieldNames ? '' : 'findings',
-        subBuilder: ReviewAnalysisFinding.create)
+        subBuilder: ReviewAnalysisFinding.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -986,12 +1028,16 @@ class ReviewAnalysisReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewAnalysisReport() / ReviewAnalysisReport.new instead')
   static ReviewAnalysisReport create() => ReviewAnalysisReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewAnalysisReport._();
   @$core.override
-  ReviewAnalysisReport createEmptyInstance() => create();
+  ReviewAnalysisReport createEmptyInstance() => ReviewAnalysisReport._();
   @$core.pragma('dart2js:noInline')
   static ReviewAnalysisReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisReport>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisReport>(
+          ReviewAnalysisReport.$_createMessage);
   static ReviewAnalysisReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1021,7 +1067,7 @@ class ReviewSignatureChange extends $pb.GeneratedMessage {
     $core.String? before,
     $core.String? after,
   }) {
-    final result = create();
+    final result = ReviewSignatureChange._();
     if (file != null) result.file = file;
     if (lang != null) result.lang = lang;
     if (kind != null) result.kind = kind;
@@ -1035,15 +1081,15 @@ class ReviewSignatureChange extends $pb.GeneratedMessage {
 
   factory ReviewSignatureChange.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewSignatureChange()..mergeFromBuffer(data, registry);
   factory ReviewSignatureChange.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewSignatureChange()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewSignatureChange',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewSignatureChange.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'file')
     ..aOS(2, _omitFieldNames ? '' : 'lang')
     ..aOS(3, _omitFieldNames ? '' : 'kind')
@@ -1064,12 +1110,16 @@ class ReviewSignatureChange extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewSignatureChange() / ReviewSignatureChange.new instead')
   static ReviewSignatureChange create() => ReviewSignatureChange._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewSignatureChange._();
   @$core.override
-  ReviewSignatureChange createEmptyInstance() => create();
+  ReviewSignatureChange createEmptyInstance() => ReviewSignatureChange._();
   @$core.pragma('dart2js:noInline')
   static ReviewSignatureChange getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewSignatureChange>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewSignatureChange>(
+          ReviewSignatureChange.$_createMessage);
   static ReviewSignatureChange? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1133,7 +1183,7 @@ class ReviewSignatureReport extends $pb.GeneratedMessage {
     $core.int? filesScanned,
     $core.bool? truncated,
   }) {
-    final result = create();
+    final result = ReviewSignatureReport._();
     if (changes != null) result.changes.addAll(changes);
     if (filesScanned != null) result.filesScanned = filesScanned;
     if (truncated != null) result.truncated = truncated;
@@ -1144,17 +1194,17 @@ class ReviewSignatureReport extends $pb.GeneratedMessage {
 
   factory ReviewSignatureReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewSignatureReport()..mergeFromBuffer(data, registry);
   factory ReviewSignatureReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewSignatureReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewSignatureReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewSignatureReport.$_createMessage)
     ..pPM<ReviewSignatureChange>(1, _omitFieldNames ? '' : 'changes',
-        subBuilder: ReviewSignatureChange.create)
+        subBuilder: ReviewSignatureChange.$_createMessage)
     ..aI(2, _omitFieldNames ? '' : 'filesScanned',
         fieldType: $pb.PbFieldType.OU3)
     ..aOB(3, _omitFieldNames ? '' : 'truncated')
@@ -1172,12 +1222,16 @@ class ReviewSignatureReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewSignatureReport() / ReviewSignatureReport.new instead')
   static ReviewSignatureReport create() => ReviewSignatureReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewSignatureReport._();
   @$core.override
-  ReviewSignatureReport createEmptyInstance() => create();
+  ReviewSignatureReport createEmptyInstance() => ReviewSignatureReport._();
   @$core.pragma('dart2js:noInline')
   static ReviewSignatureReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewSignatureReport>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewSignatureReport>(
+          ReviewSignatureReport.$_createMessage);
   static ReviewSignatureReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1213,8 +1267,11 @@ class ReviewCallGraphNode extends $pb.GeneratedMessage {
     $core.String? file,
     $core.int? line,
     $core.double? centrality,
+    $core.int? endLine,
+    $core.bool? test,
+    $core.bool? generated,
   }) {
-    final result = create();
+    final result = ReviewCallGraphNode._();
     if (id != null) result.id = id;
     if (package != null) result.package = package;
     if (name != null) result.name = name;
@@ -1222,6 +1279,9 @@ class ReviewCallGraphNode extends $pb.GeneratedMessage {
     if (file != null) result.file = file;
     if (line != null) result.line = line;
     if (centrality != null) result.centrality = centrality;
+    if (endLine != null) result.endLine = endLine;
+    if (test != null) result.test = test;
+    if (generated != null) result.generated = generated;
     return result;
   }
 
@@ -1229,15 +1289,15 @@ class ReviewCallGraphNode extends $pb.GeneratedMessage {
 
   factory ReviewCallGraphNode.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCallGraphNode()..mergeFromBuffer(data, registry);
   factory ReviewCallGraphNode.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCallGraphNode()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCallGraphNode',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCallGraphNode.$_createMessage)
     ..aI(1, _omitFieldNames ? '' : 'id', fieldType: $pb.PbFieldType.OU3)
     ..aOS(2, _omitFieldNames ? '' : 'package')
     ..aOS(3, _omitFieldNames ? '' : 'name')
@@ -1245,6 +1305,9 @@ class ReviewCallGraphNode extends $pb.GeneratedMessage {
     ..aOS(5, _omitFieldNames ? '' : 'file')
     ..aI(6, _omitFieldNames ? '' : 'line', fieldType: $pb.PbFieldType.OU3)
     ..aD(7, _omitFieldNames ? '' : 'centrality')
+    ..aI(8, _omitFieldNames ? '' : 'endLine', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(9, _omitFieldNames ? '' : 'test')
+    ..aOB(10, _omitFieldNames ? '' : 'generated')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1258,12 +1321,16 @@ class ReviewCallGraphNode extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use ReviewCallGraphNode() / ReviewCallGraphNode.new instead')
   static ReviewCallGraphNode create() => ReviewCallGraphNode._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCallGraphNode._();
   @$core.override
-  ReviewCallGraphNode createEmptyInstance() => create();
+  ReviewCallGraphNode createEmptyInstance() => ReviewCallGraphNode._();
   @$core.pragma('dart2js:noInline')
   static ReviewCallGraphNode getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCallGraphNode>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCallGraphNode>(
+          ReviewCallGraphNode.$_createMessage);
   static ReviewCallGraphNode? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1328,6 +1395,36 @@ class ReviewCallGraphNode extends $pb.GeneratedMessage {
   $core.bool hasCentrality() => $_has(6);
   @$pb.TagNumber(7)
   void clearCentrality() => $_clearField(7);
+
+  /// Last line (0 = unknown): with `line`, the span a diff hunk must overlap.
+  @$pb.TagNumber(8)
+  $core.int get endLine => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set endLine($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasEndLine() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearEndLine() => $_clearField(8);
+
+  /// In a `_test.go` file.
+  @$pb.TagNumber(9)
+  $core.bool get test => $_getBF(8);
+  @$pb.TagNumber(9)
+  set test($core.bool value) => $_setBool(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasTest() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearTest() => $_clearField(9);
+
+  /// In a generated file (`// Code generated … DO NOT EDIT.` before `package`).
+  @$pb.TagNumber(10)
+  $core.bool get generated => $_getBF(9);
+  @$pb.TagNumber(10)
+  set generated($core.bool value) => $_setBool(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasGenerated() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearGenerated() => $_clearField(10);
 }
 
 class ReviewCallEdge extends $pb.GeneratedMessage {
@@ -1335,7 +1432,7 @@ class ReviewCallEdge extends $pb.GeneratedMessage {
     $core.int? callerId,
     $core.int? calleeId,
   }) {
-    final result = create();
+    final result = ReviewCallEdge._();
     if (callerId != null) result.callerId = callerId;
     if (calleeId != null) result.calleeId = calleeId;
     return result;
@@ -1345,15 +1442,15 @@ class ReviewCallEdge extends $pb.GeneratedMessage {
 
   factory ReviewCallEdge.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCallEdge()..mergeFromBuffer(data, registry);
   factory ReviewCallEdge.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCallEdge()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCallEdge',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCallEdge.$_createMessage)
     ..aI(1, _omitFieldNames ? '' : 'callerId', fieldType: $pb.PbFieldType.OU3)
     ..aI(2, _omitFieldNames ? '' : 'calleeId', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
@@ -1369,12 +1466,15 @@ class ReviewCallEdge extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewCallEdge() / ReviewCallEdge.new instead')
   static ReviewCallEdge create() => ReviewCallEdge._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCallEdge._();
   @$core.override
-  ReviewCallEdge createEmptyInstance() => create();
+  ReviewCallEdge createEmptyInstance() => ReviewCallEdge._();
   @$core.pragma('dart2js:noInline')
-  static ReviewCallEdge getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCallEdge>(create);
+  static ReviewCallEdge getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewCallEdge>(
+          ReviewCallEdge.$_createMessage);
   static ReviewCallEdge? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1403,7 +1503,7 @@ class ReviewPackageShape extends $pb.GeneratedMessage {
     $core.int? exportedFns,
     $core.int? types,
   }) {
-    final result = create();
+    final result = ReviewPackageShape._();
     if (package != null) result.package = package;
     if (files != null) result.files = files;
     if (exportedFns != null) result.exportedFns = exportedFns;
@@ -1415,15 +1515,15 @@ class ReviewPackageShape extends $pb.GeneratedMessage {
 
   factory ReviewPackageShape.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewPackageShape()..mergeFromBuffer(data, registry);
   factory ReviewPackageShape.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewPackageShape()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewPackageShape',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewPackageShape.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'package')
     ..aI(2, _omitFieldNames ? '' : 'files', fieldType: $pb.PbFieldType.OU3)
     ..aI(3, _omitFieldNames ? '' : 'exportedFns',
@@ -1442,12 +1542,15 @@ class ReviewPackageShape extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewPackageShape() / ReviewPackageShape.new instead')
   static ReviewPackageShape create() => ReviewPackageShape._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewPackageShape._();
   @$core.override
-  ReviewPackageShape createEmptyInstance() => create();
+  ReviewPackageShape createEmptyInstance() => ReviewPackageShape._();
   @$core.pragma('dart2js:noInline')
   static ReviewPackageShape getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewPackageShape>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewPackageShape>(
+          ReviewPackageShape.$_createMessage);
   static ReviewPackageShape? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1494,13 +1597,15 @@ class ReviewCallGraph extends $pb.GeneratedMessage {
     $core.Iterable<$core.int>? changedFns,
     $core.Iterable<ReviewPackageShape>? packages,
     $core.bool? truncated,
+    $core.int? changedGenerated,
   }) {
-    final result = create();
+    final result = ReviewCallGraph._();
     if (nodes != null) result.nodes.addAll(nodes);
     if (edges != null) result.edges.addAll(edges);
     if (changedFns != null) result.changedFns.addAll(changedFns);
     if (packages != null) result.packages.addAll(packages);
     if (truncated != null) result.truncated = truncated;
+    if (changedGenerated != null) result.changedGenerated = changedGenerated;
     return result;
   }
 
@@ -1508,23 +1613,25 @@ class ReviewCallGraph extends $pb.GeneratedMessage {
 
   factory ReviewCallGraph.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCallGraph()..mergeFromBuffer(data, registry);
   factory ReviewCallGraph.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCallGraph()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCallGraph',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCallGraph.$_createMessage)
     ..pPM<ReviewCallGraphNode>(1, _omitFieldNames ? '' : 'nodes',
-        subBuilder: ReviewCallGraphNode.create)
+        subBuilder: ReviewCallGraphNode.$_createMessage)
     ..pPM<ReviewCallEdge>(2, _omitFieldNames ? '' : 'edges',
-        subBuilder: ReviewCallEdge.create)
+        subBuilder: ReviewCallEdge.$_createMessage)
     ..p<$core.int>(3, _omitFieldNames ? '' : 'changedFns', $pb.PbFieldType.KU3)
     ..pPM<ReviewPackageShape>(4, _omitFieldNames ? '' : 'packages',
-        subBuilder: ReviewPackageShape.create)
+        subBuilder: ReviewPackageShape.$_createMessage)
     ..aOB(5, _omitFieldNames ? '' : 'truncated')
+    ..aI(6, _omitFieldNames ? '' : 'changedGenerated',
+        fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1538,12 +1645,15 @@ class ReviewCallGraph extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewCallGraph() / ReviewCallGraph.new instead')
   static ReviewCallGraph create() => ReviewCallGraph._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCallGraph._();
   @$core.override
-  ReviewCallGraph createEmptyInstance() => create();
+  ReviewCallGraph createEmptyInstance() => ReviewCallGraph._();
   @$core.pragma('dart2js:noInline')
-  static ReviewCallGraph getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCallGraph>(create);
+  static ReviewCallGraph getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewCallGraph>(
+          ReviewCallGraph.$_createMessage);
   static ReviewCallGraph? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1566,6 +1676,16 @@ class ReviewCallGraph extends $pb.GeneratedMessage {
   $core.bool hasTruncated() => $_has(4);
   @$pb.TagNumber(5)
   void clearTruncated() => $_clearField(5);
+
+  /// Generated functions a diff hunk touched, left out of `changed_fns`.
+  @$pb.TagNumber(6)
+  $core.int get changedGenerated => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set changedGenerated($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasChangedGenerated() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearChangedGenerated() => $_clearField(6);
 }
 
 /// Naming-convention verdicts (case-style strings, not identifier lists).
@@ -1576,7 +1696,7 @@ class ReviewNamingFacts extends $pb.GeneratedMessage {
     $core.String? constants,
     $core.double? exportedRatio,
   }) {
-    final result = create();
+    final result = ReviewNamingFacts._();
     if (functions != null) result.functions = functions;
     if (variables != null) result.variables = variables;
     if (constants != null) result.constants = constants;
@@ -1588,15 +1708,15 @@ class ReviewNamingFacts extends $pb.GeneratedMessage {
 
   factory ReviewNamingFacts.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewNamingFacts()..mergeFromBuffer(data, registry);
   factory ReviewNamingFacts.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewNamingFacts()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewNamingFacts',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewNamingFacts.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'functions')
     ..aOS(2, _omitFieldNames ? '' : 'variables')
     ..aOS(3, _omitFieldNames ? '' : 'constants')
@@ -1615,12 +1735,15 @@ class ReviewNamingFacts extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewNamingFacts() / ReviewNamingFacts.new instead')
   static ReviewNamingFacts create() => ReviewNamingFacts._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewNamingFacts._();
   @$core.override
-  ReviewNamingFacts createEmptyInstance() => create();
+  ReviewNamingFacts createEmptyInstance() => ReviewNamingFacts._();
   @$core.pragma('dart2js:noInline')
-  static ReviewNamingFacts getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewNamingFacts>(create);
+  static ReviewNamingFacts getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewNamingFacts>(
+          ReviewNamingFacts.$_createMessage);
   static ReviewNamingFacts? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1668,7 +1791,7 @@ class ReviewCommitStyleFacts extends $pb.GeneratedMessage {
     $core.double? bodyPresentRatio,
     $core.int? sampledCommits,
   }) {
-    final result = create();
+    final result = ReviewCommitStyleFacts._();
     if (conventionalRatio != null) result.conventionalRatio = conventionalRatio;
     if (subjectLenP50 != null) result.subjectLenP50 = subjectLenP50;
     if (subjectLenP95 != null) result.subjectLenP95 = subjectLenP95;
@@ -1681,15 +1804,15 @@ class ReviewCommitStyleFacts extends $pb.GeneratedMessage {
 
   factory ReviewCommitStyleFacts.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCommitStyleFacts()..mergeFromBuffer(data, registry);
   factory ReviewCommitStyleFacts.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCommitStyleFacts()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCommitStyleFacts',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCommitStyleFacts.$_createMessage)
     ..aD(1, _omitFieldNames ? '' : 'conventionalRatio',
         fieldType: $pb.PbFieldType.OF)
     ..aI(2, _omitFieldNames ? '' : 'subjectLenP50',
@@ -1714,12 +1837,16 @@ class ReviewCommitStyleFacts extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewCommitStyleFacts() / ReviewCommitStyleFacts.new instead')
   static ReviewCommitStyleFacts create() => ReviewCommitStyleFacts._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCommitStyleFacts._();
   @$core.override
-  ReviewCommitStyleFacts createEmptyInstance() => create();
+  ReviewCommitStyleFacts createEmptyInstance() => ReviewCommitStyleFacts._();
   @$core.pragma('dart2js:noInline')
   static ReviewCommitStyleFacts getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCommitStyleFacts>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCommitStyleFacts>(
+          ReviewCommitStyleFacts.$_createMessage);
   static ReviewCommitStyleFacts? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1782,7 +1909,7 @@ class ReviewStyleFacts extends $pb.GeneratedMessage {
     $core.bool? diffMatchesStyle,
     $core.int? filesScanned,
   }) {
-    final result = create();
+    final result = ReviewStyleFacts._();
     if (commentDensity != null) result.commentDensity = commentDensity;
     if (doccommentRatio != null) result.doccommentRatio = doccommentRatio;
     if (indentTabs != null) result.indentTabs = indentTabs;
@@ -1799,15 +1926,15 @@ class ReviewStyleFacts extends $pb.GeneratedMessage {
 
   factory ReviewStyleFacts.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewStyleFacts()..mergeFromBuffer(data, registry);
   factory ReviewStyleFacts.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewStyleFacts()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewStyleFacts',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewStyleFacts.$_createMessage)
     ..aD(1, _omitFieldNames ? '' : 'commentDensity',
         fieldType: $pb.PbFieldType.OF)
     ..aD(2, _omitFieldNames ? '' : 'doccommentRatio',
@@ -1817,9 +1944,9 @@ class ReviewStyleFacts extends $pb.GeneratedMessage {
     ..aI(5, _omitFieldNames ? '' : 'fnLenMedian',
         fieldType: $pb.PbFieldType.OU3)
     ..aOM<ReviewNamingFacts>(6, _omitFieldNames ? '' : 'naming',
-        subBuilder: ReviewNamingFacts.create)
+        subBuilder: ReviewNamingFacts.$_createMessage)
     ..aOM<ReviewCommitStyleFacts>(7, _omitFieldNames ? '' : 'commits',
-        subBuilder: ReviewCommitStyleFacts.create)
+        subBuilder: ReviewCommitStyleFacts.$_createMessage)
     ..aOB(8, _omitFieldNames ? '' : 'diffMatchesStyle')
     ..aI(9, _omitFieldNames ? '' : 'filesScanned',
         fieldType: $pb.PbFieldType.OU3)
@@ -1836,12 +1963,15 @@ class ReviewStyleFacts extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewStyleFacts() / ReviewStyleFacts.new instead')
   static ReviewStyleFacts create() => ReviewStyleFacts._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewStyleFacts._();
   @$core.override
-  ReviewStyleFacts createEmptyInstance() => create();
+  ReviewStyleFacts createEmptyInstance() => ReviewStyleFacts._();
   @$core.pragma('dart2js:noInline')
-  static ReviewStyleFacts getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewStyleFacts>(create);
+  static ReviewStyleFacts getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewStyleFacts>(
+          ReviewStyleFacts.$_createMessage);
   static ReviewStyleFacts? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -1940,7 +2070,7 @@ class ReviewFunctionSummary extends $pb.GeneratedMessage {
     $core.String? model,
     $core.int? durationMs,
   }) {
-    final result = create();
+    final result = ReviewFunctionSummary._();
     if (name != null) result.name = name;
     if (file != null) result.file = file;
     if (kind != null) result.kind = kind;
@@ -1954,15 +2084,15 @@ class ReviewFunctionSummary extends $pb.GeneratedMessage {
 
   factory ReviewFunctionSummary.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewFunctionSummary()..mergeFromBuffer(data, registry);
   factory ReviewFunctionSummary.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewFunctionSummary()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewFunctionSummary',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewFunctionSummary.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'name')
     ..aOS(2, _omitFieldNames ? '' : 'file')
     ..aOS(3, _omitFieldNames ? '' : 'kind')
@@ -1983,12 +2113,16 @@ class ReviewFunctionSummary extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewFunctionSummary() / ReviewFunctionSummary.new instead')
   static ReviewFunctionSummary create() => ReviewFunctionSummary._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewFunctionSummary._();
   @$core.override
-  ReviewFunctionSummary createEmptyInstance() => create();
+  ReviewFunctionSummary createEmptyInstance() => ReviewFunctionSummary._();
   @$core.pragma('dart2js:noInline')
   static ReviewFunctionSummary getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewFunctionSummary>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewFunctionSummary>(
+          ReviewFunctionSummary.$_createMessage);
   static ReviewFunctionSummary? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2053,7 +2187,7 @@ class ReviewSummaryReport extends $pb.GeneratedMessage {
     $core.int? produced,
     $core.int? omitted,
   }) {
-    final result = create();
+    final result = ReviewSummaryReport._();
     if (summaries != null) result.summaries.addAll(summaries);
     if (requested != null) result.requested = requested;
     if (produced != null) result.produced = produced;
@@ -2065,17 +2199,17 @@ class ReviewSummaryReport extends $pb.GeneratedMessage {
 
   factory ReviewSummaryReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewSummaryReport()..mergeFromBuffer(data, registry);
   factory ReviewSummaryReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewSummaryReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewSummaryReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewSummaryReport.$_createMessage)
     ..pPM<ReviewFunctionSummary>(1, _omitFieldNames ? '' : 'summaries',
-        subBuilder: ReviewFunctionSummary.create)
+        subBuilder: ReviewFunctionSummary.$_createMessage)
     ..aI(2, _omitFieldNames ? '' : 'requested', fieldType: $pb.PbFieldType.OU3)
     ..aI(3, _omitFieldNames ? '' : 'produced', fieldType: $pb.PbFieldType.OU3)
     ..aI(4, _omitFieldNames ? '' : 'omitted', fieldType: $pb.PbFieldType.OU3)
@@ -2092,12 +2226,16 @@ class ReviewSummaryReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use ReviewSummaryReport() / ReviewSummaryReport.new instead')
   static ReviewSummaryReport create() => ReviewSummaryReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewSummaryReport._();
   @$core.override
-  ReviewSummaryReport createEmptyInstance() => create();
+  ReviewSummaryReport createEmptyInstance() => ReviewSummaryReport._();
   @$core.pragma('dart2js:noInline')
   static ReviewSummaryReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewSummaryReport>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewSummaryReport>(
+          ReviewSummaryReport.$_createMessage);
   static ReviewSummaryReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2138,7 +2276,7 @@ class ReviewCoChangePartner extends $pb.GeneratedMessage {
     $core.int? coOccurrences,
     $core.bool? inDiff,
   }) {
-    final result = create();
+    final result = ReviewCoChangePartner._();
     if (path != null) result.path = path;
     if (confidence != null) result.confidence = confidence;
     if (coOccurrences != null) result.coOccurrences = coOccurrences;
@@ -2150,15 +2288,15 @@ class ReviewCoChangePartner extends $pb.GeneratedMessage {
 
   factory ReviewCoChangePartner.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCoChangePartner()..mergeFromBuffer(data, registry);
   factory ReviewCoChangePartner.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCoChangePartner()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCoChangePartner',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCoChangePartner.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'path')
     ..aD(2, _omitFieldNames ? '' : 'confidence')
     ..aI(3, _omitFieldNames ? '' : 'coOccurrences',
@@ -2178,12 +2316,16 @@ class ReviewCoChangePartner extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewCoChangePartner() / ReviewCoChangePartner.new instead')
   static ReviewCoChangePartner create() => ReviewCoChangePartner._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCoChangePartner._();
   @$core.override
-  ReviewCoChangePartner createEmptyInstance() => create();
+  ReviewCoChangePartner createEmptyInstance() => ReviewCoChangePartner._();
   @$core.pragma('dart2js:noInline')
   static ReviewCoChangePartner getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCoChangePartner>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCoChangePartner>(
+          ReviewCoChangePartner.$_createMessage);
   static ReviewCoChangePartner? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2228,7 +2370,7 @@ class ReviewCoChangeEntry extends $pb.GeneratedMessage {
     $core.String? path,
     $core.Iterable<ReviewCoChangePartner>? partners,
   }) {
-    final result = create();
+    final result = ReviewCoChangeEntry._();
     if (path != null) result.path = path;
     if (partners != null) result.partners.addAll(partners);
     return result;
@@ -2238,18 +2380,18 @@ class ReviewCoChangeEntry extends $pb.GeneratedMessage {
 
   factory ReviewCoChangeEntry.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCoChangeEntry()..mergeFromBuffer(data, registry);
   factory ReviewCoChangeEntry.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCoChangeEntry()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCoChangeEntry',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCoChangeEntry.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'path')
     ..pPM<ReviewCoChangePartner>(2, _omitFieldNames ? '' : 'partners',
-        subBuilder: ReviewCoChangePartner.create)
+        subBuilder: ReviewCoChangePartner.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2263,12 +2405,16 @@ class ReviewCoChangeEntry extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use ReviewCoChangeEntry() / ReviewCoChangeEntry.new instead')
   static ReviewCoChangeEntry create() => ReviewCoChangeEntry._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCoChangeEntry._();
   @$core.override
-  ReviewCoChangeEntry createEmptyInstance() => create();
+  ReviewCoChangeEntry createEmptyInstance() => ReviewCoChangeEntry._();
   @$core.pragma('dart2js:noInline')
   static ReviewCoChangeEntry getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCoChangeEntry>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCoChangeEntry>(
+          ReviewCoChangeEntry.$_createMessage);
   static ReviewCoChangeEntry? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2291,7 +2437,7 @@ class ReviewCoChangeReport extends $pb.GeneratedMessage {
     $core.Iterable<ReviewCoChangeEntry>? entries,
     $core.int? missingPartners,
   }) {
-    final result = create();
+    final result = ReviewCoChangeReport._();
     if (commitsScanned != null) result.commitsScanned = commitsScanned;
     if (truncated != null) result.truncated = truncated;
     if (entries != null) result.entries.addAll(entries);
@@ -2303,20 +2449,20 @@ class ReviewCoChangeReport extends $pb.GeneratedMessage {
 
   factory ReviewCoChangeReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewCoChangeReport()..mergeFromBuffer(data, registry);
   factory ReviewCoChangeReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewCoChangeReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewCoChangeReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewCoChangeReport.$_createMessage)
     ..aI(1, _omitFieldNames ? '' : 'commitsScanned',
         fieldType: $pb.PbFieldType.OU3)
     ..aOB(2, _omitFieldNames ? '' : 'truncated')
     ..pPM<ReviewCoChangeEntry>(3, _omitFieldNames ? '' : 'entries',
-        subBuilder: ReviewCoChangeEntry.create)
+        subBuilder: ReviewCoChangeEntry.$_createMessage)
     ..aI(4, _omitFieldNames ? '' : 'missingPartners',
         fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
@@ -2332,12 +2478,16 @@ class ReviewCoChangeReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewCoChangeReport() / ReviewCoChangeReport.new instead')
   static ReviewCoChangeReport create() => ReviewCoChangeReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewCoChangeReport._();
   @$core.override
-  ReviewCoChangeReport createEmptyInstance() => create();
+  ReviewCoChangeReport createEmptyInstance() => ReviewCoChangeReport._();
   @$core.pragma('dart2js:noInline')
   static ReviewCoChangeReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewCoChangeReport>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewCoChangeReport>(
+          ReviewCoChangeReport.$_createMessage);
   static ReviewCoChangeReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2382,7 +2532,7 @@ class ReviewFileChurn extends $pb.GeneratedMessage {
     $core.double? churnSlope,
     $fixnum.Int64? totalChurn,
   }) {
-    final result = create();
+    final result = ReviewFileChurn._();
     if (path != null) result.path = path;
     if (commits != null) result.commits = commits;
     if (uniqueAuthors != null) result.uniqueAuthors = uniqueAuthors;
@@ -2398,15 +2548,15 @@ class ReviewFileChurn extends $pb.GeneratedMessage {
 
   factory ReviewFileChurn.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewFileChurn()..mergeFromBuffer(data, registry);
   factory ReviewFileChurn.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewFileChurn()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewFileChurn',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewFileChurn.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'path')
     ..aI(2, _omitFieldNames ? '' : 'commits', fieldType: $pb.PbFieldType.OU3)
     ..aI(3, _omitFieldNames ? '' : 'uniqueAuthors',
@@ -2431,12 +2581,15 @@ class ReviewFileChurn extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewFileChurn() / ReviewFileChurn.new instead')
   static ReviewFileChurn create() => ReviewFileChurn._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewFileChurn._();
   @$core.override
-  ReviewFileChurn createEmptyInstance() => create();
+  ReviewFileChurn createEmptyInstance() => ReviewFileChurn._();
   @$core.pragma('dart2js:noInline')
-  static ReviewFileChurn getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewFileChurn>(create);
+  static ReviewFileChurn getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewFileChurn>(
+          ReviewFileChurn.$_createMessage);
   static ReviewFileChurn? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2517,7 +2670,7 @@ class ReviewChurnReport extends $pb.GeneratedMessage {
     $core.int? commitsScanned,
     $core.Iterable<ReviewFileChurn>? files,
   }) {
-    final result = create();
+    final result = ReviewChurnReport._();
     if (commitsScanned != null) result.commitsScanned = commitsScanned;
     if (files != null) result.files.addAll(files);
     return result;
@@ -2527,19 +2680,19 @@ class ReviewChurnReport extends $pb.GeneratedMessage {
 
   factory ReviewChurnReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewChurnReport()..mergeFromBuffer(data, registry);
   factory ReviewChurnReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewChurnReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewChurnReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewChurnReport.$_createMessage)
     ..aI(1, _omitFieldNames ? '' : 'commitsScanned',
         fieldType: $pb.PbFieldType.OU3)
     ..pPM<ReviewFileChurn>(2, _omitFieldNames ? '' : 'files',
-        subBuilder: ReviewFileChurn.create)
+        subBuilder: ReviewFileChurn.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2553,12 +2706,15 @@ class ReviewChurnReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewChurnReport() / ReviewChurnReport.new instead')
   static ReviewChurnReport create() => ReviewChurnReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewChurnReport._();
   @$core.override
-  ReviewChurnReport createEmptyInstance() => create();
+  ReviewChurnReport createEmptyInstance() => ReviewChurnReport._();
   @$core.pragma('dart2js:noInline')
-  static ReviewChurnReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewChurnReport>(create);
+  static ReviewChurnReport getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewChurnReport>(
+          ReviewChurnReport.$_createMessage);
   static ReviewChurnReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2582,7 +2738,7 @@ class ReviewFileSalience extends $pb.GeneratedMessage {
     $core.bool? churnIncreasing,
     $core.String? class_5,
   }) {
-    final result = create();
+    final result = ReviewFileSalience._();
     if (file != null) result.file = file;
     if (centrality != null) result.centrality = centrality;
     if (busFactor != null) result.busFactor = busFactor;
@@ -2595,15 +2751,15 @@ class ReviewFileSalience extends $pb.GeneratedMessage {
 
   factory ReviewFileSalience.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewFileSalience()..mergeFromBuffer(data, registry);
   factory ReviewFileSalience.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewFileSalience()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewFileSalience',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewFileSalience.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'file')
     ..aD(2, _omitFieldNames ? '' : 'centrality')
     ..aI(3, _omitFieldNames ? '' : 'busFactor', fieldType: $pb.PbFieldType.OU3)
@@ -2622,12 +2778,15 @@ class ReviewFileSalience extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewFileSalience() / ReviewFileSalience.new instead')
   static ReviewFileSalience create() => ReviewFileSalience._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewFileSalience._();
   @$core.override
-  ReviewFileSalience createEmptyInstance() => create();
+  ReviewFileSalience createEmptyInstance() => ReviewFileSalience._();
   @$core.pragma('dart2js:noInline')
   static ReviewFileSalience getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewFileSalience>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewFileSalience>(
+          ReviewFileSalience.$_createMessage);
   static ReviewFileSalience? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2680,7 +2839,7 @@ class ReviewSalienceReport extends $pb.GeneratedMessage {
   factory ReviewSalienceReport({
     $core.Iterable<ReviewFileSalience>? files,
   }) {
-    final result = create();
+    final result = ReviewSalienceReport._();
     if (files != null) result.files.addAll(files);
     return result;
   }
@@ -2689,17 +2848,17 @@ class ReviewSalienceReport extends $pb.GeneratedMessage {
 
   factory ReviewSalienceReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewSalienceReport()..mergeFromBuffer(data, registry);
   factory ReviewSalienceReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewSalienceReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewSalienceReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewSalienceReport.$_createMessage)
     ..pPM<ReviewFileSalience>(1, _omitFieldNames ? '' : 'files',
-        subBuilder: ReviewFileSalience.create)
+        subBuilder: ReviewFileSalience.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2713,12 +2872,16 @@ class ReviewSalienceReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewSalienceReport() / ReviewSalienceReport.new instead')
   static ReviewSalienceReport create() => ReviewSalienceReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewSalienceReport._();
   @$core.override
-  ReviewSalienceReport createEmptyInstance() => create();
+  ReviewSalienceReport createEmptyInstance() => ReviewSalienceReport._();
   @$core.pragma('dart2js:noInline')
   static ReviewSalienceReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewSalienceReport>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewSalienceReport>(
+          ReviewSalienceReport.$_createMessage);
   static ReviewSalienceReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2731,7 +2894,7 @@ class ReviewRiskReason extends $pb.GeneratedMessage {
     $core.double? weight,
     $core.String? detail,
   }) {
-    final result = create();
+    final result = ReviewRiskReason._();
     if (kind != null) result.kind = kind;
     if (weight != null) result.weight = weight;
     if (detail != null) result.detail = detail;
@@ -2742,15 +2905,15 @@ class ReviewRiskReason extends $pb.GeneratedMessage {
 
   factory ReviewRiskReason.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewRiskReason()..mergeFromBuffer(data, registry);
   factory ReviewRiskReason.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewRiskReason()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewRiskReason',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewRiskReason.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'kind')
     ..aD(2, _omitFieldNames ? '' : 'weight')
     ..aOS(3, _omitFieldNames ? '' : 'detail')
@@ -2767,12 +2930,15 @@ class ReviewRiskReason extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewRiskReason() / ReviewRiskReason.new instead')
   static ReviewRiskReason create() => ReviewRiskReason._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewRiskReason._();
   @$core.override
-  ReviewRiskReason createEmptyInstance() => create();
+  ReviewRiskReason createEmptyInstance() => ReviewRiskReason._();
   @$core.pragma('dart2js:noInline')
-  static ReviewRiskReason getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewRiskReason>(create);
+  static ReviewRiskReason getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewRiskReason>(
+          ReviewRiskReason.$_createMessage);
   static ReviewRiskReason? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2810,7 +2976,7 @@ class ReviewFileRisk extends $pb.GeneratedMessage {
     $core.String? level,
     $core.Iterable<ReviewRiskReason>? reasons,
   }) {
-    final result = create();
+    final result = ReviewFileRisk._();
     if (file != null) result.file = file;
     if (score != null) result.score = score;
     if (level != null) result.level = level;
@@ -2822,20 +2988,20 @@ class ReviewFileRisk extends $pb.GeneratedMessage {
 
   factory ReviewFileRisk.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewFileRisk()..mergeFromBuffer(data, registry);
   factory ReviewFileRisk.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewFileRisk()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewFileRisk',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewFileRisk.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'file')
     ..aD(2, _omitFieldNames ? '' : 'score')
     ..aOS(3, _omitFieldNames ? '' : 'level')
     ..pPM<ReviewRiskReason>(4, _omitFieldNames ? '' : 'reasons',
-        subBuilder: ReviewRiskReason.create)
+        subBuilder: ReviewRiskReason.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2849,12 +3015,15 @@ class ReviewFileRisk extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewFileRisk() / ReviewFileRisk.new instead')
   static ReviewFileRisk create() => ReviewFileRisk._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewFileRisk._();
   @$core.override
-  ReviewFileRisk createEmptyInstance() => create();
+  ReviewFileRisk createEmptyInstance() => ReviewFileRisk._();
   @$core.pragma('dart2js:noInline')
-  static ReviewFileRisk getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewFileRisk>(create);
+  static ReviewFileRisk getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewFileRisk>(
+          ReviewFileRisk.$_createMessage);
   static ReviewFileRisk? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2895,7 +3064,7 @@ class ReviewRiskReport extends $pb.GeneratedMessage {
     $core.double? gateThreshold,
     $core.bool? gateFailed,
   }) {
-    final result = create();
+    final result = ReviewRiskReport._();
     if (files != null) result.files.addAll(files);
     if (maxScore != null) result.maxScore = maxScore;
     if (gateThreshold != null) result.gateThreshold = gateThreshold;
@@ -2907,17 +3076,17 @@ class ReviewRiskReport extends $pb.GeneratedMessage {
 
   factory ReviewRiskReport.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewRiskReport()..mergeFromBuffer(data, registry);
   factory ReviewRiskReport.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewRiskReport()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewRiskReport',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewRiskReport.$_createMessage)
     ..pPM<ReviewFileRisk>(1, _omitFieldNames ? '' : 'files',
-        subBuilder: ReviewFileRisk.create)
+        subBuilder: ReviewFileRisk.$_createMessage)
     ..aD(2, _omitFieldNames ? '' : 'maxScore')
     ..aD(3, _omitFieldNames ? '' : 'gateThreshold')
     ..aOB(4, _omitFieldNames ? '' : 'gateFailed')
@@ -2934,12 +3103,15 @@ class ReviewRiskReport extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewRiskReport() / ReviewRiskReport.new instead')
   static ReviewRiskReport create() => ReviewRiskReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewRiskReport._();
   @$core.override
-  ReviewRiskReport createEmptyInstance() => create();
+  ReviewRiskReport createEmptyInstance() => ReviewRiskReport._();
   @$core.pragma('dart2js:noInline')
-  static ReviewRiskReport getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewRiskReport>(create);
+  static ReviewRiskReport getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewRiskReport>(
+          ReviewRiskReport.$_createMessage);
   static ReviewRiskReport? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -2981,12 +3153,14 @@ class ReviewRuleCount extends $pb.GeneratedMessage {
     $core.String? rule,
     $core.int? count,
     $core.int? inChange,
+    $core.int? generated,
   }) {
-    final result = create();
+    final result = ReviewRuleCount._();
     if (tool != null) result.tool = tool;
     if (rule != null) result.rule = rule;
     if (count != null) result.count = count;
     if (inChange != null) result.inChange = inChange;
+    if (generated != null) result.generated = generated;
     return result;
   }
 
@@ -2994,19 +3168,20 @@ class ReviewRuleCount extends $pb.GeneratedMessage {
 
   factory ReviewRuleCount.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewRuleCount()..mergeFromBuffer(data, registry);
   factory ReviewRuleCount.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewRuleCount()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewRuleCount',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewRuleCount.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'tool')
     ..aOS(2, _omitFieldNames ? '' : 'rule')
     ..aI(3, _omitFieldNames ? '' : 'count', fieldType: $pb.PbFieldType.OU3)
     ..aI(4, _omitFieldNames ? '' : 'inChange', fieldType: $pb.PbFieldType.OU3)
+    ..aI(5, _omitFieldNames ? '' : 'generated', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3020,12 +3195,15 @@ class ReviewRuleCount extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewRuleCount() / ReviewRuleCount.new instead')
   static ReviewRuleCount create() => ReviewRuleCount._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewRuleCount._();
   @$core.override
-  ReviewRuleCount createEmptyInstance() => create();
+  ReviewRuleCount createEmptyInstance() => ReviewRuleCount._();
   @$core.pragma('dart2js:noInline')
-  static ReviewRuleCount getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewRuleCount>(create);
+  static ReviewRuleCount getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewRuleCount>(
+          ReviewRuleCount.$_createMessage);
   static ReviewRuleCount? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -3063,6 +3241,15 @@ class ReviewRuleCount extends $pb.GeneratedMessage {
   $core.bool hasInChange() => $_has(3);
   @$pb.TagNumber(4)
   void clearInChange() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get generated => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set generated($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasGenerated() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearGenerated() => $_clearField(5);
 }
 
 /// The unified analysis digest (review-analysis-depth Stage 2): every
@@ -3074,12 +3261,14 @@ class ReviewAnalysisDigest extends $pb.GeneratedMessage {
     $core.int? total,
     $core.int? inChange,
     $core.Iterable<ReviewRuleCount>? ruleCounts,
+    $core.int? generated,
   }) {
-    final result = create();
+    final result = ReviewAnalysisDigest._();
     if (findings != null) result.findings.addAll(findings);
     if (total != null) result.total = total;
     if (inChange != null) result.inChange = inChange;
     if (ruleCounts != null) result.ruleCounts.addAll(ruleCounts);
+    if (generated != null) result.generated = generated;
     return result;
   }
 
@@ -3087,21 +3276,22 @@ class ReviewAnalysisDigest extends $pb.GeneratedMessage {
 
   factory ReviewAnalysisDigest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewAnalysisDigest()..mergeFromBuffer(data, registry);
   factory ReviewAnalysisDigest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewAnalysisDigest()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewAnalysisDigest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewAnalysisDigest.$_createMessage)
     ..pPM<ReviewAnalysisFinding>(1, _omitFieldNames ? '' : 'findings',
-        subBuilder: ReviewAnalysisFinding.create)
+        subBuilder: ReviewAnalysisFinding.$_createMessage)
     ..aI(2, _omitFieldNames ? '' : 'total', fieldType: $pb.PbFieldType.OU3)
     ..aI(3, _omitFieldNames ? '' : 'inChange', fieldType: $pb.PbFieldType.OU3)
     ..pPM<ReviewRuleCount>(4, _omitFieldNames ? '' : 'ruleCounts',
-        subBuilder: ReviewRuleCount.create)
+        subBuilder: ReviewRuleCount.$_createMessage)
+    ..aI(5, _omitFieldNames ? '' : 'generated', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -3115,12 +3305,16 @@ class ReviewAnalysisDigest extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ReviewAnalysisDigest() / ReviewAnalysisDigest.new instead')
   static ReviewAnalysisDigest create() => ReviewAnalysisDigest._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewAnalysisDigest._();
   @$core.override
-  ReviewAnalysisDigest createEmptyInstance() => create();
+  ReviewAnalysisDigest createEmptyInstance() => ReviewAnalysisDigest._();
   @$core.pragma('dart2js:noInline')
   static ReviewAnalysisDigest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisDigest>(create);
+      $pb.GeneratedMessage.$_defaultFor<ReviewAnalysisDigest>(
+          ReviewAnalysisDigest.$_createMessage);
   static ReviewAnalysisDigest? _defaultInstance;
 
   @$pb.TagNumber(1)
@@ -3146,6 +3340,16 @@ class ReviewAnalysisDigest extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(4)
   $pb.PbList<ReviewRuleCount> get ruleCounts => $_getList(3);
+
+  /// How many of `total` are on generated code.
+  @$pb.TagNumber(5)
+  $core.int get generated => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set generated($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasGenerated() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearGenerated() => $_clearField(5);
 }
 
 class ReviewFacts extends $pb.GeneratedMessage {
@@ -3168,7 +3372,7 @@ class ReviewFacts extends $pb.GeneratedMessage {
     ReviewAnalysisDigest? digest,
     $core.String? digestSummary,
   }) {
-    final result = create();
+    final result = ReviewFacts._();
     if (meta != null) result.meta = meta;
     if (change != null) result.change = change;
     if (gitState != null) result.gitState = gitState;
@@ -3193,47 +3397,47 @@ class ReviewFacts extends $pb.GeneratedMessage {
 
   factory ReviewFacts.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
+      ReviewFacts()..mergeFromBuffer(data, registry);
   factory ReviewFacts.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
+      ReviewFacts()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ReviewFacts',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
-      createEmptyInstance: create)
+      createEmptyInstance: ReviewFacts.$_createMessage)
     ..aOM<ReviewMeta>(1, _omitFieldNames ? '' : 'meta',
-        subBuilder: ReviewMeta.create)
+        subBuilder: ReviewMeta.$_createMessage)
     ..aOM<ReviewChangeSet>(2, _omitFieldNames ? '' : 'change',
-        subBuilder: ReviewChangeSet.create)
+        subBuilder: ReviewChangeSet.$_createMessage)
     ..aOM<ReviewGitState>(3, _omitFieldNames ? '' : 'gitState',
-        subBuilder: ReviewGitState.create)
+        subBuilder: ReviewGitState.$_createMessage)
     ..aOM<ReviewAnalysisReport>(4, _omitFieldNames ? '' : 'analysis',
-        subBuilder: ReviewAnalysisReport.create)
+        subBuilder: ReviewAnalysisReport.$_createMessage)
     ..aOM<ReviewSignatureReport>(5, _omitFieldNames ? '' : 'signatures',
-        subBuilder: ReviewSignatureReport.create)
+        subBuilder: ReviewSignatureReport.$_createMessage)
     ..aOM<ReviewCallGraph>(6, _omitFieldNames ? '' : 'callgraph',
-        subBuilder: ReviewCallGraph.create)
+        subBuilder: ReviewCallGraph.$_createMessage)
     ..aOM<ReviewStyleFacts>(7, _omitFieldNames ? '' : 'style',
-        subBuilder: ReviewStyleFacts.create)
+        subBuilder: ReviewStyleFacts.$_createMessage)
     ..aOM<ReviewSummaryReport>(8, _omitFieldNames ? '' : 'summaries',
-        subBuilder: ReviewSummaryReport.create)
+        subBuilder: ReviewSummaryReport.$_createMessage)
     ..aOM<ReviewCoChangeReport>(9, _omitFieldNames ? '' : 'cochange',
-        subBuilder: ReviewCoChangeReport.create)
+        subBuilder: ReviewCoChangeReport.$_createMessage)
     ..aOM<ReviewChurnReport>(10, _omitFieldNames ? '' : 'churn',
-        subBuilder: ReviewChurnReport.create)
+        subBuilder: ReviewChurnReport.$_createMessage)
     ..aOM<ReviewSalienceReport>(11, _omitFieldNames ? '' : 'salience',
-        subBuilder: ReviewSalienceReport.create)
+        subBuilder: ReviewSalienceReport.$_createMessage)
     ..aOM<ReviewRiskReport>(12, _omitFieldNames ? '' : 'risk',
-        subBuilder: ReviewRiskReport.create)
+        subBuilder: ReviewRiskReport.$_createMessage)
     ..aOM<ReviewAnalysisReport>(13, _omitFieldNames ? '' : 'shellcheck',
-        subBuilder: ReviewAnalysisReport.create)
+        subBuilder: ReviewAnalysisReport.$_createMessage)
     ..aOM<ReviewAnalysisReport>(14, _omitFieldNames ? '' : 'goChecks',
-        subBuilder: ReviewAnalysisReport.create)
+        subBuilder: ReviewAnalysisReport.$_createMessage)
     ..aOM<ReviewAnalysisReport>(15, _omitFieldNames ? '' : 'nearby',
-        subBuilder: ReviewAnalysisReport.create)
+        subBuilder: ReviewAnalysisReport.$_createMessage)
     ..aOM<ReviewAnalysisDigest>(16, _omitFieldNames ? '' : 'digest',
-        subBuilder: ReviewAnalysisDigest.create)
+        subBuilder: ReviewAnalysisDigest.$_createMessage)
     ..aOS(17, _omitFieldNames ? '' : 'digestSummary')
     ..hasRequiredFields = false;
 
@@ -3248,12 +3452,15 @@ class ReviewFacts extends $pb.GeneratedMessage {
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReviewFacts() / ReviewFacts.new instead')
   static ReviewFacts create() => ReviewFacts._();
+  static $pb.GeneratedMessage $_createMessage() => ReviewFacts._();
   @$core.override
-  ReviewFacts createEmptyInstance() => create();
+  ReviewFacts createEmptyInstance() => ReviewFacts._();
   @$core.pragma('dart2js:noInline')
-  static ReviewFacts getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ReviewFacts>(create);
+  static ReviewFacts getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReviewFacts>(
+          ReviewFacts.$_createMessage);
   static ReviewFacts? _defaultInstance;
 
   @$pb.TagNumber(1)

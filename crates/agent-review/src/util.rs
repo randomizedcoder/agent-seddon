@@ -142,31 +142,49 @@ fn is_marker_line(l: &str) -> bool {
 /// rest are unproven (listed as hand-written).
 pub(crate) const MAX_BASE_PROBES: usize = 4096;
 
-/// The changed files (`(path, base-side path)`) whose generated status the PR
-/// could have made up: the base version wasn't already generated, or can't be
-/// read. A new file, a rename into a generated path, or a marker the PR adds —
-/// however it is spelled — is the change's own claim, so such a file is reviewed
-/// as hand-written; otherwise stamping a file "generated" would hide its changes
-/// from the call graph and rank its findings last.
+/// The largest base blob [`unproven_generated`] reads for its head; a bigger file
+/// whose path doesn't decide it is unproven (listed as hand-written).
+pub(crate) const MAX_BASE_BLOB_BYTES: u64 = 8 << 20;
+
+/// The changed files (`(path, base-side path)`, the base side `None` for a file
+/// the change adds) whose generated status the PR could have made up: the base
+/// version wasn't already generated, or can't be read. A new file, a rename into a
+/// generated path, or a marker the PR adds — however it is spelled — is the
+/// change's own claim, so such a file is reviewed as hand-written; otherwise
+/// stamping a file "generated" would hide its changes from the call graph and rank
+/// its findings last. The base side's path rules decide without a read; only an
+/// undecided file's head is read, capped at [`MAX_BASE_BLOB_BYTES`].
 pub(crate) async fn unproven_generated(
     repo: &dyn agent_core::RepoBackend,
     base: &agent_core::Revision,
     files: Vec<(String, Option<String>)>,
 ) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
-    for (i, (path, old)) in files.into_iter().enumerate() {
-        let base_path = old.unwrap_or_else(|| path.clone());
-        let proven = i < MAX_BASE_PROBES
-            && match repo.read_file(base, Path::new(&base_path)).await {
-                Ok(blob) if !blob.is_binary => {
+    let mut probes = 0;
+    for (path, base_side) in files {
+        let Some(base_path) = base_side else {
+            out.insert(path); // added: no base side to prove it
+            continue;
+        };
+        let bp = Path::new(&base_path);
+        // The path rules decide most files without a read: a lockfile is never
+        // generated, and a generated path at the base is proven.
+        let proven = if is_lockfile(bp) {
+            false
+        } else if is_generated_path(bp) {
+            true
+        } else if probes < MAX_BASE_PROBES {
+            probes += 1;
+            match repo.read_file_capped(base, bp, MAX_BASE_BLOB_BYTES).await {
+                Ok(Some(blob)) if !blob.is_binary => {
                     let head = blob.text.as_bytes();
-                    is_generated(
-                        Path::new(&base_path),
-                        &head[..head.len().min(GENERATED_HEAD_BYTES)],
-                    )
+                    is_generated(bp, &head[..head.len().min(GENERATED_HEAD_BYTES)])
                 }
                 _ => false,
-            };
+            }
+        } else {
+            false
+        };
         if !proven {
             out.insert(path);
         }
@@ -358,7 +376,6 @@ mod tests {
         );
     }
 
-    /// Each row: a patch, and whether it adds a generator marker.
     /// A base repo for [`unproven_generated`]: `x/gen.go` was generated at the base,
     /// `x/hand.go` was not, `gen/old.go` was generated (a rename's old side).
     fn base_repo() -> agent_testkit::FixtureRepo {
@@ -375,23 +392,40 @@ mod tests {
     }
 
     #[rstest]
-    #[case::positive_generated_at_base("already generated before the PR", "x/gen.go", None, false)]
+    #[case::positive_generated_at_base(
+        "already generated before the PR",
+        "x/gen.go",
+        Some("x/gen.go"),
+        false
+    )]
     #[case::positive_rename_of_generated(
         "a rename keeps its base side's status",
         "y/new.go",
         Some("gen/old.go"),
         false
     )]
+    #[case::positive_generated_path_needs_no_read(
+        "a generated path at the base is proven by its path",
+        "p/api.pb.go",
+        Some("p/api.pb.go"),
+        false
+    )]
     #[case::negative_hand_written_at_base(
         "the PR stamps a hand-written file",
         "x/hand.go",
-        None,
+        Some("x/hand.go"),
         true
     )]
     #[case::negative_new_file(
         "a file the PR adds has no base to prove it",
-        "x/added.pb.go",
+        "x/added.go",
         None,
+        true
+    )]
+    #[case::negative_lockfile(
+        "a lockfile is never generated",
+        "Cargo.lock",
+        Some("Cargo.lock"),
         true
     )]
     #[case::corner_rename_into_generated_path(
@@ -400,10 +434,16 @@ mod tests {
         Some("x/hand.go"),
         true
     )]
+    #[case::adversarial_new_file_with_generated_name(
+        "a file the PR adds under a generated name is still its own claim",
+        "x/added.pb.go",
+        None,
+        true
+    )]
     #[case::adversarial_marker_in_string(
         "a marker inside a string at the base is not a marker",
         "x/lit.go",
-        None,
+        Some("x/lit.go"),
         true
     )]
     #[case::adversarial_traversal(
@@ -416,14 +456,14 @@ mod tests {
     async fn unproven_generated_cases(
         #[case] description: &str,
         #[case] path: &str,
-        #[case] old: Option<&str>,
+        #[case] base_side: Option<&str>,
         #[case] unproven: bool,
     ) {
         let repo = base_repo();
         let got = unproven_generated(
             &repo,
             &agent_core::Revision::from("base".to_string()),
-            vec![(path.to_string(), old.map(str::to_string))],
+            vec![(path.to_string(), base_side.map(str::to_string))],
         )
         .await;
         assert_eq!(got.contains(path), unproven, "{description}");
@@ -433,7 +473,8 @@ mod tests {
     async fn boundary_probes_past_the_cap_are_unproven() {
         // desc: only MAX_BASE_PROBES files are read; the rest stay hand-written.
         let repo = base_repo();
-        let files = vec![("x/gen.go".to_string(), None); MAX_BASE_PROBES + 1];
+        let files =
+            vec![("x/gen.go".to_string(), Some("x/gen.go".to_string())); MAX_BASE_PROBES + 1];
         let first = unproven_generated(
             &repo,
             &agent_core::Revision::from("base".to_string()),
@@ -444,6 +485,30 @@ mod tests {
             first.contains("x/gen.go"),
             "the file past the cap is unproven"
         );
+    }
+
+    #[tokio::test]
+    async fn boundary_base_blob_over_the_cap_is_unproven() {
+        // desc: a marked base file bigger than MAX_BASE_BLOB_BYTES is not read, so it
+        // stays hand-written; one byte under is read and proven.
+        let marked = |n: usize| {
+            let mut s = "// Code generated by x. DO NOT EDIT.\n\npackage x\n".to_string();
+            s.push_str(&"/".repeat(n - s.len()));
+            s
+        };
+        let cap = MAX_BASE_BLOB_BYTES as usize;
+        let repo = agent_testkit::FixtureRepo::new()
+            .with_blob("base", "x/big.go", marked(cap + 1))
+            .with_blob("base", "x/fits.go", marked(cap));
+        let side = |p: &str| (p.to_string(), Some(p.to_string()));
+        let got = unproven_generated(
+            &repo,
+            &agent_core::Revision::from("base".to_string()),
+            vec![side("x/big.go"), side("x/fits.go")],
+        )
+        .await;
+        assert!(got.contains("x/big.go"), "over the cap: unproven");
+        assert!(!got.contains("x/fits.go"), "at the cap: read and proven");
     }
 
     /// Each row: what the path names, and whether a head is read from it.
