@@ -140,7 +140,10 @@ fn is_marker_line(l: &str) -> bool {
 
 /// How many changed files [`unproven_generated`] reads at the base; past it, the
 /// rest are unproven (listed as hand-written).
-pub(crate) const MAX_BASE_PROBES: usize = 4096;
+pub(crate) const MAX_BASE_PROBES: usize = 1024;
+
+/// How many base reads [`unproven_generated`] runs at once.
+const BASE_PROBE_PARALLELISM: usize = 8;
 
 /// The largest base blob [`unproven_generated`] reads for its head; a bigger file
 /// whose path doesn't decide it is unproven (listed as hand-written).
@@ -159,8 +162,9 @@ pub(crate) async fn unproven_generated(
     base: &agent_core::Revision,
     files: Vec<(String, Option<String>)>,
 ) -> std::collections::BTreeSet<String> {
+    use futures_util::StreamExt;
     let mut out = std::collections::BTreeSet::new();
-    let mut probes = 0;
+    let mut undecided: Vec<(String, String)> = Vec::new();
     for (path, base_side) in files {
         let Some(base_path) = base_side else {
             out.insert(path); // added: no base side to prove it
@@ -169,26 +173,32 @@ pub(crate) async fn unproven_generated(
         let bp = Path::new(&base_path);
         // The path rules decide most files without a read: a lockfile is never
         // generated, and a generated path at the base is proven.
-        let proven = if is_lockfile(bp) {
-            false
+        if is_lockfile(bp) {
+            out.insert(path);
         } else if is_generated_path(bp) {
-            true
-        } else if probes < MAX_BASE_PROBES {
-            probes += 1;
-            match repo.read_file_capped(base, bp, MAX_BASE_BLOB_BYTES).await {
+            // proven
+        } else if undecided.len() < MAX_BASE_PROBES {
+            undecided.push((path, base_path));
+        } else {
+            out.insert(path);
+        }
+    }
+    let read: Vec<(String, bool)> = futures_util::stream::iter(undecided)
+        .map(|(path, base_path)| async move {
+            let bp = Path::new(&base_path);
+            let proven = match repo.read_file_capped(base, bp, MAX_BASE_BLOB_BYTES).await {
                 Ok(Some(blob)) if !blob.is_binary => {
                     let head = blob.text.as_bytes();
                     is_generated(bp, &head[..head.len().min(GENERATED_HEAD_BYTES)])
                 }
                 _ => false,
-            }
-        } else {
-            false
-        };
-        if !proven {
-            out.insert(path);
-        }
-    }
+            };
+            (path, proven)
+        })
+        .buffer_unordered(BASE_PROBE_PARALLELISM)
+        .collect()
+        .await;
+    out.extend(read.into_iter().filter(|(_, p)| !p).map(|(path, _)| path));
     out
 }
 

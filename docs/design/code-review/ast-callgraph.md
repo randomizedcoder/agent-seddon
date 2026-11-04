@@ -71,8 +71,10 @@ blast radius was wrong in two ways, and both are fixed:
   rules as the digest, so the two agree on a file. The base side is probed once per
   review (`CollectCtx::unproven_generated`, shared by both): its path rules decide
   without a read, and an undecided file's base is read through
-  `RepoBackend::read_file_capped` (8 MiB; the git CLI asks the size first), so a
-  huge file in the PR is never buffered. Lines are physical
+  `RepoBackend::read_file_capped` (8 MiB; the git CLI asks the size first, a
+  `GrpcRepo` read is held to tonic's 4 MiB decode limit), 8 at a time, at most 1024
+  reads. The probe runs beside the collector fan-out under its deadline; the digest
+  only reads what it found, so a stuck read can't delay the review. Lines are physical
   (`PositionFor(…, false)`), so a `//line` directive can't move a fn away from the
   hunks. Only `+` lines (and a deletion's neighbours) count, never the hunk's
   context lines. The helper bounds its own work: hop-1 ranks each fn once, and the

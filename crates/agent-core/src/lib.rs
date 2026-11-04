@@ -5467,8 +5467,9 @@ pub trait RepoBackend: Send + Sync {
     /// [`read_file`](Self::read_file), or `Ok(None)` when the blob is larger than
     /// `max_bytes`, for a caller that only wants a small file (or a file's head) and
     /// must not buffer a huge one the change controls. The default reads the whole
-    /// blob and then checks, so it bounds what the caller keeps, not the read; a
-    /// backend that can ask the size first (the git CLI) overrides it.
+    /// blob and then checks, so it bounds what the caller keeps, not the read; only
+    /// the git CLI asks the size first. A remote `GrpcRepo` read is bounded instead by
+    /// tonic's default 4 MiB decode limit (a bigger blob is an `Err`).
     async fn read_file_capped(
         &self,
         rev: &Revision,
