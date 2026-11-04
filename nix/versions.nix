@@ -85,8 +85,10 @@ in
   rust-analyzer = pkgs.rust-analyzer;
   # `cargo-llvm-cov`: source-based test-coverage. Drives the `nix run .#coverage`
   # app (local lcov + HTML report) and the non-gating `coverage` check. Needs the
-  # `llvm-tools` toolchain component (added above).
-  cargo-llvm-cov = pkgs.cargo-llvm-cov;
+  # `llvm-tools` toolchain component (added above). Its own test suite is skipped:
+  # on nixpkgs 0bb2eedc its fixture workspaces SIGSEGV under nixpkgs' cargo 1.99
+  # (14 of 20 fail in the sandbox); our `coverage` check exercises the binary.
+  cargo-llvm-cov = pkgs.cargo-llvm-cov.overrideAttrs { doCheck = false; };
   # `sccache`: a compilation cache used in the dev shell as `RUSTC_WRAPPER`. Reuses
   # compiled units across feature-set changes and `cargo clean`, with a hard size
   # cap so it can't balloon like the incremental cache did. Requires

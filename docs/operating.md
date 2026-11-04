@@ -154,6 +154,22 @@ nix fmt                     # format all .nix files
 `cargo-audit`, nix-fmt, generated-constant drift, `buf lint`, `buf breaking`, and
 the bench + leak suites ([`benchmarking.md`](benchmarking.md)).
 
+### Keeping nixpkgs current (`nix run .#update-nixpkgs`)
+
+Every tool the agent and its reviews run (go, golangci-lint, gosec, shellcheck, …)
+comes from the flake's one `nixpkgs` input. A stale pin can't analyze a repo that
+targets a newer toolchain; nixpkgs still carries older versions, so newer is
+the safe direction. `nix run .#update-nixpkgs` is the weekly bump:
+
+- it skips when an update PR is already open or the disk is under `MIN_FREE_PCT`
+  (default 10);
+- it updates `flake.lock` in a throwaway worktree of `origin/main`, runs the gate
+  with `--keep-going`, and opens a `chore(deps): nixpkgs <old> -> <new>` PR whose
+  body lists the failing derivations, if any. It never merges;
+- `--dry-run` stops before the push and the PR.
+
+On l2 a weekly systemd user timer runs it; the fleet reviews the PR like any other.
+
 ### Does it actually work? (`nix run .#e2e-live`)
 
 The gate proves the binary, the wire format and the tool path against a

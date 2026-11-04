@@ -239,7 +239,7 @@ testChecks
   # suite instrumented and emits lcov.info. Non-gating on the number (no
   # `--fail-under`); the human report is `nix run .#coverage`. See
   # docs/components/testing.md.
-  coverage = craneCheck ./coverage.nix { inherit pkgs renderedK3s; };
+  coverage = craneCheck ./coverage.nix { inherit pkgs versions renderedK3s; };
   # Model-free smoke of the load/overload harness: it compiles, sheds
   # RESOURCE_EXHAUSTED under overload, and the ramp path runs (no perf assertions).
   loadtest-smoke = craneCheck ./loadtest-smoke.nix { inherit cargoArtifacts; };

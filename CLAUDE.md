@@ -37,6 +37,7 @@ nix build .#agent               # build the `agent` binary -> ./result/bin/agent
 nix run   .#gen-constants       # regenerate constants.rs after editing nix/constants.nix
 nix run   .#gen-test-features   # regenerate nix/test-features.json after changing crate features/deps
 nix run   .#buf-image           # regenerate the buf baseline after an intentional wire change
+nix run   .#update-nixpkgs      # bump nixpkgs, gate it, open a PR (weekly on l2)
 ```
 
 `nix flake check` is the gate: it runs `clippy` with `-D warnings`, so the tree

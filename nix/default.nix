@@ -576,6 +576,10 @@ let
   # the `clean` helper + a warn-on-large-target nudge on entry.
   clean = import ./clean.nix { inherit pkgs versions; };
 
+  # `nix run .#update-nixpkgs` — the weekly nixpkgs bump: update the lock in a
+  # throwaway worktree, run the gate, open a PR with the result (never merges).
+  update-nixpkgs = import ./update-nixpkgs.nix { inherit pkgs; };
+
   # Regenerate the committed buf baseline image after an *intentional* wire change.
   # The `buf` check gates `buf breaking` against this image, so bumping it is the
   # deliberate "accept this as the new wire contract" step (reviewed in the diff).
@@ -997,6 +1001,7 @@ in
         bench
         coverage
         clean
+        update-nixpkgs
         gen-constants
         gen-openapi
         gen-test-features
