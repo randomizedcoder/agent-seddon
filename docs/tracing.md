@@ -55,7 +55,8 @@ recognise them: `gen_ai.operation.name` (`chat` / `execute_tool`),
 `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens` / `output_tokens` /
 `cache_read_input_tokens` / `cache_creation_input_tokens` and `gen_ai.usage.cost`
 (USD, when priced). A failed call sets `otel.status_code = ERROR`, `error.type` and a
-bounded `otel.status_message`. Tool spans add `gen_ai.tool.name` and
+fixed `otel.status_message` — never the error text, which can echo the response
+body. Tool spans add `gen_ai.tool.name` and
 `gen_ai.tool.call.id`. Prompt and completion text are never attached (repo code,
 secrets, size); every model- or provider-supplied value is cut to a bound and a
 non-finite or negative cost is dropped (`crates/agent-runtime/src/genai.rs`).

@@ -9,8 +9,10 @@
 //! never attached: they hold repo code and secrets, and are large.
 //!
 //! Every value that came from the model or the provider (finish reason, tool
-//! name, call id, error text) is cut to a bound first, and a cost that is not a
-//! finite non-negative number is dropped.
+//! name, call id) is cut to a bound first, and a cost that is not a finite
+//! non-negative number is dropped. A failed call records a fixed status message,
+//! never the error text: a provider error can echo the response body, which may
+//! carry prompt fragments or credential hints.
 
 use agent_core::{CompletionResponse, ToolCall};
 use tracing::Span;
@@ -21,8 +23,8 @@ pub(crate) const OP_CHAT: &str = "chat";
 pub(crate) const OP_TOOL: &str = "execute_tool";
 /// Longest provider/model/tool string stamped on a span.
 pub(crate) const MAX_NAME_CHARS: usize = 128;
-/// Longest error text stamped on a span (`otel.status_message`).
-const MAX_ERROR_CHARS: usize = 512;
+/// `otel.status_message` of a failed model call (the error text is not recorded).
+pub(crate) const CALL_FAILED: &str = "model call failed";
 
 /// A model-call span carrying the GenAI request attributes, with the response
 /// attributes declared empty for [`observe`] to fill in.
@@ -64,19 +66,16 @@ pub(crate) fn tool_span(iter: usize, call: &ToolCall) -> Span {
 }
 
 /// Record a model call's outcome on its [`chat_span`] and pass the result through.
-pub(crate) fn observe<E: std::fmt::Display>(
+pub(crate) fn observe<E>(
     span: &Span,
     result: Result<CompletionResponse, E>,
 ) -> Result<CompletionResponse, E> {
     match &result {
         Ok(resp) => record_response(span, resp),
-        Err(e) => {
+        Err(_) => {
             span.record("otel.status_code", "ERROR");
             span.record("error.type", "provider_error");
-            span.record(
-                "otel.status_message",
-                bounded(&e.to_string(), MAX_ERROR_CHARS).as_str(),
-            );
+            span.record("otel.status_message", CALL_FAILED);
         }
     }
     result
@@ -187,7 +186,7 @@ mod tests {
     #[rstest]
     #[case::positive_error_status("otel.status_code", Some("ERROR"))]
     #[case::positive_error_type("error.type", Some("provider_error"))]
-    #[case::positive_error_message("otel.status_message", Some("upstream 503"))]
+    #[case::positive_error_message_is_fixed("otel.status_message", Some(CALL_FAILED))]
     #[case::negative_no_usage_on_error("gen_ai.usage.input_tokens", None)]
     #[case::negative_no_finish_on_error("gen_ai.response.finish_reasons", None)]
     fn chat_span_error_cases(#[case] key: &str, #[case] want: Option<&str>) {
@@ -197,6 +196,19 @@ mod tests {
             want,
             "{key}"
         );
+    }
+
+    #[test]
+    fn adversarial_error_text_never_recorded() {
+        let fields = run(Err(
+            "http 401: {\"error\":\"bad key sk-live-SECRET\",\"prompt\":\"repo code\"}".to_string(),
+        ));
+        for (span, key, value) in &fields {
+            assert!(
+                !value.contains("SECRET") && !value.contains("repo code"),
+                "{span}.{key} leaked the error text: {value}"
+            );
+        }
     }
 
     #[rstest]
