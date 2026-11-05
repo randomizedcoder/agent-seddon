@@ -666,6 +666,7 @@ let
     envoy = versions.envoy-bin;
     staticWebServer = versions.static-web-server;
     hyperdx = hyperdx.deploy;
+    grafanaDashboards = grafana.dashboardsDir;
   };
 
   # Opt-in VM boot test of `nixosModules.agent-stack` (KVM; not in the gate — the
@@ -1057,7 +1058,7 @@ in
     // mkApps { postgres-client = "postgres-client-wrapper"; } postgres
     // mkApps { } (removeAttrs hyperdx [ "deploy" ])
     // mkApps { } prometheus
-    // mkApps { } grafana
+    // mkApps { } (removeAttrs grafana [ "dashboardsDir" ])
     // mkApps { } (removeAttrs portal [ "deploy" ]);
 
   # Builders + packages the NixOS module (`nixosModules.agent-stack`) consumes per

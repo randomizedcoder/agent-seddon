@@ -16,6 +16,8 @@
 #   agent-seddon-portal              the Flutter web portal (:8092), a store-path bundle
 #   podman-agent-seddon-{mongo,      HyperDX (opt-in `hyperdx.enable`): UI :8080, OTLP :4317
 #     hyperdx-app,hyperdx-otel}      into the same ClickHouse (otel_* in DB `default`)
+#   grafana (the host's)             opt-in `grafana.enable`: the agent-seddon dashboards
+#                                    + a ClickHouse data source in folder "agent-seddon"
 #
 # It replaces the hand-started stack (`portal-redeploy`, `grpc-web-up`, `clickhouse-up`,
 # `nohup agent --serve-fleet`): every piece is a unit, built from this flake's pinned
@@ -508,6 +510,36 @@ in
       };
     };
 
+    grafana = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Provision the agent-seddon dashboards (folder "agent-seddon": overview, LLM &
+          router, review fleet, tools, sessions/context/memory, gRPC/stores/search,
+          traces) into the host's `services.grafana`, with a ClickHouse data source
+          (uid `clickhouse`, the read-only `agent_viewer`) and its plugin. The
+          dashboards choose their Prometheus data source with a variable, so they use
+          the one the host already has. The viewer password reaches Grafana through
+          systemd `LoadCredential`, never the store. The ClickHouse plugin is linked into
+          Grafana's plugins directory, so plugin preinstall (which provides Prometheus
+          on Grafana 13.3+) and plugins installed from the UI keep working; a host that
+          sets `services.grafana.declarativePlugins` must list
+          `grafanaPlugins.grafana-clickhouse-datasource` there itself. Needs
+          `clickhouse.enable`.
+        '';
+      };
+      prometheusUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "http://127.0.0.1:9090";
+        description = ''
+          Also provision a Prometheus data source (uid `prometheus`) at this URL. Leave
+          null when the host's Grafana already has one.
+        '';
+      };
+    };
+
     portal = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -553,6 +585,18 @@ in
                 builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" cfg.hyperdx.frontendUrl
                 != null;
             message = "services.agentSeddon.hyperdx.frontendUrl must be `http(s)://host[:port]`.";
+          }
+          {
+            assertion = !cfg.grafana.enable || chEnabled;
+            message = "services.agentSeddon.grafana needs clickhouse.enable: the dashboards read the agent tables and traces from it.";
+          }
+          {
+            assertion =
+              cfg.grafana.prometheusUrl == null
+              ||
+                builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" cfg.grafana.prometheusUrl
+                != null;
+            message = "services.agentSeddon.grafana.prometheusUrl must be `http(s)://host[:port]`.";
           }
         ];
 
@@ -605,6 +649,62 @@ in
             Restart = "on-failure";
             RestartSec = 5;
           };
+        };
+      })
+
+      (lib.mkIf cfg.grafana.enable {
+        services.grafana = {
+          enable = lib.mkDefault true;
+          provision = {
+            enable = true;
+            dashboards.settings.providers = [
+              {
+                name = "agent-seddon";
+                folder = "agent-seddon";
+                type = "file";
+                # Store-path dashboards: an edit in the UI could not be saved back.
+                allowUiUpdates = false;
+                options.path = seddon.grafanaDashboards;
+              }
+            ];
+            datasources.settings.datasources = [
+              {
+                name = "agent-seddon ClickHouse";
+                uid = "clickhouse";
+                type = "grafana-clickhouse-datasource";
+                jsonData = {
+                  host = "127.0.0.1";
+                  port = cfg.clickhouse.nativePort;
+                  protocol = "native";
+                  secure = false;
+                  username = "agent_viewer";
+                  defaultDatabase = "agent";
+                };
+                # Grafana reads the file at start; LoadCredential below puts it there.
+                secureJsonData.password = "$__file{/run/credentials/grafana.service/ch-viewer}";
+              }
+            ]
+            ++ lib.optional (cfg.grafana.prometheusUrl != null) {
+              name = "agent-seddon Prometheus";
+              uid = "prometheus";
+              type = "prometheus";
+              url = cfg.grafana.prometheusUrl;
+            };
+          };
+        };
+
+        # Linked, not `declarativePlugins`: that would turn off plugin preinstall, which is
+        # where Grafana 13.3+ gets its Prometheus data source.
+        systemd.tmpfiles.rules = [
+          "L+ ${config.services.grafana.settings.paths.plugins}/grafana-clickhouse-datasource - - - - ${pkgs.grafanaPlugins.grafana-clickhouse-datasource}"
+        ];
+
+        # The viewer password is generated on first start (0700, the agent user);
+        # LoadCredential copies it to a file only the grafana unit can read.
+        systemd.services.grafana = {
+          after = [ "agent-seddon-clickhouse-creds.service" ];
+          wants = [ "agent-seddon-clickhouse-creds.service" ];
+          serviceConfig.LoadCredential = [ "ch-viewer:${chCredsDir}/viewer.password" ];
         };
       })
 

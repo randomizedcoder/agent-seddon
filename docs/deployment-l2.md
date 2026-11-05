@@ -97,7 +97,7 @@ The declarative replacement for this hand-started stack is the NixOS module in
 | 9636 | `--serve-fleet` metrics | binary | Prometheus scrape target |
 | 8095 | llama.cpp (Qwen3-30B-A3B) | service | Vulkan on MI50; `n_ctx = 32768` |
 | 9090 | Prometheus | native | scrapes `:9700` / `:9630` / `:9636` |
-| 3000 | Grafana | native | `admin:admin`; `agent-seddon-overview` |
+| 3000 | Grafana | native | `admin:admin`; with the module's `grafana.enable`, the "agent-seddon" folder |
 | 8080 | HyperDX UI (app) | podman | decomposed trio; LAN login needs `hyperdx.frontendUrl` (module) or `HYPERDX_FRONTEND_URL` (`hyperdx-up`) |
 | 4317 / 4318 | OTLP gRPC / HTTP | podman (HyperDX collector) | agent `[telemetry] otlp_endpoint`; opens once someone has signed up at `:8080` (the app hands the collector its config over OpAMP). The key in `otlp_headers_file` (the module's key timer writes it) is checked only when the team's collector authentication is on |
 | 8123 / 9000 | ClickHouse HTTP / native | native, loopback | the single CH — `agent.*` + OTLP `default.otel_*` |

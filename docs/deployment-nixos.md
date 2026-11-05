@@ -137,6 +137,35 @@ host in one (the defaults are `localhost`) is replaced by the host the page was 
 under, so `http://l2:8092` links to `http://l2:9090`. Without `hyperdx.enable` the
 HyperDX card is hidden.
 
+### Grafana dashboards
+
+`grafana.enable = true` adds the agent-seddon dashboards to the host's own
+`services.grafana`, in a folder named "agent-seddon":
+
+| uid | shows |
+|---|---|
+| `agent-seddon` | the overview: active runs, runs, tokens, reviews, tool and provider errors |
+| `agent-seddon-llm` | model calls, TTFT, tokens, prompt-cache hits, spend, the task router, gen_ai spans |
+| `agent-seddon-review` | the latest drafts, triggers, repo indexes, collectors, findings, tool status |
+| `agent-seddon-tools` | tool calls, errors and latency, the sandbox, web fetches, references |
+| `agent-seddon-cognition` | context size, compaction, memory, task modes, the gate, the distiller |
+| `agent-seddon-platform` | gRPC, the config store, policy and auth, transport, search, the repo backend |
+| `agent-seddon-traces` | spans, error spans and gen_ai conversations from `default.otel_traces` |
+| `portal-gui-perf` | the portal GUI perf runs |
+
+The dashboards are generated from `nix/grafana/dashboards.nix` into the store and
+can't be edited in place; save a copy to change one. Each dashboard picks its
+Prometheus and ClickHouse data sources with a variable, so it uses the Prometheus data
+source the host already has. Set `grafana.prometheusUrl` to provision one (uid
+`prometheus`) on a host without one. The module provisions a ClickHouse data source
+(uid `clickhouse`) that logs in as the read-only `agent_viewer`. Grafana reads the
+viewer password from `$__file{/run/credentials/grafana.service/ch-viewer}`, which
+systemd `LoadCredential` copies from `/var/lib/agent-seddon/clickhouse/viewer.password`.
+The module links the ClickHouse plugin into Grafana's plugins directory. It does not
+use `declarativePlugins`, which turns off plugin preinstall, and Grafana 13.3 and later
+gets its Prometheus data source from preinstall. A host that sets `declarativePlugins`
+itself must add `grafanaPlugins.grafana-clickhouse-datasource` to that list.
+
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
 
@@ -148,7 +177,10 @@ in the host flake, then `nixos-rebuild switch`.
   closed by default, and the LAN config opens only the public ports, never 8094,
   9000, 8123 or 5432. A HyperDX config checks the three containers, Mongo bound to
   loopback, passwords only in env files, the unit ordering, the key timer, the agents'
-  OTLP settings and that only 8080 opens (never 4317/4318/8000/4320/27017); a bad
+  OTLP settings and that only 8080 opens (never 4317/4318/8000/4320/27017). A Grafana
+  config checks the dashboards provider, the ClickHouse source as `agent_viewer` with a
+  `$__file` credential, the `LoadCredential` and ordering, the plugin link (with `declarativePlugins` unset), and that a
+  Prometheus source appears only when asked for. A bad
   `frontendUrl` or HyperDX without ClickHouse is refused.
 - **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
   the module in a QEMU VM and checks that each step comes up in order:

@@ -403,6 +403,11 @@ testChecks
     inherit pkgs src agentSeddonDeploy;
   };
 
+  # The generated Grafana dashboards: unique uids/ids, on-grid panels, and every metric
+  # and ClickHouse table they query exists in the tree (check-the-checks on a broken
+  # fixture). nix/grafana/dashboards.nix.
+  grafana-dashboards = import ./grafana-dashboards.nix { inherit pkgs lib src; };
+
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
   # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.
   mt-audit-tests = import ./mt-audit-tests.nix { inherit pkgs; };

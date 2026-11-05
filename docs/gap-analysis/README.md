@@ -592,8 +592,8 @@ live `TaskRouter` stats are never surfaced.
 
 Router, pool, upstream-token and cost metric families exist
 ([agent-metrics/src/lib.rs](../../crates/agent-metrics/src/lib.rs):344-355, 446-494, 581-661), but the
-Grafana dashboard ([agent-seddon.json](../../nix/grafana/dashboards/agent-seddon.json)) queries none of
-them. `agent_router_upstream_inflight` is under-reported for streams (§8.1) and last-writer-wins
+Grafana dashboard queried none of them. (Since 2026-11-04 the generated
+[LLM & router dashboard](../../nix/grafana/dashboards.nix) does.) `agent_router_upstream_inflight` is under-reported for streams (§8.1) and last-writer-wins
 across cells (router.rs:151-156). No saturation or queue-depth gauge exists, so there is no
 autoscaling signal ([gpu-pool/STATUS.md](../design/gpu-pool/STATUS.md):115 deferred).
 

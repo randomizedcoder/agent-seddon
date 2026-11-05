@@ -23,6 +23,7 @@ void main() {
     ('boundary_loopback_range', 'http://127.1.2.3:3000', l2, 'http://l2:3000'),
     ('positive_any_address_follows_page', 'http://0.0.0.0:3000', l2, 'http://l2:3000'),
     ('positive_ipv6_loopback_follows_page', 'http://[::1]:3000', l2, 'http://l2:3000'),
+    ('positive_ipv6_any_address_follows_page', 'http://[::]:3000', l2, 'http://l2:3000'),
     ('corner_ipv6_page_host_bracketed', 'http://localhost:3000',
         Uri.parse('http://[fd00::46]:8092/'), 'http://[fd00::46]:3000'),
     ('adversarial_javascript_scheme', 'javascript:alert(1)', l2, null),

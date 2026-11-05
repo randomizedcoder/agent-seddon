@@ -20,7 +20,7 @@ together and shows how the **agent can inspect its own performance**.
 ```sh
 # Metrics (enabled by default; served on 127.0.0.1:9600):
 nix run .#prometheus-up      # Prometheus  UI :9090, scrapes :9600 + per-seam :9601–9606
-nix run .#grafana-up         # Grafana     UI :3000, provisioned "agent-seddon" dashboard
+nix run .#grafana-up         # Grafana     UI :3000, provisioned "agent-seddon" dashboards
 
 # Traces (opt-in — set [telemetry] otlp_endpoint = "http://127.0.0.1:4317"):
 nix run .#clickhouse-up      # the single ClickHouse (agent.* + otel_*)
@@ -37,16 +37,36 @@ Tear down with the matching `*-down` apps (`prometheus-down`, `grafana-down`,
 
 The agent records into one shared Prometheus registry (cheap, always-on; only
 *serving* `/metrics` is gated by `[metrics] enabled`, default true). Grafana
-auto-provisions the **agent-seddon** dashboard, one row per component:
+auto-provisions seven dashboards, generated from
+[`nix/grafana/dashboards.nix`](../nix/grafana/dashboards.nix) (builders in `lib.nix`)
+and linked to each other from the menu at the top:
 
-- **Overview** — runs/sec by outcome, run duration p50/p95, iterations, active runs.
-- **Provider** — API calls, call latency, request/TTFT p95 by provider, tokens/sec, errors.
-- **Tools** — calls/sec and exec p95 **by tool** (so `search` vs `bash` vs `edit`), errors.
-- **Memory / Context / Policy** — op latencies, recall size, compactions, authorize decisions.
-- **Search** — index freshness (`1 = up to date`) and file count, **reindex
-  duration + rate** (see *when* indexing runs and *how long* it takes), and
-  **query latency / rate / hits by `backend` + `mode`** (so tantivy vs. a second
-  backend compare side by side).
+- **agent-seddon** (overview) — active runs, runs, tokens, reviews, tool and provider
+  error shares, then a row each for runs, model calls, tools, the fleet and gRPC.
+- **LLM & router** — calls by model and finish reason, latency, TTFT, stream chunks,
+  tokens by model and tenant, prompt-cache hit share, spend by model and by upstream,
+  router dispatches, in-flight, decisions and failovers, and the gen_ai spans per model
+  (calls, p95, tokens, cost) from ClickHouse.
+- **Review fleet** — the latest drafts and open feedback (ClickHouse), triggers by
+  source, review transitions, the repo index, per-collector latency and status,
+  findings by tool and severity, risk, call-graph size, and tool status with reasons.
+- **Tools & sandbox** — calls, errors and p95 **by tool**, tool spans, the sandbox,
+  web fetches, `@`-references, content blocks.
+- **Sessions, context & memory** — context size per session, compaction, memory ops,
+  the distiller, task modes, the consensus gate, plan todos, campaigns.
+- **gRPC, stores & search** — requests, errors and p95 per rpc, overload sheds, the
+  config store, policy, auth, guards, hooks, message transport, the search index
+  (freshness, reindex, queries by `backend` + `mode`), the repo backend and graph.
+- **Traces** — spans and error spans per service, the slowest span names and roots,
+  the latest errors with their TraceId, and gen_ai tokens, finish reasons and the
+  busiest conversations, all read from `default.otel_traces`.
+
+Each dashboard picks its data sources with the `$prometheus` and `$clickhouse`
+variables, so it works against whatever sources the Grafana already has. The
+`grafana-dashboards` check fails the build when a dashboard names an `agent_*` metric
+that no crate registers, or a table `schema.sql` does not create. On a NixOS host,
+`services.agentSeddon.grafana.enable` provisions them (see
+[deployment-nixos.md](deployment-nixos.md#grafana-dashboards)).
 
 The dashboard's `$job` selector switches between the in-process agent (`job="agent"`)
 and any `agent --serve-<seam>` process, which each expose their own `/metrics`

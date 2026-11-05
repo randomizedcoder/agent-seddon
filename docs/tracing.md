@@ -50,7 +50,9 @@ the `reason` (so a guard block is an audit trail in the trace, not just a counte
 `provider.finalize`) and each `tool.execute` also carries the OpenTelemetry GenAI
 semantic-convention names, so LLM-aware trace UIs (HyperDX's **Dashboards → LLM**)
 recognise them: `gen_ai.operation.name` (`chat` / `execute_tool`),
-`gen_ai.provider.name` (`[agent] provider`), `gen_ai.request.model`,
+`gen_ai.provider.name` (`[agent] provider`), `gen_ai.request.model` (the configured
+model: under `provider = "task-router"` that is the default, not the upstream the
+router picked — the router's metrics carry the chosen `upstream`),
 `gen_ai.conversation.id` (the session), and on the response
 `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens` / `output_tokens` /
 `cache_read_input_tokens` / `cache_creation_input_tokens` and `gen_ai.usage.cost`
