@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::Instrument;
 
+use crate::genai;
+
 #[derive(Clone)]
 pub struct Settings {
     pub max_iterations: usize,
@@ -57,6 +59,9 @@ pub struct Settings {
     pub fleet_root: Option<PathBuf>,
     /// Model name, used as a metrics label.
     pub model: String,
+    /// The configured provider (`[agent] provider`, e.g. `task-router`), stamped on
+    /// model-call spans as `gen_ai.provider.name`.
+    pub provider_name: String,
     /// Per-run id, stamped on every recorded event (empty when telemetry is off).
     pub session_id: String,
     /// Always-injected user context (context.d/prepend and /append).
@@ -2564,6 +2569,7 @@ impl Agent {
         provider: &Arc<dyn LlmProvider>,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
+        let provider_name = self.settings.provider_name.as_str();
         // A review turn's final answer needs room: 4096 truncated a real review to
         // finish=length. In review mode raise the output cap to a floor so the
         // drafted review isn't cut off; a higher explicit setting is preserved.
@@ -2644,14 +2650,17 @@ impl Agent {
             // echo); `stream=false` is the buffered path (an escape hatch for
             // servers that misbehave on SSE).
             let resp = if self.settings.stream {
-                self.complete_streaming(provider, req, events)
-                    .instrument(tracing::info_span!("provider.stream", iter, model))
-                    .await?
+                let span = genai::chat_span!("provider.stream", model, provider_name, iter = iter);
+                genai::observe(
+                    &span,
+                    self.complete_streaming(provider, req, events)
+                        .instrument(span.clone())
+                        .await,
+                )?
             } else {
-                provider
-                    .complete(req)
-                    .instrument(tracing::info_span!("provider.complete", iter, model))
-                    .await?
+                let span =
+                    genai::chat_span!("provider.complete", model, provider_name, iter = iter);
+                genai::observe(&span, provider.complete(req).instrument(span.clone()).await)?
             };
             metrics.on_api_call(
                 model,
@@ -3007,7 +3016,7 @@ impl Agent {
                     // A call the verifier blocked (enforce mode) does not run — its
                     // feedback message is produced in the result loop below.
                     let blocked = vfb.is_some();
-                    let span = tracing::info_span!("tool.execute", iter, tool = %call.name);
+                    let span = genai::tool_span(iter, call);
                     async move {
                         if blocked {
                             return None;
@@ -3224,15 +3233,23 @@ impl Agent {
             }),
         };
         let finalize = if self.settings.stream {
-            self.complete_streaming(provider, finalize_req, events)
-                .instrument(tracing::info_span!("provider.finalize", model))
-                .await
+            let span = genai::chat_span!("provider.finalize", model, provider_name);
+            genai::observe(
+                &span,
+                self.complete_streaming(provider, finalize_req, events)
+                    .instrument(span.clone())
+                    .await,
+            )
         } else {
-            provider
-                .complete(finalize_req)
-                .instrument(tracing::info_span!("provider.finalize", model))
-                .await
-                .map_err(anyhow::Error::from)
+            let span = genai::chat_span!("provider.finalize", model, provider_name);
+            genai::observe(
+                &span,
+                provider
+                    .complete(finalize_req)
+                    .instrument(span.clone())
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         };
         self.memory.distill().await.ok();
         match finalize {
@@ -5810,6 +5827,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             fleet_root: None,
             model: "m".into(),
+            provider_name: "p".into(),
             session_id: String::new(),
             context_prepend: vec![],
             context_append: vec![],

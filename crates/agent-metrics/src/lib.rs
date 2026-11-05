@@ -3787,8 +3787,18 @@ impl FleetMetrics {
     }
 }
 
-/// The `source` values of `agent_fleet_triggers_total` (`agent_core::TriggerSource`).
-pub const FLEET_TRIGGER_SOURCES: [&str; 4] = ["poll", "webhook", "slack", "review_now"];
+/// The `source` values of `agent_fleet_triggers_total`, derived from
+/// [`agent_core::TriggerSource::ALL`] so a new source can't be missed here.
+pub const FLEET_TRIGGER_SOURCES: [&str; agent_core::TriggerSource::ALL.len()] = {
+    let all = agent_core::TriggerSource::ALL;
+    let mut out = [""; agent_core::TriggerSource::ALL.len()];
+    let mut i = 0;
+    while i < all.len() {
+        out[i] = all[i].as_str();
+        i += 1;
+    }
+    out
+};
 
 /// The `outcome` values of `agent_fleet_index_runs_total`.
 pub const FLEET_INDEX_OUTCOMES: [&str; 5] = ["ready", "partial", "unchanged", "waiting", "failed"];

@@ -179,6 +179,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             fleet_root: None,
             model: "m".into(),
+            provider_name: "p".into(),
             session_id: String::new(),
             context_prepend: vec![],
             context_append: vec![],

@@ -87,18 +87,21 @@ The declarative replacement for this hand-started stack is the NixOS module in
 | Port | Service | Runtime | Notes |
 |------|---------|---------|-------|
 | 8092 | Portal web UI | static-web-server | Flutter web build; endpoints via `--dart-define` |
-| 8090 | Envoy grpc-web → gateway | podman | upstream `127.0.0.1:50100` |
-| 8091 | Envoy grpc-web → sessions | podman | upstream `127.0.0.1:50080` |
+| 8090 | Envoy grpc-web → gateway | native (`agent-seddon-grpc-web`) | upstream `127.0.0.1:50100` |
+| 8091 | Envoy grpc-web → sessions | native (`agent-seddon-grpc-web`) | upstream `127.0.0.1:50080` |
 | 50100 | `agent --serve-all` | binary | all read-only seams over one router |
 | 50080 | `agent --serve-sessions` | binary | driving gateway; needs its own `[search] index_dir` |
 | 9700 | `--serve-all` metrics | binary | Prometheus scrape target |
 | 9630 | `--serve-sessions` metrics | binary | Prometheus scrape target |
+| 50086 | `agent --serve-fleet` | binary | review fleet (`ReviewFleetService`), loopback only |
+| 9636 | `--serve-fleet` metrics | binary | Prometheus scrape target |
 | 8095 | llama.cpp (Qwen3-30B-A3B) | service | Vulkan on MI50; `n_ctx = 32768` |
-| 9090 | Prometheus | native | scrapes `:9700` / `:9630` |
+| 9090 | Prometheus | native | scrapes `:9700` / `:9630` / `:9636` |
 | 3000 | Grafana | native | `admin:admin`; `agent-seddon-overview` |
 | 8080 | HyperDX UI (app) | podman | decomposed trio; LAN login needs `hyperdx.frontendUrl` (module) or `HYPERDX_FRONTEND_URL` (`hyperdx-up`) |
-| 4317 / 4318 | OTLP gRPC / HTTP | podman (HyperDX collector) | agent `[telemetry] otlp_endpoint`; needs the ingestion key in `otlp_headers_file` (the module's key timer writes it) |
-| 8123 / 9000 | ClickHouse HTTP / native | podman | the single CH — `agent.*` + OTLP `default.otel_*` |
+| 4317 / 4318 | OTLP gRPC / HTTP | podman (HyperDX collector) | agent `[telemetry] otlp_endpoint`; opens once someone has signed up at `:8080` (the app hands the collector its config over OpAMP). The key in `otlp_headers_file` (the module's key timer writes it) is checked only when the team's collector authentication is on |
+| 8123 / 9000 | ClickHouse HTTP / native | native, loopback | the single CH — `agent.*` + OTLP `default.otel_*` |
+| 5432 | PostgreSQL | native, loopback | fleet/config stores |
 
 The LAN firewall (`~/nixos/desktop/l2/lan-access.nix`) opens
 `8090/8091/8092/8095/3000/9090/8080`. **Security:** `8090/8091` expose the

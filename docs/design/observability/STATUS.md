@@ -30,6 +30,18 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   page's host. Tables: `trigger_counted_cases`, `telemetry_otlp_headers_cases`,
   `obs_link_test.dart`, Launch rows `follows_page_host`/`empty_url_hidden`, and the
   `hyperdx*` rows of `nixos-agent-stack-eval`.
+- **GenAI span attributes** (l2, 2026-11-04, after the HyperDX deploy): HyperDX's
+  LLM dashboard found no LLM calls because it matches the OTel GenAI attribute names, and
+  no span carried them. `crates/agent-runtime/src/genai.rs` adds them to the model-call
+  and `tool.execute` spans (operation, provider, model, conversation, finish reason,
+  token usage, cost, error status), bounded and with hostile costs dropped
+  ([tracing.md](../../tracing.md)). Table: `genai::tests`. Also from the #701 review:
+  `FLEET_TRIGGER_SOURCES` is derived from `TriggerSource::ALL`; the HyperDX firewall
+  warning fires whenever the firewall is off (row
+  `hyperdxWarnsWithoutFirewallOnLoopback`), and its text and the deployment docs now say
+  the ingestion key is checked only when the team turns collector authentication on;
+  `obsLink` treats `0.0.0.0` as loopback, matches `127.x` only as an IPv4 address, and
+  has IPv6 rows.
 
 ## Cross-references updated by Phase 0
 

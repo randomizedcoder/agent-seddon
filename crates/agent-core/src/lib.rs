@@ -3523,7 +3523,7 @@ impl TriggerSource {
     pub const ALL: [Self; 4] = [Self::Poll, Self::Webhook, Self::Slack, Self::ReviewNow];
 
     /// The metric label value.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Poll => "poll",
             Self::Webhook => "webhook",
