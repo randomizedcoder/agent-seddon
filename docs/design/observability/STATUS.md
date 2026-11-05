@@ -18,6 +18,19 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
 | **5.5** | ClickHouse sinks — `agent_logs` inherits tenant/repo/pr from the span scope (+`repo`/`pr` columns); OTLP `EnrichSpanProcessor` stamps tenant/session on every scoped span; `tenant` on the `agent.turn` root | ✅ | #319 |
 | **5** | sweep the pre-existing families + existing spans per the census (§E resolved: policy_authorize/policy_guard/hook_dispatches/session_ops → +tenant; scheduled/session_gc/registry kept health with rationale; span side already covered by 5.5's processor) | ✅ | #321 |
 
+## Later fixes
+
+- **Triggers counted, HyperDX deployed, portal links follow the page** (after the l2
+  checks on 2026-11-04): Grafana's trigger panel was empty because
+  `FleetMetrics::on_trigger` was never called. `FleetTrigger` now carries a
+  `TriggerSource` (poll/webhook/slack/review_now) that `handle` counts. HyperDX had never
+  moved from hand-started podman into `nixosModules.agent-stack`; `hyperdx.enable` adds it
+  (see `docs/deployment-nixos.md`), with `[telemetry] otlp_headers_file` keeping the
+  ingestion key out of config. The portal's Launch links swap a loopback host for the
+  page's host. Tables: `trigger_counted_cases`, `telemetry_otlp_headers_cases`,
+  `obs_link_test.dart`, Launch rows `follows_page_host`/`empty_url_hidden`, and the
+  `hyperdx*` rows of `nixos-agent-stack-eval`.
+
 ## Cross-references updated by Phase 0
 
 - [`../review-fleet/07-observability.md`](../review-fleet/07-observability.md) — the "no repo/PR in

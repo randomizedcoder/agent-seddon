@@ -269,13 +269,32 @@ async fn main() -> Result<()> {
 
     // OTLP tracing (opt-in, independent of the ClickHouse sink): enabled by a
     // non-empty `otlp_endpoint`. Tag spans with the run's session id when we have one.
-    let otel_cfg = (!config.telemetry.otlp_endpoint.is_empty()).then(|| OtelConfig {
+    // The headers may come from a file (an ingestion key): an unreadable one fails the
+    // start; one not written yet leaves the exporter off (warned below) rather than
+    // sending spans the collector rejects.
+    let otlp_headers = if config.telemetry.otlp_endpoint.is_empty() {
+        None
+    } else {
+        config
+            .telemetry
+            .otlp_headers()
+            .map_err(anyhow::Error::msg)?
+    };
+    let otlp_waiting_for_key = !config.telemetry.otlp_endpoint.is_empty() && otlp_headers.is_none();
+    let otel_cfg = otlp_headers.map(|headers| OtelConfig {
         endpoint: config.telemetry.otlp_endpoint.clone(),
         service_name: config.telemetry.otel_service_name.clone(),
         instance_id: (!session_id.is_empty()).then(|| session_id.clone()),
-        headers: config.telemetry.otlp_headers.clone(),
+        headers,
     });
     let otel_guard = init_tracing(&telemetry, config.telemetry.stream_logs, otel_cfg);
+    if otlp_waiting_for_key {
+        tracing::warn!(
+            file = %config.telemetry.otlp_headers_file,
+            "OTLP export off: the headers file does not exist yet (HyperDX mints its \
+             ingestion key when its first account is created)"
+        );
+    }
 
     // Confirm the C23-3c egress allow-list now that a subscriber exists.
     if let Some((addr, rules)) = egress_addr {

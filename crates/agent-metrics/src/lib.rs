@@ -969,7 +969,7 @@ impl Metrics {
         let fleet_triggers = IntCounterVec::new(
             Opts::new(
                 "agent_fleet_triggers_total",
-                "Review-fleet triggers, by source (poll|slack), tenant and repo",
+                "Review-fleet triggers, by source (poll|webhook|slack|review_now), tenant and repo",
             ),
             &["source", "user", "repo"],
         )
@@ -2088,7 +2088,7 @@ impl Metrics {
     /// no-op. A transport kind not listed here (a deferred teams/irc/signal impl) would
     /// leave a frozen series — acceptable for a lifecycle backstop, and documented.
     fn remove_fleet_series(&self, user: &str, repo: &str) {
-        for source in ["poll", "slack"] {
+        for source in FLEET_TRIGGER_SOURCES {
             let _ = self
                 .fleet_triggers
                 .remove_label_values(&[source, user, repo]);
@@ -3685,7 +3685,7 @@ impl FleetMetrics {
         [self.user.as_str(), self.repo.as_str()]
     }
 
-    /// A trigger fired for this repo (`source` = `poll` | `slack`).
+    /// A trigger fired for this repo (`source` is one of [`FLEET_TRIGGER_SOURCES`]).
     pub fn on_trigger(&self, source: &str) {
         self.inner
             .fleet_triggers
@@ -3786,6 +3786,9 @@ impl FleetMetrics {
         self.inner.remove_fleet_series(&self.user, &self.repo);
     }
 }
+
+/// The `source` values of `agent_fleet_triggers_total` (`agent_core::TriggerSource`).
+pub const FLEET_TRIGGER_SOURCES: [&str; 4] = ["poll", "webhook", "slack", "review_now"];
 
 /// The `outcome` values of `agent_fleet_index_runs_total`.
 pub const FLEET_INDEX_OUTCOMES: [&str; 5] = ["ready", "partial", "unchanged", "waiting", "failed"];

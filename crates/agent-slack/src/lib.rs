@@ -126,6 +126,7 @@ impl SlackWatch {
             if let Some(pr_number) = parse_pr_link(&msg.text, &sub.expect) {
                 sink.enqueue(FleetTrigger {
                     force: false,
+                    source: agent_core::TriggerSource::Slack,
                     head_sha: String::new(),
                     session_id: sub.session_id.clone(),
                     pr_number,
@@ -286,6 +287,7 @@ mod tests {
             got.as_slice(),
             &[FleetTrigger {
                 force: false,
+                source: agent_core::TriggerSource::Slack,
                 head_sha: String::new(),
                 session_id: "acme:web-pr".into(),
                 pr_number: 5,
@@ -346,6 +348,7 @@ mod tests {
         let got = sink.got.lock().unwrap();
         assert!(got.contains(&FleetTrigger {
             force: false,
+            source: agent_core::TriggerSource::Slack,
             head_sha: String::new(),
             session_id: "s-web".into(),
             pr_number: 1,
@@ -354,6 +357,7 @@ mod tests {
         }));
         assert!(got.contains(&FleetTrigger {
             force: false,
+            source: agent_core::TriggerSource::Slack,
             head_sha: String::new(),
             session_id: "s-api".into(),
             pr_number: 2,
@@ -386,6 +390,7 @@ mod tests {
             got.as_slice(),
             &[FleetTrigger {
                 force: false,
+                source: agent_core::TriggerSource::Slack,
                 head_sha: String::new(),
                 session_id: "acme:web-pr".into(),
                 pr_number: 12,

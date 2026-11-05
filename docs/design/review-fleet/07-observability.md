@@ -18,7 +18,7 @@ existing metrics/OTEL/ClickHouse stack rather than adding a new one.
 - Reuse `SessionMetrics` (`agent-metrics/src/lib.rs:2277`), created per session via
   `for_session(session, user)` (`:1529`), **retired on session end** via `retire()` (`:2409`)
   so per-session gauge series don't leak (multi-session 06 discipline).
-- New fleet families: `fleet_triggers_total{source}` (poll|slack), `fleet_reviews_total{status}`
+- New fleet families: `fleet_triggers_total{source}` (poll|webhook|slack|review_now), `fleet_reviews_total{status}`
   (drafted|posted|superseded), `fleet_feedback{state}` (open|addressed), `fleet_approval_latency`,
   `fleet_slack_post_failures_total`.
 - Labels bounded: `(user, repo)` (both already `safe_segment`). **`repo` is now a permitted label**

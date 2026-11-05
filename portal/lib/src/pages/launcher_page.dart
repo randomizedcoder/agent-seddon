@@ -2,23 +2,34 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config.dart';
+import '../obs_link.dart';
 
 /// The Launcher: cards that open the existing observability UIs in the system
-/// browser. The portal never scrapes their HTML — it just points at them.
+/// browser. The portal never scrapes their HTML — it just points at them. Each
+/// URL follows the host the portal was opened from ([obsLink]); a UI whose URL is
+/// empty is not deployed and gets no card.
 class LauncherPage extends StatelessWidget {
-  const LauncherPage({super.key, required this.config});
+  const LauncherPage({super.key, required this.config, this.pageUri});
 
   final PortalConfig config;
 
+  /// The portal's own URL; `Uri.base` unless a test pins it.
+  final Uri? pageUri;
+
   @override
   Widget build(BuildContext context) {
+    final page = pageUri ?? Uri.base;
     final links = <_Launch>[
-      _Launch('Grafana', 'Metrics dashboards (agent-seddon)', config.grafanaUrl,
-          Icons.insights),
-      _Launch('HyperDX', 'Distributed traces (ClickStack)', config.hyperdxUrl,
-          Icons.account_tree),
-      _Launch('Prometheus', 'Raw metrics + queries', config.prometheusUrl,
-          Icons.query_stats),
+      for (final (title, subtitle, configured, icon) in [
+        ('Grafana', 'Metrics dashboards (agent-seddon)', config.grafanaUrl,
+            Icons.insights),
+        ('HyperDX', 'Distributed traces (ClickStack)', config.hyperdxUrl,
+            Icons.account_tree),
+        ('Prometheus', 'Raw metrics + queries', config.prometheusUrl,
+            Icons.query_stats),
+      ])
+        if (obsLink(configured, page) case final url?)
+          _Launch(title, subtitle, url.toString(), icon),
     ];
     return ListView(
       padding: const EdgeInsets.all(24),

@@ -10,7 +10,8 @@ import 'robot.dart';
 /// record the opened URL and script success/failure (the `positive_open` /
 /// `negative_launch_blocked` rows), proving the action is `local` (no gRPC).
 class LaunchRobot extends Robot {
-  LaunchRobot(super.tester, {this.config = const PortalConfig()}) {
+  LaunchRobot(super.tester,
+      {this.config = const PortalConfig(), this.pageUri}) {
     const channel = MethodChannel('plugins.flutter.io/url_launcher');
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel,
         (call) async {
@@ -30,6 +31,9 @@ class LaunchRobot extends Robot {
 
   final PortalConfig config;
 
+  /// The portal URL the page resolves loopback links against; null ⇒ `Uri.base`.
+  final Uri? pageUri;
+
   /// Every platform-channel call the page made — checked as a set to prove the
   /// action is browser-local (no gRPC ever fires; there is no gateway here).
   final List<MethodCall> calls = [];
@@ -38,7 +42,11 @@ class LaunchRobot extends Robot {
   /// Scripts whether `url_launcher` reports success; false drives the SnackBar.
   bool launchSucceeds = true;
 
-  Future<void> load() => pumpPage(LauncherPage(config: config));
+  Future<void> load() =>
+      pumpPage(LauncherPage(config: config, pageUri: pageUri));
+
+  bool hasCard(String name) =>
+      byKey('launch.card.$name').evaluate().isNotEmpty;
 
   Future<void> tapCard(String name) async {
     await tester.tap(byKey('launch.card.$name'));
