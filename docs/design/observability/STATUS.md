@@ -43,6 +43,20 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   `obsLink` treats `0.0.0.0` as loopback, matches `127.x` only as an IPv4 address, and
   has IPv6 rows.
 
+- **Dashboards for every family** (2026-11-04): the single hand-written `agent-seddon.json`
+  becomes seven dashboards generated from `nix/grafana/dashboards.nix` (overview, LLM &
+  router, review fleet, tools, sessions/context/memory, gRPC/stores/search, traces), 114
+  metric families plus the ClickHouse review tables and `otel_traces`. Each picks its data
+  sources by variable. `services.agentSeddon.grafana.enable` provisions them into the
+  host's Grafana with a ClickHouse source as `agent_viewer` (password via `LoadCredential`).
+  The `grafana-dashboards` check fails on an unknown metric or table, with check-the-checks
+  on a broken fixture; the `grafana*` rows of `nixos-agent-stack-eval` cover the module.
+  Carried from #702's review: the legacy `tool` field on `tool.execute` is bounded like
+  `gen_ai.tool.name`; an agent-loop test pins that a real turn's `provider.complete` /
+  `provider.stream` and `tool.execute` spans carry the GenAI attributes; the span census
+  points at `genai.rs`; `docs/tracing.md` says `gen_ai.request.model` under the task router
+  is the configured default; the portal's obs links treat `[::]` like `0.0.0.0`.
+
 ## Cross-references updated by Phase 0
 
 - [`../review-fleet/07-observability.md`](../review-fleet/07-observability.md) — the "no repo/PR in

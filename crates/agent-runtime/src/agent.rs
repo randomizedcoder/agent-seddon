@@ -8813,4 +8813,59 @@ mod tests {
             );
         }
     }
+
+    // ---- GenAI span wiring --------------------------------------------------
+
+    /// A real turn (one tool call, then a final answer) records the GenAI attributes
+    /// on the loop's own model-call and tool spans, on both the buffered and the
+    /// streamed path. genai.rs tests the span builders; this pins that the loop
+    /// uses them.
+    #[rstest::rstest]
+    #[case::positive_buffered(false, "provider.complete")]
+    #[case::positive_streamed(true, "provider.stream")]
+    fn genai_spans_from_a_real_turn_cases(#[case] stream: bool, #[case] model_span: &str) {
+        let fields = agent_testkit::observe::captured_span_fields(|| {
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(NamedTool("read_file")));
+            let agent = Arc::new(Agent::new(
+                Arc::new(ScriptedProvider::new(vec![
+                    tool_turn(vec![tool_call("c1", "read_file")]),
+                    final_turn("done"),
+                ])),
+                tools,
+                Arc::new(RecordingMemory::new()),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                Settings {
+                    stream,
+                    ..settings(false)
+                },
+            ));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            assert_eq!(rt.block_on(agent.run("go")).unwrap(), "done");
+        });
+        let has = |span: &str, key: &str, want: &str| {
+            fields
+                .iter()
+                .any(|(s, k, v)| s == span && k == key && v == want)
+        };
+        assert!(
+            has(model_span, "gen_ai.operation.name", "chat"),
+            "{fields:?}"
+        );
+        assert!(has(model_span, "gen_ai.request.model", "m"), "{fields:?}");
+        assert!(has(model_span, "gen_ai.provider.name", "p"), "{fields:?}");
+        assert!(
+            has("tool.execute", "gen_ai.tool.name", "read_file"),
+            "{fields:?}"
+        );
+        assert!(
+            has("tool.execute", "gen_ai.tool.call.id", "c1"),
+            "{fields:?}"
+        );
+    }
 }

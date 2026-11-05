@@ -57,7 +57,7 @@ pub(crate) fn tool_span(iter: usize, call: &ToolCall) -> Span {
     tracing::info_span!(
         "tool.execute",
         iter,
-        tool = %call.name,
+        tool = %bounded(&call.name, MAX_NAME_CHARS),
         gen_ai.operation.name = OP_TOOL,
         gen_ai.tool.name = %bounded(&call.name, MAX_NAME_CHARS),
         gen_ai.tool.call.id = %bounded(&call.id, MAX_NAME_CHARS),
@@ -285,6 +285,8 @@ mod tests {
         let get = |k| field(&fields, "tool.execute", k);
         assert_eq!(get("gen_ai.operation.name").as_deref(), Some(OP_TOOL));
         assert_eq!(get("gen_ai.tool.name").as_deref(), Some(want_name));
+        // The legacy `tool` field carries the same name, under the same bound.
+        assert_eq!(get("tool").as_deref(), Some(want_name));
         assert_eq!(get("gen_ai.tool.call.id").as_deref(), Some(want_id));
     }
 

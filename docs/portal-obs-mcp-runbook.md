@@ -222,11 +222,14 @@ session → `InvalidArgument`), not an error — send a goal to bring it live.
 
 - Login: **`admin` / `admin`** (default) on first use.
 - Datasource: Prometheus is provisioned (`l2/grafana.nix`), `http://localhost:9090`.
-- **Dashboards** are provisioned from `~/nixos/desktop/l2/grafana-dashboards/` —
-  drop a JSON there and rebuild (the provider loads the whole dir). The
-  `agent-seddon-overview.json` dashboard (uid `agent-seddon-overview`) covers
-  request rate by provider, API-call error rate (`finish_reason`), provider/API
-  latency p50/p95/p99, TTFT, iterations, mode switches, and backpressure.
+- **Dashboards:** with the module's `services.agentSeddon.grafana.enable`, the seven
+  agent-seddon dashboards (overview, LLM & router, review fleet, tools, cognition,
+  platform, traces) are provisioned into the "agent-seddon" folder, generated from
+  `nix/grafana/dashboards.nix` (see [`deployment-nixos.md`](deployment-nixos.md#grafana-dashboards)).
+  Host-specific extras can still go in `~/nixos/desktop/l2/grafana-dashboards/` —
+  drop a JSON there and rebuild (the provider loads the whole dir); the older
+  hand-written `agent-seddon-overview.json` there is superseded by the generated
+  overview (uid `agent-seddon`).
 - Push a dashboard live without a rebuild (admin API):
   ```sh
   jq '{dashboard: ., overwrite: true, folderId: 0}' dash.json \

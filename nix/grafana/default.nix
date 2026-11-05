@@ -26,12 +26,27 @@ let
   defaultPort = toString versions.grafanaPort;
 
   provisioning = ./provisioning;
-  dashboards = ./dashboards;
+  dashboards = dashboardsDir;
+
+  # The generated dashboards (./dashboards.nix), one <uid>.json each, beside the
+  # hand-written ones in ./dashboards. Shared with `services.agentSeddon.grafana`.
+  generated = import ./dashboards.nix { inherit lib; };
+  dashboardsDir = pkgs.runCommand "agent-seddon-grafana-dashboards" { } (
+    ''
+      mkdir -p $out
+      cp ${./dashboards}/*.json $out/
+    ''
+    + lib.concatMapStrings (d: ''
+      cp ${pkgs.writeText "${d.uid}.json" (builtins.toJSON d)} $out/${d.uid}.json
+    '') (lib.attrValues generated)
+  );
 
   # Shared container-lifecycle apps (the identical *-down/*-client/*-logs bodies).
   c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
 in
 {
+  inherit dashboardsDir;
+
   grafana-up = pkgs.writeShellApplication {
     name = "grafana-up";
     runtimeInputs = c.runtimes ++ [

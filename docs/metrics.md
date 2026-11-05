@@ -136,5 +136,5 @@ host` (see the header comments in `nix/prometheus/default.nix`).
 - `crates/agent-metrics` — the shared registry + metric families.
 - `crates/agent-runtime/src/metered.rs` — the per-seam wrappers (applied in
   `builder.rs`).
-- `nix/prometheus/`, `nix/grafana/` — the docker-app modules + provisioning +
-  dashboard JSON. Scrape targets are generated from `nix/constants.nix`.
+- `nix/prometheus/`, `nix/grafana/` — the docker-app modules + provisioning. The
+  dashboards are generated from `nix/grafana/dashboards.nix`. Scrape targets are generated from `nix/constants.nix`.

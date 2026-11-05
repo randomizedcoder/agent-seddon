@@ -66,6 +66,25 @@ let
       };
     };
   };
+  graf = evalWith { services.agentSeddon.grafana.enable = true; };
+  grafProm = evalWith {
+    services.agentSeddon.grafana = {
+      enable = true;
+      prometheusUrl = "http://127.0.0.1:9090";
+    };
+  };
+  grafFails =
+    extra:
+    failedAssertions (evalWith {
+      services.agentSeddon = lib.recursiveUpdate { grafana.enable = true; } extra;
+    }) != [ ];
+  grafDs =
+    c:
+    let
+      st = c.services.grafana.provision.datasources.settings;
+    in
+    if st == null then [ ] else st.datasources;
+  grafCh = lib.findFirst (d: d.uid == "clickhouse") null (grafDs graf);
   hdxFails =
     extra:
     failedAssertions (evalWith {
@@ -268,6 +287,44 @@ let
       "http://l2:8080, http://evil"
     ];
     hyperdxDefaultOk = !(hdxFails { });
+    # Grafana: off by default; on, it provisions the dashboards dir + a ClickHouse source
+    # as the viewer, whose password comes from a credential, never the store.
+    grafanaOffByDefault = !lo.services.grafana.enable && grafDs lo == [ ];
+    grafanaProvisionsDashboards =
+      graf.services.grafana.enable
+      && lib.any (
+        p: p.name == "agent-seddon" && p.options.path == agentSeddonDeploy.grafanaDashboards
+      ) graf.services.grafana.provision.dashboards.settings.providers;
+    grafanaClickhouseAsViewer =
+      grafCh != null
+      && grafCh.jsonData.username == "agent_viewer"
+      && grafCh.jsonData.port == 9000
+      && grafCh.secureJsonData.password == "$__file{/run/credentials/grafana.service/ch-viewer}";
+    grafanaViewerCredential =
+      graf.systemd.services.grafana.serviceConfig.LoadCredential == [
+        "ch-viewer:/var/lib/agent-seddon/clickhouse/viewer.password"
+      ]
+      && lib.elem "agent-seddon-clickhouse-creds.service" graf.systemd.services.grafana.after;
+    # The plugin is linked into the plugins dir; declarativePlugins stays unset so
+    # plugin preinstall (Prometheus on Grafana 13.3+) keeps running.
+    grafanaClickhousePlugin =
+      graf.services.grafana.declarativePlugins == null
+      && lib.any (
+        r: lib.hasPrefix "L+ /var/lib/grafana/plugins/grafana-clickhouse-datasource " r
+      ) graf.systemd.tmpfiles.rules;
+    grafanaNoPrometheusByDefault = lib.all (d: d.type != "prometheus") (grafDs graf);
+    grafanaPrometheusWhenAsked = lib.any (
+      d: d.uid == "prometheus" && d.url == "http://127.0.0.1:9090"
+    ) (grafDs grafProm);
+    grafanaNeedsClickhouse = grafFails { clickhouse.enable = false; };
+    grafanaPrometheusUrlRejected =
+      lib.all (u: grafFails { grafana.prometheusUrl = u; }) [
+        ""
+        "127.0.0.1:9090"
+        "file:///etc/passwd"
+        "http://x:9090/api, http://evil"
+      ]
+      && !(grafFails { });
   };
 
   failed = lib.filterAttrs (_: v: !v) checks;
@@ -275,7 +332,7 @@ in
 pkgs.runCommand "nixos-agent-stack-eval" { } (
   if failed == { } then
     ''
-      echo "nixosModules.agent-stack evaluates: ${toString (lib.length (lib.attrNames checks))} checks (units, user, credentials, clickhouse, postgres, hyperdx, firewall loopback+LAN)" > "$out"
+      echo "nixosModules.agent-stack evaluates: ${toString (lib.length (lib.attrNames checks))} checks (units, user, credentials, clickhouse, postgres, hyperdx, grafana, firewall loopback+LAN)" > "$out"
     ''
   else
     throw "nixos-agent-stack-eval: unmet assertions: ${lib.concatStringsSep ", " (lib.attrNames failed)}"
