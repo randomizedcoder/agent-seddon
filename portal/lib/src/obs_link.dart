@@ -19,8 +19,13 @@ Uri? obsLink(String configured, Uri page) {
   return url;
 }
 
+/// `localhost`, `127.0.0.0/8`, `::1`, or the any-address `0.0.0.0` (a bind address,
+/// never a host a browser elsewhere can reach).
 bool _loopback(String host) =>
     host == 'localhost' ||
     host == '::1' ||
     host == '[::1]' ||
-    host.startsWith('127.');
+    host == '0.0.0.0' ||
+    _ipv4Loopback.hasMatch(host);
+
+final _ipv4Loopback = RegExp(r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$');

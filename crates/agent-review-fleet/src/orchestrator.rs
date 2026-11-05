@@ -654,6 +654,9 @@ impl FleetOrchestrator {
         // Look up the (validated) row so we key the review by its org + repo, and count
         // the trigger under it — every one that reaches here, whatever it turns out to be
         // (a duplicate, up to date, shed). Triggers folded in the queue count once.
+        // A duplicate now pays this lookup before the in-flight check: one keyed read per
+        // trigger, at poll rate (≤ `poll_batch` per repo per tick) — accepted, since the
+        // count needs the row's (user, repo) and every other path reads it anyway.
         let row = self.roster.get(&trigger.session_id).await?;
         let fm = self.fleet_metrics(&row);
         if let Some(fm) = &fm {

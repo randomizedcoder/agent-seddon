@@ -1486,6 +1486,7 @@ pub async fn build_agent_with_mode(
         fleet_root: (!cfg.review_fleet.root.is_empty())
             .then(|| std::path::PathBuf::from(expand_tilde(&cfg.review_fleet.root))),
         model: cfg.provider.model.clone(),
+        provider_name: cfg.agent.provider.clone(),
         session_id,
         context_prepend,
         context_append,

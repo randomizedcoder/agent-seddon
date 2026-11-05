@@ -107,14 +107,30 @@ share the host's network and only Mongo binds loopback: the collector's OTLP por
 the firewall is what keeps them off the LAN. Evaluating with the firewall off and a
 LAN `publicHost` warns.
 
-The collector refuses OTLP without the team's ingestion key, which HyperDX mints when
-the first account registers. So after the first deploy, open `frontendUrl` and sign
-up. Within two minutes `agent-seddon-hyperdx-key` (the agent user, sandboxed like the
-agents) reads the key from Mongo over loopback and writes `authorization=<key>` to
-`/var/lib/agent-seddon/hyperdx/otlp.headers` (0600). A path unit sees the new file and
-`agent-seddon-hyperdx-restart` (root, `systemctl try-restart` only) restarts the agents. Each agent exports to `127.0.0.1:4317` with
-`[telemetry] otlp_headers_file` pointing there and `otel_service_name` set to its unit
-name. Until the file exists, the agents log one warning and run without the exporter.
+The collector opens no OTLP port until the first account registers: the app hands it
+its receiver config over OpAMP, and there is none without a team. So after the first
+deploy, open `frontendUrl` and sign up; 4317/4318 open a few seconds later. HyperDX
+mints the team's ingestion key at sign-up. Within two minutes
+`agent-seddon-hyperdx-key` (the agent user, sandboxed like the agents) reads it from
+Mongo over loopback and writes `authorization=<key>` to
+`/var/lib/agent-seddon/hyperdx/otlp.headers` (0600). A path unit sees the new file, and
+`agent-seddon-hyperdx-restart` (root, `systemctl try-restart` only) restarts the
+agents. Each agent exports to `127.0.0.1:4317` with `[telemetry] otlp_headers_file`
+pointing there and `otel_service_name` set to its unit name. Until the file exists,
+the agents log one warning and run without the exporter.
+
+The collector checks that key only when the team's collector authentication is on
+(HyperDX → Team settings; off by default). The agents always send it, so turning it
+on needs no other change, and it is what keeps other hosts' OTLP out when the
+collector's ports are reachable.
+
+Model calls and tool calls carry the OpenTelemetry GenAI attributes
+(`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`,
+`gen_ai.tool.name`, `gen_ai.conversation.id`), so HyperDX's **Dashboards → LLM** page
+shows calls, tokens, cost, latency and errors per model and session. To browse every
+span instead, open **Search** and pick the **Traces** source. Verified on l2
+(2026-11-04): sign-up → key copied → agents restarted in the same second → spans from
+all three agents in `default.otel_traces`.
 
 The portal's Grafana/Prometheus/HyperDX links are compile-time defines, but a loopback
 host in one (the defaults are `localhost`) is replaced by the host the page was opened

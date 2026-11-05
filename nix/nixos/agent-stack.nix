@@ -755,12 +755,12 @@ in
         in
         {
           # Host networking: only Mongo binds loopback; the collector (4317/4318) and the
-          # app's API and OpAMP (8000/4320) listen on every address, and only the firewall
-          # keeps them off the LAN.
-          warnings = lib.optional (lan && !config.networking.firewall.enable) ''
+          # app's API and OpAMP (8000/4320) listen on every address whatever publicHost
+          # says, and only the firewall keeps them off the network.
+          warnings = lib.optional (!config.networking.firewall.enable) ''
             services.agentSeddon.hyperdx: the firewall is off, so HyperDX's OTLP (4317/4318),
-            API (8000) and OpAMP (4320) ports are reachable from the LAN, unauthenticated
-            except OTLP.
+            API (8000) and OpAMP (4320) ports are reachable from the network. OTLP needs the
+            ingestion key only when the team's "collector authentication" setting is on.
           '';
 
           virtualisation.oci-containers.containers = {

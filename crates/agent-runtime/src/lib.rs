@@ -21,6 +21,7 @@ mod egress;
 mod fleet_index;
 #[cfg(feature = "review")]
 mod fleet_review;
+mod genai;
 #[cfg(feature = "git")]
 mod git;
 pub mod hooks;

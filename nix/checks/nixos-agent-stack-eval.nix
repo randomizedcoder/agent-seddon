@@ -86,6 +86,11 @@ let
     };
     networking.firewall.enable = false;
   };
+  # Loopback publicHost: the containers still bind every address.
+  hdxLoopbackNoFirewall = evalWith {
+    services.agentSeddon.hyperdx.enable = true;
+    networking.firewall.enable = false;
+  };
   hdxWarns = c: lib.any (lib.hasInfix "services.agentSeddon.hyperdx: the firewall is off") c.warnings;
   # An agent's merged settings (what its --config TOML is rendered from).
   agentToml = c: name: c.services.agentSeddon.renderedSettings.${name};
@@ -235,6 +240,7 @@ let
       && !(hdxNoAgents.systemd.paths ? agent-seddon-hyperdx-restart);
     # Host networking leaves OTLP/API/OpAMP on every address: firewall off on a LAN warns.
     hyperdxWarnsWithoutFirewall = hdxWarns hdxNoFirewall && !(hdxWarns hdx);
+    hyperdxWarnsWithoutFirewallOnLoopback = hdxWarns hdxLoopbackNoFirewall;
     # Agents export OTLP with the key file; each names itself.
     hyperdxAgentsExport =
       let
