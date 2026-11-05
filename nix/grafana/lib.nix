@@ -136,7 +136,7 @@ let
       targets = lib.imap0 (
         i: t:
         {
-          refId = builtins.elemAt (lib.stringToCharacters "ABCDEFGHIJKLMNOPQRSTUVWXYZ") i;
+          refId = "Q${toString i}";
           datasource = ds;
         }
         // t
@@ -291,7 +291,7 @@ rec {
     prometheus = dsVar "prometheus" "Prometheus" "prometheus";
     clickhouse = dsVar "clickhouse" "ClickHouse" "grafana-clickhouse-datasource";
     job = queryVar "job" "Job" ''label_values({__name__=~"agent_.+"}, job)'';
-    tenant = queryVar "tenant" "Tenant" "label_values(agent_fleet_reviews_total, user)";
+    tenant = queryVar "tenant" "Tenant" ''label_values({__name__=~"agent_.+"}, user)'';
   };
 
   # The dashboards that link to each other (the "agent-seddon" tag) share a menu.

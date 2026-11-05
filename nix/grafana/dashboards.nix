@@ -86,6 +86,7 @@ let
           })
           (stat {
             title = "Tool error share";
+            description = "Tool errors over tool calls in the window, across all tenants: the error counter carries no tenant label, so the Tenant filter does not apply.";
             w = 4;
             h = 5;
             unit = "percentunit";
@@ -104,8 +105,11 @@ let
               }
             ];
             targets = [
+              # agent_tool_errors_total has no `user` label, so both sides use the
+              # job filter only; a tenant-filtered denominator would divide every
+              # tenant's errors by one tenant's calls.
               (ratio "sum(rate(agent_tool_errors_total{${sel}}[$__range]))"
-                "sum(rate(agent_tool_calls_total{${selUser}}[$__range]))"
+                "sum(rate(agent_tool_calls_total{${sel}}[$__range]))"
                 "errors"
               )
             ];

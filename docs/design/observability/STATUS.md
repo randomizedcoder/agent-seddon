@@ -56,6 +56,10 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   `provider.stream` and `tool.execute` spans carry the GenAI attributes; the span census
   points at `genai.rs`; `docs/tracing.md` says `gen_ai.request.model` under the task router
   is the configured default; the portal's obs links treat `[::]` like `0.0.0.0`.
+  Review fixes (#703 draft): the overview's tool error share uses the job filter on both
+  sides (the error counter has no tenant label); the check also fails a generated uid that
+  would overwrite a hand-written `dashboards/<uid>.json`; the Tenant variable lists `user`
+  from every agent family, not only review-fleet ones.
 
 ## Cross-references updated by Phase 0
 

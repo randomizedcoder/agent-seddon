@@ -2,16 +2,18 @@
 #
 # Gate for the generated Grafana dashboards (nix/grafana/dashboards.nix):
 #
-#   - structure: dashboard uids are unique, panel ids are unique within a dashboard,
-#     every panel sits inside the 24-column grid and has at least one query;
+#   - structure: dashboard uids are unique and none matches a hand-written
+#     nix/grafana/dashboards/<uid>.json (dashboardsDir would overwrite it), panel ids are
+#     unique within a dashboard, every panel sits inside the 24-column grid and has at
+#     least one query;
 #   - metrics: every `agent_*` metric a Prometheus query names (less a histogram's
 #     `_bucket`/`_sum`/`_count`) is a string literal somewhere in crates/*/src, so a
 #     renamed or removed metric fails here instead of leaving an empty panel;
 #   - tables: every `agent.<table>` a ClickHouse query reads is created in
 #     nix/clickhouse/schema.sql.
 #
-# Check-the-checks: the same validators run on a broken fixture (a duplicate uid, a
-# duplicate panel id, an off-grid panel, an unknown metric, an unknown table) and
+# Check-the-checks: the same validators run on a broken fixture (a duplicate uid, a uid
+# that collides with a hand-written file, a duplicate panel id, an off-grid panel, an unknown metric, an unknown table) and
 # must report every one of them.
 {
   pkgs,
@@ -22,13 +24,19 @@
 let
   dashboards = lib.attrValues (import ../grafana/dashboards.nix { inherit lib; });
 
+  # The uids nix/grafana/default.nix copies in from hand-written JSON files.
+  handWritten = map (lib.removeSuffix ".json") (
+    lib.filter (lib.hasSuffix ".json") (lib.attrNames (builtins.readDir ../grafana/dashboards))
+  );
+
   # --- structure (pure eval) ------------------------------------------------------
   dupes = xs: lib.unique (lib.filter (x: lib.count (y: y == x) xs > 1) xs);
 
   structural =
-    ds:
+    hand: ds:
     let
       uidDupes = dupes (map (d: d.uid) ds);
+      clashes = lib.filter (u: lib.elem u hand) (lib.unique (map (d: d.uid) ds));
       perDash =
         d:
         let
@@ -44,7 +52,9 @@ let
         map (i: "${d.uid}: duplicate panel id ${toString i}") (dupes ids)
         ++ map (p: "${d.uid}: panel '${p.title}' is off the grid or has no query") bad;
     in
-    map (u: "duplicate dashboard uid ${u}") uidDupes ++ lib.concatMap perDash ds;
+    map (u: "duplicate dashboard uid ${u}") uidDupes
+    ++ map (u: "uid ${u} collides with hand-written dashboards/${u}.json") clashes
+    ++ lib.concatMap perDash ds;
 
   # --- names the queries use (pure eval; checked against the tree at build) -------
   queries =
@@ -107,14 +117,15 @@ let
         }
       )
     ];
-  brokenStructural = structural broken;
+  brokenStructural = structural [ (lib.head dashboards).uid ] broken;
   structuralCaught =
     lib.length brokenStructural >= 3
     && lib.any (lib.hasPrefix "duplicate dashboard uid") brokenStructural
+    && lib.any (lib.hasInfix "collides with hand-written") brokenStructural
     && lib.any (lib.hasInfix "duplicate panel id") brokenStructural
     && lib.any (lib.hasInfix "off the grid") brokenStructural;
 
-  realStructural = structural dashboards;
+  realStructural = structural handWritten dashboards;
 
   lines = xs: pkgs.writeText "names" (lib.concatMapStrings (x: "${x}\n") xs);
 in
