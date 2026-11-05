@@ -75,10 +75,12 @@ The declarative replacement for this hand-started stack is the NixOS module in
   `/metrics` (`:9700` / `:9630`); traces flow via OTLP to HyperDX
   (`:4317` gRPC / `:4318` HTTP → UI `:8080`); Grafana (native) reads Prometheus
   and provisions the `agent-seddon-overview` dashboard.
-- **Native vs podman.** Prometheus and Grafana are native NixOS services; the
-  Envoy grpc-web bridge, the single ClickHouse, and the decomposed HyperDX (Mongo +
-  OTel collector + app) run under rootless podman. HyperDX's collector writes the OTLP
-  `otel_*` tables into that one ClickHouse, so traces JOIN the `agent.*` history.
+- **Native vs podman.** Prometheus and Grafana are native NixOS services. Since the
+  cut-over to `nixosModules.agent-stack`, the bridge, ClickHouse and Postgres are
+  native units too, and the decomposed HyperDX (Mongo + OTel collector + app) runs as
+  rootful podman units with `hyperdx.enable` ([deployment-nixos.md](deployment-nixos.md#hyperdx)).
+  HyperDX's collector writes the OTLP `otel_*` tables into that one ClickHouse, so
+  traces JOIN the `agent.*` history.
 
 ## Port reference
 
@@ -94,8 +96,8 @@ The declarative replacement for this hand-started stack is the NixOS module in
 | 8095 | llama.cpp (Qwen3-30B-A3B) | service | Vulkan on MI50; `n_ctx = 32768` |
 | 9090 | Prometheus | native | scrapes `:9700` / `:9630` |
 | 3000 | Grafana | native | `admin:admin`; `agent-seddon-overview` |
-| 8080 | HyperDX UI (app) | podman | decomposed trio; LAN login needs `HYPERDX_FRONTEND_URL` |
-| 4317 / 4318 | OTLP gRPC / HTTP | podman (HyperDX collector) | agent `[telemetry] otlp_endpoint`; needs the ingestion key in `otlp_headers` |
+| 8080 | HyperDX UI (app) | podman | decomposed trio; LAN login needs `hyperdx.frontendUrl` (module) or `HYPERDX_FRONTEND_URL` (`hyperdx-up`) |
+| 4317 / 4318 | OTLP gRPC / HTTP | podman (HyperDX collector) | agent `[telemetry] otlp_endpoint`; needs the ingestion key in `otlp_headers_file` (the module's key timer writes it) |
 | 8123 / 9000 | ClickHouse HTTP / native | podman | the single CH — `agent.*` + OTLP `default.otel_*` |
 
 The LAN firewall (`~/nixos/desktop/l2/lan-access.nix`) opens

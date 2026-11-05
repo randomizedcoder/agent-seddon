@@ -665,6 +665,7 @@ let
     chCreds = clickhouse.clickhouse-creds;
     envoy = versions.envoy-bin;
     staticWebServer = versions.static-web-server;
+    hyperdx = hyperdx.deploy;
   };
 
   # Opt-in VM boot test of `nixosModules.agent-stack` (KVM; not in the gate — the
@@ -1054,7 +1055,7 @@ in
     }
     // mkApps { clickhouse-client = "clickhouse-client-wrapper"; } clickhouse
     // mkApps { postgres-client = "postgres-client-wrapper"; } postgres
-    // mkApps { } hyperdx
+    // mkApps { } (removeAttrs hyperdx [ "deploy" ])
     // mkApps { } prometheus
     // mkApps { } grafana
     // mkApps { } (removeAttrs portal [ "deploy" ]);

@@ -90,6 +90,8 @@ both demo configs:
 ```toml
 # config/otel-demo/gateway.toml  and  loop.toml, under [telemetry]:
 otlp_headers = "authorization=<ingestion-key>"
+# …or keep the key out of the config: a 0600 file holding that line.
+# otlp_headers_file = "~/.config/agent-seddon/otlp.headers"
 ```
 
 **3. Start the model gateway** (serves the real provider over gRPC on `:50051`):

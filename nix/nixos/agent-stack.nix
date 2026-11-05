@@ -14,6 +14,8 @@
 #   agent-seddon-grpc-web            Envoy grpc-web bridge  (:8090 gateway, :8091 sessions,
 #                                    :8093 fleet, :8094 REST on loopback)
 #   agent-seddon-portal              the Flutter web portal (:8092), a store-path bundle
+#   podman-agent-seddon-{mongo,      HyperDX (opt-in `hyperdx.enable`): UI :8080, OTLP :4317
+#     hyperdx-app,hyperdx-otel}      into the same ClickHouse (otel_* in DB `default`)
 #
 # It replaces the hand-started stack (`portal-redeploy`, `grpc-web-up`, `clickhouse-up`,
 # `nohup agent --serve-fleet`): every piece is a unit, built from this flake's pinned
@@ -68,6 +70,12 @@ let
   pgCredsDir = "${stateDir}/postgres";
   pgEnabled = cfg.postgres.enable;
   pg = config.services.agentPostgres;
+  hdx = seddon.hyperdx;
+  hdxEnabled = cfg.hyperdx.enable;
+  hdxDir = "${stateDir}/hyperdx";
+  # Written by agent-seddon-hyperdx-key once an account exists; the agents read it at
+  # start (a missing file only turns the OTLP exporter off).
+  otlpHeadersFile = "${hdxDir}/otlp.headers";
 
   # The `[config_store]`-backed stores the managed Postgres holds. Each opens its own
   # lazy pool, hence the small `pool_max`: 3 agents × 6 stores × 4 stays under the
@@ -142,6 +150,12 @@ let
       digest.store = "clickhouse";
     })
     (lib.optionalAttrs pgEnabled pgSettings)
+    (lib.optionalAttrs hdxEnabled {
+      telemetry = {
+        otlp_endpoint = "http://127.0.0.1:${toString hdx.ports.otlpGrpc}";
+        otlp_headers_file = otlpHeadersFile;
+      };
+    })
   ];
 
   services = {
@@ -183,18 +197,22 @@ let
 
   # `/run/credentials/@unit@/x` → this unit's credentials dir. Done on the rendered TOML
   # text (not the attrset) so it reaches any nesting depth, including array tables.
+  mergedSettings =
+    name: svc:
+    withProviderKey (
+      lib.foldl' lib.recursiveUpdate repoConfig [
+        baseSettings
+        (lib.optionalAttrs hdxEnabled { telemetry.otel_service_name = unitName name; })
+        svc.extra
+        cfg.settings
+        cfg.${name}.settings
+      ]
+    );
+
   configFile =
     name: svc:
     let
-      merged = withProviderKey (
-        lib.foldl' lib.recursiveUpdate repoConfig [
-          baseSettings
-          svc.extra
-          cfg.settings
-          cfg.${name}.settings
-        ]
-      );
-      raw = toml.generate "agent-seddon-${name}.toml" merged;
+      raw = toml.generate "agent-seddon-${name}.toml" (mergedSettings name svc);
     in
     pkgs.runCommand "agent-seddon-${name}.toml" { } ''
       sed 's#/run/credentials/@unit@/#/run/credentials/${unitName name}.service/#g' ${raw} > "$out"
@@ -216,6 +234,8 @@ let
       PORTAL_GRPC_WEB_URL = urlFor ports.grpcWeb;
       PORTAL_SESSIONS_GRPC_WEB_URL = urlFor ports.grpcWebSessions;
       PORTAL_FLEET_GRPC_WEB_URL = urlFor ports.grpcWebFleet;
+      # Empty hides the Launch card; a loopback URL is rewritten to the page's host.
+      PORTAL_HYPERDX_URL = if hdxEnabled then cfg.hyperdx.frontendUrl else "";
     }
     // cfg.portal.defines;
   };
@@ -406,6 +426,13 @@ in
       '';
     };
 
+    renderedSettings = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      internal = true;
+      readOnly = true;
+      description = "Each enabled agent's merged settings, before `@unit@` rewriting (for the eval check).";
+    };
+
     gateway = agentOpts "gateway";
     sessions = agentOpts "sessions";
     fleet = agentOpts "fleet" // {
@@ -455,6 +482,32 @@ in
       description = "Run the Envoy grpc-web bridge the portal dials.";
     };
 
+    hyperdx = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Run HyperDX as three podman containers (MongoDB, the app, the OTel collector)
+          over the managed ClickHouse, and export the agents' traces to it over OTLP. The
+          collector accepts OTLP only with the ingestion key HyperDX mints when the first
+          account is registered (open `frontendUrl` and sign up);
+          `agent-seddon-hyperdx-key.timer` then copies it to the agents and restarts them.
+          Needs `clickhouse.enable`.
+        '';
+      };
+      frontendUrl = lib.mkOption {
+        type = lib.types.str;
+        default = urlFor hdx.ports.ui;
+        defaultText = lib.literalExpression ''"http://''${publicHost}:${toString hdx.ports.ui}"'';
+        example = "http://l2:8080";
+        description = ''
+          The URL browsers open HyperDX at. Its session cookie binds to this host, so it
+          must be the name you browse with (a sign-in elsewhere bounces back to login).
+          Also the portal's Launch link.
+        '';
+      };
+    };
+
     portal = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -489,6 +542,18 @@ in
             ) cfg.extraOrigins;
             message = "services.agentSeddon.extraOrigins: each must be an exact origin `http(s)://host[:port]` (no wildcard, path or trailing slash).";
           }
+          {
+            assertion = !hdxEnabled || chEnabled;
+            message = "services.agentSeddon.hyperdx needs clickhouse.enable: the collector and the app use the managed ClickHouse.";
+          }
+          {
+            assertion =
+              !hdxEnabled
+              ||
+                builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" cfg.hyperdx.frontendUrl
+                != null;
+            message = "services.agentSeddon.hyperdx.frontendUrl must be `http(s)://host[:port]`.";
+          }
         ];
 
         users.users.${cfg.user} = {
@@ -500,6 +565,7 @@ in
         users.groups.${cfg.group} = { };
 
         systemd.services = lib.mapAttrs' agentUnit enabledAgents;
+        services.agentSeddon.renderedSettings = lib.mapAttrs mergedSettings enabledAgents;
 
         networking.firewall.allowedTCPPorts = lib.mkIf (cfg.openFirewall && lan) (
           lib.optional cfg.portal.enable ports.portalWeb
@@ -508,6 +574,7 @@ in
             ++ lib.optional cfg.sessions.enable ports.grpcWebSessions
             ++ lib.optional cfg.fleet.enable ports.grpcWebFleet
           )
+          ++ lib.optional hdxEnabled hdx.ports.ui
         );
       }
 
@@ -677,6 +744,162 @@ in
           };
         };
       })
+
+      (lib.mkIf hdxEnabled (
+        let
+          app = hdx.names.app;
+          otel = hdx.names.otel;
+          mongo = hdx.names.mongo;
+          podmanUnit = n: "podman-${n}.service";
+          agentUnits = map (n: "${unitName n}.service") (lib.attrNames enabledAgents);
+        in
+        {
+          virtualisation.oci-containers.containers = {
+            ${mongo} = {
+              image = hdx.mongoImage;
+              # The image's entrypoint binds every address unless told otherwise.
+              cmd = [
+                "--bind_ip"
+                "127.0.0.1"
+              ];
+              volumes = [ "/var/lib/agent-seddon-hyperdx/mongo:/data/db" ];
+              extraOptions = [ "--network=host" ];
+            };
+            ${app} = {
+              image = hdx.appImage;
+              dependsOn = [ mongo ];
+              environment = {
+                MONGO_URI = "mongodb://127.0.0.1:${toString hdx.ports.mongo}/hyperdx";
+                FRONTEND_URL = cfg.hyperdx.frontendUrl;
+                HYPERDX_APP_URL = "http://localhost";
+                HYPERDX_APP_PORT = toString hdx.ports.ui;
+                HYPERDX_API_PORT = toString hdx.ports.api;
+                OPAMP_PORT = toString hdx.ports.opamp;
+                OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:${toString hdx.ports.otlpHttp}";
+                OTEL_SERVICE_NAME = "hdx-oss-app";
+                USAGE_STATS_ENABLED = "false";
+                DEFAULT_SOURCES = hdx.defaultSources;
+              };
+              # DEFAULT_CONNECTIONS carries the agent_viewer password.
+              environmentFiles = [ "${hdxDir}/app.env" ];
+              extraOptions = [ "--network=host" ];
+            };
+            ${otel} = {
+              image = hdx.otelImage;
+              dependsOn = [ app ];
+              environment = {
+                CLICKHOUSE_ENDPOINT = "tcp://127.0.0.1:${toString cfg.clickhouse.nativePort}?dial_timeout=10s";
+                CLICKHOUSE_USER = "default";
+                HYPERDX_OTEL_EXPORTER_CLICKHOUSE_DATABASE = hdx.otelDb;
+                # The MergeTree schema, not the JSON-typed one.
+                HYPERDX_OTEL_EXPORTER_CREATE_LEGACY_SCHEMA = "true";
+                OPAMP_SERVER_URL = "http://127.0.0.1:${toString hdx.ports.opamp}";
+                HYPERDX_LOG_LEVEL = "info";
+              };
+              # CLICKHOUSE_PASSWORD: the admin's, since the collector creates otel_*.
+              environmentFiles = [ "${hdxDir}/otel.env" ];
+              extraOptions = [ "--network=host" ];
+            };
+          };
+
+          systemd.tmpfiles.rules = [ "d /var/lib/agent-seddon-hyperdx/mongo 0700 root root -" ];
+
+          systemd.services = {
+            "podman-${app}" = {
+              after = [
+                "agent-seddon-hyperdx-env.service"
+                "agent-seddon-clickhouse-schema.service"
+              ];
+              requires = [
+                "agent-seddon-hyperdx-env.service"
+                "agent-seddon-clickhouse-schema.service"
+              ];
+            };
+            "podman-${otel}" = {
+              after = [
+                "agent-seddon-hyperdx-env.service"
+                "agent-seddon-clickhouse-schema.service"
+              ];
+              requires = [
+                "agent-seddon-hyperdx-env.service"
+                "agent-seddon-clickhouse-schema.service"
+              ];
+            };
+
+            # Render the containers' secret environment from the ClickHouse passwords,
+            # into the agent user's 0700 directory (podman reads it as root).
+            agent-seddon-hyperdx-env = {
+              description = "agent-seddon HyperDX container environment";
+              after = [ "agent-seddon-clickhouse-creds.service" ];
+              requires = [ "agent-seddon-clickhouse-creds.service" ];
+              environment.XDG_STATE_HOME = "/var/lib";
+              path = [
+                seddon.chCreds
+                pkgs.coreutils
+              ];
+              script = ''
+                cd ${hdxDir}
+                printf 'DEFAULT_CONNECTIONS=%s\n' \
+                  "$(clickhouse-creds hyperdx-connections --url http://127.0.0.1:8123)" > app.env.tmp
+                printf 'CLICKHOUSE_PASSWORD=%s\n' "$(tr -d '\n' < ${chCredsDir}/admin.password)" > otel.env.tmp
+                mv app.env.tmp app.env
+                mv otel.env.tmp otel.env
+              '';
+              serviceConfig = hardening // {
+                Type = "oneshot";
+                RemainAfterExit = true;
+                User = cfg.user;
+                Group = cfg.group;
+                StateDirectory = "agent-seddon/hyperdx";
+                StateDirectoryMode = "0700";
+              };
+            };
+
+            # Copy the ingestion key HyperDX minted at sign-up to the agents (as the OTLP
+            # `authorization` header) and restart them when it changes. Root: it execs
+            # into the rootful mongo container. Quiet until the account exists.
+            agent-seddon-hyperdx-key = {
+              description = "agent-seddon HyperDX ingestion key for the agents";
+              after = [ (podmanUnit mongo) ];
+              path = [
+                config.virtualisation.podman.package
+                pkgs.coreutils
+                pkgs.systemd
+              ];
+              script = ''
+                key="$(podman exec ${mongo} mongosh --quiet hyperdx --eval \
+                  'const t = db.teams.findOne(); print(t && t.apiKey ? t.apiKey : "")' 2>/dev/null)" || exit 0
+                key="$(printf '%s' "$key" | tr -d '[:space:]')"
+                [ -n "$key" ] || exit 0
+                if ! [[ "$key" =~ ^[A-Za-z0-9-]{8,128}$ ]]; then
+                  echo "agent-seddon-hyperdx-key: ignoring a malformed key" >&2
+                  exit 1
+                fi
+                want="authorization=$key"
+                if [ -f ${otlpHeadersFile} ] && [ "$(cat ${otlpHeadersFile})" = "$want" ]; then exit 0; fi
+                umask 077
+                printf '%s' "$want" > ${otlpHeadersFile}.tmp
+                chown ${cfg.user}:${cfg.group} ${otlpHeadersFile}.tmp
+                mv ${otlpHeadersFile}.tmp ${otlpHeadersFile}
+                echo "agent-seddon-hyperdx-key: ingestion key updated; restarting the agents"
+                systemctl try-restart ${lib.concatStringsSep " " agentUnits}
+              '';
+              # The 0700 agent-seddon/hyperdx directory exists once the env unit ran.
+              unitConfig.ConditionPathIsDirectory = hdxDir;
+              serviceConfig.Type = "oneshot";
+            };
+          };
+
+          systemd.timers.agent-seddon-hyperdx-key = {
+            description = "Copy the HyperDX ingestion key to the agents";
+            wantedBy = [ "timers.target" ];
+            timerConfig = {
+              OnBootSec = "2min";
+              OnUnitActiveSec = "2min";
+            };
+          };
+        }
+      ))
     ]
   );
 }

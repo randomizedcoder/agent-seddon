@@ -352,6 +352,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 session_id: req.session_id,
                 pr_number: req.pr_number,
                 force: req.force,
+                source: agent_core::TriggerSource::ReviewNow,
                 requested_by: requester.into_iter().collect(),
                 tenant: agent_core::scoped_tenant().unwrap_or_default(),
             });

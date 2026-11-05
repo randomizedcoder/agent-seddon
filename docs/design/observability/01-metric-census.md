@@ -27,13 +27,17 @@ The C19 families. Repo is the operator-roster `FleetSession.repo` (bounded, LRU-
 
 | Family | Labels | Phase 2 |
 |---|---|---|
-| `agent_fleet_triggers_total` | `source` (poll\|slack), `user`, `repo` | **deferred** — see note |
+| `agent_fleet_triggers_total` | `source` (poll\|webhook\|slack\|review_now), `user`, `repo` | ✅ recorded (orchestrator, every trigger for a known row, duplicates included) |
 | `agent_fleet_reviews_total` | `status` (reviewing\|drafted\|superseded\|uptodate), `user`, `repo` | ✅ recorded (orchestrator) |
 | `agent_fleet_progress_total` | `beat` (found\|drafted\|posted), `outcome` (posted\|softfailed\|skipped), `user`, `repo` | ✅ recorded (progress feed) |
 | `agent_fleet_approvals_total` | `outcome` (posted\|already\|notfound\|post_failed), `user`, `repo` | ✅ recorded (approver) |
 | `agent_fleet_approval_latency_seconds` | `user`, `repo` (drafted→posted; clamp) | **deferred** — see note |
 | `agent_fleet_post_failures_total` | `transport` (kind), `user`, `repo` | ✅ recorded (progress feed) |
 
+> **`agent_fleet_triggers_total`** was wired later: `FleetTrigger` carries a `TriggerSource`,
+> and `handle` counts it once the row resolves (the obs-links/HyperDX PR, after the l2 Grafana
+> panel stayed empty). The rest of this note is the original reasoning.
+>
 > **Two deferred within the track** (registered + unit-tested in Phase 1; wiring needs a
 > prerequisite): **`agent_fleet_triggers_total{source}`** needs a `source` on
 > `agent_core::FleetTrigger` — `poll_session`/the drain loop see only `session_id` (no `(user,

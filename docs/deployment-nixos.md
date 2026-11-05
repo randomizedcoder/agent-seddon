@@ -19,6 +19,9 @@ Envoy and ClickHouse, a `portal-web` dev server) with systemd units that a
 | `agent-seddon-fleet` | `agent --serve-fleet` (built with `forge-ghapp`) | 127.0.0.1:50086 |
 | `agent-seddon-grpc-web` | Envoy, config rendered at build time from `nix/portal/envoy-spec.nix` | 8090/8091/8093 (+8094 REST, loopback only) |
 | `agent-seddon-portal` | `static-web-server` over a hermetic Flutter web bundle (`nix/portal/web-bundle.nix`) | 8092 |
+| `podman-agent-seddon-{mongo,hyperdx-app,hyperdx-otel}` | opt-in `hyperdx.enable`: HyperDX's three containers (`nix/hyperdx`), host network, over the managed ClickHouse | UI 8080; OTLP, API, OpAMP and Mongo on loopback |
+| `agent-seddon-hyperdx-env` | oneshot: renders the containers' secret env files (viewer connection, collector's admin password) into `/var/lib/agent-seddon/hyperdx` (0700) | — |
+| `agent-seddon-hyperdx-key` (timer, 2 min) | copies the ingestion key HyperDX mints at sign-up to `hyperdx/otlp.headers`, restarts the agents when it changes | — |
 
 ## Where the data lives
 
@@ -87,6 +90,31 @@ row gets its own mirror and worktree under `fleet/workspaces/<user>/<id>/`. A fl
 with a root but no local review backend is refused at start: it would review the working
 directory's repo instead of the row's.
 
+### HyperDX
+
+`hyperdx.enable = true` runs HyperDX (`nix/hyperdx`, the same images and seeded sources
+as `nix run .#hyperdx-up`) as `virtualisation.oci-containers` units. The collector
+writes `otel_*` into the managed ClickHouse's `default` database as the admin; the app
+reads it as `agent_viewer`. Both passwords reach the containers as env files the
+`agent-seddon-hyperdx-env` oneshot writes, never through the store.
+
+Set `hyperdx.frontendUrl` to the URL you browse with (`"http://l2:8080"`): HyperDX's
+session cookie binds to that host, and the portal's Launch card links to it. With
+`openFirewall` and a LAN `publicHost`, only the UI port (8080) opens.
+
+The collector refuses OTLP without the team's ingestion key, which HyperDX mints when
+the first account registers. So after the first deploy, open `frontendUrl` and sign
+up. Within two minutes `agent-seddon-hyperdx-key` reads the key from Mongo, writes
+`authorization=<key>` to `/var/lib/agent-seddon/hyperdx/otlp.headers` (0600, the agent
+user) and restarts the agents. Each agent exports to `127.0.0.1:4317` with
+`[telemetry] otlp_headers_file` pointing there and `otel_service_name` set to its unit
+name. Until the file exists, the agents log one warning and run without the exporter.
+
+The portal's Grafana/Prometheus/HyperDX links are compile-time defines, but a loopback
+host in one (the defaults are `localhost`) is replaced by the host the page was opened
+under, so `http://l2:8092` links to `http://l2:9090`. Without `hyperdx.enable` the
+HyperDX card is hidden.
+
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
 
@@ -96,7 +124,10 @@ in the host flake, then `nixos-rebuild switch`.
   module in a loopback config and a LAN config, then asserts the units and their
   flags, the user, the credential wiring, ClickHouse and Postgres ordering, and extra CORS origins (a wildcard, path or junk is refused), and the firewall:
   closed by default, and the LAN config opens only the public ports, never 8094,
-  9000, 8123 or 5432.
+  9000, 8123 or 5432. A HyperDX config checks the three containers, Mongo bound to
+  loopback, passwords only in env files, the unit ordering, the key timer, the agents'
+  OTLP settings and that only 8080 opens (never 4317/4318/8000/4320/27017); a bad
+  `frontendUrl` or HyperDX without ClickHouse is refused.
 - **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
   the module in a QEMU VM and checks that each step comes up in order:
   - creds, ClickHouse, then the schema; it also checks that a passwordless

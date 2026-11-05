@@ -332,9 +332,10 @@ The `<HYPERDX_INGESTION_KEY>` must equal the team's `apiKey`. On the decomposed 
 it's minted by the app (§6), so read it from **Team Settings → API Keys** (or Mongo
 `db.teams.findOne().apiKey`) and set it in `otlp_headers`. The collector's bearer-token
 receiver accepts the raw key or `Bearer <key>`. It persists across container recreation
-via Mongo's volume. To keep the key out of the repo, have the launch wiring substitute
-it into the generated config at start (the config field is inline `otlp_headers`, with
-no `_file` variant like the LLM `api_key_file`).
+via Mongo's volume. To keep the key out of the repo and the store, put
+`authorization=<key>` in a 0600 file and point `[telemetry] otlp_headers_file` at it.
+Under `nixosModules.agent-stack` with `hyperdx.enable`, a timer does this for you (see
+[deployment-nixos.md](deployment-nixos.md#hyperdx)).
 
 > `otlp_endpoint` uses `127.0.0.1:4317` (loopback) because the gateways run on the
 > host and ClickStack publishes OTLP only on loopback — that's independent of the

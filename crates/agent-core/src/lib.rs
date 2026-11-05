@@ -3499,6 +3499,37 @@ pub struct FleetTrigger {
     /// superseded by the new round. Coalescing keeps it: a forced trigger folded into a
     /// pending one makes the pending one forced.
     pub force: bool,
+    /// What produced it: the `source` label of `agent_fleet_triggers_total`. A trigger
+    /// folded into a pending one is counted under its own source before the fold.
+    pub source: TriggerSource,
+}
+
+/// What produced a [`FleetTrigger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerSource {
+    /// The forge poller.
+    Poll,
+    /// A forge push / pull-request webhook.
+    Webhook,
+    /// The Slack channel watcher.
+    Slack,
+    /// The `ReviewNow` RPC (the portal's "Review now").
+    ReviewNow,
+}
+
+impl TriggerSource {
+    /// Every source, in label order.
+    pub const ALL: [Self; 4] = [Self::Poll, Self::Webhook, Self::Slack, Self::ReviewNow];
+
+    /// The metric label value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Webhook => "webhook",
+            Self::Slack => "slack",
+            Self::ReviewNow => "review_now",
+        }
+    }
 }
 
 /// Whether a [`FleetTrigger`] was queued or folded into one already pending.

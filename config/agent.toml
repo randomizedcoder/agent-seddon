@@ -1069,6 +1069,11 @@ flush_interval_ms = 1000
 # endpoint to turn it on:
 # otlp_endpoint     = "http://localhost:4317"
 # otel_service_name = "agent-seddon"       # service.name on exported spans
+# HyperDX's collector wants its ingestion key: `authorization=<key>`, inline or (better,
+# it is a secret) in a file. Set one or the other.
+# otlp_headers_file = "/var/lib/agent-seddon/hyperdx/otlp.headers"   # (what nixosModules.agent-stack writes)
+# A named file that does not exist yet turns the exporter off with a warning (the key
+# appears only once a HyperDX account is registered); it is read at startup.
 
 # Always-injected user context. Files in <dir>/prepend/ are folded into the
 # system prompt; files in <dir>/append/ become a trailing message. Name files

@@ -15,4 +15,16 @@ const launchSpec = PageSpec('launch', [
     name: 'launch_blocked',
     description: 'when url_launcher reports failure, a SnackBar shows, no crash',
   ),
+  SpecRow(
+    elementId: 'launch.card',
+    caseClass: CaseClass.corner,
+    name: 'follows_page_host',
+    description: 'a localhost URL opens on the host the portal was loaded from',
+  ),
+  SpecRow(
+    elementId: 'launch.card',
+    caseClass: CaseClass.boundary,
+    name: 'empty_url_hidden',
+    description: 'a UI whose URL is empty (not deployed) has no card',
+  ),
 ]);

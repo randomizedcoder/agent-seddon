@@ -4861,6 +4861,13 @@ pub struct TelemetryCfg {
     /// `authorization=<ingestion-key>`. Empty (the default) ⇒ no headers.
     #[serde(default)]
     pub otlp_headers: String,
+    /// File holding `otlp_headers` (same `key=value` form), so an ingestion key stays out
+    /// of the config and the Nix store. Read at startup: trimmed, size-capped, never
+    /// empty; setting both forms is an error. A file that does not exist (yet) turns
+    /// the exporter off rather than sending spans the collector would reject: HyperDX
+    /// mints its key only when its first account is created.
+    #[serde(default)]
+    pub otlp_headers_file: String,
 }
 
 impl Default for TelemetryCfg {
@@ -4881,6 +4888,7 @@ impl Default for TelemetryCfg {
             otlp_endpoint: String::new(),
             otel_service_name: default_otel_service_name(),
             otlp_headers: String::new(),
+            otlp_headers_file: String::new(),
         }
     }
 }
@@ -4904,13 +4912,7 @@ pub const MAX_PASSWORD_FILE_BYTES: u64 = 4096;
 /// Read a password file: `~` expanded, size-capped, trailing whitespace trimmed, and
 /// never empty. Errors name the file (operator config) but never its contents.
 fn read_password_file(field: &str, path: &str) -> Result<String, String> {
-    let expanded = match path.strip_prefix("~/") {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(home) => format!("{home}/{rest}"),
-            Err(_) => path.to_string(),
-        },
-        None => path.to_string(),
-    };
+    let expanded = expand_home(path);
     let unreadable = |e: std::io::Error| format!("[telemetry] {field} {expanded}: {e}");
     let len = std::fs::metadata(&expanded).map_err(unreadable)?.len();
     if len > MAX_PASSWORD_FILE_BYTES {
@@ -4924,6 +4926,17 @@ fn read_password_file(field: &str, path: &str) -> Result<String, String> {
         return Err(format!("[telemetry] {field} {expanded} is empty"));
     }
     Ok(password.to_string())
+}
+
+/// `~/x` under `$HOME`; anything else as given.
+fn expand_home(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => path.to_string(),
+        },
+        None => path.to_string(),
+    }
 }
 
 /// The inline value, or the file's contents when a file is named.
@@ -4943,6 +4956,9 @@ impl TelemetryCfg {
         let set = |s: &str| !s.trim().is_empty();
         if set(&self.password) && set(&self.password_file) {
             return Err("[telemetry] set `password` or `password_file`, not both".into());
+        }
+        if set(&self.otlp_headers) && set(&self.otlp_headers_file) {
+            return Err("[telemetry] set `otlp_headers` or `otlp_headers_file`, not both".into());
         }
         if set(&self.reader_password) && set(&self.reader_password_file) {
             return Err(
@@ -4968,6 +4984,16 @@ impl TelemetryCfg {
             );
         }
         Ok(())
+    }
+
+    /// The OTLP request headers: `otlp_headers_file`'s contents when set, else
+    /// `otlp_headers`. `None` when the named file does not exist (export off).
+    pub fn otlp_headers(&self) -> Result<Option<String>, String> {
+        let file = self.otlp_headers_file.trim();
+        if !file.is_empty() && !std::path::Path::new(&expand_home(file)).exists() {
+            return Ok(None);
+        }
+        password_from("otlp_headers_file", &self.otlp_headers, file).map(Some)
     }
 
     /// The writer password: `password_file`'s contents when set, else `password`.
@@ -5883,6 +5909,11 @@ mod tests {
         "enabled = true\nreader_user = \"agent_reader\"",
         Some("every ClickHouse login has a password")
     )]
+    #[case::negative_otlp_headers_both_forms(
+        "otlp_headers = \"authorization=k\"\notlp_headers_file = \"/s/h\"",
+        Some("not both")
+    )]
+    #[case::positive_otlp_headers_file_alone("otlp_headers_file = \"/s/h\"", None)]
     #[case::corner_disabled_reader_without_password_is_inert(
         "enabled = false\nreader_user = \"agent_reader\"",
         None
@@ -5934,6 +5965,54 @@ mod tests {
         match want {
             Ok("<cap>") => assert_eq!(got.unwrap().len(), MAX_PASSWORD_FILE_BYTES as usize),
             Ok(p) => assert_eq!(got.unwrap(), p),
+            Err(frag) => {
+                let e = got.unwrap_err();
+                assert!(e.contains(frag), "{e}");
+                assert!(!e.contains("aaaa"), "an error never echoes the contents");
+            }
+        }
+    }
+
+    /// desc: `otlp_headers()` — the inline value, or the file's (an ingestion key kept
+    /// out of the config): trimmed, capped, never empty, contents never echoed; a file
+    /// not there yet (HyperDX not onboarded) turns export off.
+    #[rstest::rstest]
+    #[case::positive_inline_when_no_file("authorization=k1", None, Ok("authorization=k1"))]
+    #[case::positive_file_trimmed("", Some("authorization=k2\n"), Ok("authorization=k2"))]
+    #[case::negative_unset_is_empty("", None, Ok(""))]
+    #[case::negative_empty_file("", Some(""), Err("is empty"))]
+    #[case::corner_missing_file_is_export_off("", Some("<missing>"), Ok("<none>"))]
+    #[case::boundary_at_cap("", Some(&*"a".repeat(MAX_PASSWORD_FILE_BYTES as usize)), Ok("<cap>"))]
+    #[case::adversarial_over_cap_refused_unread(
+        "",
+        Some(&*"a".repeat(MAX_PASSWORD_FILE_BYTES as usize + 1)),
+        Err("larger than")
+    )]
+    fn telemetry_otlp_headers_cases(
+        #[case] inline: &str,
+        #[case] file: Option<&str>,
+        #[case] want: std::result::Result<&str, &str>,
+    ) {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join("otlp.headers");
+        match file {
+            Some("<missing>") | None => {}
+            Some(c) => std::fs::write(&path, c).unwrap(),
+        }
+        let cfg = TelemetryCfg {
+            otlp_headers: inline.into(),
+            otlp_headers_file: file.map(|_| path.display().to_string()).unwrap_or_default(),
+            ..TelemetryCfg::default()
+        };
+        let got = cfg.otlp_headers();
+        std::fs::remove_dir_all(&dir).ok();
+        match want {
+            Ok("<none>") => assert_eq!(got.unwrap(), None),
+            Ok("<cap>") => assert_eq!(
+                got.unwrap().unwrap().len(),
+                MAX_PASSWORD_FILE_BYTES as usize
+            ),
+            Ok(h) => assert_eq!(got.unwrap().as_deref(), Some(h)),
             Err(frag) => {
                 let e = got.unwrap_err();
                 assert!(e.contains(frag), "{e}");

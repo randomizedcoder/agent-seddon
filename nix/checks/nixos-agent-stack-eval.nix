@@ -56,6 +56,23 @@ let
   # A host that also imports agent-postgres itself (the module is imported once).
   both = evalWith { imports = [ ../nixos/agent-postgres.nix ]; };
   noPg = evalWith { services.agentSeddon.postgres.enable = false; };
+  hdx = evalWith {
+    services.agentSeddon = {
+      publicHost = "172.16.50.46";
+      openFirewall = true;
+      hyperdx = {
+        enable = true;
+        frontendUrl = "http://l2:8080";
+      };
+    };
+  };
+  hdxFails =
+    extra:
+    failedAssertions (evalWith {
+      services.agentSeddon = lib.recursiveUpdate { hyperdx.enable = true; } extra;
+    }) != [ ];
+  # An agent's merged settings (what its --config TOML is rendered from).
+  agentToml = c: name: c.services.agentSeddon.renderedSettings.${name};
   originsOk =
     o:
     failedAssertions (evalWith {
@@ -143,6 +160,68 @@ let
     ];
     lanKeepsInternalClosed = !(has lan 8094) && !(has lan 9000) && !(has lan 8123) && !(has lan 5432);
     portalLanBind = lib.hasInfix "--host 0.0.0.0" (execOf lan "agent-seddon-portal");
+    # HyperDX: opt-in; three host-network containers, the env rendered off-store first.
+    hyperdxOffByDefault =
+      lo.virtualisation.oci-containers.containers == { }
+      && !(lo.systemd.services ? agent-seddon-hyperdx-env);
+    hyperdxContainers = lib.all (n: hdx.virtualisation.oci-containers.containers ? ${n}) [
+      "agent-seddon-mongo"
+      "agent-seddon-hyperdx-app"
+      "agent-seddon-hyperdx-otel"
+    ];
+    hyperdxMongoLoopback =
+      hdx.virtualisation.oci-containers.containers.agent-seddon-mongo.cmd == [
+        "--bind_ip"
+        "127.0.0.1"
+      ];
+    hyperdxFrontendUrl =
+      hdx.virtualisation.oci-containers.containers.agent-seddon-hyperdx-app.environment.FRONTEND_URL
+      == "http://l2:8080";
+    # Passwords reach the containers by env file, never the store-rendered environment.
+    hyperdxSecretsByFile =
+      let
+        cs = hdx.virtualisation.oci-containers.containers;
+      in
+      !(cs.agent-seddon-hyperdx-app.environment ? DEFAULT_CONNECTIONS)
+      && !(cs.agent-seddon-hyperdx-otel.environment ? CLICKHOUSE_PASSWORD)
+      && cs.agent-seddon-hyperdx-app.environmentFiles == [ "/var/lib/agent-seddon/hyperdx/app.env" ]
+      && cs.agent-seddon-hyperdx-otel.environmentFiles == [ "/var/lib/agent-seddon/hyperdx/otel.env" ];
+    hyperdxAppAfterEnv =
+      builtins.elem "agent-seddon-hyperdx-env.service" (svc hdx "podman-agent-seddon-hyperdx-app")
+      .requires
+      && builtins.elem "agent-seddon-clickhouse-schema.service" (svc hdx "podman-agent-seddon-hyperdx-otel")
+      .requires;
+    hyperdxEnvAsAgentUser = (svc hdx "agent-seddon-hyperdx-env").serviceConfig.User == "agent-seddon";
+    hyperdxKeyTimer = hdx.systemd.timers ? agent-seddon-hyperdx-key;
+    hyperdxKeyRestartsAgents = lib.hasInfix "try-restart agent-seddon-fleet.service" (svc hdx "agent-seddon-hyperdx-key")
+    .script;
+    # Agents export OTLP with the key file; each names itself.
+    hyperdxAgentsExport =
+      let
+        t = (agentToml hdx "fleet").telemetry;
+      in
+      t.otlp_endpoint == "http://127.0.0.1:4317"
+      && t.otlp_headers_file == "/var/lib/agent-seddon/hyperdx/otlp.headers"
+      && t.otel_service_name == "agent-seddon-fleet";
+    hyperdxNoExportWhenOff = !((agentToml lo "fleet").telemetry ? otlp_headers_file);
+    # LAN + firewall ⇒ only the UI opens; OTLP, the API, OpAMP and Mongo stay closed.
+    hyperdxUiOpened = has hdx 8080 && !(has lan 8080);
+    hyperdxInternalClosed = lib.all (p: !(has hdx p)) [
+      4317
+      4318
+      8000
+      4320
+      27017
+    ];
+    hyperdxNeedsClickhouse = hdxFails { clickhouse.enable = false; };
+    hyperdxFrontendUrlRejected = lib.all (u: hdxFails { hyperdx.frontendUrl = u; }) [
+      ""
+      "l2:8080"
+      "javascript://x"
+      "http://l2:8080/path"
+      "http://l2:8080, http://evil"
+    ];
+    hyperdxDefaultOk = !(hdxFails { });
   };
 
   failed = lib.filterAttrs (_: v: !v) checks;
@@ -150,7 +229,7 @@ in
 pkgs.runCommand "nixos-agent-stack-eval" { } (
   if failed == { } then
     ''
-      echo "nixosModules.agent-stack evaluates: ${toString (lib.length (lib.attrNames checks))} checks (units, user, credentials, clickhouse, postgres, firewall loopback+LAN)" > "$out"
+      echo "nixosModules.agent-stack evaluates: ${toString (lib.length (lib.attrNames checks))} checks (units, user, credentials, clickhouse, postgres, hyperdx, firewall loopback+LAN)" > "$out"
     ''
   else
     throw "nixos-agent-stack-eval: unmet assertions: ${lib.concatStringsSep ", " (lib.attrNames failed)}"

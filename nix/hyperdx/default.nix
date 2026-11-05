@@ -116,6 +116,32 @@ let
   c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
 in
 {
+  # What `nixosModules.agent-stack` needs to run the same three containers as units
+  # (`services.agentSeddon.hyperdx`): one definition of the images, ports and seeded
+  # sources for both. Not an app (`mkApps` skips it).
+  deploy = {
+    inherit
+      appImage
+      otelImage
+      mongoImage
+      otelDb
+      defaultSources
+      ;
+    names = {
+      app = appName;
+      otel = otelName;
+      mongo = mongoName;
+    };
+    ports = {
+      ui = versions.hyperdxUiPort;
+      api = versions.hyperdxApiPort;
+      opamp = versions.hyperdxOpampPort;
+      mongo = versions.mongoPort;
+      otlpGrpc = versions.otlpGrpcPort;
+      otlpHttp = versions.otlpHttpPort;
+    };
+  };
+
   hyperdx-up = pkgs.writeShellApplication {
     name = "hyperdx-up";
     runtimeInputs = c.runtimes ++ [
