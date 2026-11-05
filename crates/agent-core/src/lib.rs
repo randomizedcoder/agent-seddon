@@ -3499,8 +3499,9 @@ pub struct FleetTrigger {
     /// superseded by the new round. Coalescing keeps it: a forced trigger folded into a
     /// pending one makes the pending one forced.
     pub force: bool,
-    /// What produced it: the `source` label of `agent_fleet_triggers_total`. A trigger
-    /// folded into a pending one is counted under its own source before the fold.
+    /// What produced it: the `source` label of `agent_fleet_triggers_total`, counted
+    /// when the orchestrator handles the trigger. A trigger folded into a pending one is
+    /// not counted; the pending one counts once, under its own source.
     pub source: TriggerSource,
 }
 

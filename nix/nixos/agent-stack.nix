@@ -754,6 +754,15 @@ in
           agentUnits = map (n: "${unitName n}.service") (lib.attrNames enabledAgents);
         in
         {
+          # Host networking: only Mongo binds loopback; the collector (4317/4318) and the
+          # app's API and OpAMP (8000/4320) listen on every address, and only the firewall
+          # keeps them off the LAN.
+          warnings = lib.optional (lan && !config.networking.firewall.enable) ''
+            services.agentSeddon.hyperdx: the firewall is off, so HyperDX's OTLP (4317/4318),
+            API (8000) and OpAMP (4320) ports are reachable from the LAN, unauthenticated
+            except OTLP.
+          '';
+
           virtualisation.oci-containers.containers = {
             ${mongo} = {
               image = hdx.mongoImage;
@@ -856,37 +865,63 @@ in
             };
 
             # Copy the ingestion key HyperDX minted at sign-up to the agents (as the OTLP
-            # `authorization` header) and restart them when it changes. Root: it execs
-            # into the rootful mongo container. Quiet until the account exists.
+            # `authorization` header). As the agent user, over Mongo's loopback port, with
+            # the same sandbox as the agents. Quiet until the account exists.
             agent-seddon-hyperdx-key = {
               description = "agent-seddon HyperDX ingestion key for the agents";
-              after = [ (podmanUnit mongo) ];
-              path = [
-                config.virtualisation.podman.package
-                pkgs.coreutils
-                pkgs.systemd
+              wants = [ "agent-seddon-hyperdx-env.service" ];
+              after = [
+                "agent-seddon-hyperdx-env.service"
+                (podmanUnit mongo)
               ];
+              path = [
+                pkgs.mongosh
+                pkgs.coreutils
+              ];
+              environment.HOME = hdxDir;
               script = ''
-                key="$(podman exec ${mongo} mongosh --quiet hyperdx --eval \
-                  'const t = db.teams.findOne(); print(t && t.apiKey ? t.apiKey : "")' 2>/dev/null)" || exit 0
+                if ! key="$(mongosh --quiet --norc mongodb://127.0.0.1:${toString hdx.ports.mongo}/hyperdx --eval \
+                  'const t = db.teams.findOne(); print(t && t.apiKey ? t.apiKey : "")' 2>/tmp/err)"; then
+                  echo "agent-seddon-hyperdx-key: Mongo not reachable yet: $(head -c 200 /tmp/err)" >&2
+                  exit 0
+                fi
                 key="$(printf '%s' "$key" | tr -d '[:space:]')"
                 [ -n "$key" ] || exit 0
-                if ! [[ "$key" =~ ^[A-Za-z0-9-]{8,128}$ ]]; then
-                  echo "agent-seddon-hyperdx-key: ignoring a malformed key" >&2
-                  exit 1
+                # Header-safe whatever HyperDX's format: no separators, bounded.
+                if ! [[ "$key" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; then
+                  echo "agent-seddon-hyperdx-key: the team's apiKey is not a plain token; not using it" >&2
+                  exit 0
                 fi
                 want="authorization=$key"
                 if [ -f ${otlpHeadersFile} ] && [ "$(cat ${otlpHeadersFile})" = "$want" ]; then exit 0; fi
-                umask 077
                 printf '%s' "$want" > ${otlpHeadersFile}.tmp
-                chown ${cfg.user}:${cfg.group} ${otlpHeadersFile}.tmp
                 mv ${otlpHeadersFile}.tmp ${otlpHeadersFile}
-                echo "agent-seddon-hyperdx-key: ingestion key updated; restarting the agents"
-                systemctl try-restart ${lib.concatStringsSep " " agentUnits}
+                echo "agent-seddon-hyperdx-key: ingestion key updated"
               '';
-              # The 0700 agent-seddon/hyperdx directory exists once the env unit ran.
-              unitConfig.ConditionPathIsDirectory = hdxDir;
-              serviceConfig.Type = "oneshot";
+              serviceConfig = hardening // {
+                Type = "oneshot";
+                User = cfg.user;
+                Group = cfg.group;
+                ReadWritePaths = [ hdxDir ];
+              };
+            };
+          }
+          # A new key file restarts the agents (they read it at start). Root, to reach
+          # PID 1; it runs nothing else.
+          // lib.optionalAttrs (agentUnits != [ ]) {
+            agent-seddon-hyperdx-restart = {
+              description = "Restart the agents for a new HyperDX ingestion key";
+              serviceConfig = hardening // {
+                Type = "oneshot";
+                ExecStart = "${pkgs.systemd}/bin/systemctl try-restart ${lib.concatStringsSep " " agentUnits}";
+              };
+            };
+          };
+
+          systemd.paths = lib.mkIf (agentUnits != [ ]) {
+            agent-seddon-hyperdx-restart = {
+              wantedBy = [ "multi-user.target" ];
+              pathConfig.PathChanged = otlpHeadersFile;
             };
           };
 

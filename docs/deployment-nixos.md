@@ -21,7 +21,8 @@ Envoy and ClickHouse, a `portal-web` dev server) with systemd units that a
 | `agent-seddon-portal` | `static-web-server` over a hermetic Flutter web bundle (`nix/portal/web-bundle.nix`) | 8092 |
 | `podman-agent-seddon-{mongo,hyperdx-app,hyperdx-otel}` | opt-in `hyperdx.enable`: HyperDX's three containers (`nix/hyperdx`), host network, over the managed ClickHouse | UI 8080; OTLP, API, OpAMP and Mongo on loopback |
 | `agent-seddon-hyperdx-env` | oneshot: renders the containers' secret env files (viewer connection, collector's admin password) into `/var/lib/agent-seddon/hyperdx` (0700) | — |
-| `agent-seddon-hyperdx-key` (timer, 2 min) | copies the ingestion key HyperDX mints at sign-up to `hyperdx/otlp.headers`, restarts the agents when it changes | — |
+| `agent-seddon-hyperdx-key` (timer, 2 min) | agent user: copies the ingestion key HyperDX mints at sign-up to `hyperdx/otlp.headers` when it changes | — |
+| `agent-seddon-hyperdx-restart` (path unit on that file) | root: `systemctl try-restart` of the enabled agents, nothing else | — |
 
 ## Where the data lives
 
@@ -100,13 +101,18 @@ reads it as `agent_viewer`. Both passwords reach the containers as env files the
 
 Set `hyperdx.frontendUrl` to the URL you browse with (`"http://l2:8080"`): HyperDX's
 session cookie binds to that host, and the portal's Launch card links to it. With
-`openFirewall` and a LAN `publicHost`, only the UI port (8080) opens.
+`openFirewall` and a LAN `publicHost`, only the UI port (8080) opens. The containers
+share the host's network and only Mongo binds loopback: the collector's OTLP ports
+(4317/4318) and the app's API and OpAMP ports (8000/4320) listen on every address, so
+the firewall is what keeps them off the LAN. Evaluating with the firewall off and a
+LAN `publicHost` warns.
 
 The collector refuses OTLP without the team's ingestion key, which HyperDX mints when
 the first account registers. So after the first deploy, open `frontendUrl` and sign
-up. Within two minutes `agent-seddon-hyperdx-key` reads the key from Mongo, writes
-`authorization=<key>` to `/var/lib/agent-seddon/hyperdx/otlp.headers` (0600, the agent
-user) and restarts the agents. Each agent exports to `127.0.0.1:4317` with
+up. Within two minutes `agent-seddon-hyperdx-key` (the agent user, sandboxed like the
+agents) reads the key from Mongo over loopback and writes `authorization=<key>` to
+`/var/lib/agent-seddon/hyperdx/otlp.headers` (0600). A path unit sees the new file and
+`agent-seddon-hyperdx-restart` (root, `systemctl try-restart` only) restarts the agents. Each agent exports to `127.0.0.1:4317` with
 `[telemetry] otlp_headers_file` pointing there and `otel_service_name` set to its unit
 name. Until the file exists, the agents log one warning and run without the exporter.
 

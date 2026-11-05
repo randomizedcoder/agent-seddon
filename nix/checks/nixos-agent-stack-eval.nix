@@ -71,6 +71,22 @@ let
     failedAssertions (evalWith {
       services.agentSeddon = lib.recursiveUpdate { hyperdx.enable = true; } extra;
     }) != [ ];
+  hdxNoAgents = evalWith {
+    services.agentSeddon = {
+      hyperdx.enable = true;
+      gateway.enable = false;
+      sessions.enable = false;
+      fleet.enable = false;
+    };
+  };
+  hdxNoFirewall = evalWith {
+    services.agentSeddon = {
+      publicHost = "172.16.50.46";
+      hyperdx.enable = true;
+    };
+    networking.firewall.enable = false;
+  };
+  hdxWarns = c: lib.any (lib.hasInfix "services.agentSeddon.hyperdx: the firewall is off") c.warnings;
   # An agent's merged settings (what its --config TOML is rendered from).
   agentToml = c: name: c.services.agentSeddon.renderedSettings.${name};
   originsOk =
@@ -193,8 +209,32 @@ let
       .requires;
     hyperdxEnvAsAgentUser = (svc hdx "agent-seddon-hyperdx-env").serviceConfig.User == "agent-seddon";
     hyperdxKeyTimer = hdx.systemd.timers ? agent-seddon-hyperdx-key;
-    hyperdxKeyRestartsAgents = lib.hasInfix "try-restart agent-seddon-fleet.service" (svc hdx "agent-seddon-hyperdx-key")
-    .script;
+    # The key copier is the agent user in the agents' sandbox; only the restart unit is
+    # root, and it runs one systemctl command, triggered by the key file changing.
+    hyperdxKeyUnprivileged =
+      let
+        k = (svc hdx "agent-seddon-hyperdx-key").serviceConfig;
+      in
+      k.User == "agent-seddon"
+      && k.NoNewPrivileges
+      && k.CapabilityBoundingSet == ""
+      && k.ProtectSystem == "strict"
+      && k.ReadWritePaths == [ "/var/lib/agent-seddon/hyperdx" ];
+    hyperdxKeyAfterEnv = builtins.elem "agent-seddon-hyperdx-env.service" (svc hdx "agent-seddon-hyperdx-key")
+    .wants;
+    hyperdxRestartOnKey =
+      hdx.systemd.paths.agent-seddon-hyperdx-restart.pathConfig.PathChanged
+      == "/var/lib/agent-seddon/hyperdx/otlp.headers"
+      && lib.hasInfix "systemctl try-restart agent-seddon-fleet.service" (
+        execOf hdx "agent-seddon-hyperdx-restart"
+      )
+      && (svc hdx "agent-seddon-hyperdx-restart").serviceConfig.CapabilityBoundingSet == "";
+    # No agents ⇒ nothing to restart (an empty `try-restart` would fail every time).
+    hyperdxNoAgentsNoRestart =
+      !(hdxNoAgents.systemd.services ? agent-seddon-hyperdx-restart)
+      && !(hdxNoAgents.systemd.paths ? agent-seddon-hyperdx-restart);
+    # Host networking leaves OTLP/API/OpAMP on every address: firewall off on a LAN warns.
+    hyperdxWarnsWithoutFirewall = hdxWarns hdxNoFirewall && !(hdxWarns hdx);
     # Agents export OTLP with the key file; each names itself.
     hyperdxAgentsExport =
       let
