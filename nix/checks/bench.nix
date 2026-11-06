@@ -7,61 +7,86 @@
 # check` — it catches "major low-hanging fruit" regressions, not micro-noise.
 #
 # Ceilings live *in the bench file* as `hard_limits([(EventKind::Ir, …)])`, so a
-# regression makes `cargo bench` exit non-zero (fails this check). Add a line per
-# crate here as each feature PR lands its own `benches/*.rs`.
+# regression makes `cargo bench` exit non-zero (fails this check).
+#
+# One `bench-<crate>` check per crate below, each on that crate's source slice
+# (nix/workspace-slice.nix), so an edit re-runs only the benches that can see it;
+# `nix/checks/default.nix` aggregates them as `bench`. Add a row here as each
+# feature PR lands its own `benches/*.rs`.
 #
 {
+  lib,
   craneLib,
   commonArgs,
-  cargoArtifacts,
+  workspaceSlice,
   versions,
 }:
 
-craneLib.mkCargoDerivation (
-  commonArgs
-  // {
-    inherit cargoArtifacts;
-    pname = "agent-seddon-bench";
-    version = "0.1.0";
-    doInstallCargoArtifacts = false;
-    nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [
-      versions.valgrind
-      versions.iai-callgrind-runner
+let
+  # crate → the `cargo bench -p <crate>` arguments of each of its benches.
+  runs = {
+    agent-metrics = [ "--bench metrics" ];
+    agent-tools = [
+      "--features tool-patch --bench patch"
+      "--features tool-edit --bench edit"
+      "--features tool-web --bench web"
     ];
-    # iai-callgrind finds its runner via this env (or PATH); pin it explicitly.
-    IAI_CALLGRIND_RUNNER = "${versions.iai-callgrind-runner}/bin/iai-callgrind-runner";
-    buildPhaseCargoCommand = ''
-      cargo bench -p agent-metrics --bench metrics
-      cargo bench -p agent-tools --features tool-patch --bench patch
-      cargo bench -p agent-tools --features tool-edit --bench edit
-      cargo bench -p agent-tools --features tool-web --bench web
-      cargo bench -p agent-validate --features validate-draft07 --bench validate
-      cargo bench -p agent-lsp --bench lsp_parse
-      cargo bench -p agent-search --features search-vector --bench vector
-      cargo bench -p agent-ast --bench ast
-      cargo bench -p agent-repo-graph --features extract-rust --bench extract
-      cargo bench -p agent-session --bench checkpoint
-      cargo bench -p agent-reference --bench parse
-      cargo bench -p agent-scanner --bench scan
-      cargo bench -p agent-cache --bench place
-      cargo bench -p agent-web-search --bench rank
-      cargo bench -p agent-export --bench render
-      cargo bench -p agent-scheduler --bench next_fire
-      cargo bench -p agent-core --bench registry
-      cargo bench -p agent-context --bench context
-      cargo bench -p agent-context --features context-mode-aware --bench mode_aware
-      cargo bench -p agent-context --features context-instant --bench instant_assemble
-      cargo bench -p agent-mode --bench classify
-      cargo bench -p agent-memory --features memory-dimensions --bench dimensions
-      cargo bench -p agent-providers --features provider-pool --bench pool_select
-      cargo bench -p agent-providers --bench route_resolve
-      cargo bench -p agent-providers --features provider-consensus --bench gate_verdict
-      cargo bench -p agent-providers --features provider-branching --bench branch_dispatch
-      cargo bench -p agent-digest --features digest-sqlite --bench digest_query
-      cargo bench -p agent-graph --bench graph_load
-      cargo bench -p agent-registry --bench registry_route
-      cargo bench -p agent-tokenizer --bench tokenize
-    '';
-    installPhaseCommand = "mkdir -p $out";
-  }
-)
+    agent-validate = [ "--features validate-draft07 --bench validate" ];
+    agent-lsp = [ "--bench lsp_parse" ];
+    agent-search = [ "--features search-vector --bench vector" ];
+    agent-ast = [ "--bench ast" ];
+    agent-repo-graph = [ "--features extract-rust --bench extract" ];
+    agent-session = [ "--bench checkpoint" ];
+    agent-reference = [ "--bench parse" ];
+    agent-scanner = [ "--bench scan" ];
+    agent-cache = [ "--bench place" ];
+    agent-web-search = [ "--bench rank" ];
+    agent-export = [ "--bench render" ];
+    agent-scheduler = [ "--bench next_fire" ];
+    agent-core = [ "--bench registry" ];
+    agent-context = [
+      "--bench context"
+      "--features context-mode-aware --bench mode_aware"
+      "--features context-instant --bench instant_assemble"
+    ];
+    agent-mode = [ "--bench classify" ];
+    agent-memory = [ "--features memory-dimensions --bench dimensions" ];
+    agent-providers = [
+      "--features provider-pool --bench pool_select"
+      "--bench route_resolve"
+      "--features provider-consensus --bench gate_verdict"
+      "--features provider-branching --bench branch_dispatch"
+    ];
+    agent-digest = [ "--features digest-sqlite --bench digest_query" ];
+    agent-graph = [ "--bench graph_load" ];
+    agent-registry = [ "--bench registry_route" ];
+    agent-tokenizer = [ "--bench tokenize" ];
+  };
+
+  benchCheck =
+    crate: args:
+    craneLib.mkCargoDerivation (
+      commonArgs
+      // workspaceSlice.sliceArgs [ crate ]
+      // {
+        pname = "bench-${crate}";
+        version = "0.1.0";
+        doInstallCargoArtifacts = false;
+        nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [
+          versions.valgrind
+          versions.iai-callgrind-runner
+        ];
+        # iai-callgrind finds its runner via this env (or PATH); pin it explicitly.
+        IAI_CALLGRIND_RUNNER = "${versions.iai-callgrind-runner}/bin/iai-callgrind-runner";
+        buildPhaseCargoCommand = lib.concatMapStrings (a: "cargo bench -p ${crate} ${a}\n") args;
+        installPhaseCommand = "mkdir -p $out";
+      }
+    );
+in
+{
+  # The table itself, for the `leak-bench-sync` check.
+  inherit runs;
+  checks = lib.mapAttrs' (
+    crate: args: lib.nameValuePair "bench-${crate}" (benchCheck crate args)
+  ) runs;
+}

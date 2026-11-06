@@ -51,10 +51,14 @@ The bench (see `crates/agent-metrics/benches/metrics.rs` for the exemplar):
 
 ```rust
 use std::hint::black_box;
-use iai_callgrind::{library_benchmark, library_benchmark_group, main};
+use iai_callgrind::{
+    library_benchmark, library_benchmark_group, main, Callgrind, EventKind,
+    LibraryBenchmarkConfig,
+};
 
 // NB: iai-callgrind's macro rejects `///` docs on the benched fn — use `//`.
-#[library_benchmark]
+#[library_benchmark(config = LibraryBenchmarkConfig::default()
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_400_000u64)])))]
 fn hot_path() -> Output {
     black_box(do_the_thing(black_box(input())))
 }
@@ -67,16 +71,22 @@ Use `agent-testkit`'s `bench` module for **deterministic inputs** (no clocks / n
 randomness — instruction counts must be reproducible): `write_tree`,
 `message_history`, `fact_corpus`.
 
-Then add an **absolute ceiling** for the new bench to `nix/checks/bench.nix`:
+The `hard_limits` value is the bench's **absolute ceiling**: exceeding it makes
+`cargo bench` exit non-zero. Start with a placeholder and run it once
+(`nix run .#bench -- -p <crate>`); a run over the placeholder fails but still prints the
+observed `Instructions:` count. Set the ceiling ~40% above that count. When a legitimate change
+moves the count, bump the ceiling in the same PR — the diff is the record of the perf
+change.
+
+Then add the bench to the `runs` table in `nix/checks/bench.nix`, under its crate:
 
 ```nix
-cargo bench -p <crate> --bench <feature> -- hot_path \
-  --callgrind-limits='ir=<~1.4× the observed instruction count>'
+agent-foo = [ "--features <feature> --bench <feature>" ];
 ```
 
-Run it once (`nix run .#bench`) to read the observed `Instructions:` count, then
-set the ceiling ~40% above it. When a legitimate change moves the count, bump the
-ceiling in the same PR — the diff is the record of the perf change.
+Each crate in the table is its own `bench-<crate>` check on the crate's source slice
+(see [testing.md](testing.md#per-crate-test-slices-the-gate)), so an edit re-runs only
+the benches that can see it; `bench` builds them all.
 
 ## Writing a leak test
 
@@ -106,9 +116,13 @@ fn hot_path_does_not_leak() {
 }
 ```
 
-Add the crate to `nix/checks/leak.nix` (one `cargo test -p <crate> --features
-dhat-heap --test leak` line). The `dhat-heap` feature keeps the global allocator
-out of every normal build.
+Add the crate to the `runs` table in `nix/checks/leak.nix`
+(`agent-foo = [ "--features dhat-heap --test leak" ];`); it becomes its own
+`leak-<crate>` check on the crate's slice, and `leak` builds them all. The
+`dhat-heap` feature keeps the global allocator out of every normal build.
+
+The `leak-bench-sync` check fails while a `tests/*leak*.rs` or `benches/*.rs` file
+has no row in its table.
 
 ## Observability assertions
 

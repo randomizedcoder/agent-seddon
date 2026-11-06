@@ -193,8 +193,14 @@ Three things keep a slice testing what the whole-workspace `cargo test` tested:
 - **Paths.** Every slice unpacks to the same directory, so cargo reuses the foundation
   build's compiled crates (it keys a workspace crate by its absolute path).
 
-The rest of the gate (`coverage`, `leak`, `bench`, `feature-matrix`, the binary and e2e
-checks) still builds from the whole workspace, so it re-runs on any change.
+The leak tests and benches are split too: `leak-<crate>` and `bench-<crate>` run a
+crate's rows of [`nix/checks/leak.nix`](../../nix/checks/leak.nix) and
+[`nix/checks/bench.nix`](../../nix/checks/bench.nix) on its slice, with `leak` and
+`bench` as the aggregates (see [benchmarking.md](benchmarking.md)).
+
+The rest of the gate (`coverage`, `feature-matrix`, the binary and e2e checks) still
+builds from the whole workspace, so it re-runs on any change. Coverage stays whole
+because its `--fail-under-lines` floor is one workspace-wide percentage.
 
 ## Coverage
 
