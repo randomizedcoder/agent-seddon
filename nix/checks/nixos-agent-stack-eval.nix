@@ -128,7 +128,21 @@ let
     };
     networking.firewall.enable = false;
   };
-  hdxAppEnv = c: c.virtualisation.oci-containers.containers.agent-seddon-hyperdx-app.environment;
+  # ...and the l2 shape: LAN, firewall on, UI opened.
+  hdxOpenLan = evalWith {
+    services.agentSeddon = {
+      publicHost = "172.16.50.46";
+      openFirewall = true;
+      hyperdx = {
+        enable = true;
+        auth = false;
+        frontendUrl = "http://l2:8080";
+      };
+    };
+  };
+  hdxLanWarns = c: lib.any (lib.hasInfix "no login; anyone who reaches") c.warnings;
+  hdxApp = c: c.virtualisation.oci-containers.containers.agent-seddon-hyperdx-app;
+  hdxAppEnv = c: (hdxApp c).environment;
   # An agent's merged settings (what its --config TOML is rendered from).
   agentToml = c: name: c.services.agentSeddon.renderedSettings.${name};
   originsOk =
@@ -292,7 +306,21 @@ let
     # auth = false: local app mode, with HyperDX's exact guard string (anything else is
     # ignored and the login stays).
     hyperdxNoAuthLocalMode =
-      (hdxAppEnv hdxOpen).IS_LOCAL_APP_MODE or "" == "DANGEROUSLY_is_local_app_mode💀";
+      ((hdxAppEnv hdxOpen).IS_LOCAL_APP_MODE or "") == "DANGEROUSLY_is_local_app_mode💀";
+    # ...which the image's entry.sh would overwrite, so the app starts a copy without
+    # that line and refuses to start if the line is not there. The default keeps the
+    # image's own entrypoint.
+    hyperdxNoAuthEntryStripsOverride =
+      let
+        a = hdxApp hdxOpen;
+        script = lib.last a.cmd;
+      in
+      a.entrypoint == "/bin/sh"
+      && lib.hasInfix ''grep -qxF 'export IS_LOCAL_APP_MODE="REQUIRED_AUTH"' /etc/local/entry.sh || {'' script
+      && lib.hasInfix "exit 1" script
+      && lib.hasInfix ''grep -vxF 'export IS_LOCAL_APP_MODE="REQUIRED_AUTH"' /etc/local/entry.sh'' script
+      && lib.hasInfix "exec sh /tmp/entry-local.sh" script;
+    hyperdxAuthKeepsImageEntry = (hdxApp hdx).entrypoint == null && (hdxApp hdx).cmd == [ ];
     # ...no key to copy, so no key timer, key unit or restart-on-key.
     hyperdxNoAuthNoKeyUnits =
       !(hdxOpen.systemd.timers ? agent-seddon-hyperdx-key)
@@ -306,8 +334,13 @@ let
         t = (agentToml hdxOpen "fleet").telemetry;
       in
       t.otlp_endpoint == "http://127.0.0.1:4317" && !(t ? otlp_headers_file);
-    # The firewall-off warning says nothing asks for a credential.
-    hyperdxNoAuthWarnsOpen = lib.any (lib.hasInfix "neither OTLP nor the API asks for any credential") hdxOpenNoFirewall.warnings;
+    # The firewall-off warning says nothing asks for a credential (OpAMP never does).
+    hyperdxNoAuthWarnsOpen =
+      lib.any (lib.hasInfix "neither OTLP nor the API asks for one either") hdxOpenNoFirewall.warnings
+      && lib.any (lib.hasInfix "OpAMP never") (hdxNoFirewall.warnings);
+    # LAN + firewall on + no login: the opened UI is warned about; login on, or no LAN,
+    # is not.
+    hyperdxNoAuthLanWarns = hdxLanWarns hdxOpenLan && !(hdxLanWarns hdx) && !(hdxLanWarns hdxOpen);
     # LAN + firewall ⇒ only the UI opens; OTLP, the API, OpAMP and Mongo stay closed.
     hyperdxUiOpened = has hdx 8080 && !(has lan 8080);
     hyperdxInternalClosed = lib.all (p: !(has hdx p)) [

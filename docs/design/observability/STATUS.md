@@ -68,6 +68,11 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   installed and the agents export without `otlp_headers_file`. The default stays
   `true`. `nixos-agent-stack-eval` rows: default not local, the exact guard string, no
   key units, agents still export, the firewall-off warning names the open endpoints.
+  Review fix: the image's `entry.sh` overwrites `IS_LOCAL_APP_MODE` with
+  `REQUIRED_AUTH`, so the app starts from a copy without that line and refuses to start
+  if the line is missing (rows: the start command strips it, the default keeps the
+  image's entrypoint); a LAN + `openFirewall` warning; the runbook's "not possible"
+  note corrected. Live check (UI with no login, collector up at start) after deploy.
 
 ## Cross-references updated by Phase 0
 

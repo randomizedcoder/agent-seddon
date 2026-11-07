@@ -77,6 +77,17 @@ let
   # Login on (the default): sign-up mints the ingestion key the collector requires.
   # Off: HyperDX's local app mode, no login and no key.
   hdxAuth = cfg.hyperdx.auth;
+  # The app container's start command under auth = false: entry.sh minus its
+  # IS_LOCAL_APP_MODE override (busybox sh; the image has no bash).
+  hdxEntryOverride = ''export IS_LOCAL_APP_MODE="REQUIRED_AUTH"'';
+  hdxLocalEntry = ''
+    grep -qxF '${hdxEntryOverride}' /etc/local/entry.sh || {
+      echo "agent-seddon: /etc/local/entry.sh no longer sets IS_LOCAL_APP_MODE as expected; refusing to start without a login" >&2
+      exit 1
+    }
+    grep -vxF '${hdxEntryOverride}' /etc/local/entry.sh > /tmp/entry-local.sh
+    exec sh /tmp/entry-local.sh
+  '';
   hdxDir = "${stateDir}/hyperdx";
   # Written by agent-seddon-hyperdx-key once an account exists; the agents read it at
   # start (a missing file only turns the OTLP exporter off).
@@ -875,15 +886,23 @@ in
           # Host networking: only Mongo binds loopback; the collector (4317/4318) and the
           # app's API and OpAMP (8000/4320) listen on every address whatever publicHost
           # says, and only the firewall keeps them off the network.
-          warnings = lib.optional (!config.networking.firewall.enable) ''
-            services.agentSeddon.hyperdx: the firewall is off, so HyperDX's OTLP (4317/4318),
-            API (8000) and OpAMP (4320) ports are reachable from the network. ${
-              if hdxAuth then
-                ''OTLP needs the ingestion key only when the team's "collector authentication" setting is on.''
-              else
-                "With hyperdx.auth = false neither OTLP nor the API asks for any credential."
-            }
-          '';
+          warnings =
+            lib.optional (!config.networking.firewall.enable) ''
+              services.agentSeddon.hyperdx: the firewall is off, so HyperDX's OTLP (4317/4318),
+              API (8000) and OpAMP (4320) ports are reachable from the network. OpAMP never
+              asks for a credential. ${
+                if hdxAuth then
+                  ''OTLP needs the ingestion key only when the team's "collector authentication" setting is on.''
+                else
+                  "With hyperdx.auth = false neither OTLP nor the API asks for one either."
+              }
+            ''
+            # The likelier exposure: the UI is opened to the LAN on purpose.
+            ++ lib.optional (!hdxAuth && cfg.openFirewall && lan && config.networking.firewall.enable) ''
+              services.agentSeddon.hyperdx: auth = false and openFirewall open the HyperDX UI
+              (${toString hdx.ports.ui}) to the network with no login; anyone who reaches
+              ${cfg.hyperdx.frontendUrl} has full HyperDX access.
+            '';
 
           virtualisation.oci-containers.containers = {
             ${mongo} = {
@@ -911,11 +930,23 @@ in
                 USAGE_STATS_ENABLED = "false";
                 DEFAULT_SOURCES = hdx.defaultSources;
               }
-              # HyperDX's switch for local app mode (the value is its own guard string).
+              # HyperDX's switch for local app mode; the value is its own guard string
+              # (packages/api config.ts: IS_LOCAL_APP_MODE === 'DANGEROUSLY_is_local_app_mode💀').
               // lib.optionalAttrs (!hdxAuth) { IS_LOCAL_APP_MODE = "DANGEROUSLY_is_local_app_mode💀"; };
               # DEFAULT_CONNECTIONS carries the agent_viewer password.
               environmentFiles = [ "${hdxDir}/app.env" ];
               extraOptions = [ "--network=host" ];
+            }
+            # The image's /etc/local/entry.sh overwrites IS_LOCAL_APP_MODE with
+            # "REQUIRED_AUTH" before starting the API, so run a copy without that line.
+            # If the image stops setting it that exact way, refuse to start rather than
+            # silently keep the login.
+            // lib.optionalAttrs (!hdxAuth) {
+              entrypoint = "/bin/sh";
+              cmd = [
+                "-c"
+                hdxLocalEntry
+              ];
             };
             ${otel} = {
               image = hdx.otelImage;
