@@ -285,6 +285,9 @@ decomposed stack (see §3):
 > `isLocalMode` is browser-storage mode, a different thing, and stays off.) The NixOS
 > module's `hyperdx.auth = false` sets the flag *and* starts the app from a copy of
 > `entry.sh` without that line ([deployment-nixos.md](deployment-nixos.md)). The
+> image tag (`:2`) moves, and the start command only guards the `entry.sh` line, not
+> the value the API accepts: after an image change under `auth = false`, open the UI
+> and confirm there is still no login. The
 > all-in-one image this runbook starts was not re-checked; on a trusted LAN,
 > use `CLICKSTACK_FRONTEND_URL` + login, or a tunnel.
 

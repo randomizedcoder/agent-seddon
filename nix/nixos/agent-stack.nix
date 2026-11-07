@@ -509,6 +509,7 @@ in
           collector accepts OTLP only with the ingestion key HyperDX mints when the first
           account is registered (open `frontendUrl` and sign up);
           `agent-seddon-hyperdx-key.timer` then copies it to the agents and restarts them.
+          With `auth = false` there is no account and no key (local app mode).
           Needs `clickhouse.enable`.
         '';
       };
@@ -894,7 +895,7 @@ in
                 if hdxAuth then
                   ''OTLP needs the ingestion key only when the team's "collector authentication" setting is on.''
                 else
-                  "With hyperdx.auth = false neither OTLP nor the API asks for one either."
+                  "With hyperdx.auth = false neither OTLP nor the API asks for one either, and the UI (${toString hdx.ports.ui}) is open with no login."
               }
             ''
             # The likelier exposure: the UI is opened to the LAN on purpose.

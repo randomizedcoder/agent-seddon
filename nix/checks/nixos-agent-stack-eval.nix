@@ -128,6 +128,14 @@ let
     };
     networking.firewall.enable = false;
   };
+  # ...firewall off on a loopback publicHost: the containers still bind every address.
+  hdxOpenLoopbackNoFirewall = evalWith {
+    services.agentSeddon.hyperdx = {
+      enable = true;
+      auth = false;
+    };
+    networking.firewall.enable = false;
+  };
   # ...and the l2 shape: LAN, firewall on, UI opened.
   hdxOpenLan = evalWith {
     services.agentSeddon = {
@@ -314,11 +322,12 @@ let
       let
         a = hdxApp hdxOpen;
         script = lib.last a.cmd;
+        line = ''export IS_LOCAL_APP_MODE="REQUIRED_AUTH"'';
       in
       a.entrypoint == "/bin/sh"
-      && lib.hasInfix ''grep -qxF 'export IS_LOCAL_APP_MODE="REQUIRED_AUTH"' /etc/local/entry.sh || {'' script
+      && lib.hasInfix "grep -qxF '${line}' /etc/local/entry.sh ||" script
       && lib.hasInfix "exit 1" script
-      && lib.hasInfix ''grep -vxF 'export IS_LOCAL_APP_MODE="REQUIRED_AUTH"' /etc/local/entry.sh'' script
+      && lib.hasInfix "grep -vxF '${line}' /etc/local/entry.sh" script
       && lib.hasInfix "exec sh /tmp/entry-local.sh" script;
     hyperdxAuthKeepsImageEntry = (hdxApp hdx).entrypoint == null && (hdxApp hdx).cmd == [ ];
     # ...no key to copy, so no key timer, key unit or restart-on-key.
@@ -336,8 +345,18 @@ let
       t.otlp_endpoint == "http://127.0.0.1:4317" && !(t ? otlp_headers_file);
     # The firewall-off warning says nothing asks for a credential (OpAMP never does).
     hyperdxNoAuthWarnsOpen =
-      lib.any (lib.hasInfix "neither OTLP nor the API asks for one either") hdxOpenNoFirewall.warnings
-      && lib.any (lib.hasInfix "OpAMP never") (hdxNoFirewall.warnings);
+      lib.all
+        (
+          c:
+          lib.any (lib.hasInfix "neither OTLP nor the API asks for one either") c.warnings
+          && lib.any (lib.hasInfix "the UI (8080) is open with no login") c.warnings
+        )
+        [
+          hdxOpenNoFirewall
+          hdxOpenLoopbackNoFirewall
+        ]
+      && lib.any (lib.hasInfix "OpAMP never") hdxNoFirewall.warnings
+      && !(lib.any (lib.hasInfix "open with no login") hdxNoFirewall.warnings);
     # LAN + firewall on + no login: the opened UI is warned about; login on, or no LAN,
     # is not.
     hyperdxNoAuthLanWarns = hdxLanWarns hdxOpenLan && !(hdxLanWarns hdx) && !(hdxLanWarns hdxOpen);
