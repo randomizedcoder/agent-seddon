@@ -278,11 +278,17 @@ decomposed stack (see §3):
    (If you browse by hostname `l2:8080` instead, the cookie won't match — use the IP,
    or an SSH tunnel to `localhost:8080`.)
 
-> **Disabling auth:** not possible on this image. `HYPERDX_IMAGE=all-in-one-auth`
-> bakes login into the *frontend*, so the runtime `IS_LOCAL_APP_MODE` flag only
-> bypasses the backend — the UI still gates you. A true no-auth deployment needs
-> HyperDX's separate `all-in-one-noauth` image, which isn't published under the
-> `hyperdx-all-in-one` repo tags (only `2`/`latest`, both auth). On a trusted LAN,
+> **Disabling auth:** a plain `-e IS_LOCAL_APP_MODE=…` does nothing. In the
+> decomposed app image (`hyperdx/hyperdx:2`, checked 2026-11-07) `/etc/local/entry.sh`
+> runs `export IS_LOCAL_APP_MODE="REQUIRED_AUTH"` before it starts the API, so the API
+> keeps asking for a login and the UI keeps showing it. (The frontend's compiled-in
+> `isLocalMode` is browser-storage mode, a different thing, and stays off.) The NixOS
+> module's `hyperdx.auth = false` sets the flag *and* starts the app from a copy of
+> `entry.sh` without that line ([deployment-nixos.md](deployment-nixos.md)). The
+> image tag (`:2`) moves, and the start command only guards the `entry.sh` line, not
+> the value the API accepts: after an image change under `auth = false`, open the UI
+> and confirm there is still no login. The
+> all-in-one image this runbook starts was not re-checked; on a trusted LAN,
 > use `CLICKSTACK_FRONTEND_URL` + login, or a tunnel.
 
 > **Scraping the key from the UI** (only if you didn't pin it): Team Settings →

@@ -74,6 +74,20 @@ let
   pg = config.services.agentPostgres;
   hdx = seddon.hyperdx;
   hdxEnabled = cfg.hyperdx.enable;
+  # Login on (the default): sign-up mints the ingestion key the collector requires.
+  # Off: HyperDX's local app mode, no login and no key.
+  hdxAuth = cfg.hyperdx.auth;
+  # The app container's start command under auth = false: entry.sh minus its
+  # IS_LOCAL_APP_MODE override (busybox sh; the image has no bash).
+  hdxEntryOverride = ''export IS_LOCAL_APP_MODE="REQUIRED_AUTH"'';
+  hdxLocalEntry = ''
+    grep -qxF '${hdxEntryOverride}' /etc/local/entry.sh || {
+      echo "agent-seddon: /etc/local/entry.sh no longer sets IS_LOCAL_APP_MODE as expected; refusing to start without a login" >&2
+      exit 1
+    }
+    grep -vxF '${hdxEntryOverride}' /etc/local/entry.sh > /tmp/entry-local.sh
+    exec sh /tmp/entry-local.sh
+  '';
   hdxDir = "${stateDir}/hyperdx";
   # Written by agent-seddon-hyperdx-key once an account exists; the agents read it at
   # start (a missing file only turns the OTLP exporter off).
@@ -155,8 +169,9 @@ let
     (lib.optionalAttrs hdxEnabled {
       telemetry = {
         otlp_endpoint = "http://127.0.0.1:${toString hdx.ports.otlpGrpc}";
-        otlp_headers_file = otlpHeadersFile;
-      };
+      }
+      # Without a login there is no key, and a missing headers file turns the exporter off.
+      // lib.optionalAttrs hdxAuth { otlp_headers_file = otlpHeadersFile; };
     })
   ];
 
@@ -494,6 +509,7 @@ in
           collector accepts OTLP only with the ingestion key HyperDX mints when the first
           account is registered (open `frontendUrl` and sign up);
           `agent-seddon-hyperdx-key.timer` then copies it to the agents and restarts them.
+          With `auth = false` there is no account and no key (local app mode).
           Needs `clickhouse.enable`.
         '';
       };
@@ -506,6 +522,20 @@ in
           The URL browsers open HyperDX at. Its session cookie binds to this host, so it
           must be the name you browse with (a sign-in elsewhere bounces back to login).
           Also the portal's Launch link.
+        '';
+      };
+      auth = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Require a HyperDX login. `false` runs HyperDX's local app mode: no sign-up
+          and no login, one built-in team whose sources and connections are seeded from
+          the managed ClickHouse at start, and a collector that accepts OTLP without an
+          ingestion key (so the key timer is not installed and the agents export with no
+          header). Anyone who can reach `frontendUrl` then has full HyperDX access, and
+          anyone who can reach the collector can write traces: use it only on a trusted
+          network. Sources, saved searches and dashboards made under a signed-up team
+          stay in MongoDB but are not shown in local mode.
         '';
       };
     };
@@ -857,11 +887,23 @@ in
           # Host networking: only Mongo binds loopback; the collector (4317/4318) and the
           # app's API and OpAMP (8000/4320) listen on every address whatever publicHost
           # says, and only the firewall keeps them off the network.
-          warnings = lib.optional (!config.networking.firewall.enable) ''
-            services.agentSeddon.hyperdx: the firewall is off, so HyperDX's OTLP (4317/4318),
-            API (8000) and OpAMP (4320) ports are reachable from the network. OTLP needs the
-            ingestion key only when the team's "collector authentication" setting is on.
-          '';
+          warnings =
+            lib.optional (!config.networking.firewall.enable) ''
+              services.agentSeddon.hyperdx: the firewall is off, so HyperDX's OTLP (4317/4318),
+              API (8000) and OpAMP (4320) ports are reachable from the network. OpAMP never
+              asks for a credential. ${
+                if hdxAuth then
+                  ''OTLP needs the ingestion key only when the team's "collector authentication" setting is on.''
+                else
+                  "With hyperdx.auth = false neither OTLP nor the API asks for one either, and the UI (${toString hdx.ports.ui}) is open with no login."
+              }
+            ''
+            # The likelier exposure: the UI is opened to the LAN on purpose.
+            ++ lib.optional (!hdxAuth && cfg.openFirewall && lan && config.networking.firewall.enable) ''
+              services.agentSeddon.hyperdx: auth = false and openFirewall open the HyperDX UI
+              (${toString hdx.ports.ui}) to the network with no login; anyone who reaches
+              ${cfg.hyperdx.frontendUrl} has full HyperDX access.
+            '';
 
           virtualisation.oci-containers.containers = {
             ${mongo} = {
@@ -888,10 +930,24 @@ in
                 OTEL_SERVICE_NAME = "hdx-oss-app";
                 USAGE_STATS_ENABLED = "false";
                 DEFAULT_SOURCES = hdx.defaultSources;
-              };
+              }
+              # HyperDX's switch for local app mode; the value is its own guard string
+              # (packages/api config.ts: IS_LOCAL_APP_MODE === 'DANGEROUSLY_is_local_app_mode💀').
+              // lib.optionalAttrs (!hdxAuth) { IS_LOCAL_APP_MODE = "DANGEROUSLY_is_local_app_mode💀"; };
               # DEFAULT_CONNECTIONS carries the agent_viewer password.
               environmentFiles = [ "${hdxDir}/app.env" ];
               extraOptions = [ "--network=host" ];
+            }
+            # The image's /etc/local/entry.sh overwrites IS_LOCAL_APP_MODE with
+            # "REQUIRED_AUTH" before starting the API, so run a copy without that line.
+            # If the image stops setting it that exact way, refuse to start rather than
+            # silently keep the login.
+            // lib.optionalAttrs (!hdxAuth) {
+              entrypoint = "/bin/sh";
+              cmd = [
+                "-c"
+                hdxLocalEntry
+              ];
             };
             ${otel} = {
               image = hdx.otelImage;
@@ -967,7 +1023,7 @@ in
             # Copy the ingestion key HyperDX minted at sign-up to the agents (as the OTLP
             # `authorization` header). As the agent user, over Mongo's loopback port, with
             # the same sandbox as the agents. Quiet until the account exists.
-            agent-seddon-hyperdx-key = {
+            agent-seddon-hyperdx-key = lib.mkIf hdxAuth {
               description = "agent-seddon HyperDX ingestion key for the agents";
               wants = [ "agent-seddon-hyperdx-env.service" ];
               after = [
@@ -1008,7 +1064,7 @@ in
           }
           # A new key file restarts the agents (they read it at start). Root, to reach
           # PID 1; it runs nothing else.
-          // lib.optionalAttrs (agentUnits != [ ]) {
+          // lib.optionalAttrs (hdxAuth && agentUnits != [ ]) {
             agent-seddon-hyperdx-restart = {
               description = "Restart the agents for a new HyperDX ingestion key";
               serviceConfig = hardening // {
@@ -1018,14 +1074,14 @@ in
             };
           };
 
-          systemd.paths = lib.mkIf (agentUnits != [ ]) {
+          systemd.paths = lib.mkIf (hdxAuth && agentUnits != [ ]) {
             agent-seddon-hyperdx-restart = {
               wantedBy = [ "multi-user.target" ];
               pathConfig.PathChanged = otlpHeadersFile;
             };
           };
 
-          systemd.timers.agent-seddon-hyperdx-key = {
+          systemd.timers.agent-seddon-hyperdx-key = lib.mkIf hdxAuth {
             description = "Copy the HyperDX ingestion key to the agents";
             wantedBy = [ "timers.target" ];
             timerConfig = {
