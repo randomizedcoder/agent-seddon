@@ -61,6 +61,14 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   would overwrite a hand-written `dashboards/<uid>.json`; the Tenant variable lists `user`
   from every agent family, not only review-fleet ones.
 
+- **HyperDX without a login** (2026-11-07): `services.agentSeddon.hyperdx.auth = false`
+  runs HyperDX's local app mode for a trusted lab network: no sign-up or login, one
+  built-in team seeded with the ClickHouse connection and sources at start, and no
+  collector authentication, so the key timer, key unit and restart-on-key path are not
+  installed and the agents export without `otlp_headers_file`. The default stays
+  `true`. `nixos-agent-stack-eval` rows: default not local, the exact guard string, no
+  key units, agents still export, the firewall-off warning names the open endpoints.
+
 ## Cross-references updated by Phase 0
 
 - [`../review-fleet/07-observability.md`](../review-fleet/07-observability.md) — the "no repo/PR in

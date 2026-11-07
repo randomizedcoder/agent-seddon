@@ -21,7 +21,7 @@ Envoy and ClickHouse, a `portal-web` dev server) with systemd units that a
 | `agent-seddon-portal` | `static-web-server` over a hermetic Flutter web bundle (`nix/portal/web-bundle.nix`) | 8092 |
 | `podman-agent-seddon-{mongo,hyperdx-app,hyperdx-otel}` | opt-in `hyperdx.enable`: HyperDX's three containers (`nix/hyperdx`), host network, over the managed ClickHouse | UI 8080; OTLP, API, OpAMP and Mongo on loopback |
 | `agent-seddon-hyperdx-env` | oneshot: renders the containers' secret env files (viewer connection, collector's admin password) into `/var/lib/agent-seddon/hyperdx` (0700) | — |
-| `agent-seddon-hyperdx-key` (timer, 2 min) | agent user: copies the ingestion key HyperDX mints at sign-up to `hyperdx/otlp.headers` when it changes | — |
+| `agent-seddon-hyperdx-key` (timer, 2 min; not with `hyperdx.auth = false`) | agent user: copies the ingestion key HyperDX mints at sign-up to `hyperdx/otlp.headers` when it changes | — |
 | `agent-seddon-hyperdx-restart` (path unit on that file) | root: `systemctl try-restart` of the enabled agents, nothing else | — |
 
 ## Where the data lives
@@ -123,6 +123,18 @@ The collector checks that key only when the team's collector authentication is o
 (HyperDX → Team settings; off by default). The agents always send it, so turning it
 on needs no other change, and it is what keeps other hosts' OTLP out when the
 collector's ports are reachable.
+
+**No login (`hyperdx.auth = false`).** For a trusted lab network, the module can run
+HyperDX's local app mode instead (`IS_LOCAL_APP_MODE` on the app container): there is
+no sign-up and no login, and the app serves one built-in team whose ClickHouse
+connection and sources are seeded from `DEFAULT_CONNECTIONS` / `DEFAULT_SOURCES` at
+start (only when that team has none, so edits made in the UI survive restarts). That
+team never enforces collector authentication, so the collector accepts OTLP without a
+key, and the module drops the key timer, the key unit and the restart-on-key path; the
+agents export with no `otlp_headers_file`. Anyone who can reach `frontendUrl` has full
+HyperDX access and anyone who can reach 4317/4318 can write traces, so keep the
+firewall on. Sources, saved searches and dashboards created under a signed-up team stay
+in MongoDB but are not shown in local mode (turning `auth` back on shows them again).
 
 Model calls and tool calls carry the OpenTelemetry GenAI attributes
 (`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`,

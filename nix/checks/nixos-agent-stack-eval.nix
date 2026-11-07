@@ -111,6 +111,24 @@ let
     networking.firewall.enable = false;
   };
   hdxWarns = c: lib.any (lib.hasInfix "services.agentSeddon.hyperdx: the firewall is off") c.warnings;
+  # hyperdx.auth = false: HyperDX's local app mode.
+  hdxOpen = evalWith {
+    services.agentSeddon.hyperdx = {
+      enable = true;
+      auth = false;
+    };
+  };
+  hdxOpenNoFirewall = evalWith {
+    services.agentSeddon = {
+      publicHost = "172.16.50.46";
+      hyperdx = {
+        enable = true;
+        auth = false;
+      };
+    };
+    networking.firewall.enable = false;
+  };
+  hdxAppEnv = c: c.virtualisation.oci-containers.containers.agent-seddon-hyperdx-app.environment;
   # An agent's merged settings (what its --config TOML is rendered from).
   agentToml = c: name: c.services.agentSeddon.renderedSettings.${name};
   originsOk =
@@ -269,6 +287,27 @@ let
       && t.otlp_headers_file == "/var/lib/agent-seddon/hyperdx/otlp.headers"
       && t.otel_service_name == "agent-seddon-fleet";
     hyperdxNoExportWhenOff = !((agentToml lo "fleet").telemetry ? otlp_headers_file);
+    # Login on by default: the app is not in local mode.
+    hyperdxAuthByDefault = !(hdxAppEnv hdx ? IS_LOCAL_APP_MODE);
+    # auth = false: local app mode, with HyperDX's exact guard string (anything else is
+    # ignored and the login stays).
+    hyperdxNoAuthLocalMode =
+      (hdxAppEnv hdxOpen).IS_LOCAL_APP_MODE or "" == "DANGEROUSLY_is_local_app_mode💀";
+    # ...no key to copy, so no key timer, key unit or restart-on-key.
+    hyperdxNoAuthNoKeyUnits =
+      !(hdxOpen.systemd.timers ? agent-seddon-hyperdx-key)
+      && !(hdxOpen.systemd.services ? agent-seddon-hyperdx-key)
+      && !(hdxOpen.systemd.services ? agent-seddon-hyperdx-restart)
+      && !(hdxOpen.systemd.paths ? agent-seddon-hyperdx-restart);
+    # ...and the agents still export, with no headers file (a missing one turns the
+    # exporter off).
+    hyperdxNoAuthAgentsExport =
+      let
+        t = (agentToml hdxOpen "fleet").telemetry;
+      in
+      t.otlp_endpoint == "http://127.0.0.1:4317" && !(t ? otlp_headers_file);
+    # The firewall-off warning says nothing asks for a credential.
+    hyperdxNoAuthWarnsOpen = lib.any (lib.hasInfix "neither OTLP nor the API asks for any credential") hdxOpenNoFirewall.warnings;
     # LAN + firewall ⇒ only the UI opens; OTLP, the API, OpAMP and Mongo stay closed.
     hyperdxUiOpened = has hdx 8080 && !(has lan 8080);
     hyperdxInternalClosed = lib.all (p: !(has hdx p)) [
