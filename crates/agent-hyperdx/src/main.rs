@@ -12,8 +12,8 @@
 //! backoff (agent-retry). Exit 0 when every item is written or left to its owner.
 
 use agent_hyperdx::{
-    check_layout, is_object_id, parse_sources, plan, provision, resolve, retryable, Api,
-    Collection, Desired, Error, Result, MAX_BODY_BYTES,
+    check_layout, is_object_id, parse_sources, plan, provision, resolve, retryable, sources_in,
+    Api, Collection, Desired, Error, Result, MAX_BODY_BYTES,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -38,8 +38,10 @@ fn parse_args() -> std::result::Result<Args, String> {
         }
     }
     let template = template.ok_or("--template is required")?;
-    if !check && api.is_none() {
-        return Err("--api is required (or --check)".into());
+    match (check, &api) {
+        (false, None) => return Err("--api is required (or --check)".into()),
+        (true, Some(_)) => return Err("--check never contacts the API; drop --api".into()),
+        _ => {}
     }
     Ok(Args {
         api,
@@ -163,20 +165,6 @@ fn check(desired: &Desired) -> Result<()> {
     Ok(())
 }
 
-fn sources_in(v: &Value) -> Vec<String> {
-    match v {
-        Value::Object(o) => o
-            .iter()
-            .flat_map(|(k, x)| match (k.as_str(), x) {
-                ("source", Value::String(s)) => vec![s.clone()],
-                _ => sources_in(x),
-            })
-            .collect(),
-        Value::Array(a) => a.iter().flat_map(sources_in).collect(),
-        _ => Vec::new(),
-    }
-}
-
 async fn run(args: Args) -> Result<()> {
     let bytes = std::fs::read(&args.template)
         .map_err(|e| Error::Invalid(format!("{}: {e}", args.template)))?;
@@ -213,6 +201,12 @@ async fn run(args: Args) -> Result<()> {
         "hyperdx-provision: created {:?}, updated {:?}, left to their owners {:?}",
         report.created, report.updated, report.skipped
     );
+    for name in &report.duplicates {
+        eprintln!(
+            "hyperdx-provision: more than one {name:?} carries the agent-seddon tag; only \
+             the first is updated, delete the others"
+        );
+    }
     Ok(())
 }
 

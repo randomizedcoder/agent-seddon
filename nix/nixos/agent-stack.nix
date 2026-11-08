@@ -1112,6 +1112,10 @@ in
                 (podmanUnit app)
               ];
               after = [ (podmanUnit app) ];
+              # A oneshot that stays active is not re-run by `wants`; PartOf makes an app
+              # restart (say, after a wiped Mongo reseeded the sources with new ids)
+              # restart it too.
+              partOf = [ (podmanUnit app) ];
               restartTriggers = [ hdx.dashboardsTemplate ];
               serviceConfig = hardening // {
                 Type = "oneshot";

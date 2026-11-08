@@ -367,12 +367,13 @@ let
         u = svc hdxOpen "agent-seddon-hyperdx-dashboards";
         exec = toString u.serviceConfig.ExecStart;
       in
-      lib.hasInfix "/bin/hyperdx-provision --api http://127.0.0.1:8000 --template /nix/store/" exec
+      lib.hasInfix "/bin/hyperdx-provision --api http://127.0.0.1:${toString agentSeddonDeploy.hyperdx.ports.api} --template /nix/store/" exec
       && lib.hasSuffix "-agent-seddon-hyperdx-dashboards.json" exec
       && u.serviceConfig.User == "agent-seddon"
       && u.serviceConfig.Type == "oneshot"
       && builtins.elem "podman-agent-seddon-hyperdx-app.service" u.wantedBy
       && builtins.elem "podman-agent-seddon-hyperdx-app.service" u.after
+      && builtins.elem "podman-agent-seddon-hyperdx-app.service" u.partOf
       && u.restartTriggers != [ ];
     hyperdxNoDashboardsWithLogin = !(hdx.systemd.services ? agent-seddon-hyperdx-dashboards);
     hyperdxNoDashboardsWhenOff = !(lo.systemd.services ? agent-seddon-hyperdx-dashboards);

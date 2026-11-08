@@ -81,7 +81,7 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   placeholders by kind, create/update/leave-alone plan keyed on name + the
   `agent-seddon` tag, fail-closed parsing of the API's ids before they reach a URL,
   bounded replies, agent-retry until the API and sources are up). Gate:
-  `hyperdx-dashboards` (`--check` over the template + three check-the-check fixtures)
+  `hyperdx-dashboards` (`--check` over the template + five check-the-check fixtures)
   and `nixos-agent-stack-eval` rows. #703 carry-overs: a Grafana `requires` on the creds
   unit, an assertion when the host's Grafana is off, URL ports bounded to 1-65535, and
   the dev container's read-only dashboards no longer claim `allowUiUpdates`. Still open:

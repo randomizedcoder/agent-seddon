@@ -195,6 +195,22 @@ pub fn resolve(template: &Value, sources: &Sources) -> Result<Value> {
     walk(template, None, sources, 0)
 }
 
+/// Every string under a `source` key, after [`resolve`] (`--check` asserts each is an
+/// ObjectId: a template that spells a source some other way is caught offline).
+pub fn sources_in(v: &Value) -> Vec<String> {
+    match v {
+        Value::Object(o) => o
+            .iter()
+            .flat_map(|(k, x)| match (k.as_str(), x) {
+                ("source", Value::String(s)) => vec![s.clone()],
+                _ => sources_in(x),
+            })
+            .collect(),
+        Value::Array(a) => a.iter().flat_map(sources_in).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// An item already in HyperDX.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Existing {
@@ -236,6 +252,8 @@ pub enum Action {
         id: String,
         name: String,
         body: Value,
+        /// More tagged items with this name: only `id` is updated.
+        duplicates: usize,
     },
     /// A same-named item exists without [`MANAGED_TAG`]: a person's, so left alone.
     SkipUserOwned {
@@ -276,6 +294,7 @@ pub fn plan(desired: &[Value], existing: &[Existing]) -> Result<Vec<Action>> {
                     id: e.id.clone(),
                     name,
                     body: body.clone(),
+                    duplicates: same.iter().filter(|e| e.managed).count() - 1,
                 },
                 None if !same.is_empty() => Action::SkipUserOwned { name },
                 None => Action::Create {
@@ -386,6 +405,9 @@ pub struct Report {
     pub created: Vec<String>,
     pub updated: Vec<String>,
     pub skipped: Vec<String>,
+    /// Updated items that have more than one tagged copy (the others are left as they
+    /// are; worth deleting).
+    pub duplicates: Vec<String>,
 }
 
 /// Resolve, plan and apply every collection. Stops at the first failed write.
@@ -408,12 +430,20 @@ pub async fn provision(api: &(dyn Api + Sync), desired: &Desired) -> Result<Repo
                     api.post(c.path(), &body).await?;
                     report.created.push(name);
                 }
-                Action::Update { id, name, body } => {
+                Action::Update {
+                    id,
+                    name,
+                    body,
+                    duplicates,
+                } => {
                     // Checked by parse_existing; checked again where it meets the URL.
                     if !is_object_id(&id) {
                         return Err(invalid("refusing a non-ObjectId id in a URL"));
                     }
                     api.patch(&format!("{}/{id}", c.path()), &body).await?;
+                    if duplicates > 0 {
+                        report.duplicates.push(name.clone());
+                    }
                     report.updated.push(name);
                 }
                 Action::SkipUserOwned { name } => report.skipped.push(name),
@@ -581,6 +611,7 @@ mod tests {
     #[case::positive_user_owned_left_alone(vec![mine("A")], vec![ex(D1, "A", false)], Ok(vec!["skip A"]))]
     #[case::corner_user_and_managed_same_name(vec![mine("A")], vec![ex(TRACE, "A", false), ex(D1, "A", true)], Ok(vec!["update A"]))]
     #[case::corner_others_untouched(vec![mine("A")], vec![ex(D1, "B", true)], Ok(vec!["create A"]))]
+    #[case::corner_two_managed_copies(vec![mine("A")], vec![ex(D1, "A", true), ex(TRACE, "A", true)], Ok(vec!["update A +1"]))]
     #[case::negative_duplicate(vec![mine("A"), mine("A")], vec![], Err(()))]
     #[case::negative_untagged(vec![json!({"name": "A"})], vec![], Err(()))]
     #[case::negative_not_object(vec![json!("A")], vec![], Err(()))]
@@ -595,9 +626,17 @@ mod tests {
             a.iter()
                 .map(|x| match x {
                     Action::Create { name, .. } => format!("create {name}"),
-                    Action::Update { id, name, .. } => {
+                    Action::Update {
+                        id,
+                        name,
+                        duplicates,
+                        ..
+                    } => {
                         assert_eq!(id, D1);
-                        format!("update {name}")
+                        match duplicates {
+                            0 => format!("update {name}"),
+                            n => format!("update {name} +{n}"),
+                        }
                     }
                     Action::SkipUserOwned { name } => format!("skip {name}"),
                 })
@@ -749,6 +788,7 @@ mod tests {
                 created: vec!["New".into(), "S".into()],
                 updated: vec!["Old".into()],
                 skipped: vec!["Mine".into()],
+                duplicates: vec![],
             }
         );
         let w = a.writes.lock().unwrap();
@@ -764,6 +804,34 @@ mod tests {
         // The placeholder reached HyperDX as the real id.
         assert_eq!(w[0].2["tiles"][0]["config"]["source"], TRACE);
         assert_eq!(w[2].2["source"], TRACE);
+    }
+
+    #[rstest]
+    #[case::positive_nested(json!({"tiles": [{"config": {"source": TRACE}}], "source": LOG}), vec![TRACE, LOG])]
+    #[case::corner_none(json!({"where": "x"}), vec![])]
+    #[case::corner_non_string_source(json!({"source": {"source": TRACE}}), vec![TRACE])]
+    #[case::adversarial_unresolved_placeholder(json!({"source": "$trace"}), vec!["$trace"])]
+    fn sources_in_cases(#[case] v: Value, #[case] want: Vec<&str>) {
+        let mut got = sources_in(&v);
+        let mut want: Vec<String> = want.into_iter().map(String::from).collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn corner_duplicate_managed_copies_are_reported() {
+        let mut a = api();
+        a.gets.insert(
+            "/dashboards",
+            Ok(json!([
+                {"id": D1, "name": "Old", "tags": [MANAGED_TAG]},
+                {"id": TRACE, "name": "Old", "tags": [MANAGED_TAG]},
+            ])),
+        );
+        let r = run(provision(&a, &desired())).unwrap();
+        assert_eq!(r.duplicates, vec!["Old".to_string()]);
+        assert!(r.updated.contains(&"Old".to_string()));
     }
 
     #[test]

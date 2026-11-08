@@ -7,7 +7,7 @@
 # API validates each write when the module provisions (and the tiles were checked
 # against the image's schema when they were written, see docs/deployment-nixos.md).
 #
-# Check-the-check: three broken templates must each be refused.
+# Check-the-check: five broken templates must each be refused.
 { pkgs, agentSeddonDeploy }:
 
 let
@@ -41,6 +41,31 @@ let
           name = "D";
           tags = tag;
           tiles = [ ((tile "a" 0) // { config.source = "$metric"; }) ];
+        }
+      ];
+    };
+    duplicateName = bad "duplicate-name" {
+      savedSearches = [
+        {
+          name = "S";
+          tags = tag;
+          source = "$trace";
+          where = "";
+        }
+        {
+          name = "S";
+          tags = tag;
+          source = "$trace";
+          where = "";
+        }
+      ];
+    };
+    badPlaceholder = bad "bad-placeholder" {
+      dashboards = [
+        {
+          name = "D";
+          tags = tag;
+          tiles = [ ((tile "a" 0) // { config.source = "$trace\n"; }) ];
         }
       ];
     };
