@@ -112,6 +112,19 @@ let
     themes.store = "postgres";
   };
 
+  # A URL's explicit port, if any, is 1-65535 (the URL regexes allow any 1-5 digits).
+  portOk =
+    u:
+    let
+      m = builtins.match ".*:0*([0-9]+)/?" u;
+    in
+    m == null
+    || (
+      let
+        p = lib.toInt (lib.head m);
+      in
+      p >= 1 && p <= 65535
+    );
   isLoopback = h: h == "127.0.0.1" || h == "localhost" || h == "::1";
   lan = !(isLoopback cfg.publicHost);
   bindHost = if lan then "0.0.0.0" else "127.0.0.1";
@@ -538,6 +551,19 @@ in
           stay in MongoDB but are not shown in local mode.
         '';
       };
+      dashboards = lib.mkOption {
+        type = lib.types.bool;
+        default = !cfg.hyperdx.auth;
+        defaultText = lib.literalExpression "!config.services.agentSeddon.hyperdx.auth";
+        description = ''
+          Provision the agent-seddon dashboards (overview, model calls, tools, review
+          fleet) and saved searches into HyperDX, each tagged `agent-seddon`, every time
+          the app starts or they change (`agent-seddon-hyperdx-dashboards`). They are
+          written through HyperDX's API, which validates them; one you edit in the UI is
+          overwritten on the next run, and a same-named dashboard without the tag is
+          left alone. Needs `auth = false`: with a login the API wants a session.
+        '';
+      };
     };
 
     grafana = {
@@ -613,8 +639,17 @@ in
               !hdxEnabled
               ||
                 builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" cfg.hyperdx.frontendUrl
-                != null;
+                != null
+                && portOk cfg.hyperdx.frontendUrl;
             message = "services.agentSeddon.hyperdx.frontendUrl must be `http(s)://host[:port]`.";
+          }
+          {
+            assertion = !(hdxEnabled && cfg.hyperdx.dashboards) || !cfg.hyperdx.auth;
+            message = "services.agentSeddon.hyperdx.dashboards needs hyperdx.auth = false: with a login HyperDX's API wants a session.";
+          }
+          {
+            assertion = !cfg.grafana.enable || config.services.grafana.enable;
+            message = "services.agentSeddon.grafana provisions into the host's Grafana, but services.grafana.enable is false.";
           }
           {
             assertion = !cfg.grafana.enable || chEnabled;
@@ -625,7 +660,8 @@ in
               cfg.grafana.prometheusUrl == null
               ||
                 builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" cfg.grafana.prometheusUrl
-                != null;
+                != null
+                && portOk cfg.grafana.prometheusUrl;
             message = "services.agentSeddon.grafana.prometheusUrl must be `http(s)://host[:port]`.";
           }
         ];
@@ -733,7 +769,8 @@ in
         # LoadCredential copies it to a file only the grafana unit can read.
         systemd.services.grafana = {
           after = [ "agent-seddon-clickhouse-creds.service" ];
-          wants = [ "agent-seddon-clickhouse-creds.service" ];
+          # Like postgresql-setup: without the password file LoadCredential fails anyway.
+          requires = [ "agent-seddon-clickhouse-creds.service" ];
           serviceConfig.LoadCredential = [ "ch-viewer:${chCredsDir}/viewer.password" ];
         };
       })
@@ -1064,6 +1101,29 @@ in
           }
           # A new key file restarts the agents (they read it at start). Root, to reach
           # PID 1; it runs nothing else.
+          # The agent-seddon dashboards and saved searches, through the app's API. Runs
+          # each time the app starts (a wiped Mongo reseeds the sources with new ids) and
+          # when the template changes; retries until the API answers and the sources exist.
+          // lib.optionalAttrs cfg.hyperdx.dashboards {
+            agent-seddon-hyperdx-dashboards = {
+              description = "agent-seddon HyperDX dashboards and saved searches";
+              wantedBy = [
+                "multi-user.target"
+                (podmanUnit app)
+              ];
+              after = [ (podmanUnit app) ];
+              restartTriggers = [ hdx.dashboardsTemplate ];
+              serviceConfig = hardening // {
+                Type = "oneshot";
+                RemainAfterExit = true;
+                User = cfg.user;
+                Group = cfg.group;
+                ExecStart = "${seddon.hyperdxProvision} --api http://127.0.0.1:${toString hdx.ports.api} --template ${hdx.dashboardsTemplate}";
+                Restart = "on-failure";
+                RestartSec = "1min";
+              };
+            };
+          }
           // lib.optionalAttrs (hdxAuth && agentUnits != [ ]) {
             agent-seddon-hyperdx-restart = {
               description = "Restart the agents for a new HyperDX ingestion key";

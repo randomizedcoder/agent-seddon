@@ -360,6 +360,35 @@ let
     # LAN + firewall on + no login: the opened UI is warned about; login on, or no LAN,
     # is not.
     hyperdxNoAuthLanWarns = hdxLanWarns hdxOpenLan && !(hdxLanWarns hdx) && !(hdxLanWarns hdxOpen);
+    # Dashboards: on by default without a login, off with one; through the app's API on
+    # loopback, as the agent user, re-run at each app start and template change.
+    hyperdxDashboardsWithoutLogin =
+      let
+        u = svc hdxOpen "agent-seddon-hyperdx-dashboards";
+        exec = toString u.serviceConfig.ExecStart;
+      in
+      lib.hasInfix "/bin/hyperdx-provision --api http://127.0.0.1:8000 --template /nix/store/" exec
+      && lib.hasSuffix "-agent-seddon-hyperdx-dashboards.json" exec
+      && u.serviceConfig.User == "agent-seddon"
+      && u.serviceConfig.Type == "oneshot"
+      && builtins.elem "podman-agent-seddon-hyperdx-app.service" u.wantedBy
+      && builtins.elem "podman-agent-seddon-hyperdx-app.service" u.after
+      && u.restartTriggers != [ ];
+    hyperdxNoDashboardsWithLogin = !(hdx.systemd.services ? agent-seddon-hyperdx-dashboards);
+    hyperdxNoDashboardsWhenOff = !(lo.systemd.services ? agent-seddon-hyperdx-dashboards);
+    # ...and asking for them with a login is refused (the API would 401).
+    hyperdxDashboardsNeedNoLogin = hdxFails { hyperdx.dashboards = true; };
+    hyperdxDashboardsOptOut =
+      let
+        c = evalWith {
+          services.agentSeddon.hyperdx = {
+            enable = true;
+            auth = false;
+            dashboards = false;
+          };
+        };
+      in
+      !(c.systemd.services ? agent-seddon-hyperdx-dashboards);
     # LAN + firewall ⇒ only the UI opens; OTLP, the API, OpAMP and Mongo stay closed.
     hyperdxUiOpened = has hdx 8080 && !(has lan 8080);
     hyperdxInternalClosed = lib.all (p: !(has hdx p)) [
@@ -376,6 +405,15 @@ let
       "javascript://x"
       "http://l2:8080/path"
       "http://l2:8080, http://evil"
+      "http://l2:65536"
+      "http://l2:0"
+    ];
+    # ...but any real port, written with leading zeros or not, is fine.
+    hyperdxFrontendUrlPorts = lib.all (u: !(hdxFails { hyperdx.frontendUrl = u; })) [
+      "http://l2:65535"
+      "http://l2:1"
+      "http://l2:08080/"
+      "https://l2"
     ];
     hyperdxDefaultOk = !(hdxFails { });
     # Grafana: off by default; on, it provisions the dashboards dir + a ClickHouse source
@@ -395,7 +433,8 @@ let
       graf.systemd.services.grafana.serviceConfig.LoadCredential == [
         "ch-viewer:/var/lib/agent-seddon/clickhouse/viewer.password"
       ]
-      && lib.elem "agent-seddon-clickhouse-creds.service" graf.systemd.services.grafana.after;
+      && lib.elem "agent-seddon-clickhouse-creds.service" graf.systemd.services.grafana.after
+      && lib.elem "agent-seddon-clickhouse-creds.service" graf.systemd.services.grafana.requires;
     # The plugin is linked into the plugins dir; declarativePlugins stays unset so
     # plugin preinstall (Prometheus on Grafana 13.3+) keeps running.
     grafanaClickhousePlugin =
@@ -414,8 +453,16 @@ let
         "127.0.0.1:9090"
         "file:///etc/passwd"
         "http://x:9090/api, http://evil"
+        "http://127.0.0.1:99999"
       ]
       && !(grafFails { });
+    # The dashboards go into the host's Grafana; turning that off while asking for them
+    # is refused rather than provisioning into nothing.
+    grafanaNeedsHostGrafana =
+      failedAssertions (evalWith {
+        services.agentSeddon.grafana.enable = true;
+        services.grafana.enable = false;
+      }) != [ ];
   };
 
   failed = lib.filterAttrs (_: v: !v) checks;

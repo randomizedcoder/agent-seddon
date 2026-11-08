@@ -113,6 +113,18 @@ let
     }
   ];
 
+  # The agent-seddon dashboards + saved searches (./dashboards.nix), one JSON file that
+  # `hyperdx-provision` (crates/agent-hyperdx) writes through the app's API.
+  generated = import ./dashboards.nix { inherit lib; };
+  dashboardsTemplate = pkgs.writeText "agent-seddon-hyperdx-dashboards.json" (
+    builtins.toJSON {
+      dashboards = lib.attrValues generated.dashboards;
+      savedSearches = map (s: generated.savedSearchDefaults // s) (
+        lib.attrValues generated.savedSearches
+      );
+    }
+  );
+
   c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
 in
 {
@@ -126,6 +138,7 @@ in
       mongoImage
       otelDb
       defaultSources
+      dashboardsTemplate
       ;
     names = {
       app = appName;

@@ -666,6 +666,9 @@ let
     envoy = versions.envoy-bin;
     staticWebServer = versions.static-web-server;
     hyperdx = hyperdx.deploy;
+    # `bin/hyperdx-provision` (crates/agent-hyperdx), built with the workspace and, like
+    # k8s-secrets, kept out of the agent runtime.
+    hyperdxProvision = "${agent-unwrapped}/bin/hyperdx-provision";
     grafanaDashboards = grafana.dashboardsDir;
   };
 
