@@ -89,6 +89,34 @@ let
     exec sh /tmp/entry-local.sh
   '';
   hdxDir = "${stateDir}/hyperdx";
+  # Grafana's admin password: the operator's file, or one generated here (root, 0600).
+  # Not under stateDir: the agent user has no business reading it.
+  grafAdminGenDir = "/var/lib/agent-seddon-grafana";
+  grafAdminFile =
+    if cfg.grafana.adminPasswordFile != null then
+      cfg.grafana.adminPasswordFile
+    else if cfg.grafana.generateAdminPassword then
+      "${grafAdminGenDir}/admin.password"
+    else
+      null;
+  graf = config.services.grafana;
+  # What `grafana cli` needs to find the database: the server's paths and database
+  # sections, rendered the way the nixpkgs module renders the server's config.ini.
+  grafCliIni =
+    (pkgs.formats.ini {
+      mkKeyValue = lib.generators.mkKeyValueDefault {
+        mkValueString = v: if v == null then "" else lib.generators.mkValueStringDefault { } v;
+      } "=";
+    }).generate
+      "grafana-cli.ini"
+      {
+        inherit (graf.settings) paths database;
+      };
+  grafLocalAddr =
+    let
+      a = graf.settings.server.http_addr;
+    in
+    if a == "" || a == "0.0.0.0" || a == "::" || a == "[::]" then "127.0.0.1" else a;
   # Written by agent-seddon-hyperdx-key once an account exists; the agents read it at
   # start (a missing file only turns the OTLP exporter off).
   otlpHeadersFile = "${hdxDir}/otlp.headers";
@@ -594,6 +622,29 @@ in
           null when the host's Grafana already has one.
         '';
       };
+      adminPasswordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/secrets/grafana-admin";
+        description = ''
+          A file holding the password for Grafana's `admin` account (absolute, outside
+          the store). Grafana reads it through systemd `LoadCredential`, and
+          `agent-seddon-grafana-admin` applies it with `grafana cli admin
+          reset-admin-password` each time Grafana starts, so the file is the source of
+          truth: a password changed in the UI is put back at the next restart. After
+          editing the file, `systemctl restart grafana`. Null (the default) leaves the
+          password to Grafana. Needs the sqlite database (Grafana's default).
+        '';
+      };
+      generateAdminPassword = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Like `adminPasswordFile`, with a random password generated once at
+          `${grafAdminGenDir}/admin.password` (root, 0600); read it with
+          `sudo cat`. Delete the file and restart Grafana for a new one.
+        '';
+      };
     };
 
     portal = {
@@ -650,6 +701,29 @@ in
           {
             assertion = !cfg.grafana.enable || config.services.grafana.enable;
             message = "services.agentSeddon.grafana provisions into the host's Grafana, but services.grafana.enable is false.";
+          }
+          {
+            assertion =
+              cfg.grafana.adminPasswordFile == null
+              || (
+                lib.hasPrefix "/" cfg.grafana.adminPasswordFile
+                && !(lib.hasPrefix builtins.storeDir cfg.grafana.adminPasswordFile)
+                && builtins.match ".*[[:space:]].*" cfg.grafana.adminPasswordFile == null
+              );
+            message = "services.agentSeddon.grafana.adminPasswordFile must be an absolute path outside the Nix store, with no whitespace.";
+          }
+          {
+            assertion = !(cfg.grafana.adminPasswordFile != null && cfg.grafana.generateAdminPassword);
+            message = "services.agentSeddon.grafana: set adminPasswordFile or generateAdminPassword, not both.";
+          }
+          {
+            assertion = grafAdminFile == null || cfg.grafana.enable;
+            message = "services.agentSeddon.grafana.adminPasswordFile / generateAdminPassword need grafana.enable.";
+          }
+          {
+            assertion =
+              grafAdminFile == null || !cfg.grafana.enable || graf.settings.database.type == "sqlite3";
+            message = "services.agentSeddon.grafana: the managed admin password needs Grafana's sqlite database (grafana cli cannot read the server's database credential).";
           }
           {
             assertion = !cfg.grafana.enable || chEnabled;
@@ -772,6 +846,76 @@ in
           # Like postgresql-setup: without the password file LoadCredential fails anyway.
           requires = [ "agent-seddon-clickhouse-creds.service" ];
           serviceConfig.LoadCredential = [ "ch-viewer:${chCredsDir}/viewer.password" ];
+        };
+      })
+
+      (lib.mkIf (cfg.grafana.enable && grafAdminFile != null) {
+        # Used when Grafana first creates its database; afterwards the reset below.
+        services.grafana.settings.security.admin_password =
+          "$__file{/run/credentials/grafana.service/admin-password}";
+        systemd.services.grafana = {
+          after = lib.optional cfg.grafana.generateAdminPassword "agent-seddon-grafana-admin-password.service";
+          requires = lib.optional cfg.grafana.generateAdminPassword "agent-seddon-grafana-admin-password.service";
+          serviceConfig.LoadCredential = [ "admin-password:${grafAdminFile}" ];
+        };
+
+        # Grafana reads admin_password only when it creates its database, so the file is
+        # applied on every start. The CLI reads the password from stdin: never argv.
+        systemd.services.agent-seddon-grafana-admin = {
+          description = "agent-seddon Grafana admin password";
+          after = [ "grafana.service" ];
+          partOf = [ "grafana.service" ];
+          wantedBy = [ "grafana.service" ];
+          restartTriggers = [ grafAdminFile ];
+          path = [ pkgs.curl ];
+          script = ''
+            # Until the server has migrated the database (Restart below retries). Loopback
+            # health only, so -k is harmless for an https Grafana with a host-name cert.
+            curl -fsSk --max-time 5 -o /dev/null \
+              "${graf.settings.server.protocol}://${grafLocalAddr}:${toString graf.settings.server.http_port}/api/health"
+            ${lib.getExe graf.package} cli --homepath ${graf.dataDir} --config ${grafCliIni} \
+              admin reset-admin-password --password-from-stdin \
+              < "$CREDENTIALS_DIRECTORY/admin-password" >/dev/null
+            echo "agent-seddon: Grafana admin password applied"
+          '';
+          unitConfig = {
+            StartLimitIntervalSec = 600;
+            StartLimitBurst = 30;
+          };
+          serviceConfig = hardening // {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = "grafana";
+            Group = "grafana";
+            LoadCredential = [ "admin-password:${grafAdminFile}" ];
+            ReadWritePaths = [ graf.dataDir ];
+            # Grafana's own: the database stays group-readable as the server leaves it.
+            UMask = "0027";
+            Restart = "on-failure";
+            RestartSec = "5s";
+          };
+        };
+      })
+
+      (lib.mkIf (cfg.grafana.enable && cfg.grafana.generateAdminPassword) {
+        # Once: an existing file is never replaced.
+        systemd.services.agent-seddon-grafana-admin-password = {
+          description = "agent-seddon Grafana admin password (generate once)";
+          before = [ "grafana.service" ];
+          path = [ pkgs.coreutils ];
+          script = ''
+            f=${grafAdminGenDir}/admin.password
+            [ -s "$f" ] && exit 0
+            umask 077
+            head -c 24 /dev/urandom | base64 | tr -d '/+=\n' > "$f.tmp"
+            mv "$f.tmp" "$f"
+          '';
+          serviceConfig = hardening // {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            StateDirectory = "agent-seddon-grafana";
+            StateDirectoryMode = "0700";
+          };
         };
       })
 

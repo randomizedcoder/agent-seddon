@@ -36,7 +36,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
 | S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 | S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
-| S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ⬜ | |
+| S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | 🟡 | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ⬜ | |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
@@ -1149,6 +1149,23 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - `agent login --browser` and `agent token --json` worked over TLS.
     - The S24 `flutter build linux` bundle under Xvfb, with `PORTAL_TLS_CA/_CERT/_KEY`, signed in
       through the CLI and loaded Access → Sessions ("this session").
+
+- **2026-11-08 — S25: Grafana's admin password from the repo.**
+  - Found while checking the l2 tools by hand: Grafana's `admin` kept nixpkgs' public default,
+    and an existing database ignores `admin_password` anyway.
+  - [`agent-stack.nix`](../../../nix/nixos/agent-stack.nix) adds `grafana.adminPasswordFile` (a
+    path outside the store) and `grafana.generateAdminPassword` (a random password, made once by
+    `agent-seddon-grafana-admin-password` as root in `/var/lib/agent-seddon-grafana`, mode 0700).
+    Grafana reads it through `LoadCredential` + `$__file{}`.
+  - `agent-seddon-grafana-admin` (PartOf `grafana.service`) runs after each Grafana start, as the
+    grafana user: it waits for `/api/health`, then runs `grafana cli admin reset-admin-password
+    --password-from-stdin` against a generated ini with the same paths and database. It retries
+    on failure, capped at 30 starts in 10 minutes.
+  - Reset on every start, not "when the hash changes" as the design first said: it needs no stored
+    hash, and a UI change goes back to the file's password.
+  - Assertions: an absolute path, not in the store, no whitespace; not both options; needs
+    `grafana.enable`; Grafana on its default sqlite database.
+  - Eval rows in `nixos-agent-stack-eval`: from a file, generated, off by default, and the refusals.
 
 ## Cross-track note (not an S-increment)
 
