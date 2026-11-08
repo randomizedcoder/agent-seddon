@@ -23,6 +23,7 @@ Envoy and ClickHouse, a `portal-web` dev server) with systemd units that a
 | `agent-seddon-hyperdx-env` | oneshot: renders the containers' secret env files (viewer connection, collector's admin password) into `/var/lib/agent-seddon/hyperdx` (0700) | — |
 | `agent-seddon-hyperdx-key` (timer, 2 min; not with `hyperdx.auth = false`) | agent user: copies the ingestion key HyperDX mints at sign-up to `hyperdx/otlp.headers` when it changes | — |
 | `agent-seddon-hyperdx-restart` (path unit on that file) | root: `systemctl try-restart` of the enabled agents, nothing else | — |
+| `agent-seddon-hyperdx-dashboards` | `hyperdx.dashboards` (default: on when `auth = false`): agent user, oneshot after each app start and template change; `hyperdx-provision` writes the agent-seddon dashboards and saved searches through the app's API | — |
 
 ## Where the data lives
 
@@ -140,6 +141,26 @@ HyperDX access and anyone who can reach 4317/4318 can write traces, so keep the
 firewall on; with `openFirewall` and a LAN `publicHost` the module warns that the UI
 is open without a login. Sources, saved searches and dashboards created under a signed-up team stay
 in MongoDB but are not shown in local mode (turning `auth` back on shows them again).
+
+**Dashboards (`hyperdx.dashboards`).** With no login, the module also puts four
+dashboards in HyperDX — *agent-seddon · Overview* (spans by service, error spans,
+slowest operations, gRPC methods), *Model calls* (calls by model, latency, tokens,
+finish reasons), *Tools* (calls, p95 latency and errors by tool, policy decisions) and
+*Review fleet* (reviews by repo, review duration, collectors, sandboxed commands) — and
+four saved searches (error spans, model calls, tool calls over 10 s, fleet reviews). They
+are data in `nix/hyperdx/dashboards.nix`; each names its source by kind (`"$trace"`),
+because HyperDX gives the seeded sources random ids. `hyperdx-provision`
+(`crates/agent-hyperdx`) reads the team's sources from the API, swaps in the real ids
+and creates or updates each item by name, tagged `agent-seddon`, so HyperDX's own schema
+checks every write. It runs after each app start (a wiped Mongo reseeds the sources) and
+when the template changes, retrying until the API and the sources are up. An item you
+edit in the UI is overwritten on the next run (copy it under another name to keep
+changes); a same-named one without the tag is left alone. The image's own dashboard
+provisioner is not used: it looks the team up in Mongo, and the local-mode team has no
+`teams` document. Needs `auth = false` (with a login the API wants a session). The
+`hyperdx-dashboards` check runs `hyperdx-provision --check` over the template in the
+gate (placeholders, names, tags, grid layout); the tiles were also checked against the
+image's own zod schema (`hyperdx/hyperdx:2`, 2026-11-07).
 
 Model calls and tool calls carry the OpenTelemetry GenAI attributes
 (`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.*`,

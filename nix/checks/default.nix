@@ -407,6 +407,10 @@ testChecks
   # and ClickHouse table they query exists in the tree (check-the-checks on a broken
   # fixture). nix/grafana/dashboards.nix.
   grafana-dashboards = import ./grafana-dashboards.nix { inherit pkgs lib src; };
+  # The HyperDX dashboards + saved searches, through `hyperdx-provision --check`: known
+  # source placeholders, unique tagged names, on-grid non-overlapping tiles (with
+  # check-the-checks fixtures). nix/hyperdx/dashboards.nix, crates/agent-hyperdx.
+  hyperdx-dashboards = import ./hyperdx-dashboards.nix { inherit pkgs agentSeddonDeploy; };
 
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
   # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.

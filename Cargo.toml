@@ -54,6 +54,7 @@ members = [
     "crates/agent-k8s-secrets",
     "crates/agent-k8s-status",
     "crates/agent-doc-links",
+    "crates/agent-hyperdx",
 ]
 
 [workspace.package]

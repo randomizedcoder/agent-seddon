@@ -74,6 +74,20 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   image's entrypoint); a LAN + `openFirewall` warning; the runbook's "not possible"
   note corrected. Live check (UI with no login, collector up at start) after deploy.
 
+- **HyperDX dashboards** (2026-11-07): `services.agentSeddon.hyperdx.dashboards`
+  (default on when `auth = false`) provisions four dashboards (overview, model calls,
+  tools, review fleet) and four saved searches from `nix/hyperdx/dashboards.nix`
+  through the app's API with `hyperdx-provision` (new crate `agent-hyperdx`: source
+  placeholders by kind, create/update/leave-alone plan keyed on name + the
+  `agent-seddon` tag, fail-closed parsing of the API's ids before they reach a URL,
+  bounded replies, agent-retry until the API and sources are up). Gate:
+  `hyperdx-dashboards` (`--check` over the template + five check-the-check fixtures)
+  and `nixos-agent-stack-eval` rows. #703 carry-overs: a Grafana `requires` on the creds
+  unit, an assertion when the host's Grafana is off, URL ports bounded to 1-65535, and
+  the dev container's read-only dashboards no longer claim `allowUiUpdates`. Still open:
+  a VM subtest for `grafana.enable`, and confirming the data-source variables
+  auto-select on the live Grafana.
+
 ## Cross-references updated by Phase 0
 
 - [`../review-fleet/07-observability.md`](../review-fleet/07-observability.md) — the "no repo/PR in

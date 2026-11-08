@@ -48,6 +48,7 @@
   "agent-grpc": [
     "auth"
   ],
+  "agent-hyperdx": [],
   "agent-k8s-render": [],
   "agent-k8s-secrets": [],
   "agent-k8s-status": [],
