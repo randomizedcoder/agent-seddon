@@ -61,7 +61,7 @@ mod provider;
 mod provider_registry;
 mod reference;
 mod repo;
-mod review;
+pub(crate) mod review;
 mod review_fleet;
 mod scanner;
 mod scheduler;
