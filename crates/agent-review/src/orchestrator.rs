@@ -15,8 +15,9 @@ use crate::style::StyleCollector;
 use crate::summaries::SummaryCollector;
 use crate::util::{safe_rev, safe_segment};
 use agent_core::{
-    fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, LlmPool, RepoBackend,
-    Result, ReviewCollector, ReviewFacts, ReviewTarget, Revision, Sandbox, SearchBackend,
+    fnv1a_hex, is_object_id, CollectStatus, CollectorStatus, Error, Forge, GitState, LlmPool,
+    RepoBackend, Result, ReviewCollector, ReviewFacts, ReviewTarget, Revision, Sandbox,
+    SearchBackend,
 };
 use async_trait::async_trait;
 use futures_util::FutureExt;
@@ -343,37 +344,43 @@ impl ReviewOrchestrator {
         }
     }
 
+    /// A PR's base: its target branch, from the forge, fetched up to date first.
+    async fn pr_base(&self, n: u64) -> Result<String> {
+        let forge = self.forge.as_ref().ok_or_else(|| {
+            Error::Config("no forge configured; cannot resolve a PR number".into())
+        })?;
+        let pr = forge.get_pr(n).await?;
+        // Bring the base (the PR's target branch) up to date first, writing
+        // its branch ref, so the diff runs against today's base and not
+        // whatever the reused mirror last saw: a stale base turns a one-file
+        // PR into every commit merged since, and a base the mirror never had
+        // fails the diff outright. Best-effort: a failure only risks a stale
+        // base, and the name is validated by the backend (it is forge data).
+        if let Err(e) = self.repo.fetch_branch(&pr.target_branch).await {
+            tracing::warn!(pr = n, error = %e,
+                "review: refreshing the PR's base branch failed; diffing against the last-known base");
+        }
+        Ok(pr.target_branch)
+    }
+
     /// Resolve a target to concrete base/head revisions (+ context). A PR needs
     /// the forge; a branch name is validated fail-closed before it touches git.
     async fn resolve(&self, target: &ReviewTarget) -> Result<Resolved> {
+        // A caller-fetched head is checked before any repo or forge work.
+        if let ReviewTarget::PrAt { head, .. } = target {
+            if !is_object_id(head) {
+                return Err(Error::Config(format!(
+                    "PR head `{head}` is not a full object id (rejected before touching git)"
+                )));
+            }
+        }
         let branches = self.repo.branches().await.unwrap_or_default();
         let branch_names: Vec<String> = branches.into_iter().map(|(n, _)| n).collect();
         let default_branch = pick_default(&branch_names);
 
         let (base_label, head_label) = match target {
-            ReviewTarget::Pr(n) | ReviewTarget::PrAt { number: n, .. } => {
-                // A caller-fetched head is validated before any forge or git call.
-                if let ReviewTarget::PrAt { head, .. } = target {
-                    if !is_object_id(head) {
-                        return Err(Error::Config(format!(
-                            "PR head `{head}` is not a full object id (rejected before touching git)"
-                        )));
-                    }
-                }
-                let forge = self.forge.as_ref().ok_or_else(|| {
-                    Error::Config("no forge configured; cannot resolve a PR number".into())
-                })?;
-                let pr = forge.get_pr(*n).await?;
-                // Bring the base (the PR's target branch) up to date first, writing
-                // its branch ref, so the diff runs against today's base and not
-                // whatever the reused mirror last saw: a stale base turns a one-file
-                // PR into every commit merged since, and a base the mirror never had
-                // fails the diff outright. Best-effort: a failure only risks a stale
-                // base, and the name is validated by the backend (it is forge data).
-                if let Err(e) = self.repo.fetch_branch(&pr.target_branch).await {
-                    tracing::warn!(pr = n, error = %e,
-                        "review: refreshing the PR's base branch failed; diffing against the last-known base");
-                }
+            ReviewTarget::Pr(n) => {
+                let base = self.pr_base(*n).await?;
                 // A PullRequest carries only a branch name, never a head SHA, and
                 // the forge PR head ref (`refs/pull/<N>/head`, …) isn't in a
                 // default fetch — so on a fresh mirror `source_branch` never
@@ -382,12 +389,10 @@ impl ReviewOrchestrator {
                 // collide with an unrelated local branch). Always fetched, and a
                 // failure fails the review: the local ref survives a force-push, so
                 // standing it in would review the old head.
-                let head = match target {
-                    ReviewTarget::PrAt { head, .. } => head.clone(),
-                    _ => self.repo.fetch_pr(*n).await?.0,
-                };
-                (pr.target_branch, head)
+                (base, self.repo.fetch_pr(*n).await?.0)
             }
+            // The caller (the fleet) fetched this head itself, checked above.
+            ReviewTarget::PrAt { number, head } => (self.pr_base(*number).await?, head.clone()),
             ReviewTarget::Branch(b) => {
                 if !safe_segment(b) {
                     return Err(Error::Config(format!(
@@ -697,11 +702,6 @@ fn repo_hash(gs: &GitState, root: &Path) -> String {
     }
 }
 
-/// A full hex object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
-fn is_object_id(s: &str) -> bool {
-    matches!(s.len(), 40 | 64) && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,6 +978,8 @@ mod tests {
     #[case::positive_sha1(&"c".repeat(40), true)]
     #[case::boundary_sha256(&"d".repeat(64), true)]
     #[case::boundary_one_short(&"c".repeat(39), false)]
+    #[case::boundary_one_long(&"c".repeat(41), false)]
+    #[case::boundary_sha256_one_long(&"d".repeat(65), false)]
     #[case::negative_uppercase(&"C".repeat(40), false)]
     #[case::negative_symbolic_ref("HEAD", false)]
     #[case::negative_empty("", false)]

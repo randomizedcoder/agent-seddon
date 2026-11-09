@@ -1241,7 +1241,8 @@ mod tests {
     /// engine's facts flowed into the draft.
     struct FakeGrounder {
         brief: std::result::Result<String, String>,
-        grounded: Mutex<Vec<u64>>,
+        /// The `(PR, head)` pairs the engine was asked to ground.
+        grounded: Mutex<Vec<(u64, String)>>,
         /// The checkout roots the engine was actually rooted at (fleet-grounding track):
         /// the fleet must ground against the per-review worktree, not the bare mirror.
         roots: Mutex<Vec<std::path::PathBuf>>,
@@ -1276,7 +1277,21 @@ mod tests {
         }
         /// The PR numbers the engine was actually asked to ground (order preserved).
         fn calls(&self) -> Vec<u64> {
-            self.grounded.lock().unwrap().clone()
+            self.grounded
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(n, _)| *n)
+                .collect()
+        }
+        /// The heads the engine was handed, alongside [`Self::calls`].
+        fn heads(&self) -> Vec<String> {
+            self.grounded
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, h)| h.clone())
+                .collect()
         }
         /// The checkout roots the engine was rooted at (order preserved).
         fn roots(&self) -> Vec<std::path::PathBuf> {
@@ -1308,8 +1323,8 @@ mod tests {
             target: ReviewTarget,
         ) -> agent_core::Result<GroundedReview> {
             self.roots.lock().unwrap().push(root.to_path_buf());
-            if let ReviewTarget::PrAt { number, .. } = target {
-                self.grounded.lock().unwrap().push(number);
+            if let ReviewTarget::PrAt { number, head } = target {
+                self.grounded.lock().unwrap().push((number, head));
             }
             match &self.brief {
                 Ok(b) => Ok(GroundedReview {
@@ -2302,6 +2317,13 @@ mod tests {
             grounder.calls(),
             vec![42],
             "engine grounds the PR exactly once"
+        );
+        // The head the fleet fetched is handed on, not fetched again by grounding.
+        assert_eq!(repo.fetch_pr_calls(), vec![42], "the head is fetched once");
+        assert_eq!(
+            grounder.heads(),
+            vec![agent_core::pr_local_ref(42)],
+            "grounding gets the head `fetch_pr` returned (the fixture's)"
         );
         o.join("web", 42).await;
 

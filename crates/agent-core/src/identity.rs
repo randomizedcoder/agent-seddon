@@ -33,6 +33,13 @@ pub fn safe_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// A full hex object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits, the form
+/// `git rev-parse` prints. Fail-closed: no `-` prefix, no ref name, no range, so a
+/// value that passes can only name an object.
+pub fn is_object_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// A malformed identity segment rejected by [`safe_segment`] at the trust boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
@@ -335,6 +342,23 @@ pub async fn in_tenant<F: std::future::Future>(tenant: &str, fut: F) -> Option<F
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[rstest::rstest]
+    #[case::positive_sha1(&"c".repeat(40), true)]
+    #[case::positive_sha256(&"d".repeat(64), true)]
+    #[case::boundary_sha1_one_short(&"c".repeat(39), false)]
+    #[case::boundary_sha1_one_long(&"c".repeat(41), false)]
+    #[case::boundary_sha256_one_short(&"d".repeat(63), false)]
+    #[case::boundary_sha256_one_long(&"d".repeat(65), false)]
+    #[case::negative_empty("", false)]
+    #[case::negative_uppercase(&"C".repeat(40), false)]
+    #[case::negative_symbolic_ref("HEAD", false)]
+    #[case::adversarial_option_injection(&format!("--{}", "c".repeat(38)), false)]
+    #[case::adversarial_range(&format!("{}..{}", "c".repeat(19), "c".repeat(19)), false)]
+    #[case::adversarial_non_ascii(&format!("{}é", "c".repeat(38)), false)]
+    fn is_object_id_cases(#[case] s: &str, #[case] want: bool) {
+        assert_eq!(is_object_id(s), want, "{s:?}");
+    }
 
     // --- R4: org tenancy tier (C25) — `user = <org>` convention -------------
 
