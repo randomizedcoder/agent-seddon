@@ -67,9 +67,9 @@ S6 → S12                            │
 S6, S8 → S13a → S13b → S14 ─────────┘
 S16, S17 independent
 
-S25 independent
-S26 → S26b
-S26 → S27 → S28 → S29, S30, S31
+S25 independent (useful without the front door)
+S13a → S26 → S26b
+       S26 → S27 → S28 → S29, S30, S31
 ```
 
 Four lanes can run in parallel after S1: correctness (S2, S7), login / token / sessions (S3 → S8),

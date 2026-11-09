@@ -39,7 +39,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ⬜ | |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ⬜ | |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
-| S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5 | ⬜ | |
+| S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping) | [10](10-sso-front-door.md) F4, F7 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall | [10](10-sso-front-door.md) F9 | ⬜ | |
