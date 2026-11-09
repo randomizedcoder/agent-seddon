@@ -574,6 +574,15 @@ let
             generateAdminPassword = true;
           };
           services.grafana.settings.database.type = "postgres";
+        }) != [ ]
+      # A DSN overrides `type`, so it is refused even with type left at sqlite3.
+      &&
+        failedAssertions (evalWith {
+          services.agentSeddon.grafana = {
+            enable = true;
+            generateAdminPassword = true;
+          };
+          services.grafana.settings.database.url = "postgres://grafana@db/grafana";
         }) != [ ];
     dexMockLogin =
       let
@@ -647,6 +656,7 @@ let
       ]
       && dexFails { redirectUris = [ ]; }
       && dexFails { mockLogin = false; }
+      # mockLogin (from the base) and GitHub together; the pairing rows follow.
       && dexFails {
         github = {
           clientId = "Iv1.abc";

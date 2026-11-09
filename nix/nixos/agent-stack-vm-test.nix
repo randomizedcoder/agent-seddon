@@ -23,7 +23,7 @@ pkgs.testers.runNixOSTest {
   name = "nixos-agent-stack-vm";
 
   nodes.machine =
-    { pkgs, ... }:
+    { pkgs, lib, ... }:
     {
       imports = [ module ];
       virtualisation = {
@@ -70,6 +70,12 @@ pkgs.testers.runNixOSTest {
       services.agentSeddon.grafana = {
         enable = true;
         generateAdminPassword = true;
+      };
+      # The operator's own file instead (sops-nix, agenix); the test writes it, then
+      # switches to this.
+      specialisation.pwfile.configuration.services.agentSeddon.grafana = {
+        generateAdminPassword = lib.mkForce false;
+        adminPasswordFile = "/run/secrets/grafana-admin";
       };
       # Dex with the mock connector (S26). The issuer is a public-looking URL nothing
       # serves: the test reaches Dex on loopback, as the agent's back-channel does.
@@ -182,6 +188,18 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl restart grafana.service")
         applied()
         machine.succeed(user_api.format("echo line-ending-pw-0123"))
+        journal = "journalctl --no-pager -u agent-seddon-grafana-admin -u grafana.service"
+        machine.fail(f"{journal} | grep -qF line-ending-pw-0123")
+        # adminPasswordFile: the operator's file, through the same reset.
+        machine.succeed(
+            "install -d -m 0700 /run/secrets && "
+            "(umask 077 && printf operator-pw-4567 > /run/secrets/grafana-admin)"
+        )
+        machine.succeed("/run/current-system/specialisation/pwfile/bin/switch-to-configuration test")
+        applied()
+        machine.succeed(user_api.format("echo operator-pw-4567"))
+        machine.fail(user_api.format("echo line-ending-pw-0123"))
+        machine.fail(f"{journal} | grep -qF operator-pw-4567")
 
     with subtest("dex: the agent's client signs in over loopback"):
         import base64, hashlib, json, urllib.parse
@@ -218,6 +236,8 @@ pkgs.testers.runNixOSTest {
             if loc.startswith(cb):
                 break
             url = loc.replace(public, local, 1) if loc.startswith(public) else urllib.parse.urljoin(url, loc)
+        else:
+            raise AssertionError(f"Dex never returned to {cb}; last redirect {loc}")
         q = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
         assert q["state"] == ["st-1"], loc
         code = q["code"][0]

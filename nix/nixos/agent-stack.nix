@@ -801,8 +801,17 @@ in
             message = "services.agentSeddon.grafana.adminPasswordFile / generateAdminPassword need grafana.enable.";
           }
           {
+            # A `url` DSN overrides `type`, and the CLI reads the same section.
             assertion =
-              grafAdminFile == null || !cfg.grafana.enable || graf.settings.database.type == "sqlite3";
+              grafAdminFile == null
+              || !cfg.grafana.enable
+              || (
+                graf.settings.database.type == "sqlite3"
+                && lib.elem (graf.settings.database.url or null) [
+                  null
+                  ""
+                ]
+              );
             message = "services.agentSeddon.grafana: the managed admin password needs Grafana's sqlite database (grafana cli cannot read the server's database credential).";
           }
           {
@@ -951,9 +960,12 @@ in
           after = [ "grafana.service" ];
           partOf = [ "grafana.service" ];
           wantedBy = [ "grafana.service" ];
-          path = [ pkgs.curl ];
+          path = [
+            pkgs.coreutils
+            pkgs.curl
+          ];
           script = ''
-            # Until the server has migrated the database: up to 5 minutes here, then
+            # Until the server has migrated the database: 60 tries, 5 to 10 minutes, then
             # Restart below. Loopback health only, so -k is harmless for an https
             # Grafana with a host-name cert.
             i=0
@@ -1123,7 +1135,10 @@ in
             requires = [ "agent-seddon-dex-secret.service" ];
             serviceConfig = {
               StateDirectory = "dex";
-              # Root, like the nixpkgs module's own secretFile step.
+              # Root, like the nixpkgs module's own secretFile step, and the same call:
+              # `replace-secret <string> <file> <target>` replaces the string (here the
+              # path, which the connector's clientSecret renders as) with the file's
+              # contents. The VM test proves that step for the static client.
               ExecStartPre = lib.mkIf (dexCfg.github.clientSecretFile != null) (
                 lib.mkAfter [
                   "+${pkgs.replace-secret}/bin/replace-secret ${dexCfg.github.clientSecretFile} ${dexCfg.github.clientSecretFile} /run/dex/config.yaml"

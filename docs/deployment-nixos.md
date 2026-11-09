@@ -222,7 +222,10 @@ an existing database keeps its old password, `agent-seddon-grafana-admin` runs a
 every Grafana start: it waits for `/api/health`, then runs `grafana cli admin
 reset-admin-password --password-from-stdin`. The password never lands on a command
 line or in the journal. Both options need `grafana.enable` and Grafana's default
-sqlite database with `server.protocol` http or https, and setting both is an error.
+sqlite database (no `database.url` DSN) with `server.protocol` http or https, and
+setting both is an error. The generated file is required: if the generator fails,
+Grafana does not start. The reset is not: if it keeps failing, Grafana stays up with
+the old password, so check `systemctl status agent-seddon-grafana-admin` after a change.
 Either one sets `services.grafana.settings.security.admin_password`, so remove any
 value the host sets there.
 

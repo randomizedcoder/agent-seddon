@@ -1160,7 +1160,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - `agent-seddon-grafana-admin` (PartOf `grafana.service`) runs after each Grafana start, as the
     grafana user: it waits for `/api/health`, then runs `grafana cli admin reset-admin-password
     --password-from-stdin` against a generated ini with the same paths, database and homepath as
-    the server. It waits up to 5 minutes for health, then retries, capped at 30 starts in 10
+    the server. It waits for health (60 tries, 5 to 10 minutes), then retries, capped at 30 starts in 10
     minutes.
   - The generator is PartOf `grafana.service` too, so deleting the file and restarting Grafana
     makes a new one (the fleet draft found the documented rotation left Grafana unable to start).
@@ -1208,8 +1208,24 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     auth → mock → callback → code → token with the client secret. The `id_token` has the
     public `iss`, the nonce and `email_verified`. A wrong secret is refused. Dex listens on
     loopback only, and no secret path is left in its config.
-  - Carried from the #707 (S25) draft: the Grafana password options now say that they set
-    `security.admin_password`, so a host that sets it too gets Nix's conflicting-definitions error.
+  - From the #708 draft:
+    - `BrowserIssuer::of` refuses a back-channel on a non-`generic` profile too, for callers that
+      build `IssuerParams` without the loader.
+    - `discover_code_fetch_host`: with a back-channel, discovery is fetched there and the token
+      endpoint is rewritten onto it, against a `FakeIssuer::start_code_behind` whose document
+      names a public issuer that resolves nowhere. Without one, that issuer is never reached.
+    - Only one trailing slash is trimmed, and a token-endpoint query is kept (host unchanged).
+    - The GitHub secret's `replace-secret` call is nixpkgs' own idiom (`replace-secret.py`
+      replaces the literal path with the file); the VM proves it for the static client.
+  - Carried from the #707 (S25) drafts:
+    - The Grafana password options say they set `security.admin_password`, so a host that sets
+      it too gets Nix's conflicting-definitions error.
+    - A `database.url` DSN is refused like a non-sqlite `type`, since it overrides `type`.
+    - The reset unit lists `coreutils` (it sleeps), and the docs give the real health wait
+      (60 tries, 5 to 10 minutes). They also say the generator fails closed (Grafana needs
+      it) while the reset fails open (Grafana stays up with the old password).
+    - VM: a specialisation switches to `adminPasswordFile`, and the operator's file signs in;
+      neither the reset's nor Grafana's journal contains the password.
 
 ## Cross-track note (not an S-increment)
 

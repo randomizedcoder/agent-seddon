@@ -210,6 +210,14 @@ impl FakeIssuer {
         Self::start_with(key, Some(advertised.to_string()), None, None)
     }
 
+    /// Start a browser sign-in issuer that sits behind a front door: discovery
+    /// names `public` as the `issuer` and puts both endpoints under it, while the
+    /// document itself is served here, as Dex's is on its loopback listener. The
+    /// agent reaches it through a `backchannel_url` of [`Self::issuer`].
+    pub fn start_code_behind(key: TestKey, script: CodeScript, public: &str) -> Self {
+        Self::start_with(key, Some(public.to_string()), None, Some(script))
+    }
+
     fn start_with(
         key: TestKey,
         advertised: Option<String>,
@@ -224,8 +232,10 @@ impl FakeIssuer {
             .port();
         let base = format!("http://127.0.0.1:{port}");
         let kid = format!("fake-{key:?}-{port}").to_lowercase();
+        // The browser endpoints sit under the issuer the document names.
+        let named = advertised.unwrap_or_else(|| base.clone());
         let mut discovery = json!({
-            "issuer": advertised.unwrap_or_else(|| base.clone()),
+            "issuer": named,
             "jwks_uri": format!("{base}/jwks"),
             "id_token_signing_alg_values_supported": [format!("{:?}", key.alg())],
         });
@@ -234,8 +244,8 @@ impl FakeIssuer {
             discovery["token_endpoint"] = json!(format!("{base}/token"));
         }
         if code.is_some() {
-            discovery["authorization_endpoint"] = json!(format!("{base}/authorize"));
-            discovery["token_endpoint"] = json!(format!("{base}/token"));
+            discovery["authorization_endpoint"] = json!(format!("{named}/authorize"));
+            discovery["token_endpoint"] = json!(format!("{named}/token"));
         }
         let discovery = discovery.to_string();
         let keys = jwks(&[(key, &kid)]).to_string();

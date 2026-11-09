@@ -114,6 +114,14 @@ impl BrowserIssuer {
         };
         let backchannel = match p.backchannel_url.trim() {
             "" => None,
+            // The loader refuses this too; checked here as well, since callers can
+            // build `IssuerParams` directly.
+            _ if resolved.profile.as_str() != "generic" => {
+                return Err(format!(
+                    "`[[auth.issuers]]` `{}`: `backchannel_url` is for a `generic` issuer",
+                    resolved.name
+                ));
+            }
             bc => {
                 check_fetch_url(bc).map_err(|e| {
                     format!(
@@ -501,14 +509,15 @@ pub fn code_endpoints(
     };
     let mut token = endpoint("token_endpoint")?;
     if let Some(bc) = backchannel {
-        let base = issuer.trim_end_matches('/');
+        // One trailing slash, the form an issuer URL may be written in.
+        let base = issuer.strip_suffix('/').unwrap_or(issuer);
         let rest = token
             .strip_prefix(base)
             .filter(|r| r.starts_with('/'))
             .ok_or(
             "discovery `token_endpoint` is not under the issuer, so it has no back-channel form",
         )?;
-        token = format!("{}{rest}", bc.trim_end_matches('/'));
+        token = format!("{}{rest}", bc.strip_suffix('/').unwrap_or(bc));
         check_fetch_url(&token).map_err(|e| format!("the back-channel token endpoint {e}"))?;
     }
     Ok(CodeEndpoints {
