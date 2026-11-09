@@ -60,6 +60,16 @@ pkgs.testers.runNixOSTest {
           }
         ];
       };
+      # The host's Grafana with the module's admin password (generated).
+      services.grafana = {
+        enable = true;
+        # A store path, like the dummy LLM key above: fine for a test VM, never a host.
+        settings.security.secret_key = "$__file{${pkgs.writeText "grafana-secret-key" "vm-test-only"}}";
+      };
+      services.agentSeddon.grafana = {
+        enable = true;
+        generateAdminPassword = true;
+      };
       environment.systemPackages = [ pkgs.curl ];
     };
 
@@ -135,9 +145,39 @@ pkgs.testers.runNixOSTest {
         headers = machine.succeed(preflight.format("http://evil.test:8092"))
         assert "access-control-allow-origin" not in headers.lower(), headers
 
+    with subtest("grafana: the admin password is generated, applied and rotated"):
+        pw_file = "/var/lib/agent-seddon-grafana/admin.password"
+        # The password never reaches argv: curl reads `user:password` from a config file.
+        user_api = (
+            "printf 'user = \"admin:%s\"\\n' \"$({})\" "
+            "| curl -fsS -o /dev/null -K - http://127.0.0.1:3000/api/user"
+        )
+        def applied():
+            machine.wait_for_unit("grafana.service")
+            machine.wait_for_unit("agent-seddon-grafana-admin.service")
+        applied()
+        machine.succeed("stat -c %a /var/lib/agent-seddon-grafana | grep -qx 700")
+        machine.succeed(f"stat -c %a {pw_file} | grep -qx 600")
+        machine.succeed(f"grep -qxE '[A-Za-z0-9]{{20,}}' {pw_file}")
+        machine.succeed(user_api.format(f"cat {pw_file}"))
+        machine.fail(user_api.format("echo admin"))
+        # Rotation as the option describes it: delete the file, restart Grafana.
+        machine.succeed(f"cp {pw_file} /root/old.password && rm {pw_file}")
+        machine.succeed("systemctl restart grafana.service")
+        applied()
+        machine.succeed(f"test -s {pw_file} && ! cmp -s {pw_file} /root/old.password")
+        machine.succeed(user_api.format(f"cat {pw_file}"))
+        machine.fail(user_api.format("cat /root/old.password"))
+        # A file ending in a newline (an editor, sops-nix): the password is the line.
+        machine.succeed(f"printf 'line-ending-pw-0123\\n' > {pw_file}")
+        machine.succeed("systemctl restart grafana.service")
+        applied()
+        machine.succeed(user_api.format("echo line-ending-pw-0123"))
+
     with subtest("units stay up"):
         machine.sleep(10)
-        for unit in ["gateway", "sessions", "fleet", "grpc-web", "portal"]:
+        for unit in ["gateway", "sessions", "fleet", "grpc-web", "portal", "grafana-admin"]:
             machine.require_unit_state(f"agent-seddon-{unit}.service", "active")
+        machine.require_unit_state("grafana.service", "active")
   '';
 }

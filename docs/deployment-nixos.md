@@ -214,13 +214,15 @@ nixpkgs leaves it at a public default. Either option replaces it:
 | `grafana.adminPasswordFile = "/run/secrets/grafana-admin"` | read from that file (a path outside the store: sops-nix, agenix or a file you put there) |
 | `grafana.generateAdminPassword = true` | random, made once by `agent-seddon-grafana-admin-password` in `/var/lib/agent-seddon-grafana/admin.password` (root only) |
 
-Read the generated one with `sudo cat /var/lib/agent-seddon-grafana/admin.password`.
+Read the generated one with `sudo cat /var/lib/agent-seddon-grafana/admin.password`;
+for a new one, delete that file and `systemctl restart grafana`. The password is the
+file's first line, so a trailing newline is fine.
 Grafana reads it as `$__file{/run/credentials/grafana.service/admin-password}`. Since
 an existing database keeps its old password, `agent-seddon-grafana-admin` runs after
 every Grafana start: it waits for `/api/health`, then runs `grafana cli admin
 reset-admin-password --password-from-stdin`. The password never lands on a command
 line or in the journal. Both options need `grafana.enable` and Grafana's default
-sqlite database, and setting both is an error.
+sqlite database with `server.protocol` http or https, and setting both is an error.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.

@@ -1159,13 +1159,19 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     Grafana reads it through `LoadCredential` + `$__file{}`.
   - `agent-seddon-grafana-admin` (PartOf `grafana.service`) runs after each Grafana start, as the
     grafana user: it waits for `/api/health`, then runs `grafana cli admin reset-admin-password
-    --password-from-stdin` against a generated ini with the same paths and database. It retries
-    on failure, capped at 30 starts in 10 minutes.
+    --password-from-stdin` against a generated ini with the same paths, database and homepath as
+    the server. It waits up to 5 minutes for health, then retries, capped at 30 starts in 10
+    minutes.
+  - The generator is PartOf `grafana.service` too, so deleting the file and restarting Grafana
+    makes a new one (the fleet draft found the documented rotation left Grafana unable to start).
   - Reset on every start, not "when the hash changes" as the design first said: it needs no stored
     hash, and a UI change goes back to the file's password.
   - Assertions: an absolute path, not in the store, no whitespace; not both options; needs
-    `grafana.enable`; Grafana on its default sqlite database.
+    `grafana.enable`; Grafana on its default sqlite database, over http(s) rather than a socket.
   - Eval rows in `nixos-agent-stack-eval`: from a file, generated, off by default, and the refusals.
+  - VM subtest in `nixos-agent-stack-vm`: the generated password signs in and `admin:admin` does
+    not; after deleting the file and restarting, a new password works and the old one does not;
+    a file ending in a newline gives the password without it.
 
 ## Cross-track note (not an S-increment)
 

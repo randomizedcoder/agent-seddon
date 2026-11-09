@@ -642,7 +642,7 @@ in
         description = ''
           Like `adminPasswordFile`, with a random password generated once at
           `${grafAdminGenDir}/admin.password` (root, 0600); read it with
-          `sudo cat`. Delete the file and restart Grafana for a new one.
+          `sudo cat`. For a new one, delete the file and `systemctl restart grafana`.
         '';
       };
     };
@@ -724,6 +724,11 @@ in
             assertion =
               grafAdminFile == null || !cfg.grafana.enable || graf.settings.database.type == "sqlite3";
             message = "services.agentSeddon.grafana: the managed admin password needs Grafana's sqlite database (grafana cli cannot read the server's database credential).";
+          }
+          {
+            assertion =
+              grafAdminFile == null || !cfg.grafana.enable || graf.settings.server.protocol != "socket";
+            message = "services.agentSeddon.grafana: the managed admin password waits on Grafana's HTTP /api/health, so it needs server.protocol http or https, not socket.";
           }
           {
             assertion = !cfg.grafana.enable || chEnabled;
@@ -866,13 +871,22 @@ in
           after = [ "grafana.service" ];
           partOf = [ "grafana.service" ];
           wantedBy = [ "grafana.service" ];
-          restartTriggers = [ grafAdminFile ];
           path = [ pkgs.curl ];
           script = ''
-            # Until the server has migrated the database (Restart below retries). Loopback
-            # health only, so -k is harmless for an https Grafana with a host-name cert.
-            curl -fsSk --max-time 5 -o /dev/null \
-              "${graf.settings.server.protocol}://${grafLocalAddr}:${toString graf.settings.server.http_port}/api/health"
+            # Until the server has migrated the database: up to 5 minutes here, then
+            # Restart below. Loopback health only, so -k is harmless for an https
+            # Grafana with a host-name cert.
+            i=0
+            until curl -fsSk --max-time 5 -o /dev/null \
+              "${graf.settings.server.protocol}://${grafLocalAddr}:${toString graf.settings.server.http_port}/api/health"; do
+              i=$((i + 1))
+              if [ "$i" -ge 60 ]; then
+                echo "agent-seddon: Grafana is not healthy after 5 minutes" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+            # The server's own homepath: nixpkgs links the package's conf/ into dataDir.
             ${lib.getExe graf.package} cli --homepath ${graf.dataDir} --config ${grafCliIni} \
               admin reset-admin-password --password-from-stdin \
               < "$CREDENTIALS_DIRECTORY/admin-password" >/dev/null
@@ -902,13 +916,16 @@ in
         systemd.services.agent-seddon-grafana-admin-password = {
           description = "agent-seddon Grafana admin password (generate once)";
           before = [ "grafana.service" ];
+          # Restarting Grafana re-runs this, so a deleted file is made again.
+          partOf = [ "grafana.service" ];
           path = [ pkgs.coreutils ];
           script = ''
             f=${grafAdminGenDir}/admin.password
-            [ -s "$f" ] && exit 0
-            umask 077
-            head -c 24 /dev/urandom | base64 | tr -d '/+=\n' > "$f.tmp"
-            mv "$f.tmp" "$f"
+            if [ ! -s "$f" ]; then
+              umask 077
+              head -c 24 /dev/urandom | base64 | tr -d '/+=\n' > "$f.tmp"
+              mv "$f.tmp" "$f"
+            fi
           '';
           serviceConfig = hardening // {
             Type = "oneshot";
