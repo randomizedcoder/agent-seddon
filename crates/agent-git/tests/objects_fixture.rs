@@ -437,6 +437,53 @@ async fn corner_refetch_same_pr_is_idempotent() {
     assert_eq!(first, second, "refetching the same PR yields the same oid");
 }
 
+/// How the PR head moves between two reviews.
+enum Move {
+    /// A new commit on top: a fast-forward.
+    Push,
+    /// The head commit amended: a force-push (or a rebase) rewrites history.
+    ForcePush,
+    /// The head reset to its parent: the ref moves backwards.
+    Reset,
+}
+
+/// Each fetch lands on the PR's current head, however it moved since the last
+/// one. A plain refspec refused the non-fast-forward cases, so a force-pushed PR
+/// was never reviewed again.
+#[rstest::rstest]
+#[case::positive_push(Move::Push)]
+#[case::adversarial_force_push(Move::ForcePush)]
+#[case::corner_reset_backwards(Move::Reset)]
+#[tokio::test]
+async fn fetch_pr_follows_the_head(#[case] step: Move) {
+    let (source, first_head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+    assert_eq!(b.fetch_pr(1).await.unwrap().as_str(), first_head);
+
+    git(&source, &["switch", "-q", "feature"]);
+    match step {
+        Move::Push => {
+            std::fs::write(source.join("c.txt"), "next\n").unwrap();
+            git(&source, &["add", "-A"]);
+            git(&source, &["commit", "-q", "-m", "next"]);
+        }
+        Move::ForcePush => {
+            git(
+                &source,
+                &["commit", "-q", "--amend", "-m", "feature work, rebased"],
+            );
+        }
+        Move::Reset => git(&source, &["reset", "-q", "--hard", "HEAD~1"]),
+    }
+    let new_head = git_out(&source, &["rev-parse", "HEAD"]);
+    assert_ne!(new_head, first_head);
+    git(&source, &["update-ref", "refs/pull/1/head", &new_head]);
+
+    let got = b.fetch_pr(1).await.unwrap();
+    assert_eq!(got.as_str(), new_head, "the refetch follows the moved head");
+}
+
 #[tokio::test]
 async fn negative_unknown_pr_number_is_soft_error() {
     let (source, _head) = fixture_with_pr();

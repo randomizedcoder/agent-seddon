@@ -168,6 +168,18 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     `forge_refusal_status`, pinned by a test) instead of being re-parsed from `agent-forge`'s
     text; `post_with_lease` is table-tested for the commit, the release on failure, and the
     held and committed leases that never reach the forge.
+- **2026-11-08 — a force-pushed PR is reviewed again.**
+  - **The failure:** after a rebase and force-push of agent-seddon #708, every trigger failed with
+    `git fetch … refs/pull/708/head:refs/fleet/pr/708 … ! [rejected] (non-fast-forward)`, so the
+    PR kept its old draft and was never reviewed at its new head.
+  - **The fix:** `fetch_pr`'s refspec is forced (`+refs/pull/<n>/head:refs/fleet/pr/<n>`). The
+    local ref is the fleet's own namespace, so replacing it loses nothing.
+  - `fetch_pr_follows_the_head` (real git): a push, a force-push (amend) and a reset backwards
+    each land on the new head; the last two fail without the `+`.
+  - **From the #709 draft:** `agent --review <PR#>` resolved the local ref first, so after a
+    force-push it reviewed the old head silently. It now always fetches; the local ref stands in,
+    with a warning, only when the fetch fails (`review_pr_resolves_the_fetched_head`). A template
+    that already starts with `+` is not doubled to `++`.
 
 ## Decisions of record
 
