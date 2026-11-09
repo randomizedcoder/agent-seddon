@@ -50,7 +50,7 @@ and Prometheus.
 | S27 | `AuthGate`: login / callback / logout, cookie sessions, the `ext_authz` check route (cookie or the client's own agent token); `read:` / `write:observability` | 10 F3, F4, F5, F10, F11 | S26 |
 | S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping | 10 F4, F7 | S27 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path (the host's `--web.external-url`), HyperDX port | 10 F6 | S28 |
-| S30 | Loopback lockdown and firewall | 10 F9 | S28 |
+| S30 | Loopback lockdown and firewall; the webhook receiver gets its own bind | 10 F9 | S28 |
 | S31 | Portal cookie mode (no token in JS) and tool links through the front door | 10 | S28 |
 
 The keyring backend for the CLI token file stays with parity spec

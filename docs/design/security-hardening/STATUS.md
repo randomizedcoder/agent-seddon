@@ -42,7 +42,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping) | [10](10-sso-front-door.md) F4, F7 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
-| S30 | Loopback lockdown + firewall | [10](10-sso-front-door.md) F9 | ⬜ | |
+| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
 
 ## As-built log

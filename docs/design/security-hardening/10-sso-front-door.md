@@ -12,7 +12,7 @@ observability tools each have their own:
 |---|---|---|
 | Portal (static) | 8092 | open; `static-web-server` ([`agent-stack.nix`](../../../nix/nixos/agent-stack.nix):706-718) |
 | grpc-web bridge | 8090 / 8091 / 8093 | open: Envoy is rendered with `PORTAL_AUTH = "off"`, no `jwt_authn` ([`nix/portal/default.nix`](../../../nix/portal/default.nix):880-905). Reaching :8090 is code execution as the agent user ([`agent-stack.nix`](../../../nix/nixos/agent-stack.nix):50-53) |
-| HyperDX UI | 8080 | open by choice (`hyperdx.auth = false`, #704), firewall-opened |
+| HyperDX UI | 8080 | its own login by default; open when a host sets `hyperdx.auth = false` (#704, as l2 does); firewall-opened |
 | Grafana | 3000 | its own `admin` login; the module sets no password and no auth mode ([`agent-stack.nix`](../../../nix/nixos/agent-stack.nix):721-770), so the password is whatever Grafana's database holds |
 | Prometheus | 9090 | open; not managed by the module (the host's own service) |
 
@@ -75,6 +75,10 @@ reuses the same pieces later; this design is the NixOS module.
   Dex; `/auth/callback` runs the existing code `Exchange`, opens the usual auth session and sets
   one cookie. The cookie holds an opaque random handle (256 bits) mapped to the auth session's
   `sid`, never a JWT, so a revoked session (`Logout`, `RevokeSession`) stops at the next request.
+  The table stores only the handle's hash, as refresh handles already do (`session.rs`), so a
+  copy of the session store yields no live browser session. Each entry belongs to its auth
+  session: it counts against the same per-tenant cap (`DEFAULT_MAX_SESSIONS_PER_TENANT`) and goes
+  when that session ends, is revoked or is garbage-collected at expiry.
   Cookie: `__Host-seddon`, `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, no `Domain`. Because
   cookies are not port-scoped, the same cookie covers :8443 and :8444.
 - **F4 — Envoy checks every request with `ext_authz`**, the HTTP flavour (`http_service`): Envoy
@@ -101,14 +105,17 @@ reuses the same pieces later; this design is the NixOS module.
   an RPC path.
 
   What Envoy removes from the client request depends on the route, so a client cannot forge an
-  identity and nothing a route needs is lost:
-  - every route: `x-seddon-*`, and `x-agent-user-id` (the agent's auth layer already overwrites
-    it from the verified token, S2);
-  - grpc-web routes: `authorization` is not removed but replaced. Envoy's route-level
-    `request_headers_to_remove` is static and runs in the router, after `ext_authz`, so it would
-    also drop the header `Check` adds; instead `Check`'s 200 always carries `authorization`
-    (above), listed in `allowed_upstream_headers`, which overwrites the client's value. Whatever
-    reaches the agent is what `Check` chose. `x-agent-session-id` is kept: the portal names its
+  identity and nothing a route needs is lost. Route-level `request_headers_to_remove` is static
+  and runs in the router, after `ext_authz`, so it would also drop any header `Check` adds. A
+  header `Check` supplies is therefore never removed on that route; `Check`'s 200 always carries
+  it, listed in `allowed_upstream_headers`, which overwrites the client's value:
+  - every route: `x-agent-user-id` (the agent's auth layer already overwrites it from the
+    verified token, S2), and `x-seddon-*` on every route except `/grafana/`;
+  - `/grafana/`: `X-Seddon-User` and `X-Seddon-Role` are not removed but replaced: `Check`'s 200
+    always carries both, so a forged value never reaches Grafana. Any other `x-seddon-*` header
+    is removed there too;
+  - grpc-web routes: `authorization` is replaced the same way (`Check`'s 200 always carries it,
+    above). Whatever reaches the agent is what `Check` chose. `x-agent-session-id` is kept: the portal names its
     session with it, and the RPC's own authorization decides access (S7);
   - tool routes: `authorization` and `cookie`, so the tools never see the session handle;
   - `/auth/*`: nothing, since logout needs the cookie to find the session to end.
@@ -123,7 +130,8 @@ reuses the same pieces later; this design is the NixOS module.
   `observability` is operator-global (`ResourceType::is_operator_global`), unlike `telemetry`:
   the tools show every tenant's data, so only a host-global granter may bind it, and a tenant
   admin's attempt is refused (`GrantRefusal::HostGlobal`). The pairs land with the gate (S27), so
-  its path map is complete from the start.
+  its path map is complete from the start. The map is default-deny: a path it does not list gets
+  403, so the portal's `/`, its assets and `favicon.ico` are entries of their own.
 - **F6 — Grafana uses `auth.proxy`.** `header_name = X-Seddon-User`, `headers = Role:X-Seddon-Role`,
   `auto_sign_up = true`, `whitelist = 127.0.0.1`, `enable_login_token = false`, login form and
   basic auth off, `root_url = https://<host>:8443/grafana/`, `serve_from_sub_path = true`. The
@@ -146,20 +154,34 @@ reuses the same pieces later; this design is the NixOS module.
   the host drops those itself. Assertions refuse a front door while the host's firewall still
   opens a tool's port, whether listed in `allowedTCPPorts` or inside an `allowedTCPPortRanges`
   range, globally or on any interface, and refuse it outright with
-  `networking.firewall.enable = false`, since the loopback binds alone don't cover HyperDX.
+  `networking.firewall.enable = false` or with any non-loopback interface in
+  `networking.firewall.trustedInterfaces` (which opens every port on it), since the loopback
+  binds alone don't cover HyperDX.
   The assertions read the NixOS firewall options only: rules added through `extraCommands`,
   `extraInputRules` or a hand-written nftables ruleset are invisible to them, so the host config
   review (l2's `lan-access.nix`) stays the backstop. HyperDX runs with `--network=host`, and all its listeners (UI 8080, API
   8000, OpAMP 4320, OTLP 4317 / 4318) bind every address, so their bind addresses must be checked
   against the image (open item); the firewall alone still closes them.
+  Two listeners keep their binds. The REST transcoder (8094) is already fixed to `127.0.0.1`,
+  whatever the grpc-web bind is, and is not routed through the front door in S25–S31. The
+  GitHub webhook receiver (8096, one exact route, `POST /webhooks/github`, HMAC-verified by the
+  agent) must stay reachable by GitHub, which carries no cookie and doesn't trust the dev PKI.
+  Today it shares the grpc-web listeners' one bind knob (`PORTAL_GRPC_WEB_HOST`), so S30 gives it
+  its own: it stays on the host's address while the rest move to loopback. It is not behind the
+  check, the module still doesn't open it (a host that takes deliveries does), and the assertions
+  don't count it as a tool port.
 - **F10 — CSRF.** `SameSite=Lax` stops cross-site sub-requests from carrying the cookie. grpc-web
   calls are non-simple requests (custom content type), so a cross-site page also needs a CORS
-  preflight, which the front door allows only for its own origins (`https://<host>:8443` and
-  `https://<host>:8444`). `/auth/logout` is POST-only.
+  preflight. The portal and its RPCs share :8443, so they need no CORS at all, and the front door
+  allows no cross-origin request on either listener: in particular, a page on :8444 (HyperDX, a
+  large app that renders log content) cannot make credentialed grpc-web calls to the agent. A
+  host that genuinely needs another origin lists it in the existing `extraOrigins`.
+  `/auth/logout` is POST-only.
   Grafana keeps its own CSRF checks.
 - **F11 — Return address.** `/auth/login?rd=` accepts only a path on the front door (starts with
-  one `/`, no `//`, no scheme, no backslash, bounded length); anything else becomes `/`. The value
-  rides in the single-use `state` the agent already stores, never in a cookie.
+  one `/`, no `//`, no scheme, no backslash, at most 2048 bytes); anything else becomes `/`. The
+  value rides in the single-use `state` the agent already stores, never in a cookie. The bound
+  is the gate's: `PendingTable` caps the state key (`MAX_STATE_BYTES`), not the value.
 - **F12 — The agent reaches Dex on loopback.** Browsers use Dex's public issuer URL, but the agent
   should not hairpin through its own front door (and trust its certificate) to talk to Dex. A
   `generic` issuer gains `backchannel_url` (`http://127.0.0.1:5556/dex`): the agent fetches
@@ -170,7 +192,8 @@ reuses the same pieces later; this design is the NixOS module.
   (another host, or a prefix like `/dexfoo`) fails discovery, so sign-in through that issuer is
   refused rather than redeeming codes at the discovered host. Discovery is read at sign-in, not
   at config load, so that is where the refusal surfaces. So a discovery document cannot point
-  the agent at another host for either.
+  the agent at another host for either. Discovery is fetched from `backchannel_url`, but the
+  document's `issuer` is still compared with the public issuer, never with the loopback URL.
 
 ## What the agent gains (Rust)
 
@@ -182,9 +205,11 @@ reuses the same pieces later; this design is the NixOS module.
   protos; the gRPC flavour would need them).
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
-  `authorization` replaced by the session's, an RPC denied as 401 not 302) and for
+  `authorization` replaced by the session's, asserting exactly one `authorization` header reaches
+  the agent, the same for a forged `X-Seddon-User` on `/grafana/`, an RPC denied as 401 not 302,
+  an unmapped path denied, a cross-origin preflight from :8444 refused) and for
   `rd` (`//evil`, `https://evil`, `/\evil`, encoded variants, `%0d%0a` and raw CR/LF, since `rd`
-  lands in the 302's `Location`, 10 KB value); every row asserts the
+  lands in the 302's `Location`, a 2049-byte value); every row asserts the
   refusal. The composed row runs the real RPC behind `Check`: a cookie-session caller naming
   another principal's session in `x-agent-session-id` is refused by the session's ownership check.
 
