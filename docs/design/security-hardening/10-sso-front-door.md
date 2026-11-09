@@ -84,7 +84,9 @@ reuses the same pieces later; this design is the NixOS module.
   hash is stored with the `state`. `/auth/callback` redeems the code only when that cookie is
   present and matches the `state`'s nonce, and clears it either way. Without this, a cross-site
   page could navigate a victim to `/auth/callback` with a code and `state` the attacker got from
-  their own login, signing the victim in as the attacker (login CSRF).
+  their own login, signing the victim in as the attacker (login CSRF). One login runs per
+  browser at a time: a second tab's `/auth/login` replaces the cookie, so the first tab's
+  callback is refused and that tab starts again.
   The table stores only the handle's hash, as refresh handles already do (`session.rs`), so a
   copy of the session store yields no live browser session. Each entry belongs to its auth
   session: it counts against the same per-tenant cap (`DEFAULT_MAX_SESSIONS_PER_TENANT`) and goes
@@ -157,7 +159,12 @@ reuses the same pieces later; this design is the NixOS module.
   admin's attempt is refused (`GrantRefusal::HostGlobal`). The pairs land with the gate (S27), so
   its path map is complete from the start. The map is default-deny: a path it does not list gets
   403, so the portal's `/`, its assets and `favicon.ico` are entries of their own.
-- **F6 — Grafana uses `auth.proxy`.** `header_name = X-Seddon-User`, `headers = Role:X-Seddon-Role`,
+- **F6 — Grafana uses `auth.proxy`, and HyperDX has no login of its own.** With the front door
+  on, the gate is HyperDX's sign-in: the module requires `hyperdx.auth = false` (an assertion),
+  so nobody signs in twice. That also makes HyperDX's collector accept OTLP with no ingestion
+  key; its ports bind every address under `--network=host`, so it is S30's firewall that keeps
+  keyless ingestion local (see F9 and the open item on HyperDX's listeners).
+  Grafana: `header_name = X-Seddon-User`, `headers = Role:X-Seddon-Role`,
   `auto_sign_up = true`, `whitelist = 127.0.0.1`, `enable_login_token = false`, login form and
   basic auth off, `root_url = https://<host>:8443/grafana/`, `serve_from_sub_path = true`. The
   `admin` account stays for break-glass; its password comes from a file (F8).
@@ -193,7 +200,9 @@ reuses the same pieces later; this design is the NixOS module.
   8000, OpAMP 4320, OTLP 4317 / 4318) bind every address, so their bind addresses must be checked
   against the image (open item); the firewall alone still closes them.
   Two listeners keep their binds. The REST transcoder (8094) is already fixed to `127.0.0.1`,
-  whatever the grpc-web bind is, and is not routed through the front door in S25–S31. The
+  whatever the grpc-web bind is, and is not routed through the front door in S25–S31. That is no
+  regression: it is loopback-only today too, so a remote REST client keeps using an SSH tunnel
+  (`ssh -L 8094:127.0.0.1:8094 <host>`) until a later increment routes it. The
   GitHub webhook receiver (8096, one exact route, `POST /webhooks/github`, HMAC-verified by the
   agent) must stay reachable by GitHub, which carries no cookie and doesn't trust the dev PKI.
   Today it shares the grpc-web listeners' one bind knob (`PORTAL_GRPC_WEB_HOST`), so S30 gives it
@@ -217,9 +226,9 @@ reuses the same pieces later; this design is the NixOS module.
   cannot make a cookie-carrying grpc-web call.
   Grafana keeps its own CSRF checks.
 - **F11 — Return address.** `/auth/login?rd=` accepts only a path on the front door, by allowlist:
-  it starts with one `/` (not `//`), is at most 2048 bytes, and every byte is printable ASCII
-  (0x21–0x7E) other than `\`, so no scheme, space, tab or other control byte; anything else
-  becomes `/`. The value rides in the single-use `state` the agent already stores, never in a
+  run on the percent-decoded value, it starts with one `/` (not `//`), is at most 2048 bytes,
+  and every byte is printable ASCII (0x21–0x7E) other than `\`, so no scheme, space, tab or
+  other control byte; anything else becomes `/`. The value rides in the single-use `state` the agent already stores, never in a
   cookie. The bound is the gate's: `PendingTable` caps the state key (`MAX_STATE_BYTES`), not the value.
 - **F12 — The agent reaches Dex on loopback.** Browsers use Dex's public issuer URL, but the agent
   should not hairpin through its own front door (and trust its certificate) to talk to Dex. A
@@ -252,12 +261,15 @@ reuses the same pieces later; this design is the NixOS module.
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches
   the agent, the same for a forged `X-Seddon-User` on `/grafana/`, an RPC denied as 401 not 302,
-  an unmapped path denied, a preflight from :8444 answered with no `Access-Control-Allow-Origin`
+  an unmapped path denied, a page path denied as a 302 to `/auth/login?rd=<path>` (the
+  counterpart of the RPC's 401), a cookie and an `authorization: Bearer` together (the cookie
+  session wins and the client's token is replaced), the cached agent token re-minted a minute
+  before expiry and not before, a valid cookie reaching HyperDX on :8444, a preflight from :8444 answered with no `Access-Control-Allow-Origin`
   (the browser does the refusing), a callback with no login cookie, the wrong nonce or another
   `state`'s nonce refused with no code redeemed, an unbound principal refused at the callback
   with no session row, and every denial written
   to the audit stream, as `audit::refused` already is for code exchanges) and for
-  `rd` (`//evil`, `https://evil`, `/\evil`, encoded variants, `%0d%0a`, raw CR/LF and tab, since
+  `rd` (empty and absent, both becoming `/`, `//evil`, `https://evil`, `/\evil`, encoded variants, `%0d%0a`, raw CR/LF and tab, since
   `rd` lands in the 302's `Location`, a 2049-byte value); every row asserts the
   refusal. The composed row runs the real RPC behind `Check`: a cookie-session caller naming
   another principal's session in `x-agent-session-id` is refused by the session's ownership check.
@@ -330,11 +342,14 @@ one l2 deploy (S30), with your go-ahead; `~/nixos/desktop/l2/lan-access.nix` the
 
 - Dex's GitHub connector with a GitHub App's OAuth client (S26b).
 - HyperDX's listeners under `--network=host` (can they be loopback-only?), and whether its UI can
-  serve under a sub-path, which would fold :8444 into :8443.
+  serve under a sub-path, which would fold :8444 into :8443. Also whether its UI calls the API
+  (8000) from the browser or proxies it server-side: if from the browser, :8444 routes the API
+  too, or S30's lockdown breaks the UI.
 - Whether Prometheus should be managed by the module or stay the host's, with the module only
   asserting it listens on loopback.
-- Grafana's `auth.proxy` role sync: confirm it updates the role on each request in the packaged
-  version (nixpkgs' `grafana` 13.3.0 at the flake's pin).
+- Grafana's `auth.proxy` in the packaged version (nixpkgs' `grafana` 13.3.0 at the flake's pin):
+  the option names F6 uses (`whitelist` in particular), and that role sync updates the role on
+  each request.
 - `/prometheus/` needs the host's Prometheus started with `--web.external-url` (and the matching
   route prefix) set to the front door's path; S29 documents it, or sets it if the module comes to
   own Prometheus.

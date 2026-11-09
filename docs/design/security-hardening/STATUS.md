@@ -37,7 +37,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 | S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
-| S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ⬜ | |
+| S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | 🟡 | #708 |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
@@ -1219,6 +1219,13 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       the issuer's whole URL, so one on another port, or on plain http, is refused.
     - The GitHub secret's `replace-secret` call is nixpkgs' own idiom (`replace-secret.py`
       replaces the literal path with the file); the VM proves it for the static client.
+  - Carried from the #706 (design) draft at 35960bbc, into `10-sso-front-door.md`: the front door
+    requires `hyperdx.auth = false` (one sign-in) and says what keyless OTLP then relies on; the
+    HyperDX API's reachability under the lockdown is an open item; REST stays loopback-only, as
+    today (no regression); `rd` is checked after percent-decoding; one login per browser at a
+    time; new `Check` rows (a page denied as 302, cookie plus bearer, the token re-mint boundary,
+    HyperDX reached on :8444) and `rd` rows (empty, absent); Grafana's option names join the
+    packaged-version open item.
   - Carried from the #707 (S25) drafts:
     - The Grafana password options say they set `security.admin_password`, so a host that sets
       it too gets Nix's conflicting-definitions error.
