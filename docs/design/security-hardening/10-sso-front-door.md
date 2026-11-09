@@ -140,6 +140,7 @@ reuses the same pieces later; this design is the NixOS module.
   Default: issued by the dev PKI the repo already has (`nix run .#pki-dev`, S4), whose root you
   trust once in the browser on `l`. A real certificate is a file option. The front door is HTTPS
   only, which also satisfies the agent's rule that a non-loopback `redirect_uris` entry is https.
+  It sends `Strict-Transport-Security`, which doesn't depend on who issued the certificate.
 - **F8 — Grafana's admin password from the repo.** Option `grafana.adminPasswordFile`, passed with
   `$__file{}` through `LoadCredential`, or `grafana.generateAdminPassword` for a random one kept
   in a root-only state directory. Grafana reads `admin_password` only when it creates its
@@ -176,6 +177,10 @@ reuses the same pieces later; this design is the NixOS module.
   allows no cross-origin request on either listener: in particular, a page on :8444 (HyperDX, a
   large app that renders log content) cannot make credentialed grpc-web calls to the agent. A
   host that genuinely needs another origin lists it in the existing `extraOrigins`.
+  What remains is what SameSite allows: it compares the registrable domain, not the port, so a
+  page on :8444 can still send same-site requests to :8443 with the cookie (top-level
+  navigations, simple GETs, subresources). None of those can make a grpc-web call or read a
+  cross-origin response, and the gate's own routes change state only on POST.
   `/auth/logout` is POST-only.
   Grafana keeps its own CSRF checks.
 - **F11 — Return address.** `/auth/login?rd=` accepts only a path on the front door (starts with
@@ -188,8 +193,10 @@ reuses the same pieces later; this design is the NixOS module.
   discovery there and redeems codes there, while the authorization URL it hands the browser and
   the `iss` it expects stay public. `backchannel_url` requires `jwks_url` (the loopback key set),
   so keys never come from the discovery document. The discovered token endpoint must sit under
-  the issuer at a `/` boundary, and is then rewritten onto the back-channel; one that does not
-  (another host, or a prefix like `/dexfoo`) fails discovery, so sign-in through that issuer is
+  the issuer at a `/` boundary: the endpoint string must extend the public issuer's whole URL
+  (scheme, host *and port*, path) with a `/`, and is then rewritten onto the back-channel. One
+  that does not (another host, another port, plain http, or a prefix like `/dexfoo`) fails
+  discovery, so sign-in through that issuer is
   refused rather than redeeming codes at the discovered host. Discovery is read at sign-in, not
   at config load, so that is where the refusal surfaces. So a discovery document cannot point
   the agent at another host for either. Discovery is fetched from `backchannel_url`, but the
@@ -207,7 +214,8 @@ reuses the same pieces later; this design is the NixOS module.
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches
   the agent, the same for a forged `X-Seddon-User` on `/grafana/`, an RPC denied as 401 not 302,
-  an unmapped path denied, a cross-origin preflight from :8444 refused) and for
+  an unmapped path denied, a cross-origin preflight from :8444 refused, and every denial written
+  to the audit stream, as `audit::refused` already is for code exchanges) and for
   `rd` (`//evil`, `https://evil`, `/\evil`, encoded variants, `%0d%0a` and raw CR/LF, since `rd`
   lands in the 302's `Location`, a 2049-byte value); every row asserts the
   refusal. The composed row runs the real RPC behind `Check`: a cookie-session caller naming
@@ -220,15 +228,20 @@ reuses the same pieces later; this design is the NixOS module.
 | S25 | Grafana admin password from a file + reset oneshot (F8) | module, eval rows |
 | S26 | Dex in the module (GitHub connector, secrets as files), the agent issuer wired, `backchannel_url` (F12) | module, Rust, tables, VM test with Dex's `mockCallback` connector |
 | S26b | GitHub App from a manifest: `/setup` bootstrap, secrets to files, Dex restart | Rust, module, tables |
-| S27 | `AuthGate`: login / callback / logout, cookie sessions, `Check` (F3, F4, F10, F11); RBAC pairs (F5) | Rust, tables, catalogue, `authz.toml` rows, `auth-e2e` row |
-| S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping (F4, F7) | `portal_envoy.py`, gate rows |
+| S27 | `AuthGate`: login / callback / logout, cookie sessions, `Check` (F3, F4, F11; F10's cookie attributes); RBAC pairs (F5) | Rust, tables, catalogue, `authz.toml` rows, `auth-e2e` row |
+| S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping, CORS (F4, F7, F10) | `portal_envoy.py`, gate rows |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port (F6) | module |
 | S30 | Loopback lockdown and firewall (F9) | module assertions; l2 config change |
 | S31 | Portal cookie mode (no token in JS) and tool links through the front door | portal, `portal-auth-e2e` |
 
-A NixOS VM test carries the whole path from S28 on: Dex with `mockCallback`, the front door, a
-signed-in request reaching Grafana as the right role, an unbound user getting 403, a forged
-`X-Seddon-User` ignored, and every tool port closed from outside the VM.
+A NixOS VM test carries the path, and each increment adds the rows it makes true, so no
+increment is gated on a property a later one lands:
+- S28: Dex with `mockCallback` signing in through the front door, an unbound user getting 403,
+  an unmapped path getting 403, a path outside `/dex` never reaching a Dex route, and a denied
+  `Check` showing up in the audit stream;
+- S29: a signed-in request reaching Grafana as the right role, and a forged `X-Seddon-User`
+  ignored;
+- S30: every tool port closed from outside the VM.
 
 ## Creating the GitHub App from the portal (S26b)
 
