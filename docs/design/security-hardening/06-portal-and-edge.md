@@ -1,5 +1,9 @@
 # 06 — Portal login and Envoy hardening
 
+> For the NixOS module with `frontDoor.enable`, the front door in [10](10-sso-front-door.md)
+> (S25–S31) replaces the per-listener Envoy described here with two TLS listeners (:8443, and
+> :8444 for HyperDX) and `ext_authz`. With the front door off, this page still applies.
+
 Closes P0-4: Envoy binds `0.0.0.0`, allows every origin, omits `authorization`, has no `jwt_authn`;
 the portal hardcodes its identity.
 

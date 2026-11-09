@@ -151,10 +151,18 @@ editing, attribute-based policies, per-service token audiences, HSM / KMS-backed
   track's confinement is shaped to become.
 - The [doctor track](../doctor/README.md) `Probe` seam gains the PKI / JWKS / IdP / session-store probes.
 
+## Follow-on: one sign-in for the tools
+
+[`10-sso-front-door.md`](10-sso-front-door.md) (S25–S31) puts the portal, Grafana, HyperDX and
+Prometheus behind one sign-in at an Envoy front door, with Dex (GitHub) as the login provider and
+the agent deciding access through `ext_authz`.
+
 ## Build order
 
 `S1 → S2` (correctness, no new surface) · `S3 → S5 → S6 → S8` (login → token → sessions → bindings)
 · `S7` (RBAC model, after S2) · `S4 → S10` (PKI, independently) · `S9` (propagation, after S5) ·
 `S11` (audit, after S6 + S8) · `S12 / S13 → S14` (CLI, portal, Envoy) · `S15` (the end-to-end
-gate, last) · `S16`, `S17` (data plane, independently). Details and dependencies in
+gate, last) · `S16`, `S17` (data plane, independently) · then the follow-on front door
+`S26 … S31` after S13a, with `S25` (Grafana's admin password) independent of all of it
+([10](10-sso-front-door.md)). Details and dependencies in
 [`09-increments.md`](09-increments.md).
