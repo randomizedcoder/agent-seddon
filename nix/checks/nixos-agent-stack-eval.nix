@@ -653,6 +653,12 @@ let
         "https://l2.example/dex#f"
         "https://u:p@l2.example/dex"
         "javascript:alert(1)"
+        # Port out of range (the URL regex admits 1-5 digits).
+        "https://l2.example:99999/dex"
+        "https://l2.example:0/dex"
+        # A loopback issuer on another port than dex.port (5556): sign-in would 404.
+        "http://127.0.0.1:9999/dex"
+        "http://127.0.0.1/dex"
       ]
       && dexFails { redirectUris = [ ]; }
       && dexFails { mockLogin = false; }
@@ -690,7 +696,13 @@ let
         "-x"
         ""
       ]
-      && !(dexFails { issuer = "http://127.0.0.1:5556/dex"; });
+      && !(dexFails { issuer = "http://127.0.0.1:5556/dex"; })
+      && !(dexFails { issuer = "https://l2.example:65535/dex"; })
+      # The rule follows dex.port, not a constant.
+      && !(dexFails {
+        issuer = "http://127.0.0.1:9999/dex";
+        port = 9999;
+      });
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;

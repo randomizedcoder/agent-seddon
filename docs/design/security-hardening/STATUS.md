@@ -37,7 +37,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 | S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
-| S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | 🟡 | #708 |
+| S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #TBD |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
@@ -1235,6 +1235,21 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       it) while the reset fails open (Grafana stays up with the old password).
     - VM: a specialisation switches to `adminPasswordFile`, and the operator's file signs in;
       neither the reset's nor Grafana's journal contains the password.
+  - **S26 follow-ups (#708 draft, merged as c5a94a10):**
+    - A loopback issuer must use `dex.port`. On another port, the back-channel (built from
+      the port) doubled the issuer's path, and sign-in 404'd. The issuer's port must be
+      1-65535. Eval rows cover both refusals, and a positive row moves `dex.port` along.
+    - VM: a `dexgh` specialisation starts Dex with the GitHub connector. The operator's
+      secret, not its path, is in `/run/dex/config.yaml`, and Dex's journal doesn't contain
+      it. Sign-in redirects to github.com with the App's client id and the public callback.
+    - `code_endpoints` trims every trailing slash from the back-channel, as `discover_code`
+      already did. It reports a missing authorization endpoint first again. New rows: a
+      `//` back-channel, an https back-channel, no endpoints at all.
+    - Docs: a loopback issuer's port, `require_email_verified` (where to relax it), and that
+      the single-issuer `[auth]` form has no `backchannel_url`. The Grafana refusal names
+      the DSN.
+    - New open items in 10: `agent login --device` ignores `backchannel_url`, and where
+      `/setup` runs. S26b now follows S27, whose `AuthGate` hosts `/setup` (09's lanes).
 
 ## Cross-track note (not an S-increment)
 

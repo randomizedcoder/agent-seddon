@@ -426,6 +426,19 @@ fn discovery(issuer: &str, authorization: &str, token: &str) -> serde_json::Valu
     Some("http://127.0.0.1:5556/dex/"),
     Ok(("https://l2.example:8443/dex/auth", "http://127.0.0.1:5556/dex/token"))
 )]
+#[case::corner_backchannel_many_trailing_slashes(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token"),
+    Some("http://127.0.0.1:5556/dex//"),
+    Ok(("https://l2.example:8443/dex/auth", "http://127.0.0.1:5556/dex/token"))
+)]
+// The rewrite isn't loopback-specific: any back-channel `check_fetch_url` admits.
+#[case::positive_https_backchannel(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token"),
+    Some("https://dex.internal.example/dex"),
+    Ok(("https://l2.example:8443/dex/auth", "https://dex.internal.example/dex/token"))
+)]
 // A query rides along; the host is the back-channel's either way.
 #[case::corner_token_endpoint_query_is_kept(
     DEX,
@@ -460,6 +473,12 @@ fn discovery(issuer: &str, authorization: &str, token: &str) -> serde_json::Valu
     serde_json::json!({"issuer": DEX, "authorization_endpoint": "https://l2.example:8443/dex/auth"}),
     None,
     Err("no `token_endpoint`")
+)]
+#[case::negative_no_endpoints_reports_authorization_first(
+    DEX,
+    serde_json::json!({"issuer": DEX}),
+    None,
+    Err("no `authorization_endpoint`")
 )]
 #[case::negative_no_authorization_endpoint(
     DEX,

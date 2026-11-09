@@ -6,7 +6,8 @@
 # ClickHouse (admin hash from the env file) → schema + role passwords, and Postgres
 # creds → Postgres → role + password → gateway / sessions / fleet (telemetry writer
 # authenticated, stores migrated, roster seeded) → Envoy grpc-web + portal, and Dex
-# (mock connector) completing a PKCE code flow for the agent's client over loopback.
+# (mock connector) completing a PKCE code flow for the agent's client over loopback, then
+# (a specialisation) the GitHub connector starting with the operator's secret spliced in.
 #
 # Not in `nix flake check`: it needs KVM and minutes of VM time (the same reason
 # the postgres module only has an eval gate). Run it after touching the module.
@@ -85,11 +86,22 @@ pkgs.testers.runNixOSTest {
         redirectUris = [ "https://dex.test/auth/callback" ];
         mockLogin = true;
       };
+      # The GitHub connector instead (#708 draft): Dex starts with the operator's client
+      # secret spliced in by `replace-secret`. Nothing dials github.com.
+      specialisation.dexgh.configuration.services.agentSeddon.dex = {
+        mockLogin = lib.mkForce false;
+        github = {
+          clientId = "Iv1.vmtest";
+          clientSecretFile = "/run/secrets/dex-github";
+        };
+      };
       environment.systemPackages = [ pkgs.curl ];
     };
 
   testScript = ''
     machine.start()
+    # The base system, whose specialisations the subtests switch to.
+    base = machine.succeed("readlink -f /run/current-system").strip()
 
     with subtest("clickhouse: creds, server, schema"):
         machine.wait_for_unit("agent-seddon-clickhouse-creds.service")
@@ -195,7 +207,7 @@ pkgs.testers.runNixOSTest {
             "install -d -m 0700 /run/secrets && "
             "(umask 077 && printf operator-pw-4567 > /run/secrets/grafana-admin)"
         )
-        machine.succeed("/run/current-system/specialisation/pwfile/bin/switch-to-configuration test")
+        machine.succeed(f"{base}/specialisation/pwfile/bin/switch-to-configuration test")
         applied()
         machine.succeed(user_api.format("echo operator-pw-4567"))
         machine.fail(user_api.format("echo line-ending-pw-0123"))
@@ -262,5 +274,35 @@ pkgs.testers.runNixOSTest {
             machine.require_unit_state(f"agent-seddon-{unit}.service", "active")
         machine.require_unit_state("grafana.service", "active")
         machine.require_unit_state("dex.service", "active")
+
+    with subtest("dex: the GitHub connector gets the operator's secret"):
+        gh_secret = "gh-secret-vm-0123"
+        machine.succeed(
+            "install -d -m 0700 /run/secrets && "
+            f"(umask 077 && printf {gh_secret} > /run/secrets/dex-github)"
+        )
+        machine.succeed(f"{base}/specialisation/dexgh/bin/switch-to-configuration test")
+        machine.wait_for_unit("dex.service")
+        machine.wait_for_open_port(5556)
+        # The value, not the path, reached Dex's config.
+        machine.succeed(f"grep -qF {gh_secret} /run/dex/config.yaml")
+        machine.fail("grep -qF /run/secrets/dex-github /run/dex/config.yaml")
+        machine.fail(f"journalctl --no-pager -u dex.service | grep -qF {gh_secret}")
+        # Dex loaded the connector: sign-in leads to GitHub with the App's client id.
+        url = f"{local}/auth?" + urllib.parse.urlencode({
+            "client_id": "agent-seddon", "redirect_uri": cb, "response_type": "code",
+            "scope": "openid email", "state": "st-2",
+        })
+        for _ in range(4):
+            loc = machine.succeed(f"curl -sS -o /dev/null -w '%{{redirect_url}}' '{url}'").strip()
+            assert loc, f"no redirect from {url}"
+            if loc.startswith("https://github.com/"):
+                break
+            url = loc.replace(public, local, 1) if loc.startswith(public) else urllib.parse.urljoin(url, loc)
+        else:
+            raise AssertionError(f"Dex never sent the browser to GitHub; last redirect {loc}")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
+        assert q["client_id"] == ["Iv1.vmtest"], loc
+        assert q["redirect_uri"] == [f"{public}/callback"], loc
   '';
 }

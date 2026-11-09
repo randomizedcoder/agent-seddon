@@ -262,6 +262,18 @@ front door to reach Dex. A host that turns auth on merges it into
 `dex.tenant` (default `local`). `dex.mockLogin` swaps GitHub for Dex's
 `mockCallback` connector, for tests.
 
+A loopback `dex.issuer` (`http://127.0.0.1…`, for a test) must use `dex.port`: the
+back-channel is built from the port, so any other one is refused at eval.
+
+Two things about the `issuerSettings` entry:
+
+- **It must go in `[[auth.issuers]]`.** The single-issuer `[auth]` form has no
+  `backchannel_url`.
+- **It sets `require_email_verified = true`.** Dex's GitHub connector can report an
+  email GitHub hasn't verified, and that person is refused. To admit them anyway,
+  override the field when merging the entry into `settings.auth.issuers`; binding
+  (F2) then matches an email nobody proved they own.
+
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
 
