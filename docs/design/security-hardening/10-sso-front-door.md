@@ -69,12 +69,22 @@ reuses the same pieces later; this design is the NixOS module.
   email or `sub:<issuer>/<sub>`) and anyone given a binding in the portal's Access page (S22). An
   authenticated principal with no binding gets 403 everywhere, including the portal. Unverified
   emails already match no binding; the Dex issuer entry also sets `require_email_verified = true`
-  so a login with one stops at the agent.
+  so a login with one stops at the agent. The admission check runs at `/auth/callback`, before a
+  session is opened: a principal with no binding and no `operator_subjects` match gets 403 and no
+  session row, so free GitHub accounts cannot fill the tenant's session cap
+  (`DEFAULT_MAX_SESSIONS_PER_TENANT`). Nothing is lost: a binding names an email or `sub`, so the
+  operator can grant access before the user ever signs in.
 - **F3 — The agent owns the browser session (backend-for-frontend).** A new `AuthGate` in the
   agent runs the code flow itself: `/auth/login` calls the existing `Begin` logic and redirects to
   Dex; `/auth/callback` runs the existing code `Exchange`, opens the usual auth session and sets
   one cookie. The cookie holds an opaque random handle (256 bits) mapped to the auth session's
   `sid`, never a JWT, so a revoked session (`Logout`, `RevokeSession`) stops at the next request.
+  The login is bound to the browser that started it. `/auth/login` sets a second cookie,
+  `__Host-seddon-login` (same attributes, expiring with the `state`), holding a random nonce whose
+  hash is stored with the `state`. `/auth/callback` redeems the code only when that cookie is
+  present and matches the `state`'s nonce, and clears it either way. Without this, a cross-site
+  page could navigate a victim to `/auth/callback` with a code and `state` the attacker got from
+  their own login, signing the victim in as the attacker (login CSRF).
   The table stores only the handle's hash, as refresh handles already do (`session.rs`), so a
   copy of the session store yields no live browser session. Each entry belongs to its auth
   session: it counts against the same per-tenant cap (`DEFAULT_MAX_SESSIONS_PER_TENANT`) and goes
@@ -104,21 +114,36 @@ reuses the same pieces later; this design is the NixOS module.
   that 401 into a navigation to `/auth/login?rd=<the page's path>`; `rd` is always a page, never
   an RPC path.
 
-  What Envoy removes from the client request depends on the route, so a client cannot forge an
-  identity and nothing a route needs is lost. Route-level `request_headers_to_remove` is static
-  and runs in the router, after `ext_authz`, so it would also drop any header `Check` adds. A
-  header `Check` supplies is therefore never removed on that route; `Check`'s 200 always carries
-  it, listed in `allowed_upstream_headers`, which overwrites the client's value:
-  - every route: `x-agent-user-id` (the agent's auth layer already overwrites it from the
-    verified token, S2), and `x-seddon-*` on every route except `/grafana/`;
-  - `/grafana/`: `X-Seddon-User` and `X-Seddon-Role` are not removed but replaced: `Check`'s 200
-    always carries both, so a forged value never reaches Grafana. Any other `x-seddon-*` header
-    is removed there too;
-  - grpc-web routes: `authorization` is replaced the same way (`Check`'s 200 always carries it,
-    above). Whatever reaches the agent is what `Check` chose. `x-agent-session-id` is kept: the portal names its
-    session with it, and the RPC's own authorization decides access (S7);
-  - tool routes: `authorization` and `cookie`, so the tools never see the session handle;
-  - `/auth/*`: nothing, since logout needs the cookie to find the session to end.
+  What reaches each upstream is fixed per route, so a client cannot forge an identity and
+  nothing a route needs is lost. Route-level `request_headers_to_remove` takes exact header
+  names (no prefixes) and runs in the router, after `ext_authz`, so it would also drop a header
+  `Check` adds. A header `Check` supplies on a route is therefore *replaced*, not removed: its
+  200 always carries it, listed in `allowed_upstream_headers`, which overwrites the client's
+  value. The identity headers are a closed set, and every route says what happens to each:
+
+  | Header | grpc-web | `/` (portal) | `/auth/*` | `/dex/*` | `/grafana/` | `/prometheus/` | HyperDX (:8444) |
+  |---|---|---|---|---|---|---|---|
+  | `authorization` | replaced | removed | removed | removed | removed | removed | removed |
+  | `cookie` | removed | removed | kept | kept | removed | removed | removed |
+  | `x-seddon-user` | removed | removed | removed | removed | replaced | removed | removed |
+  | `x-seddon-role` | removed | removed | removed | removed | replaced | removed | removed |
+  | `x-agent-user-id` | removed | removed | removed | removed | removed | removed | removed |
+  | `x-agent-session-id` | kept | removed | removed | removed | removed | removed | removed |
+
+  - `authorization` on grpc-web is the agent token `Check` chose (above): whatever reaches the
+    agent is that.
+  - `cookie` is kept only where it is needed: `/auth/*`, since logout needs it to find the
+    session to end, and `/dex/*`, which is not behind the check and is the identity provider
+    itself. The agent and the tools never see the session handle.
+  - `x-agent-session-id` is kept on grpc-web: the portal names its session with it, and the RPC's
+    own authorization decides access (S7).
+  - `x-agent-user-id` is removed everywhere, not only where the agent would overwrite it, so a
+    forged one reaches no tool either.
+
+  The table is one Nix value: it renders every route's `request_headers_to_remove` and the
+  per-route `replaced` set `Check` answers with. A header added to the gate is a new row, so no
+  route can miss it. S28's `portal_envoy` rows assert each route's lists equal the table, and a
+  `Check` row asserts it never answers with a header outside its route's `replaced` set.
 
   `Check` failing or timing out (1 s) fails closed (`failure_mode_allow: false`).
 - **F5 — Permissions.** New pairs in the RBAC catalogue, named like the rest (`read:` / `write:`):
@@ -145,7 +170,8 @@ reuses the same pieces later; this design is the NixOS module.
   `$__file{}` through `LoadCredential`, or `grafana.generateAdminPassword` for a random one kept
   in a root-only state directory. Grafana reads `admin_password` only when it creates its
   database, so a oneshot after each Grafana start runs `grafana cli admin reset-admin-password`
-  from the same file (`--password-from-stdin`, never argv; S25's VM test signs in with it). Resetting on every start needs no stored hash, and a
+  from the same file (`--password-from-stdin`, never argv). The flag exists in the packaged
+  Grafana: S25's VM test (#707) resets the password this way and signs in with it. Resetting on every start needs no stored hash, and a
   password changed in the UI goes back to the file's. This lands first (S25) because it is useful
   with or without the front door.
 - **F9 — Everything else moves to loopback.** With `frontDoor.enable`, the module binds the portal
@@ -157,7 +183,10 @@ reuses the same pieces later; this design is the NixOS module.
   range, globally or on any interface, and refuse it outright with
   `networking.firewall.enable = false` or with any non-loopback interface in
   `networking.firewall.trustedInterfaces` (which opens every port on it), since the loopback
-  binds alone don't cover HyperDX.
+  binds alone don't cover HyperDX. That refusal is deliberate and will fire on common hosts
+  (`tailscale0`, `virbr0`, container bridges): such a host stops trusting the interface and opens
+  what it needs on it with `networking.firewall.interfaces.<name>.allowedTCPPorts`, which the
+  assertions check like the global lists.
   The assertions read the NixOS firewall options only: rules added through `extraCommands`,
   `extraInputRules` or a hand-written nftables ruleset are invisible to them, so the host config
   review (l2's `lan-access.nix`) stays the backstop. HyperDX runs with `--network=host`, and all its listeners (UI 8080, API
@@ -180,13 +209,18 @@ reuses the same pieces later; this design is the NixOS module.
   What remains is what SameSite allows: it compares the registrable domain, not the port, so a
   page on :8444 can still send same-site requests to :8443 with the cookie (top-level
   navigations, simple GETs, subresources). None of those can make a grpc-web call or read a
-  cross-origin response, and the gate's own routes change state only on POST.
-  `/auth/logout` is POST-only.
+  cross-origin response. Of the gate's own routes, `/auth/logout` is POST-only, and the one GET
+  that changes state, `/auth/callback`, redeems a code only for the browser that began that login
+  (the nonce cookie, F3).
+  The front door's CORS stays non-credentialed: today's `cors_policy` sets no
+  `allow_credentials`, and an `extraOrigins` entry does not add it, so a listed origin still
+  cannot make a cookie-carrying grpc-web call.
   Grafana keeps its own CSRF checks.
-- **F11 — Return address.** `/auth/login?rd=` accepts only a path on the front door (starts with
-  one `/`, no `//`, no scheme, no backslash, at most 2048 bytes); anything else becomes `/`. The
-  value rides in the single-use `state` the agent already stores, never in a cookie. The bound
-  is the gate's: `PendingTable` caps the state key (`MAX_STATE_BYTES`), not the value.
+- **F11 — Return address.** `/auth/login?rd=` accepts only a path on the front door, by allowlist:
+  it starts with one `/` (not `//`), is at most 2048 bytes, and every byte is printable ASCII
+  (0x21–0x7E) other than `\`, so no scheme, space, tab or other control byte; anything else
+  becomes `/`. The value rides in the single-use `state` the agent already stores, never in a
+  cookie. The bound is the gate's: `PendingTable` caps the state key (`MAX_STATE_BYTES`), not the value.
 - **F12 — The agent reaches Dex on loopback.** Browsers use Dex's public issuer URL, but the agent
   should not hairpin through its own front door (and trust its certificate) to talk to Dex. A
   `generic` issuer gains `backchannel_url` (`http://127.0.0.1:5556/dex`): the agent fetches
@@ -201,6 +235,10 @@ reuses the same pieces later; this design is the NixOS module.
   at config load, so that is where the refusal surfaces. So a discovery document cannot point
   the agent at another host for either. Discovery is fetched from `backchannel_url`, but the
   document's `issuer` is still compared with the public issuer, never with the loopback URL.
+  The comparison is on the raw strings, so the issuer is configured exactly as Dex writes it: an
+  explicit `:443` against an implicit one is refused, not normalized. The S26 `code_endpoints`
+  table carries the rows (another host, another port, plain http, the `/dexevil` prefix, the
+  issuer itself as the endpoint, a userinfo trick).
 
 ## What the agent gains (Rust)
 
@@ -214,10 +252,13 @@ reuses the same pieces later; this design is the NixOS module.
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches
   the agent, the same for a forged `X-Seddon-User` on `/grafana/`, an RPC denied as 401 not 302,
-  an unmapped path denied, a cross-origin preflight from :8444 refused, and every denial written
+  an unmapped path denied, a preflight from :8444 answered with no `Access-Control-Allow-Origin`
+  (the browser does the refusing), a callback with no login cookie, the wrong nonce or another
+  `state`'s nonce refused with no code redeemed, an unbound principal refused at the callback
+  with no session row, and every denial written
   to the audit stream, as `audit::refused` already is for code exchanges) and for
-  `rd` (`//evil`, `https://evil`, `/\evil`, encoded variants, `%0d%0a` and raw CR/LF, since `rd`
-  lands in the 302's `Location`, a 2049-byte value); every row asserts the
+  `rd` (`//evil`, `https://evil`, `/\evil`, encoded variants, `%0d%0a`, raw CR/LF and tab, since
+  `rd` lands in the 302's `Location`, a 2049-byte value); every row asserts the
   refusal. The composed row runs the real RPC behind `Check`: a cookie-session caller naming
   another principal's session in `x-agent-session-id` is refused by the session's ownership check.
 
