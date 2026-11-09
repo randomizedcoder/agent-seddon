@@ -95,7 +95,7 @@ reuses the same pieces later; this design is the NixOS module.
   cookies are not port-scoped, the same cookie covers :8443 and :8444.
 - **F4 — Envoy checks every request with `ext_authz`**, the HTTP flavour (`http_service`): Envoy
   sends the request's headers to `AuthGate`'s check route on loopback and gets 200 (plus headers
-  to add), 302 or 403 back. It needs no protos, and the gate's routes are plain hyper anyway.
+  to add), 302 or 403 back. It needs no protos, and the gate's routes are plain HTTP anyway.
   Envoy passes a denied answer's status and headers (`Location` included) to the browser; S28
   confirms the 302 in a test before anything rests on it, with a 401 and a login page as the
   fallback. `Check` maps the path to a required permission, resolves the caller, and answers with
@@ -254,8 +254,9 @@ reuses the same pieces later; this design is the NixOS module.
 - `crates/agent-grpc/src/server/auth/gate.rs`: the cookie session table (handle → `sid`, in the
   existing session store, so it survives restarts with `session_store = "file"` or `postgres`), the
   path → permission map, token minting and caching, and the three HTTP routes on a loopback
-  listener (plain hyper, which the workspace already uses; no web framework added).
-- The `ext_authz` check route (F4): the same hyper listener, no protos (the repo vendors no Envoy
+  listener (`tiny_http`, which the `auth` feature already pulls in for the CLI login's loopback
+  redirect; hyper is not a direct dependency, and no web framework is added).
+- The `ext_authz` check route (F4): the same listener, no protos (the repo vendors no Envoy
   protos; the gRPC flavour would need them).
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
@@ -281,7 +282,8 @@ reuses the same pieces later; this design is the NixOS module.
 | S25 | Grafana admin password from a file + reset oneshot (F8) | module, eval rows |
 | S26 | Dex in the module (GitHub connector, secrets as files), the agent issuer wired, `backchannel_url` (F12) | module, Rust, tables, VM test with Dex's `mockCallback` connector |
 | S26b | GitHub App from a manifest: `/setup` bootstrap, secrets to files, Dex restart | Rust, module, tables |
-| S27 | `AuthGate`: login / callback / logout, cookie sessions, `Check` (F3, F4, F11; F10's cookie attributes); RBAC pairs (F5) | Rust, tables, catalogue, `authz.toml` rows, `auth-e2e` row |
+| S27a | `AuthGate` core: RBAC pairs (F5), the path map, `rd` (F11), browser cookie sessions (F3) | Rust, tables, catalogue |
+| S27b | `AuthGate` routes: login / callback / logout, `Check` (F4; F10's cookie attributes), the token cache | Rust, tables, `authz.toml` rows, `auth-e2e` row |
 | S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping, CORS (F4, F7, F10) | `portal_envoy.py`, gate rows |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port (F6) | module |
 | S30 | Loopback lockdown and firewall (F9) | module assertions; l2 config change |

@@ -114,7 +114,8 @@ impl Action {
 /// their history (so approving a review is not a roster write); `Agent` is the
 /// interactive agent and the seams it runs on; `Exec` is served arbitrary
 /// execution; `Binding` is who holds which role; `Telemetry` is metrics, digests
-/// and the auth audit.
+/// and the auth audit; `Observability` is the tools' web UIs behind the front door
+/// (Grafana, Prometheus, HyperDX), which show every tenant's data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     Config,
@@ -132,11 +133,12 @@ pub enum ResourceType {
     Binding,
     Telemetry,
     Theme,
+    Observability,
 }
 
 impl ResourceType {
     /// Every resource type, in declaration order (see [`Action::ALL`]).
-    pub const ALL: [ResourceType; 15] = [
+    pub const ALL: [ResourceType; 16] = [
         ResourceType::Config,
         ResourceType::Registry,
         ResourceType::Fleet,
@@ -152,6 +154,7 @@ impl ResourceType {
         ResourceType::Binding,
         ResourceType::Telemetry,
         ResourceType::Theme,
+        ResourceType::Observability,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -171,6 +174,7 @@ impl ResourceType {
             ResourceType::Binding => "binding",
             ResourceType::Telemetry => "telemetry",
             ResourceType::Theme => "theme",
+            ResourceType::Observability => "observability",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -190,6 +194,7 @@ impl ResourceType {
             "binding" => ResourceType::Binding,
             "telemetry" => ResourceType::Telemetry,
             "theme" => ResourceType::Theme,
+            "observability" => ResourceType::Observability,
             _ => return None,
         })
     }
@@ -198,13 +203,15 @@ impl ResourceType {
     /// rather than tenant-owned. The operator/tenant split (config C29/C40): an
     /// operator-global key may be mutated only by a host-global role
     /// ([`RoleDef::crosses_tenants`]); a tenant-scoped role is denied even in its
-    /// own tenant. Only [`ResourceType::Config`] (the bootstrap TOML surface —
-    /// ports/wiring, store DSN, auth issuer, telemetry) is operator-global today;
-    /// every card registry is tenant-owned. Kept as an explicit `match` (no
-    /// wildcard) so a newly added resource type must consciously choose its side.
+    /// own tenant. Two are operator-global: [`ResourceType::Config`] (the bootstrap
+    /// TOML surface — ports/wiring, store DSN, auth issuer, telemetry) and
+    /// [`ResourceType::Observability`] (the tools show every tenant's data, so only
+    /// a host-global granter may bind it). Every card registry is tenant-owned.
+    /// Kept as an explicit `match` (no wildcard) so a newly added resource type
+    /// must consciously choose its side.
     pub fn is_operator_global(&self) -> bool {
         match self {
-            ResourceType::Config => true,
+            ResourceType::Config | ResourceType::Observability => true,
             ResourceType::Registry
             | ResourceType::Fleet
             | ResourceType::Prompt
@@ -892,12 +899,12 @@ mod tests {
     // --- effective_permissions --------------------------------------------
 
     #[rstest]
-    // desc: reader gets read on every resource type except the operator-global config.
+    // desc: reader gets read on every resource type except the operator-global ones.
     #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 14)]
-    // desc: org_admin: every action on every tenant resource, still not config.
+    // desc: org_admin: every action on every tenant resource, still not the operator-global ones.
     #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 8 * 14)]
-    // desc: operator: the whole matrix, config included.
-    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 15)]
+    // desc: operator: the whole matrix, config and observability included.
+    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 16)]
     // desc: agent_user is exactly its seven grants (four + its own themes).
     #[case::positive_agent_user_seven(&[ROLE_AGENT_USER], 7)]
     // desc: no roles ⇒ nothing.
@@ -1019,6 +1026,8 @@ mod tests {
     #[case::negative_review_is_tenant_owned(ResourceType::Review, false)]
     #[case::negative_binding_is_tenant_owned(ResourceType::Binding, false)]
     #[case::negative_telemetry_is_tenant_owned(ResourceType::Telemetry, false)]
+    // desc: the tools' UIs show every tenant's data (security-hardening 10 F5).
+    #[case::positive_observability_is_operator_global(ResourceType::Observability, true)]
     fn operator_global_classification(
         #[case] resource_type: ResourceType,
         #[case] expect_operator_global: bool,
@@ -1113,6 +1122,7 @@ mod tests {
     #[case::positive_review(ResourceType::Review)]
     #[case::positive_binding(ResourceType::Binding)]
     #[case::positive_telemetry(ResourceType::Telemetry)]
+    #[case::positive_observability(ResourceType::Observability)]
     fn resource_type_round_trips(#[case] r: ResourceType) {
         assert_eq!(ResourceType::parse(r.as_str()), Some(r));
     }
@@ -1523,8 +1533,8 @@ mod tests {
     #[case::negative_reviewer_to_fleet_admin(&[ROLE_REVIEWER], &[ROLE_FLEET_ADMIN], 10)]
     // desc: granting nothing exceeds nothing.
     #[case::boundary_empty_grant(&[], &[], 0)]
-    // desc: org_admin granting operator exceeds by the config surface (tenant-local view).
-    #[case::corner_operator_exceeds_org_admin_by_config(&[ROLE_ORG_ADMIN], &[ROLE_OPERATOR], 8)]
+    // desc: the operator holds what org_admin lacks: every action on the two operator-global types.
+    #[case::corner_operator_exceeds_org_admin_by_config_and_observability(&[ROLE_ORG_ADMIN], &[ROLE_OPERATOR], 8 * 2)]
     // desc: access_admin cannot hand out exec.
     #[case::adversarial_access_admin_exec(&[ROLE_ACCESS_ADMIN], &[ROLE_ORG_ADMIN], 8 * 14 - 7)]
     fn exceeding_permissions_cases(

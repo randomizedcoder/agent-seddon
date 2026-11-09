@@ -61,7 +61,8 @@ Gaps:
 **Enum additions** (each a conscious `match` arm; `parse` stays fail-closed):
 `Action += Use, Observe`; `ResourceType += Agent, Exec, Review, Binding, Telemetry`. `Fleet` keeps
 roster semantics; `Review` is the draft / history resource, so `Approve` moves from `Fleet` to
-`Review` and `Trigger` stays on `Fleet`. `is_operator_global` stays `Config`-only. Role cards
+`Review` and `Trigger` stays on `Fleet`. `is_operator_global` stays `Config`-only (until S27 adds `Observability`, the operator's tools;
+[10](10-sso-front-door.md) F5). Role cards
 written before the change keep working: an unknown pair in an old card is dropped at load with a
 warning, never widened.
 

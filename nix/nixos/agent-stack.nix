@@ -1064,8 +1064,10 @@ in
           {
             # A loopback issuer is Dex's own listener: another port names a server that isn't
             # there, and the back-channel (built from dex.port) would double the issuer's path.
+            # Guarded on the loopback prefix: any other http:// issuer already fails the shape
+            # rule above, and this message would only mislead it.
             assertion =
-              !(lib.hasPrefix "http://" dexCfg.issuer)
+              !(lib.hasPrefix "http://127.0.0.1" dexCfg.issuer)
               || (if dexIssuerPort == null then 80 else dexIssuerPort) == dexCfg.port;
             message = "services.agentSeddon.dex.issuer: a loopback (http://127.0.0.1) issuer must use dex.port (${toString dexCfg.port}).";
           }

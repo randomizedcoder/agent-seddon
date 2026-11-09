@@ -281,6 +281,9 @@ pkgs.testers.runNixOSTest {
             "install -d -m 0700 /run/secrets && "
             f"(umask 077 && printf {gh_secret} > /run/secrets/dex-github)"
         )
+        # Its own names, so the subtest doesn't lean on the mock-login one's locals.
+        local, public = "http://127.0.0.1:5556/dex", "https://dex.test/dex"
+        cb = "https://dex.test/auth/callback"
         machine.succeed(f"{base}/specialisation/dexgh/bin/switch-to-configuration test")
         machine.wait_for_unit("dex.service")
         machine.wait_for_open_port(5556)

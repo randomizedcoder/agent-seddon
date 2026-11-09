@@ -39,7 +39,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
-| S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
+| S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | 🟡 | |
+| S27b | `AuthGate` routes: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
@@ -1250,6 +1251,38 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       the DSN.
     - New open items in 10: `agent login --device` ignores `backchannel_url`, and where
       `/setup` runs. S26b now follows S27, whose `AuthGate` hosts `/setup` (09's lanes).
+
+- **2026-11-09 — S27a: the `AuthGate` core, as pure functions and session-store calls.** S27 is
+  split: S27a is the logic, S27b the HTTP routes that call it (09's lanes).
+  - **RBAC (F5).** `ResourceType::Observability` (`observability`) covers Grafana, Prometheus
+    and HyperDX. It is operator-global like `Config`: only a host-global role holds it, so a
+    tenant's `org_admin` never reaches the tools. The operator's matrix grows to 8 × 16.
+  - **Browser sessions (F3).** `SessionStore::open_browser` opens a `browser` session and returns
+    the cookie value `ck1.<tenant>.<sid>.<secret>`; `by_cookie` resolves one, refusing a
+    revoked, expired or non-browser session, a wrong secret, and an `rh1` refresh handle.
+    `refresh` refuses a browser session, and `ExchangeCode` can't open one (it maps the kind to
+    `unspecified`). Browser sessions share the per-subject cap.
+  - **[`gate.rs`](../../../crates/agent-grpc/src/server/auth/gate.rs):**
+    - `return_path` (F11): `rd` decoded once (two hex digits, UTF-8), then allowlisted: one
+      leading `/`, at most 2048 bytes, printable ASCII without `\`; else `/`.
+    - `route` (F5): the path map, default-deny. The portal's bundle files and asset dirs,
+      `/agent.v1.<Service>/<Method>`, `/grafana[/…]` and `/prometheus[/…]` on the main
+      listener; everything on HyperDX's. A path not in normal form (dot segments, `//`, a
+      backslash, an encoded `/`, `\`, `.` or NUL, a control byte, over 4096 bytes) has no route.
+    - `admits`: any permission at all for the portal and its RPCs (an unbound principal holds
+      none, F2), `read:observability` for the tools. `grafana_role`: `Admin` for the operator,
+      `Editor` with `write:observability`, else `Viewer`.
+    - `unauthenticated` (F4): an RPC gets a 401, a page a 302 to `/auth/login?rd=<encoded
+      path>`, and HyperDX's listener the main listener's login. `Route::replaced` is F4's
+      closed header set per route.
+    - Tables cover each, with adversarial rows (protocol-relative, scheme, backslash, CRLF raw
+      and encoded, double encoding, traversal out of `/grafana`, a tenant role naming
+      `observability`); the login's `rd` round-trips every page path.
+  - Carried from the #712 draft: the loopback-port assertion is guarded on `http://127.0.0.1`
+    (another http issuer already fails the shape rule); eval rows for leading-zero ports
+    (`:05556` passes, `:00999` and `:00000` fail); a config row for an https `backchannel_url`;
+    the `dexgh` VM subtest defines its own URLs; `code_endpoints` says why the issuer loses one
+    trailing slash and the back-channel all of them.
 
 ## Cross-track note (not an S-increment)
 

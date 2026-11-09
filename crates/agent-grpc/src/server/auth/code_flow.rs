@@ -510,7 +510,10 @@ pub fn code_endpoints(
     let authorization = endpoint("authorization_endpoint")?;
     let mut token = endpoint("token_endpoint")?;
     if let Some(bc) = backchannel {
-        // One trailing slash, the form an issuer URL may be written in.
+        // One trailing slash only: the issuer is an identity, matched exactly against
+        // the IdP's own `issuer` above, so it isn't normalised beyond the one form an
+        // issuer URL may be written in. The back-channel below is only a base URL
+        // the operator configured, so it is trimmed freely.
         let base = issuer.strip_suffix('/').unwrap_or(issuer);
         let rest = token
             .strip_prefix(base)
@@ -518,7 +521,8 @@ pub fn code_endpoints(
             .ok_or(
             "discovery `token_endpoint` is not under the issuer, so it has no back-channel form",
         )?;
-        // Every trailing slash, as `discover_code` trims the base it fetches from.
+        // Every trailing slash, as `discover_code` trims the base it fetches from, so
+        // both requests go to the same host and path.
         token = format!("{}{rest}", bc.trim_end_matches('/'));
         check_fetch_url(&token).map_err(|e| format!("the back-channel token endpoint {e}"))?;
     }
