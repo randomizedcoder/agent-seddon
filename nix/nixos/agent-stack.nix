@@ -110,6 +110,13 @@ let
       m = builtins.match "https?://[^/]+(/.*)?" dexCfg.issuer;
     in
     if m == null || builtins.head m == null then "" else builtins.head m;
+  # The issuer's explicit port, or null. `portOk` can't be reused: it reads a port only at
+  # the end of a URL, and the issuer usually has a path after it.
+  dexIssuerPort =
+    let
+      m = builtins.match "https?://[^/:]+(:0*([0-9]+))?(/.*)?" dexCfg.issuer;
+    in
+    if m == null || builtins.elemAt m 1 == null then null else lib.toInt (builtins.elemAt m 1);
   # The agent's OAuth client secret at Dex: generated once (root, 0700 dir); Dex gets it
   # through the nixpkgs module's `secretFile`, the agents through `credentials`.
   dexGenDir = "/var/lib/agent-seddon-dex";
@@ -812,7 +819,7 @@ in
                   ""
                 ]
               );
-            message = "services.agentSeddon.grafana: the managed admin password needs Grafana's sqlite database (grafana cli cannot read the server's database credential).";
+            message = "services.agentSeddon.grafana: the managed admin password needs Grafana's sqlite database, with no `database.url` DSN (grafana cli cannot read the server's database credential).";
           }
           {
             assertion =
@@ -1049,6 +1056,18 @@ in
               builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" dexCfg.issuer != null
               || builtins.match "http://127\\.0\\.0\\.1(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" dexCfg.issuer != null;
             message = "services.agentSeddon.dex.issuer must be https://host[:port][/path] (or http://127.0.0.1…), with no trailing slash, query or fragment.";
+          }
+          {
+            assertion = dexIssuerPort == null || (dexIssuerPort >= 1 && dexIssuerPort <= 65535);
+            message = "services.agentSeddon.dex.issuer: the port must be 1-65535.";
+          }
+          {
+            # A loopback issuer is Dex's own listener: another port names a server that isn't
+            # there, and the back-channel (built from dex.port) would double the issuer's path.
+            assertion =
+              !(lib.hasPrefix "http://" dexCfg.issuer)
+              || (if dexIssuerPort == null then 80 else dexIssuerPort) == dexCfg.port;
+            message = "services.agentSeddon.dex.issuer: a loopback (http://127.0.0.1) issuer must use dex.port (${toString dexCfg.port}).";
           }
           {
             assertion = dexCfg.mockLogin != (dexCfg.github.clientId != null);

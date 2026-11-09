@@ -46,7 +46,7 @@ and Prometheus.
 |---|---|---|---|
 | S25 | Grafana's admin password from a file (or generated), reset after every Grafana start | 10 F8 | — |
 | S26 | Dex in the module (GitHub connector, secrets as files); the agent's Dex issuer with `backchannel_url` | 10 F1, F12 | S13a |
-| S26b | GitHub App from a manifest: `/setup` bootstrap code, secrets to files, Dex restart | 10 | S26 |
+| S26b | GitHub App from a manifest: `/setup` bootstrap code, secrets to files, Dex restart | 10 | S27 |
 | S27 | `AuthGate`: login / callback / logout, cookie sessions, the `ext_authz` check route (cookie or the client's own agent token); `read:` / `write:observability` | 10 F3, F4, F5, F10, F11 | S26 |
 | S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping, CORS | 10 F4, F7, F10 | S27 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path (the host's `--web.external-url`), HyperDX port | 10 F6 | S28 |
@@ -68,8 +68,8 @@ S6, S8 → S13a → S13b → S14 ─────────┘
 S16, S17 independent
 
 S25 independent (useful without the front door)
-S13a → S26 → S26b
-       S26 → S27 → S28 → S29, S30, S31
+S13a → S26 → S27 → S28 → S29, S30, S31
+              S27 → S26b   (/setup is an AuthGate route; see 10's open items)
 ```
 
 Four lanes can run in parallel after S1: correctness (S2, S7), login / token / sessions (S3 → S8),

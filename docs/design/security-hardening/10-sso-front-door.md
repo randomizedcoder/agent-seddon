@@ -341,6 +341,14 @@ one l2 deploy (S30), with your go-ahead; `~/nixos/desktop/l2/lan-access.nix` the
 ## Open items
 
 - Dex's GitHub connector with a GitHub App's OAuth client (S26b).
+- Where `/setup` runs (S26b). The agent has no plain-HTTP server that could host it: the fleet's
+  webhook receiver runs only under `--serve-fleet`, and only once a webhook secret exists, which
+  is what the App creates. S27's `AuthGate` serves HTTP for login anyway, so S26b comes after S27
+  and adds `/setup` there. The module also has to take the GitHub client id from a file, since a
+  manifest-made App's id isn't known at eval.
+- `agent login --device` dials the public issuer and ignores `backchannel_url`
+  (`crates/agent-grpc/src/client/login.rs`). Behind the front door the public issuer is
+  reachable, so this only matters for a CLI on the host itself; settle it with S27's token rules.
 - HyperDX's listeners under `--network=host` (can they be loopback-only?), and whether its UI can
   serve under a sub-path, which would fold :8444 into :8443. Also whether its UI calls the API
   (8000) from the browser or proxies it server-side: if from the browser, :8444 routes the API

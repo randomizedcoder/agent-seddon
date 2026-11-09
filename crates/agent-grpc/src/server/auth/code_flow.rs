@@ -507,6 +507,7 @@ pub fn code_endpoints(
         check_fetch_url(url).map_err(|e| format!("discovery `{key}` {e}"))?;
         Ok(url.to_string())
     };
+    let authorization = endpoint("authorization_endpoint")?;
     let mut token = endpoint("token_endpoint")?;
     if let Some(bc) = backchannel {
         // One trailing slash, the form an issuer URL may be written in.
@@ -517,11 +518,12 @@ pub fn code_endpoints(
             .ok_or(
             "discovery `token_endpoint` is not under the issuer, so it has no back-channel form",
         )?;
-        token = format!("{}{rest}", bc.strip_suffix('/').unwrap_or(bc));
+        // Every trailing slash, as `discover_code` trims the base it fetches from.
+        token = format!("{}{rest}", bc.trim_end_matches('/'));
         check_fetch_url(&token).map_err(|e| format!("the back-channel token endpoint {e}"))?;
     }
     Ok(CodeEndpoints {
-        authorization: endpoint("authorization_endpoint")?,
+        authorization,
         token,
     })
 }
