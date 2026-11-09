@@ -113,7 +113,8 @@ head SHA, and a forge PR head ref (`refs/pull/<N>/head`, `refs/merge-requests/
 cannot resolve a PR on a fresh mirror without an explicit fetch. `fetch_pr(number)`
 substitutes `{n}` in `pr_ref_template` (the operator-owned, forge-agnostic remote
 ref), fetches it into the namespaced local ref `refs/fleet/pr/<n>` (`pr_local_ref`),
-and returns the resolved head oid. The `--review <PR#>` path resolves that local
+and returns the resolved head oid. The refspec is forced (`+`), so a force-pushed or
+rebased PR replaces the old head instead of being refused as a non-fast-forward. The `--review <PR#>` path resolves that local
 ref first and fetches only when it is missing. An empty `pr_ref_template` makes
 `fetch_pr` a clear config error rather than a guess.
 

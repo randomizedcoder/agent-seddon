@@ -1490,7 +1490,10 @@ impl RepoBackend for CliBackend {
         safe_segment("pr ref segment", tail)?;
 
         let base = self.base().to_path_buf();
-        let refspec = format!("{remote_ref}:{local}");
+        // Forced (`+`): a force-pushed or rebased PR rewrites its head, and the
+        // local ref is the fleet's own namespace, so replacing it loses nothing.
+        // Without it git refuses the non-fast-forward and the PR is never reviewed again.
+        let refspec = format!("+{remote_ref}:{local}");
         self.git_str(&base, &["fetch", self.remote_name(), &refspec])
             .await?;
 
@@ -1988,7 +1991,7 @@ mod tests {
                 mirror_s.clone(),
                 "fetch".into(),
                 "origin".into(),
-                "refs/pull/42/head:refs/fleet/pr/42".into(),
+                "+refs/pull/42/head:refs/fleet/pr/42".into(),
             ]),
             "template substituted + namespaced local ref, on the mirror: {argvs:?}"
         );
@@ -2024,7 +2027,7 @@ mod tests {
                 mirror_s,
                 "fetch".into(),
                 "origin".into(),
-                "refs/merge-requests/7/head:refs/fleet/pr/7".into(),
+                "+refs/merge-requests/7/head:refs/fleet/pr/7".into(),
             ]),
             "gitlab template drives the refspec"
         );
