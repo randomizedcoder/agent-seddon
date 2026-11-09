@@ -1215,6 +1215,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       endpoint is rewritten onto it, against a `FakeIssuer::start_code_behind` whose document
       names a public issuer that resolves nowhere. Without one, that issuer is never reached.
     - Only one trailing slash is trimmed, and a token-endpoint query is kept (host unchanged).
+    - From the #706 design draft: `code_endpoints` rows pin that the token endpoint must extend
+      the issuer's whole URL, so one on another port, or on plain http, is refused.
     - The GitHub secret's `replace-secret` call is nixpkgs' own idiom (`replace-secret.py`
       replaces the literal path with the file); the VM proves it for the static client.
   - Carried from the #707 (S25) drafts:

@@ -477,6 +477,27 @@ fn discovery(issuer: &str, authorization: &str, token: &str) -> serde_json::Valu
     Some(DEX_BC),
     Err("not under the issuer")
 )]
+#[case::adversarial_token_endpoint_on_another_port(
+    DEX,
+    discovery(
+        DEX,
+        "https://l2.example:8443/dex/auth",
+        "https://l2.example:8444/dex/token"
+    ),
+    Some(DEX_BC),
+    Err("not under the issuer")
+)]
+#[case::adversarial_token_endpoint_on_another_scheme(
+    DEX,
+    discovery(
+        DEX,
+        "https://l2.example:8443/dex/auth",
+        "http://l2.example:8443/dex/token"
+    ),
+    Some(DEX_BC),
+    // Refused before the prefix check: plain http off loopback.
+    Err("must use https")
+)]
 #[case::adversarial_token_endpoint_shares_a_prefix(
     DEX,
     discovery(
