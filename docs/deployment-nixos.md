@@ -223,6 +223,8 @@ every Grafana start: it waits for `/api/health`, then runs `grafana cli admin
 reset-admin-password --password-from-stdin`. The password never lands on a command
 line or in the journal. Both options need `grafana.enable` and Grafana's default
 sqlite database with `server.protocol` http or https, and setting both is an error.
+Either one sets `services.grafana.settings.security.admin_password`, so remove any
+value the host sets there.
 
 ### Dex (sign-in with GitHub)
 

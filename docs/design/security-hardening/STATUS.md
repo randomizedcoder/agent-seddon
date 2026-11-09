@@ -1208,6 +1208,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     auth → mock → callback → code → token with the client secret. The `id_token` has the
     public `iss`, the nonce and `email_verified`. A wrong secret is refused. Dex listens on
     loopback only, and no secret path is left in its config.
+  - Carried from the #707 (S25) draft: the Grafana password options now say that they set
+    `security.admin_password`, so a host that sets it too gets Nix's conflicting-definitions error.
 
 ## Cross-track note (not an S-increment)
 

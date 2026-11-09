@@ -648,7 +648,9 @@ in
           reset-admin-password` each time Grafana starts, so the file is the source of
           truth: a password changed in the UI is put back at the next restart. After
           editing the file, `systemctl restart grafana`. Null (the default) leaves the
-          password to Grafana. Needs the sqlite database (Grafana's default).
+          password to Grafana. Needs the sqlite database (Grafana's default). This sets
+          `services.grafana.settings.security.admin_password`, so the host must not
+          (Nix reports that as conflicting definitions).
         '';
       };
       generateAdminPassword = lib.mkOption {
