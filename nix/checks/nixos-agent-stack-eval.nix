@@ -78,6 +78,19 @@ let
     failedAssertions (evalWith {
       services.agentSeddon = lib.recursiveUpdate { grafana.enable = true; } extra;
     }) != [ ];
+  grafPw = evalWith {
+    services.agentSeddon.grafana = {
+      enable = true;
+      adminPasswordFile = "/run/secrets/grafana-admin";
+    };
+  };
+  grafGen = evalWith {
+    services.agentSeddon.grafana = {
+      enable = true;
+      generateAdminPassword = true;
+    };
+  };
+  grafAdminUnit = c: c.systemd.services.agent-seddon-grafana-admin;
   grafDs =
     c:
     let
@@ -459,6 +472,84 @@ let
       && !(grafFails { });
     # The dashboards go into the host's Grafana; turning that off while asking for them
     # is refused rather than provisioning into nothing.
+    # The admin password: a file, through LoadCredential into both units; the reset
+    # reads it from stdin and runs on every Grafana start (partOf).
+    grafanaAdminPasswordFromFile =
+      failedAssertions grafPw == [ ]
+      &&
+        grafPw.services.grafana.settings.security.admin_password
+        == "$__file{/run/credentials/grafana.service/admin-password}"
+      && lib.elem "admin-password:/run/secrets/grafana-admin" grafPw.systemd.services.grafana.serviceConfig.LoadCredential
+      &&
+        (grafAdminUnit grafPw).serviceConfig.LoadCredential
+        == [ "admin-password:/run/secrets/grafana-admin" ]
+      && lib.elem "grafana.service" (grafAdminUnit grafPw).partOf
+      && lib.elem "grafana.service" (grafAdminUnit grafPw).wantedBy
+      && (grafAdminUnit grafPw).serviceConfig.User == "grafana"
+      && lib.hasInfix "--password-from-stdin" (grafAdminUnit grafPw).script
+      && lib.hasInfix "< \"$CREDENTIALS_DIRECTORY/admin-password\"" (grafAdminUnit grafPw).script
+      && !(grafPw.systemd.services ? agent-seddon-grafana-admin-password);
+    grafanaAdminPasswordGenerated =
+      failedAssertions grafGen == [ ]
+      # Restarting Grafana re-runs the generator, so a deleted file is made again.
+      && lib.elem "grafana.service" grafGen.systemd.services.agent-seddon-grafana-admin-password.partOf
+      && lib.elem "admin-password:/var/lib/agent-seddon-grafana/admin.password" grafGen.systemd.services.grafana.serviceConfig.LoadCredential
+      && lib.elem "agent-seddon-grafana-admin-password.service" grafGen.systemd.services.grafana.requires
+      &&
+        grafGen.systemd.services.agent-seddon-grafana-admin-password.serviceConfig.StateDirectoryMode
+        == "0700"
+      # Root: the file lands in a root-only directory, out of the agent user's reach.
+      && !(grafGen.systemd.services.agent-seddon-grafana-admin-password.serviceConfig ? User);
+    # Off by default: no password setting, no units, the viewer credential alone.
+    grafanaAdminPasswordOffByDefault =
+      !(graf.systemd.services ? agent-seddon-grafana-admin)
+      && !(graf.systemd.services ? agent-seddon-grafana-admin-password)
+      && graf.services.grafana.settings.security.admin_password == "admin";
+    grafanaAdminPasswordRejects =
+      lib.all (f: grafFails { grafana.adminPasswordFile = f; }) [
+        "relative/pw"
+        "${builtins.storeDir}/abc-pw"
+        "/run/secrets/a b"
+        ""
+        "/run/secrets/pw\nExecStart=/bin/sh"
+      ]
+      && grafFails {
+        grafana = {
+          adminPasswordFile = "/run/secrets/pw";
+          generateAdminPassword = true;
+        };
+      }
+      && !(grafFails { grafana.generateAdminPassword = true; })
+      # Each option alone still needs grafana.enable.
+      &&
+        lib.all
+          (
+            g:
+            failedAssertions (evalWith {
+              services.agentSeddon.grafana = g;
+            }) != [ ]
+          )
+          [
+            { adminPasswordFile = "/run/secrets/pw"; }
+            { generateAdminPassword = true; }
+          ]
+      # A socket-only Grafana has no HTTP /api/health for the reset to wait on.
+      &&
+        failedAssertions (evalWith {
+          services.agentSeddon.grafana = {
+            enable = true;
+            generateAdminPassword = true;
+          };
+          services.grafana.settings.server.protocol = "socket";
+        }) != [ ]
+      &&
+        failedAssertions (evalWith {
+          services.agentSeddon.grafana = {
+            enable = true;
+            generateAdminPassword = true;
+          };
+          services.grafana.settings.database.type = "postgres";
+        }) != [ ];
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;
