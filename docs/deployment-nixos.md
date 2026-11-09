@@ -222,7 +222,45 @@ an existing database keeps its old password, `agent-seddon-grafana-admin` runs a
 every Grafana start: it waits for `/api/health`, then runs `grafana cli admin
 reset-admin-password --password-from-stdin`. The password never lands on a command
 line or in the journal. Both options need `grafana.enable` and Grafana's default
-sqlite database with `server.protocol` http or https, and setting both is an error.
+sqlite database (no `database.url` DSN) with `server.protocol` http or https, and
+setting both is an error. The generated file is required: if the generator fails,
+Grafana does not start. The reset is not: if it keeps failing, Grafana stays up with
+the old password, so check `systemctl status agent-seddon-grafana-admin` after a change.
+Either one sets `services.grafana.settings.security.admin_password`, so remove any
+value the host sets there.
+
+### Dex (sign-in with GitHub)
+
+`dex.enable = true` runs Dex on `127.0.0.1:${dex.port}` (default 5556) as the agent's
+login provider, the first piece of the front door in
+[security-hardening 10](design/security-hardening/10-sso-front-door.md):
+
+```nix
+services.agentSeddon.dex = {
+  enable = true;
+  issuer = "https://172.16.50.46:8443/dex";            # the front door's /dex; no trailing slash
+  redirectUris = [ "https://172.16.50.46:8443/auth/callback" ];
+  github = {
+    clientId = "Iv1.…";                                 # callback <issuer>/callback
+    clientSecretFile = "/etc/agent-seddon/secrets/dex-github";
+    orgs = [ "my-org" ];                                # optional
+  };
+};
+```
+
+| unit | does |
+|---|---|
+| `agent-seddon-dex-secret` | once, as root: a random client secret for the agent in `/var/lib/agent-seddon-dex/agent-client.secret` (0700 directory) |
+| `dex` | the nixpkgs Dex, sqlite in `/var/lib/dex`, the agent registered as client `agent-seddon`; both secrets are put into `/run/dex/config.yaml` at start by root, never into the store |
+
+The agents get the client secret as the credential `dex-client`. The module does not
+turn the agent's `[auth]` on: until the front door lands, the portal sends no token.
+`dex.issuerSettings` is the ready `[[auth.issuers]]` entry: the public issuer,
+and `jwks_url` / `backchannel_url` on loopback, so the agent never goes through the
+front door to reach Dex. A host that turns auth on merges it into
+`settings.auth.issuers`. Dex tokens carry no tenant, so every sign-in maps to
+`dex.tenant` (default `local`). `dex.mockLogin` swaps GitHub for Dex's
+`mockCallback` connector, for tests.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.

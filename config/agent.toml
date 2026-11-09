@@ -1340,6 +1340,17 @@ job         = "agent-seddon"
 #                                                      # is set (it redeems browser codes); Google needs it
 #
 # [[auth.issuers]]
+# name            = "dex"                              # Dex on loopback (nixosModules.agent-stack dex.*)
+# profile         = "generic"
+# issuer          = "https://l2.example:8443/dex"      # public: browsers, and the expected `iss`
+# audience        = "agent-seddon"
+# jwks_url        = "http://127.0.0.1:5556/dex/keys"
+# backchannel_url = "http://127.0.0.1:5556/dex"        # where the agent itself discovers and redeems codes
+# default_tenant  = "local"
+# require_email_verified = true
+# client_secret   = "file:/run/credentials/@unit@/dex-client"
+#
+# [[auth.issuers]]
 # name              = "keycloak"
 # profile           = "generic"
 # issuer            = "https://idp.example.com/realms/agents"   # keys via discovery

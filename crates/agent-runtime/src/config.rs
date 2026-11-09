@@ -3847,6 +3847,13 @@ pub struct AuthIssuerCfg {
     /// Public key set URL. A `generic` issuer without one uses OIDC discovery.
     #[serde(default)]
     pub jwks_url: String,
+    /// `generic` only: where the agent itself reaches the issuer, when that differs
+    /// from the public `issuer` URL browsers use (Dex on loopback behind a front
+    /// door). Browser sign-in discovery and the code redemption go here; the
+    /// authorization endpoint browsers see and the expected `iss` stay public.
+    /// Needs `jwks_url`.
+    #[serde(default)]
+    pub backchannel_url: String,
     /// `generic` only: claim carrying the tenant (default `org`).
     #[serde(default)]
     pub tenant_claim: String,
@@ -3897,6 +3904,16 @@ impl AuthIssuerCfg {
         if !self.jwks_url.trim().is_empty() {
             check_fetch_url("jwks_url", &self.jwks_url)
                 .map_err(|e| format!("`[[auth.issuers]]` `{name}`: {e}"))?;
+        }
+        if !self.backchannel_url.trim().is_empty() {
+            if !matches!(self.profile.trim(), "" | "generic") {
+                return fail("`backchannel_url` is for a `generic` issuer");
+            }
+            check_fetch_url("backchannel_url", &self.backchannel_url)
+                .map_err(|e| format!("`[[auth.issuers]]` `{name}`: {e}"))?;
+            if self.jwks_url.trim().is_empty() {
+                return fail("`backchannel_url` needs `jwks_url` (keys are not discovered)");
+            }
         }
         match self.profile.trim() {
             "google"
@@ -6570,6 +6587,15 @@ mod tests {
         }
     }
 
+    fn dex_entry(backchannel: &str) -> AuthIssuerCfg {
+        AuthIssuerCfg {
+            issuer: "https://l2.example:8443/dex".into(),
+            jwks_url: "http://127.0.0.1:5556/dex/keys".into(),
+            backchannel_url: backchannel.into(),
+            ..generic_entry("dex")
+        }
+    }
+
     fn generic_entry(name: &str) -> AuthIssuerCfg {
         AuthIssuerCfg {
             name: name.into(),
@@ -6642,6 +6668,15 @@ mod tests {
     #[case::adversarial_entry_name_traversal(issuers(vec![generic_entry("../kc")]), true, Some("plain identifier"))]
     #[case::adversarial_entry_jwks_plain_http_remote(issuers(vec![AuthIssuerCfg { jwks_url: "http://idp.example/k".into(), ..google_entry() }]), true, Some("must use https"))]
     #[case::adversarial_discovery_plain_http_remote(issuers(vec![AuthIssuerCfg { issuer: "http://idp.example".into(), ..generic_entry("kc") }]), true, Some("used for discovery"))]
+    // --- `backchannel_url` (security-hardening S26) ---
+    #[case::positive_backchannel_loopback(issuers(vec![dex_entry("http://127.0.0.1:5556/dex")]), true, None)]
+    #[case::negative_backchannel_without_jwks(issuers(vec![AuthIssuerCfg { jwks_url: String::new(), ..dex_entry("http://127.0.0.1:5556/dex") }]), true, Some("needs `jwks_url`"))]
+    #[case::negative_backchannel_on_google(issuers(vec![AuthIssuerCfg { backchannel_url: "http://127.0.0.1:5556".into(), ..google_entry() }]), true, Some("for a `generic` issuer"))]
+    #[case::corner_backchannel_whitespace_is_unset(issuers(vec![AuthIssuerCfg { jwks_url: String::new(), ..dex_entry("  ") }]), true, None)]
+    #[case::adversarial_backchannel_plain_http_remote(issuers(vec![dex_entry("http://10.0.0.5:5556/dex")]), true, Some("must use https"))]
+    #[case::adversarial_backchannel_localhost_name(issuers(vec![dex_entry("http://localhost:5556/dex")]), true, Some("must use https"))]
+    #[case::adversarial_backchannel_credentials(issuers(vec![dex_entry("https://u:p@idp.example/dex")]), true, Some("credentials"))]
+    #[case::adversarial_backchannel_file_scheme(issuers(vec![dex_entry("file:///etc/dex")]), true, Some("scheme `file`"))]
     // --- `[auth.token]` (security-hardening S5) ---
     #[case::positive_token_service(AuthCfg { token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_token_ttl_min(AuthCfg { token: Some(AuthTokenCfg { ttl_secs: 60, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]

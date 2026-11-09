@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use agent_testkit::oidc::{CodeScript, FakeIssuer, TestKey};
 use rstest::rstest;
 
 use super::*;
@@ -391,6 +392,230 @@ fn corner_empty_secret_is_a_public_client() {
     p.client_secret = Some(ClientSecret::new(""));
     let b = BrowserIssuer::of(&p).expect("resolves").expect("browser");
     assert!(b.client_secret.is_none());
+}
+
+const DEX: &str = "https://l2.example:8443/dex";
+const DEX_BC: &str = "http://127.0.0.1:5556/dex";
+
+fn discovery(issuer: &str, authorization: &str, token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "issuer": issuer,
+        "authorization_endpoint": authorization,
+        "token_endpoint": token,
+    })
+}
+
+/// Discovery documents against the expected issuer: `Ok((authorization, token))`,
+/// or a needle of the refusal.
+#[rstest]
+#[case::positive_no_backchannel(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token"),
+    None,
+    Ok(("https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token"))
+)]
+#[case::positive_backchannel_moves_only_the_token_endpoint(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token"),
+    Some(DEX_BC),
+    Ok(("https://l2.example:8443/dex/auth", "http://127.0.0.1:5556/dex/token"))
+)]
+#[case::corner_backchannel_trailing_slash(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token"),
+    Some("http://127.0.0.1:5556/dex/"),
+    Ok(("https://l2.example:8443/dex/auth", "http://127.0.0.1:5556/dex/token"))
+)]
+// A query rides along; the host is the back-channel's either way.
+#[case::corner_token_endpoint_query_is_kept(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "https://l2.example:8443/dex/token?v=1"),
+    Some(DEX_BC),
+    Ok(("https://l2.example:8443/dex/auth", "http://127.0.0.1:5556/dex/token?v=1"))
+)]
+#[case::corner_issuer_without_a_path(
+    "https://idp.example",
+    discovery("https://idp.example", "https://idp.example/auth", "https://idp.example/oauth/token"),
+    Some("http://127.0.0.1:5556"),
+    Ok(("https://idp.example/auth", "http://127.0.0.1:5556/oauth/token"))
+)]
+#[case::boundary_token_endpoint_is_the_issuer_itself(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", DEX),
+    Some(DEX_BC),
+    Err("not under the issuer")
+)]
+#[case::negative_document_names_another_issuer(
+    DEX,
+    discovery(
+        "https://other.example/dex",
+        "https://l2.example:8443/dex/auth",
+        "https://l2.example:8443/dex/token"
+    ),
+    Some(DEX_BC),
+    Err("different issuer")
+)]
+#[case::negative_no_token_endpoint(
+    DEX,
+    serde_json::json!({"issuer": DEX, "authorization_endpoint": "https://l2.example:8443/dex/auth"}),
+    None,
+    Err("no `token_endpoint`")
+)]
+#[case::negative_no_authorization_endpoint(
+    DEX,
+    serde_json::json!({"issuer": DEX, "token_endpoint": "https://l2.example:8443/dex/token"}),
+    Some(DEX_BC),
+    Err("no `authorization_endpoint`")
+)]
+#[case::adversarial_token_endpoint_on_another_host(
+    DEX,
+    discovery(
+        DEX,
+        "https://l2.example:8443/dex/auth",
+        "https://evil.example/dex/token"
+    ),
+    Some(DEX_BC),
+    Err("not under the issuer")
+)]
+#[case::adversarial_token_endpoint_on_another_port(
+    DEX,
+    discovery(
+        DEX,
+        "https://l2.example:8443/dex/auth",
+        "https://l2.example:8444/dex/token"
+    ),
+    Some(DEX_BC),
+    Err("not under the issuer")
+)]
+#[case::adversarial_token_endpoint_on_another_scheme(
+    DEX,
+    discovery(
+        DEX,
+        "https://l2.example:8443/dex/auth",
+        "http://l2.example:8443/dex/token"
+    ),
+    Some(DEX_BC),
+    // Refused before the prefix check: plain http off loopback.
+    Err("must use https")
+)]
+#[case::adversarial_token_endpoint_shares_a_prefix(
+    DEX,
+    discovery(
+        DEX,
+        "https://l2.example:8443/dex/auth",
+        "https://l2.example:8443/dexevil/token"
+    ),
+    Some(DEX_BC),
+    Err("not under the issuer")
+)]
+#[case::adversarial_token_endpoint_userinfo_trick(
+    "https://l2.example:8443",
+    discovery(
+        "https://l2.example:8443",
+        "https://l2.example:8443/auth",
+        "https://l2.example:8443@evil.example/token"
+    ),
+    Some("http://127.0.0.1:5556"),
+    Err("credentials")
+)]
+#[case::adversarial_token_endpoint_host_suffix(
+    "https://l2.example:8443",
+    discovery("https://l2.example:8443", "https://l2.example:8443/auth", "https://l2.example:8443.evil.example/token"),
+    Some("http://127.0.0.1:5556"),
+    // Not even a URL (the port is not a number): refused before the prefix check.
+    Err("discovery `token_endpoint`")
+)]
+#[case::adversarial_plain_http_token_endpoint_without_backchannel(
+    DEX,
+    discovery(DEX, "https://l2.example:8443/dex/auth", "http://l2.example/dex/token"),
+    None,
+    Err("must use https")
+)]
+#[case::adversarial_javascript_authorization_endpoint(
+    DEX,
+    discovery(DEX, "javascript:alert(1)", "https://l2.example:8443/dex/token"),
+    Some(DEX_BC),
+    Err("authorization_endpoint")
+)]
+fn code_endpoints_cases(
+    #[case] issuer: &str,
+    #[case] doc: serde_json::Value,
+    #[case] backchannel: Option<&str>,
+    #[case] want: Result<(&str, &str), &str>,
+) {
+    let got = code_endpoints(&doc, issuer, backchannel);
+    match (got, want) {
+        (Ok(e), Ok((a, t))) => assert_eq!((e.authorization.as_str(), e.token.as_str()), (a, t)),
+        (Err(e), Err(needle)) => assert!(e.contains(needle), "{e:?} lacks {needle:?}"),
+        (got, want) => panic!("got {got:?}, want {want:?}"),
+    }
+}
+
+/// `BrowserIssuer::of` keeps a valid back-channel and refuses a bad one.
+#[rstest]
+#[case::positive_loopback("generic", DEX_BC, Ok(Some(DEX_BC)))]
+#[case::corner_blank_is_none("generic", "  ", Ok(None))]
+#[case::corner_blank_on_google_is_none("google", "", Ok(None))]
+#[case::adversarial_plain_http_remote(
+    "generic",
+    "http://10.0.0.5:5556/dex",
+    Err("backchannel_url")
+)]
+#[case::adversarial_file_scheme("generic", "file:///etc/dex", Err("backchannel_url"))]
+// Built directly, past the loader's check: the runtime refuses it too.
+#[case::adversarial_google_profile("google", DEX_BC, Err("is for a `generic` issuer"))]
+fn browser_issuer_backchannel(
+    #[case] profile: &str,
+    #[case] bc: &str,
+    #[case] want: Result<Option<&str>, &str>,
+) {
+    let mut p = match profile {
+        "google" => IssuerParams {
+            name: "google".into(),
+            profile: "google".into(),
+            audience: "web.apps.googleusercontent.com".into(),
+            allowed_domains: vec!["example.com".into()],
+            ..IssuerParams::default()
+        },
+        _ => generic("dex", DEX),
+    };
+    p.backchannel_url = bc.into();
+    match (BrowserIssuer::of(&p), want) {
+        (Ok(Some(b)), Ok(w)) => assert_eq!(b.backchannel.as_deref(), w),
+        (Err(e), Err(needle)) => assert!(e.contains(needle), "{e:?} lacks {needle:?}"),
+        (got, want) => panic!("got {got:?}, want {want:?}"),
+    }
+}
+
+/// The agent fetches discovery from the back-channel, not the public issuer (which
+/// resolves nowhere here), and redeems codes there. Without one it tries the public
+/// host and never reaches the issuer.
+#[rstest]
+#[case::positive_backchannel_is_fetched(true)]
+#[case::negative_public_host_is_not_this_issuer(false)]
+#[tokio::test]
+async fn discover_code_fetch_host(#[case] backchannel: bool) {
+    const PUBLIC: &str = "https://dex.invalid/dex";
+    let idp = FakeIssuer::start_code_behind(
+        TestKey::Ec,
+        CodeScript {
+            client_id: "agent-seddon".into(),
+            client_secret: None,
+            claims: serde_json::json!({}),
+        },
+        PUBLIC,
+    );
+    let bc = backchannel.then(|| idp.issuer().to_string());
+    let got = discover_code(&reqwest::Client::new(), PUBLIC, bc.as_deref()).await;
+    if backchannel {
+        let e = got.expect("discovered over the back-channel");
+        assert_eq!(e.authorization, format!("{PUBLIC}/authorize"));
+        assert_eq!(e.token, format!("{}/token", idp.issuer()));
+        assert_eq!(idp.discovery_hits(), 1);
+    } else {
+        assert!(got.is_err(), "{got:?}");
+        assert_eq!(idp.discovery_hits(), 0);
+    }
 }
 
 fn flow() -> CodeFlow {

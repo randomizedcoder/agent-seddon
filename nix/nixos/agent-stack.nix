@@ -100,6 +100,21 @@ let
     else
       null;
   graf = config.services.grafana;
+  # Dex (security-hardening S26): on loopback; the agent reaches it there
+  # (`backchannel_url`), browsers at the public `dex.issuer`.
+  dexCfg = cfg.dex;
+  dexLocal = "http://127.0.0.1:${toString dexCfg.port}${dexPath}";
+  # The issuer's path ("/dex"): Dex mounts every route under it, on any listener.
+  dexPath =
+    let
+      m = builtins.match "https?://[^/]+(/.*)?" dexCfg.issuer;
+    in
+    if m == null || builtins.head m == null then "" else builtins.head m;
+  # The agent's OAuth client secret at Dex: generated once (root, 0700 dir); Dex gets it
+  # through the nixpkgs module's `secretFile`, the agents through `credentials`.
+  dexGenDir = "/var/lib/agent-seddon-dex";
+  dexClientSecret = "${dexGenDir}/agent-client.secret";
+  dexClientId = "agent-seddon";
   # What `grafana cli` needs to find the database: the server's paths and database
   # sections, rendered the way the nixpkgs module renders the server's config.ini.
   grafCliIni =
@@ -633,7 +648,9 @@ in
           reset-admin-password` each time Grafana starts, so the file is the source of
           truth: a password changed in the UI is put back at the next restart. After
           editing the file, `systemctl restart grafana`. Null (the default) leaves the
-          password to Grafana. Needs the sqlite database (Grafana's default).
+          password to Grafana. Needs the sqlite database (Grafana's default). This sets
+          `services.grafana.settings.security.admin_password`, so the host must not
+          (Nix reports that as conflicting definitions).
         '';
       };
       generateAdminPassword = lib.mkOption {
@@ -644,6 +661,69 @@ in
           `${grafAdminGenDir}/admin.password` (root, 0600); read it with
           `sudo cat`. For a new one, delete the file and `systemctl restart grafana`.
         '';
+      };
+    };
+
+    dex = {
+      enable = lib.mkEnableOption ''
+        Dex on loopback as the agent's login provider (GitHub sign-in). The module runs
+        Dex and registers the agent as its client; turning the agent's `[auth]` on is the
+        host's step (merge `dex.issuerSettings` into `settings.auth.issuers`), since
+        without the front door the portal sends no token
+      '';
+      issuer = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "https://172.16.50.46:8443/dex";
+        description = ''
+          Dex's public issuer URL: where browsers reach it (the front door's `/dex`) and
+          the `iss` the agent expects. Dex mounts its routes under this path. https, or
+          http to 127.0.0.1; no trailing slash.
+        '';
+      };
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 5556;
+        description = "Dex's loopback port.";
+      };
+      redirectUris = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "https://172.16.50.46:8443/auth/callback" ];
+        description = "Where Dex may return a browser to the agent with a code (the agent's `[auth] redirect_uris`).";
+      };
+      tenant = lib.mkOption {
+        type = lib.types.str;
+        default = "local";
+        description = "The tenant every Dex sign-in maps to (Dex tokens carry none).";
+      };
+      github = {
+        clientId = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "The GitHub OAuth client id Dex signs in with (callback `<issuer>/callback`).";
+        };
+        clientSecretFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/dex-github";
+          description = "A file holding that client's secret (absolute, outside the store).";
+        };
+        orgs = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          description = "Only members of these GitHub organizations may finish a sign-in. Empty: any GitHub user (the agent still admits only bound principals).";
+        };
+      };
+      mockLogin = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Tests only: Dex's `mockCallback` connector, which signs anyone in as a fixed user, in place of GitHub.";
+      };
+      issuerSettings = lib.mkOption {
+        type = lib.types.attrsOf lib.types.anything;
+        readOnly = true;
+        description = "The `[[auth.issuers]]` entry for this Dex, with `backchannel_url` on loopback; merge it into `settings.auth.issuers`.";
       };
     };
 
@@ -721,8 +801,17 @@ in
             message = "services.agentSeddon.grafana.adminPasswordFile / generateAdminPassword need grafana.enable.";
           }
           {
+            # A `url` DSN overrides `type`, and the CLI reads the same section.
             assertion =
-              grafAdminFile == null || !cfg.grafana.enable || graf.settings.database.type == "sqlite3";
+              grafAdminFile == null
+              || !cfg.grafana.enable
+              || (
+                graf.settings.database.type == "sqlite3"
+                && lib.elem (graf.settings.database.url or null) [
+                  null
+                  ""
+                ]
+              );
             message = "services.agentSeddon.grafana: the managed admin password needs Grafana's sqlite database (grafana cli cannot read the server's database credential).";
           }
           {
@@ -871,9 +960,12 @@ in
           after = [ "grafana.service" ];
           partOf = [ "grafana.service" ];
           wantedBy = [ "grafana.service" ];
-          path = [ pkgs.curl ];
+          path = [
+            pkgs.coreutils
+            pkgs.curl
+          ];
           script = ''
-            # Until the server has migrated the database: up to 5 minutes here, then
+            # Until the server has migrated the database: 60 tries, 5 to 10 minutes, then
             # Restart below. Loopback health only, so -k is harmless for an https
             # Grafana with a host-name cert.
             i=0
@@ -934,6 +1026,153 @@ in
             StateDirectoryMode = "0700";
           };
         };
+      })
+
+      {
+        services.agentSeddon.dex.issuerSettings = {
+          name = "dex";
+          profile = "generic";
+          inherit (dexCfg) issuer;
+          audience = dexClientId;
+          jwks_url = "${dexLocal}/keys";
+          backchannel_url = dexLocal;
+          default_tenant = dexCfg.tenant;
+          require_email_verified = true;
+          client_secret = "file:/run/credentials/@unit@/dex-client";
+        };
+      }
+
+      (lib.mkIf dexCfg.enable {
+        assertions = [
+          {
+            assertion =
+              builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" dexCfg.issuer != null
+              || builtins.match "http://127\\.0\\.0\\.1(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" dexCfg.issuer != null;
+            message = "services.agentSeddon.dex.issuer must be https://host[:port][/path] (or http://127.0.0.1…), with no trailing slash, query or fragment.";
+          }
+          {
+            assertion = dexCfg.mockLogin != (dexCfg.github.clientId != null);
+            message = "services.agentSeddon.dex: set github.clientId (with github.clientSecretFile), or mockLogin for a test, not both.";
+          }
+          {
+            assertion = (dexCfg.github.clientId == null) == (dexCfg.github.clientSecretFile == null);
+            message = "services.agentSeddon.dex.github: clientId and clientSecretFile go together.";
+          }
+          {
+            assertion =
+              dexCfg.github.clientSecretFile == null
+              || (
+                lib.hasPrefix "/" dexCfg.github.clientSecretFile
+                && !(lib.hasPrefix builtins.storeDir dexCfg.github.clientSecretFile)
+                && builtins.match ".*[[:space:]'\\].*" dexCfg.github.clientSecretFile == null
+              );
+            message = "services.agentSeddon.dex.github.clientSecretFile must be an absolute path outside the Nix store, with no whitespace, quote or backslash.";
+          }
+          {
+            assertion = dexCfg.redirectUris != [ ];
+            message = "services.agentSeddon.dex.redirectUris: list where Dex may return a browser to the agent.";
+          }
+          {
+            assertion = builtins.all (
+              o: builtins.match "[A-Za-z0-9][A-Za-z0-9-]*" o != null
+            ) dexCfg.github.orgs;
+            message = "services.agentSeddon.dex.github.orgs: GitHub organization names only.";
+          }
+        ];
+
+        services.agentSeddon.credentials.dex-client = dexClientSecret;
+
+        services.dex = {
+          enable = true;
+          settings = {
+            inherit (dexCfg) issuer;
+            storage = {
+              type = "sqlite3";
+              config.file = "/var/lib/dex/dex.db";
+            };
+            web.http = "127.0.0.1:${toString dexCfg.port}";
+            oauth2.skipApprovalScreen = true;
+            staticClients = [
+              {
+                id = dexClientId;
+                name = "agent-seddon";
+                redirectURIs = dexCfg.redirectUris;
+                secretFile = dexClientSecret;
+              }
+            ];
+            connectors =
+              if dexCfg.mockLogin then
+                [
+                  {
+                    type = "mockCallback";
+                    id = "mock";
+                    name = "Mock";
+                  }
+                ]
+              else
+                [
+                  {
+                    type = "github";
+                    id = "github";
+                    name = "GitHub";
+                    config = {
+                      clientID = dexCfg.github.clientId;
+                      # Replaced with the file's contents at start (below), like secretFile.
+                      clientSecret = dexCfg.github.clientSecretFile;
+                      redirectURI = "${dexCfg.issuer}/callback";
+                    }
+                    // lib.optionalAttrs (dexCfg.github.orgs != [ ]) {
+                      orgs = map (name: { inherit name; }) dexCfg.github.orgs;
+                    };
+                  }
+                ];
+          };
+        };
+
+        systemd.services = {
+          dex = {
+            after = [ "agent-seddon-dex-secret.service" ];
+            requires = [ "agent-seddon-dex-secret.service" ];
+            serviceConfig = {
+              StateDirectory = "dex";
+              # Root, like the nixpkgs module's own secretFile step, and the same call:
+              # `replace-secret <string> <file> <target>` replaces the string (here the
+              # path, which the connector's clientSecret renders as) with the file's
+              # contents. The VM test proves that step for the static client.
+              ExecStartPre = lib.mkIf (dexCfg.github.clientSecretFile != null) (
+                lib.mkAfter [
+                  "+${pkgs.replace-secret}/bin/replace-secret ${dexCfg.github.clientSecretFile} ${dexCfg.github.clientSecretFile} /run/dex/config.yaml"
+                ]
+              );
+            };
+          };
+          # Once: an existing secret is never replaced. Hex, so it is safe inside YAML.
+          agent-seddon-dex-secret = {
+            description = "agent-seddon client secret at Dex (generate once)";
+            before = [ "dex.service" ] ++ map (n: "${unitName n}.service") (lib.attrNames enabledAgents);
+            path = [ pkgs.coreutils ];
+            script = ''
+              f=${dexClientSecret}
+              [ -s "$f" ] && exit 0
+              umask 077
+              od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$f.tmp"
+              mv "$f.tmp" "$f"
+            '';
+            serviceConfig = hardening // {
+              Type = "oneshot";
+              RemainAfterExit = true;
+              StateDirectory = "agent-seddon-dex";
+              StateDirectoryMode = "0700";
+            };
+          };
+        }
+        // lib.mapAttrs' (
+          n: _:
+          lib.nameValuePair (unitName n) {
+            after = [ "agent-seddon-dex-secret.service" ];
+            requires = [ "agent-seddon-dex-secret.service" ];
+          }
+        ) enabledAgents;
       })
 
       (lib.mkIf pgEnabled {
