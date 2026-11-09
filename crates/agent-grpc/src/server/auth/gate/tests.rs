@@ -1,7 +1,7 @@
 //! Tables for the gate's pure decisions: `rd`, the path map, permissions, the
 //! unauthenticated answer and the header sets (security-hardening 10, S27).
 
-use agent_core::{RoleDef, ROLE_AGENT_USER, ROLE_ORG_ADMIN, ROLE_READER};
+use agent_core::{RoleDef, ROLE_AGENT_USER, ROLE_OPERATOR, ROLE_ORG_ADMIN, ROLE_READER};
 use rstest::rstest;
 
 use super::*;
@@ -78,7 +78,12 @@ const ONE_OVER: &str = {
 #[case::corner_grafana_bare(Listener::Main, "/grafana", Some(Route::Grafana))]
 #[case::positive_prometheus(Listener::Main, "/prometheus/graph", Some(Route::Prometheus))]
 #[case::positive_hyperdx_root(Listener::Hyperdx, "/", Some(Route::Hyperdx))]
-#[case::positive_hyperdx_any(Listener::Hyperdx, "/search?q=1", Some(Route::Hyperdx))]
+#[case::positive_hyperdx_any(Listener::Hyperdx, "/search", Some(Route::Hyperdx))]
+// The query is not part of the path: `:path` can be passed as it came.
+#[case::positive_query_ignored(Listener::Main, "/main.dart.js?v=3", Some(Route::Portal))]
+#[case::positive_hyperdx_query_ignored(Listener::Hyperdx, "/search?q=1", Some(Route::Hyperdx))]
+#[case::adversarial_query_cannot_add_a_route(Listener::Main, "/admin?/grafana/", None)]
+#[case::adversarial_dotdot_before_query(Listener::Main, "/grafana/..?x", None)]
 #[case::negative_unmapped(Listener::Main, "/admin", None)]
 #[case::negative_asset_dir_itself(Listener::Main, "/assets/", None)]
 #[case::negative_grafana_prefix_only(Listener::Main, "/grafanaevil", None)]
@@ -209,6 +214,26 @@ fn grafana_role_cases(#[case] roles: &[&str], #[case] want: &str) {
 }
 
 // --- the unauthenticated answer and headers (F4) ---------------------------------
+
+// A path too long for `rd` logs in without one, rather than an `rd` the login drops.
+#[rstest]
+#[case::boundary_longest_rd(MAX_RETURN_PATH, true)]
+#[case::boundary_rd_too_long(MAX_RETURN_PATH + 1, false)]
+#[case::boundary_longest_routed(MAX_GATE_PATH, false)]
+fn unauthenticated_rd_length_cases(#[case] len: usize, #[case] keeps_rd: bool) {
+    let path = format!("/assets/{}", "a".repeat(len - "/assets/".len()));
+    assert_eq!(route(Listener::Main, &path), Some(Route::Portal));
+    let Unauthenticated::Login(loc) = unauthenticated(Listener::Main, Route::Portal, &path, MAIN)
+    else {
+        panic!("a page goes to the login");
+    };
+    let back = return_path(loc.strip_prefix("/auth/login?rd="));
+    if keeps_rd {
+        assert_eq!(back, path);
+    } else {
+        assert_eq!((loc.as_str(), back.as_str()), ("/auth/login", HOME));
+    }
+}
 
 #[rstest]
 #[case::positive_page_to_login(Listener::Main, Route::Portal, "/", Unauthenticated::Login("/auth/login?rd=/".into()))]

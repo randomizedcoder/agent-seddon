@@ -14,7 +14,7 @@
 //!   answers with, a closed set per route (F4's table).
 
 use agent_core::{
-    authorize, Action, Resource, ResourceType, RoleCatalog, VerifiedPrincipal, ROLE_OPERATOR,
+    authorize, is_operator, Action, Resource, ResourceType, RoleCatalog, VerifiedPrincipal,
 };
 
 /// Longest `rd` kept, after percent-decoding (F11).
@@ -152,13 +152,15 @@ impl Route {
     }
 }
 
-/// The route for `path` (no query) on `listener`, or `None`: refused. Default-deny:
+/// The route for `path` on `listener`, or `None`: refused. A query (`?…`) is not part
+/// of the path and is ignored, so a caller can pass `:path` as it came. Default-deny:
 /// only the listed paths map, and a path that isn't in normal form (`..` or `.`
 /// segments, `//`, a backslash, an encoded `/`, `\` or `.`, a control byte) maps
 /// to nothing, so it can't name one upstream to the gate and another to Envoy.
 /// `/auth/*` and `/dex/*` aren't checked (Envoy routes them past the check), so
 /// they have no route here either.
 pub fn route(listener: Listener, path: &str) -> Option<Route> {
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
     if !normal_path(path) {
         return None;
     }
@@ -230,9 +232,11 @@ pub fn admits(catalog: &RoleCatalog, principal: &VerifiedPrincipal, need: Need) 
 }
 
 /// Grafana's role for a principal the gate admitted to `/grafana/` (F4): `Admin`
-/// for the operator, `Editor` with `write:observability`, else `Viewer`.
+/// for the operator, `Editor` with `write:observability`, else `Viewer`. The
+/// operator is [`is_operator`], the same test `authorize` uses for the one
+/// principal that crosses tenants, so the two can't disagree on who it is.
 pub fn grafana_role(catalog: &RoleCatalog, principal: &VerifiedPrincipal) -> &'static str {
-    if principal.roles.iter().any(|r| r == ROLE_OPERATOR) {
+    if is_operator(principal) {
         "Admin"
     } else if admits(
         catalog,
@@ -256,7 +260,10 @@ pub enum Unauthenticated {
 
 /// The answer to an unauthenticated request for `path` on `listener`, once
 /// [`route`] has mapped it (an unmapped path is a 403 whoever asks). An RPC
-/// gets a 401. A page goes to the login with `rd` set to it, encoded. HyperDX's
+/// gets a 401. A page goes to the login with `rd` set to it, encoded; a path
+/// longer than [`MAX_RETURN_PATH`] (which [`route`] admits up to
+/// [`MAX_GATE_PATH`]) can't come back through [`return_path`], so it goes to the
+/// login with no `rd` and the browser lands on [`HOME`]. HyperDX's
 /// listener has no `/auth/*`, so its login is the main listener's, at
 /// `main_origin`, and the browser comes back to the portal (`rd` is a path on the
 /// main listener only).
@@ -271,6 +278,9 @@ pub fn unauthenticated(
         (Listener::Hyperdx, _) => Unauthenticated::Login(format!("{main_origin}{LOGIN_PATH}")),
         // `path` is in normal form ([`route`] mapped it); encoding it keeps it
         // literal through the login's decode.
+        (Listener::Main, _) if path.len() > MAX_RETURN_PATH => {
+            Unauthenticated::Login(LOGIN_PATH.to_string())
+        }
         (Listener::Main, _) => {
             Unauthenticated::Login(format!("{LOGIN_PATH}?rd={}", percent_encode_path(path)))
         }

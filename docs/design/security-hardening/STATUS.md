@@ -1283,6 +1283,10 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     (`:05556` passes, `:00999` and `:00000` fail); a config row for an https `backchannel_url`;
     the `dexgh` VM subtest defines its own URLs; `code_endpoints` says why the issuer loses one
     trailing slash and the back-channel all of them.
+  - From the #713 draft: `route` ignores a query itself, so `:path` can be passed as it came;
+    `grafana_role` names the operator with `is_operator`, the test `authorize` uses; a page path
+    longer than `MAX_RETURN_PATH` (but within `MAX_GATE_PATH`) goes to the login with no `rd`,
+    rather than an `rd` the login would drop; 03's operator-global sentence is past tense.
 
 ## Cross-track note (not an S-increment)
 
