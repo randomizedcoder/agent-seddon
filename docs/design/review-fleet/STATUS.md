@@ -186,6 +186,12 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     head a second time; the fleet now grounds with `ReviewTarget::PrAt { number, head }`
     (wire `pr:<n>@<oid>`), using the head it already fetched, refused unless it is a full hex
     object id (`review_pr_at_uses_the_given_head`).
+  - **From the #710 draft (follow-up PR):** the head is checked before any repo work (it ran
+    after `branches()`), and also where the gRPC server decodes `pr:<n>@<oid>`; both use one
+    `agent_core::is_object_id`. The wire form lives in one `review_target` module shared by the
+    client and server. `resolve` destructures `Pr` and `PrAt` once each (a shared `pr_base`).
+    The fleet test double records the head and asserts grounding gets the fetched one. A remote
+    collector must hold the oid (`docs/components/git.md`).
 
 ## Decisions of record
 

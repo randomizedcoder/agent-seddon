@@ -119,8 +119,12 @@ instead of being refused as a non-fast-forward. The `--review <PR#>` path always
 fetches, and a failed fetch fails the review rather than reviewing a possibly stale
 local ref. The fleet fetches the head itself (to dedup and check out) and grounds
 with `ReviewTarget::PrAt { number, head }`, so the head is fetched once per review;
-`head` must be a full hex object id. An empty `pr_ref_template` makes `fetch_pr` a
-clear config error rather than a guess.
+`head` must be a full hex object id, checked where the gRPC server decodes it and
+again in the orchestrator (`agent_core::is_object_id`). A fleet whose grounder is a
+remote collector (`GrpcReview`) sends that oid on the wire (`pr:<n>@<oid>`), so the
+remote's repo must hold it: share the fleet's mirror, or grounding fails (fail-soft:
+the review runs ungrounded, with no draft). An empty `pr_ref_template` makes
+`fetch_pr` a clear config error rather than a guess.
 
 **Base fetch (`fetch_branch`).** A review's diff base is the PR's target branch.
 `fetch_branch(name)` fetches that one branch with a full refspec,

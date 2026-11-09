@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use tonic::transport::Channel;
 
 use super::{call_retry, grpc_retry_policy, outbound};
+use crate::review_target::encode_target;
 use crate::transport::Endpoint;
 
 /// A `ReviewCollector` that calls a remote `FactCollectorService`.
@@ -28,18 +29,6 @@ impl GrpcReview {
             client: pb::fact_collector_service_client::FactCollectorServiceClient::new(channel),
             retry: grpc_retry_policy(),
         })
-    }
-}
-
-/// Encode a target for the wire: `pr:<n>` | `pr:<n>@<oid>` | `branch:<name>` |
-/// `worktree` | `revs:<base>..<head>`.
-pub(crate) fn encode_target(t: &ReviewTarget) -> String {
-    match t {
-        ReviewTarget::Pr(n) => format!("pr:{n}"),
-        ReviewTarget::PrAt { number, head } => format!("pr:{number}@{head}"),
-        ReviewTarget::Branch(b) => format!("branch:{b}"),
-        ReviewTarget::WorkingTree => "worktree".to_string(),
-        ReviewTarget::Revs { base, head } => format!("revs:{base}..{head}"),
     }
 }
 
