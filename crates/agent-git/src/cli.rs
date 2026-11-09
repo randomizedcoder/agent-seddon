@@ -1493,7 +1493,8 @@ impl RepoBackend for CliBackend {
         // Forced (`+`): a force-pushed or rebased PR rewrites its head, and the
         // local ref is the fleet's own namespace, so replacing it loses nothing.
         // Without it git refuses the non-fast-forward and the PR is never reviewed again.
-        let refspec = format!("+{remote_ref}:{local}");
+        // A template that already carries the `+` is not doubled.
+        let refspec = format!("+{}:{local}", remote_ref.trim_start_matches('+'));
         self.git_str(&base, &["fetch", self.remote_name(), &refspec])
             .await?;
 
@@ -2009,13 +2010,16 @@ mod tests {
     }
 
     /// The template is the whole story — a GitLab layout is just a different string.
+    #[rstest]
+    #[case::positive_gitlab_layout("refs/merge-requests/{n}/head")]
+    // desc: an operator worked around the old unforced refspec with a `+`.
+    // expect: one `+`, not `++` (which git rejects).
+    #[case::corner_template_plus_not_doubled("+refs/merge-requests/{n}/head")]
     #[tokio::test]
-    async fn positive_fetch_pr_template_selects_gitlab_ref() {
+    async fn fetch_pr_template_selects_the_ref(#[case] template: &str) {
         let rec = RecordingSandbox::new(ok_out(b"cafebabecafebabecafebabecafebabecafebabe\n"));
         let (b, mirror) = backend_ready_mirror();
-        let b = b
-            .with_sandbox(rec.clone())
-            .with_pr_ref_template("refs/merge-requests/{n}/head");
+        let b = b.with_sandbox(rec.clone()).with_pr_ref_template(template);
 
         b.fetch_pr(7).await.unwrap();
 

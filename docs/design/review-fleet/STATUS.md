@@ -176,6 +176,10 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     local ref is the fleet's own namespace, so replacing it loses nothing.
   - `fetch_pr_follows_the_head` (real git): a push, a force-push (amend) and a reset backwards
     each land on the new head; the last two fail without the `+`.
+  - **From the #709 draft:** `agent --review <PR#>` resolved the local ref first, so after a
+    force-push it reviewed the old head silently. It now always fetches; the local ref stands in,
+    with a warning, only when the fetch fails (`review_pr_resolves_the_fetched_head`). A template
+    that already starts with `+` is not doubled to `++`.
 
 ## Decisions of record
 

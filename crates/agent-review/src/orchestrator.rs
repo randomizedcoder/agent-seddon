@@ -371,12 +371,23 @@ impl ReviewOrchestrator {
                 // default fetch — so on a fresh mirror `source_branch` never
                 // resolves (always, for fork PRs). Resolve the head fork-correctly
                 // via the namespaced PR ref (never `source_branch`, which can
-                // collide with an unrelated local branch), fetching it if the
-                // mirror doesn't already carry it.
-                let local = agent_core::pr_local_ref(*n);
-                let head = match self.repo.resolve(&Revision::from(local.clone())).await {
-                    Ok(oid) => oid.0,
-                    Err(_) => self.repo.fetch_pr(*n).await?.0,
+                // collide with an unrelated local branch). Always fetch: the
+                // local ref survives a force-push, so resolving it first would
+                // review the old head. Only when the fetch fails (offline, no
+                // remote) does a local ref stand in, with a warning.
+                let head = match self.repo.fetch_pr(*n).await {
+                    Ok(rev) => rev.0,
+                    Err(e) => {
+                        let local = Revision::from(agent_core::pr_local_ref(*n));
+                        match self.repo.resolve(&local).await {
+                            Ok(oid) => {
+                                tracing::warn!(pr = n, error = %e,
+                                    "review: fetching the PR head failed; reviewing the last-fetched head");
+                                oid.0
+                            }
+                            Err(_) => return Err(e),
+                        }
+                    }
                 };
                 (pr.target_branch, head)
             }
@@ -706,8 +717,12 @@ mod tests {
         pr_present: bool,
         /// PR numbers passed to `fetch_pr`, in order.
         fetched: Arc<Mutex<Vec<u64>>>,
-        /// The head oid `fetch_pr` (and a present `resolve`) yields.
+        /// The head oid `fetch_pr` yields (the PR's current head).
         head_oid: String,
+        /// The oid a present local PR ref resolves to (the last-fetched head).
+        local_oid: String,
+        /// `fetch_pr` fails (offline, no remote).
+        fetch_fails: bool,
         /// Every file read hangs (a stuck base probe).
         hang_reads: bool,
     }
@@ -719,6 +734,8 @@ mod tests {
                 pr_present,
                 fetched: Arc::new(Mutex::new(Vec::new())),
                 head_oid: "a".repeat(40),
+                local_oid: "b".repeat(40),
+                fetch_fails: false,
                 hang_reads: false,
             }
         }
@@ -729,7 +746,7 @@ mod tests {
         async fn resolve(&self, rev: &Revision) -> Result<Oid> {
             if rev.as_str().starts_with("refs/fleet/pr/") {
                 return if self.pr_present {
-                    Ok(Oid(self.head_oid.clone()))
+                    Ok(Oid(self.local_oid.clone()))
                 } else {
                     Err(Error::Repo("no such local PR ref (not fetched)".into()))
                 };
@@ -738,6 +755,9 @@ mod tests {
         }
         async fn fetch_pr(&self, number: u64) -> Result<Revision> {
             self.fetched.lock().unwrap().push(number);
+            if self.fetch_fails {
+                return Err(Error::Repo("fetch failed (offline)".into()));
+            }
             Ok(Revision::from(self.head_oid.clone()))
         }
         async fn fetch_branch(&self, branch: &str) -> Result<()> {
@@ -913,41 +933,42 @@ mod tests {
         assert_eq!(r.base.as_str(), target, "base is the PR target branch");
     }
 
-    /// On a fresh mirror the PR head ref is absent, so the orchestrator fetches it
-    /// once and reviews the resolved oid — not the (unfetched) source branch.
+    /// Which head a `--review <PR#>` lands on: the fetched one, whatever the
+    /// local ref says; the local ref only when the fetch fails.
+    #[rstest]
+    // desc: a fresh mirror. expect: fetched once, reviews the PR head.
+    #[case::positive_fresh_mirror_fetches(false, false, Some('a'))]
+    // desc: the local ref is from before a force-push. expect: fetched, the new
+    // head wins over the stale ref.
+    #[case::adversarial_force_pushed_stale_ref_not_reviewed(true, false, Some('a'))]
+    // desc: offline, an earlier fetch left a local ref. expect: that head.
+    #[case::corner_fetch_fails_falls_back_to_local(true, true, Some('b'))]
+    // desc: offline and never fetched. expect: the fetch error.
+    #[case::negative_fetch_fails_without_local_errs(false, true, None)]
     #[tokio::test]
-    async fn positive_review_pr_fetches_when_head_missing() {
-        let repo = Arc::new(PrFakeRepo::new(false));
+    async fn review_pr_resolves_the_fetched_head(
+        #[case] pr_present: bool,
+        #[case] fetch_fails: bool,
+        #[case] want: Option<char>,
+    ) {
+        let repo = Arc::new(PrFakeRepo {
+            fetch_fails,
+            ..PrFakeRepo::new(pr_present)
+        });
         let fetched = repo.fetched.clone();
-        let head_oid = repo.head_oid.clone();
-        let r = orchestrator(repo)
-            .resolve(&ReviewTarget::Pr(7))
-            .await
-            .unwrap();
+        let got = orchestrator(repo).resolve(&ReviewTarget::Pr(7)).await;
 
-        assert_eq!(&*fetched.lock().unwrap(), &[7], "fetched the PR head once");
-        assert_eq!(r.head.as_str(), head_oid, "head is the resolved PR oid");
-        assert_eq!(r.base.as_str(), "main", "base is the PR target branch");
+        assert_eq!(&*fetched.lock().unwrap(), &[7], "always fetched once");
+        match want {
+            Some(c) => {
+                let r = got.expect("resolves");
+                assert_eq!(r.head.as_str(), c.to_string().repeat(40));
+                assert_eq!(r.base.as_str(), "main", "base is the PR target branch");
+            }
+            None => assert!(got.is_err(), "no head to review"),
+        }
     }
 
-    /// When the PR head ref already resolves (previously fetched), no fetch runs —
-    /// the present-check short-circuits.
-    #[tokio::test]
-    async fn corner_review_pr_skips_fetch_when_present() {
-        let repo = Arc::new(PrFakeRepo::new(true));
-        let fetched = repo.fetched.clone();
-        let head_oid = repo.head_oid.clone();
-        let r = orchestrator(repo)
-            .resolve(&ReviewTarget::Pr(7))
-            .await
-            .unwrap();
-
-        assert!(
-            fetched.lock().unwrap().is_empty(),
-            "no fetch when the PR head is already present"
-        );
-        assert_eq!(r.head.as_str(), head_oid, "head from the present local ref");
-    }
     /// A base read that never returns can't hold `collect` past the fan-out: the
     /// generated probe runs beside the collectors under the same deadline, and the
     /// digest only reads what it found.
