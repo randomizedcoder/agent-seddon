@@ -180,6 +180,12 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     force-push it reviewed the old head silently. It now always fetches; the local ref stands in,
     with a warning, only when the fetch fails (`review_pr_resolves_the_fetched_head`). A template
     that already starts with `+` is not doubled to `++`.
+  - **From the b10320b5 draft (follow-up PR):** the offline fallback resolved the local ref in the
+    checkout, while `fetch_pr` writes it into the mirror, so it never found it when a mirror
+    exists; it is dropped, and a failed fetch now fails the review. Fleet grounding fetched the
+    head a second time; the fleet now grounds with `ReviewTarget::PrAt { number, head }`
+    (wire `pr:<n>@<oid>`), using the head it already fetched, refused unless it is a full hex
+    object id (`review_pr_at_uses_the_given_head`).
 
 ## Decisions of record
 

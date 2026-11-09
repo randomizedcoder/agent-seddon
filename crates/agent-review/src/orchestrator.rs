@@ -351,7 +351,15 @@ impl ReviewOrchestrator {
         let default_branch = pick_default(&branch_names);
 
         let (base_label, head_label) = match target {
-            ReviewTarget::Pr(n) => {
+            ReviewTarget::Pr(n) | ReviewTarget::PrAt { number: n, .. } => {
+                // A caller-fetched head is validated before any forge or git call.
+                if let ReviewTarget::PrAt { head, .. } = target {
+                    if !is_object_id(head) {
+                        return Err(Error::Config(format!(
+                            "PR head `{head}` is not a full object id (rejected before touching git)"
+                        )));
+                    }
+                }
                 let forge = self.forge.as_ref().ok_or_else(|| {
                     Error::Config("no forge configured; cannot resolve a PR number".into())
                 })?;
@@ -371,23 +379,12 @@ impl ReviewOrchestrator {
                 // default fetch — so on a fresh mirror `source_branch` never
                 // resolves (always, for fork PRs). Resolve the head fork-correctly
                 // via the namespaced PR ref (never `source_branch`, which can
-                // collide with an unrelated local branch). Always fetch: the
-                // local ref survives a force-push, so resolving it first would
-                // review the old head. Only when the fetch fails (offline, no
-                // remote) does a local ref stand in, with a warning.
-                let head = match self.repo.fetch_pr(*n).await {
-                    Ok(rev) => rev.0,
-                    Err(e) => {
-                        let local = Revision::from(agent_core::pr_local_ref(*n));
-                        match self.repo.resolve(&local).await {
-                            Ok(oid) => {
-                                tracing::warn!(pr = n, error = %e,
-                                    "review: fetching the PR head failed; reviewing the last-fetched head");
-                                oid.0
-                            }
-                            Err(_) => return Err(e),
-                        }
-                    }
+                // collide with an unrelated local branch). Always fetched, and a
+                // failure fails the review: the local ref survives a force-push, so
+                // standing it in would review the old head.
+                let head = match target {
+                    ReviewTarget::PrAt { head, .. } => head.clone(),
+                    _ => self.repo.fetch_pr(*n).await?.0,
                 };
                 (pr.target_branch, head)
             }
@@ -700,6 +697,11 @@ fn repo_hash(gs: &GitState, root: &Path) -> String {
     }
 }
 
+/// A full hex object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
+fn is_object_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,16 +935,17 @@ mod tests {
         assert_eq!(r.base.as_str(), target, "base is the PR target branch");
     }
 
-    /// Which head a `--review <PR#>` lands on: the fetched one, whatever the
-    /// local ref says; the local ref only when the fetch fails.
+    /// Which head a `--review <PR#>` lands on: always the fetched one, whatever
+    /// the local ref says; a failed fetch fails the review.
     #[rstest]
     // desc: a fresh mirror. expect: fetched once, reviews the PR head.
     #[case::positive_fresh_mirror_fetches(false, false, Some('a'))]
     // desc: the local ref is from before a force-push. expect: fetched, the new
     // head wins over the stale ref.
     #[case::adversarial_force_pushed_stale_ref_not_reviewed(true, false, Some('a'))]
-    // desc: offline, an earlier fetch left a local ref. expect: that head.
-    #[case::corner_fetch_fails_falls_back_to_local(true, true, Some('b'))]
+    // desc: offline, an earlier fetch left a local ref. expect: the fetch error,
+    // not the possibly stale local head.
+    #[case::negative_fetch_fails_with_local_errs(true, true, None)]
     // desc: offline and never fetched. expect: the fetch error.
     #[case::negative_fetch_fails_without_local_errs(false, true, None)]
     #[tokio::test]
@@ -966,6 +969,42 @@ mod tests {
                 assert_eq!(r.base.as_str(), "main", "base is the PR target branch");
             }
             None => assert!(got.is_err(), "no head to review"),
+        }
+    }
+
+    /// A head the caller already fetched (the fleet) is used as given, never
+    /// fetched again; anything but a full hex object id is refused before git.
+    #[rstest]
+    #[case::positive_sha1(&"c".repeat(40), true)]
+    #[case::boundary_sha256(&"d".repeat(64), true)]
+    #[case::boundary_one_short(&"c".repeat(39), false)]
+    #[case::negative_uppercase(&"C".repeat(40), false)]
+    #[case::negative_symbolic_ref("HEAD", false)]
+    #[case::negative_empty("", false)]
+    #[case::adversarial_option_injection("--upload-pack=x", false)]
+    #[case::adversarial_range(&format!("{}..{}", "c".repeat(19), "c".repeat(19)), false)]
+    #[case::adversarial_ref_path("refs/heads/main", false)]
+    #[tokio::test]
+    async fn review_pr_at_uses_the_given_head(#[case] head: &str, #[case] ok: bool) {
+        let repo = Arc::new(PrFakeRepo::new(true));
+        let fetched = repo.fetched.clone();
+        let got = orchestrator(repo)
+            .resolve(&ReviewTarget::PrAt {
+                number: 7,
+                head: head.to_string(),
+            })
+            .await;
+
+        assert!(
+            fetched.lock().unwrap().is_empty(),
+            "the head is never fetched again"
+        );
+        if ok {
+            let r = got.expect("resolves");
+            assert_eq!(r.head.as_str(), head, "the given head, not the local ref");
+            assert_eq!(r.base.as_str(), "main", "base is the PR target branch");
+        } else {
+            assert!(got.is_err(), "`{head}` must be refused");
         }
     }
 

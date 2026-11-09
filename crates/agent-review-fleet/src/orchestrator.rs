@@ -854,8 +854,15 @@ impl FleetOrchestrator {
                 "review grounding",
                 grounding_timeout(grounder.time_budget()),
                 // Ground against the checked-out worktree, not the bare mirror, so the
-                // file-reading collectors see real files (fleet-grounding track).
-                grounder.ground(&worktree.path, ReviewTarget::Pr(pr)),
+                // file-reading collectors see real files (fleet-grounding track). The
+                // head fetched above is passed on, so grounding doesn't fetch it again.
+                grounder.ground(
+                    &worktree.path,
+                    ReviewTarget::PrAt {
+                        number: pr,
+                        head: head_oid.clone(),
+                    },
+                ),
             )
             .await
             {
@@ -1301,8 +1308,8 @@ mod tests {
             target: ReviewTarget,
         ) -> agent_core::Result<GroundedReview> {
             self.roots.lock().unwrap().push(root.to_path_buf());
-            if let ReviewTarget::Pr(n) = target {
-                self.grounded.lock().unwrap().push(n);
+            if let ReviewTarget::PrAt { number, .. } = target {
+                self.grounded.lock().unwrap().push(number);
             }
             match &self.brief {
                 Ok(b) => Ok(GroundedReview {

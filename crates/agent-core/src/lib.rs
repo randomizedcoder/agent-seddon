@@ -5721,6 +5721,10 @@ pub trait TaskClassifier: Send + Sync {
 pub enum ReviewTarget {
     /// A pull/merge request number (resolved to base/head via the `Forge` seam).
     Pr(u64),
+    /// A PR whose head the caller already fetched (the fleet, which fetches it to
+    /// dedup and check out): resolved like [`ReviewTarget::Pr`], without fetching
+    /// the head again. `head` must be a full hex object id.
+    PrAt { number: u64, head: String },
     /// A branch, diffed against the repo's default branch.
     Branch(String),
     /// The current branch vs the default branch (the in-loop hand-off target).

@@ -116,8 +116,11 @@ ref), fetches it into the namespaced local ref `refs/fleet/pr/<n>` (`pr_local_re
 and returns the resolved head oid. The refspec is forced (`+`, never doubled when
 the template has one), so a force-pushed or rebased PR replaces the old head
 instead of being refused as a non-fast-forward. The `--review <PR#>` path always
-fetches; the local ref stands in, with a warning, only when the fetch fails. An
-empty `pr_ref_template` makes `fetch_pr` a clear config error rather than a guess.
+fetches, and a failed fetch fails the review rather than reviewing a possibly stale
+local ref. The fleet fetches the head itself (to dedup and check out) and grounds
+with `ReviewTarget::PrAt { number, head }`, so the head is fetched once per review;
+`head` must be a full hex object id. An empty `pr_ref_template` makes `fetch_pr` a
+clear config error rather than a guess.
 
 **Base fetch (`fetch_branch`).** A review's diff base is the PR's target branch.
 `fetch_branch(name)` fetches that one branch with a full refspec,
