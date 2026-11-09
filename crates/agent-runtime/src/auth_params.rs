@@ -12,6 +12,7 @@ pub fn issuer_params(c: &AuthIssuerCfg) -> IssuerParams {
         issuer: c.issuer.clone(),
         audience: c.audience.clone(),
         jwks_url: c.jwks_url.clone(),
+        backchannel_url: c.backchannel_url.clone(),
         tenant_claim: c.tenant_claim.clone(),
         subject_claim: c.subject_claim.clone(),
         roles_claim: c.roles_claim.clone(),

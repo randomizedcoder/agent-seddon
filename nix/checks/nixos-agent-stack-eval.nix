@@ -91,6 +91,31 @@ let
     };
   };
   grafAdminUnit = c: c.systemd.services.agent-seddon-grafana-admin;
+  # Dex (S26): a mock-login config and a GitHub one.
+  dexBase = {
+    enable = true;
+    issuer = "https://l2.example:8443/dex";
+    redirectUris = [ "https://l2.example:8443/auth/callback" ];
+  };
+  dexMock = evalWith {
+    services.agentSeddon.dex = dexBase // {
+      mockLogin = true;
+    };
+  };
+  dexGh = evalWith {
+    services.agentSeddon.dex = dexBase // {
+      github = {
+        clientId = "Iv1.abc";
+        clientSecretFile = "/run/secrets/dex-github";
+        orgs = [ "acme" ];
+      };
+    };
+  };
+  dexFails =
+    extra:
+    failedAssertions (evalWith {
+      services.agentSeddon.dex = lib.recursiveUpdate (dexBase // { mockLogin = true; }) extra;
+    }) != [ ];
   grafDs =
     c:
     let
@@ -550,6 +575,112 @@ let
           };
           services.grafana.settings.database.type = "postgres";
         }) != [ ];
+    dexMockLogin =
+      let
+        d = dexMock.services.dex;
+        st = d.settings;
+        client = lib.head st.staticClients;
+      in
+      d.enable
+      && st.issuer == "https://l2.example:8443/dex"
+      && st.web.http == "127.0.0.1:5556"
+      && st.storage.type == "sqlite3"
+      && map (c: c.type) st.connectors == [ "mockCallback" ]
+      && client.id == "agent-seddon"
+      && client.secretFile == "/var/lib/agent-seddon-dex/agent-client.secret"
+      && client.redirectURIs == [ "https://l2.example:8443/auth/callback" ]
+      && dexMock.systemd.services.dex.serviceConfig.StateDirectory == "dex"
+      && lib.elem "agent-seddon-dex-secret.service" dexMock.systemd.services.dex.requires
+      && lib.elem "agent-seddon-dex-secret.service" dexMock.systemd.services.agent-seddon-gateway.requires
+      && lib.any (
+        e: e == "dex-client:/var/lib/agent-seddon-dex/agent-client.secret"
+      ) dexMock.systemd.services.agent-seddon-gateway.serviceConfig.LoadCredential
+      # Root writes it, out of the agent user's reach; the agent reads its credential copy.
+      && !(dexMock.systemd.services.agent-seddon-dex-secret.serviceConfig ? User)
+      && !(lib.any (lib.hasInfix "replace-secret /run/secrets") (
+        lib.toList dexMock.systemd.services.dex.serviceConfig.ExecStartPre
+      ));
+    dexGithub =
+      let
+        gh = lib.head dexGh.services.dex.settings.connectors;
+      in
+      gh.type == "github"
+      && gh.config.clientID == "Iv1.abc"
+      && gh.config.clientSecret == "/run/secrets/dex-github"
+      && gh.config.redirectURI == "https://l2.example:8443/dex/callback"
+      && gh.config.orgs == [ { name = "acme"; } ]
+      && lib.any (lib.hasInfix "replace-secret /run/secrets/dex-github /run/secrets/dex-github /run/dex/config.yaml") (
+        lib.toList dexGh.systemd.services.dex.serviceConfig.ExecStartPre
+      );
+    dexIssuerSettings =
+      dexMock.services.agentSeddon.dex.issuerSettings == {
+        name = "dex";
+        profile = "generic";
+        issuer = "https://l2.example:8443/dex";
+        audience = "agent-seddon";
+        jwks_url = "http://127.0.0.1:5556/dex/keys";
+        backchannel_url = "http://127.0.0.1:5556/dex";
+        default_tenant = "local";
+        require_email_verified = true;
+        client_secret = "file:/run/credentials/@unit@/dex-client";
+      }
+      # An issuer at the host's root: the back-channel has no path either.
+      &&
+        (evalWith {
+          services.agentSeddon.dex = dexBase // {
+            mockLogin = true;
+            issuer = "https://idp.example";
+          };
+        }).services.agentSeddon.dex.issuerSettings.backchannel_url == "http://127.0.0.1:5556";
+    dexOffByDefault =
+      !(lo.services.dex.enable or false) && !(lo.systemd.services ? agent-seddon-dex-secret);
+    dexRejects =
+      lib.all (i: dexFails { issuer = i; }) [
+        ""
+        "https://l2.example:8443/dex/"
+        "http://l2.example/dex"
+        "http://localhost:5556/dex"
+        "https://l2.example/dex?x=1"
+        "https://l2.example/dex#f"
+        "https://u:p@l2.example/dex"
+        "javascript:alert(1)"
+      ]
+      && dexFails { redirectUris = [ ]; }
+      && dexFails { mockLogin = false; }
+      && dexFails {
+        github = {
+          clientId = "Iv1.abc";
+          clientSecretFile = "/run/secrets/x";
+        };
+      }
+      && dexFails {
+        mockLogin = false;
+        github.clientId = "Iv1.abc";
+      }
+      &&
+        lib.all
+          (
+            f:
+            dexFails {
+              mockLogin = false;
+              github = {
+                clientId = "Iv1.abc";
+                clientSecretFile = f;
+              };
+            }
+          )
+          [
+            "relative"
+            "${builtins.storeDir}/abc-secret"
+            "/run/secrets/a b"
+            "/run/secrets/x\nExecStartPre=/bin/sh"
+          ]
+      && lib.all (o: dexFails { github.orgs = [ o ]; }) [
+        "a/b"
+        "-x"
+        ""
+      ]
+      && !(dexFails { issuer = "http://127.0.0.1:5556/dex"; });
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;

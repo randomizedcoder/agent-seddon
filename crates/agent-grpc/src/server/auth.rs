@@ -234,6 +234,9 @@ pub struct IssuerParams {
     pub audience: String,
     /// Key set URL. `generic` without it uses OIDC discovery on `issuer`.
     pub jwks_url: String,
+    /// `generic` only: where the agent reaches the issuer itself, when not at the
+    /// public `issuer` URL. Browser sign-in discovers and redeems codes here.
+    pub backchannel_url: String,
     /// `generic` only: claim carrying the tenant (default `org`).
     pub tenant_claim: String,
     /// `generic` only: claim carrying the subject (default `sub`).

@@ -451,7 +451,13 @@ by `iss` before verification, so an unknown issuer costs no key fetch, and each 
 own key cache, so one issuer's key never verifies a token that claims another. A `generic`
 issuer without `jwks_url` finds its keys by OIDC discovery, and the discovery document must
 name the same issuer. Roles are read from a token only with `trust_roles_claim = true` (the
-single-issuer form keeps trusting its `roles_claim`, as before).
+single-issuer form keeps trusting its `roles_claim`, as before). A `generic` issuer the agent
+reaches somewhere other than its public URL (Dex on loopback behind a front door) sets
+`backchannel_url` with `jwks_url`. Browser sign-in then fetches discovery from the back-channel,
+which must still name the public issuer. It hands the browser the public authorization URL, and
+redeems codes at the token endpoint moved onto the back-channel. That move is refused unless the
+endpoint sits under the issuer at a `/` boundary, so a document cannot send the agent to another
+host ([`code_flow.rs`](../crates/agent-grpc/src/server/auth/code_flow.rs) `code_endpoints`).
 
 **Agent tokens.** With `[auth.token]` configured
 ([`auth/token.rs`](../crates/agent-grpc/src/server/auth/token.rs)), an IdP token is good for

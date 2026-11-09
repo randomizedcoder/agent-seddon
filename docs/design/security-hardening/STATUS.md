@@ -36,7 +36,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S22 | Portal Access page (bindings, roles, sessions) | deferral | ✅ | #567 |
 | S23 | Native desktop sign-in via the CLI login | deferral | ✅ | #568 |
 | S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
-| S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | 🟡 | #707 |
+| S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ⬜ | |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27 | `AuthGate`: cookie sessions + `ext_authz` `Check`, `read:`/`write:observability` | [10](10-sso-front-door.md) F3, F4, F5, F10, F11 | ⬜ | |
@@ -1172,6 +1172,42 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - VM subtest in `nixos-agent-stack-vm`: the generated password signs in and `admin:admin` does
     not; after deleting the file and restarting, a new password works and the old one does not;
     a file ending in a newline gives the password without it.
+
+- **2026-11-08 — S26: Dex in the module, and the issuer back-channel.**
+  - **The agent (F12).** A `generic` `[[auth.issuers]]` entry takes `backchannel_url`, which needs
+    `jwks_url`, so keys are never discovered through it. Browser sign-in fetches discovery there,
+    and the document must still name the public `issuer`. The authorization URL handed to the
+    browser stays public. Only the token endpoint moves to the back-channel, and only from under
+    the issuer at a `/` boundary.
+    - [`code_endpoints`](../../../crates/agent-grpc/src/server/auth/code_flow.rs) is the pure part,
+      with a 14-row table:
+      - another host;
+      - a shared prefix (`/dexevil`);
+      - userinfo;
+      - a host suffix;
+      - the issuer itself as the endpoint;
+      - a missing endpoint;
+      - `javascript:`;
+      - a trailing slash;
+      - a pathless issuer.
+    - `BrowserIssuer::of` refuses a bad back-channel, and the config loader refuses one on a
+      non-generic issuer, without `jwks_url`, or one that isn't https or loopback-http
+      (8 config rows).
+  - **The module.** `dex.enable` runs the nixpkgs Dex on loopback (sqlite, approval screen off)
+    with the agent as client `agent-seddon`.
+    - The client secret is generated once by root (`agent-seddon-dex-secret`). Dex reads it
+      through the nixpkgs `secretFile`; the agents read it as the `dex-client` credential.
+    - The GitHub connector's secret file is spliced in by one more root `replace-secret`.
+    - `github.orgs` limits who can sign in. `mockLogin` swaps in `mockCallback`.
+    - `dex.issuerSettings` is the ready issuer entry. The module does not turn `[auth]` on,
+      since without the front door the portal sends no token.
+    - Eval rows cover the mock and GitHub configs, the issuer entry, off by default, and the
+      refusals (issuer shape, secret path, orgs, mock xor GitHub).
+  - **VM** (`.#nixos-agent-stack-vm`, opt-in): Dex's issuer is `https://dex.test/dex`, which
+    nothing serves, and the test does the whole PKCE code flow over `127.0.0.1:5556`:
+    auth → mock → callback → code → token with the client secret. The `id_token` has the
+    public `iss`, the nonce and `email_verified`. A wrong secret is refused. Dex listens on
+    loopback only, and no secret path is left in its config.
 
 ## Cross-track note (not an S-increment)
 

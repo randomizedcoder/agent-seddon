@@ -89,6 +89,9 @@ pub struct BrowserIssuer {
     pub name: String,
     pub profile: &'static str,
     pub issuer_url: String,
+    /// Where the agent reaches the issuer itself (`backchannel_url`); `None` ⇒ at
+    /// `issuer_url`.
+    pub backchannel: Option<String>,
     pub client_id: String,
     client_secret: Option<ClientSecret>,
 }
@@ -109,10 +112,23 @@ impl BrowserIssuer {
         let [url] = urls.as_slice() else {
             return Ok(None);
         };
+        let backchannel = match p.backchannel_url.trim() {
+            "" => None,
+            bc => {
+                check_fetch_url(bc).map_err(|e| {
+                    format!(
+                        "`[[auth.issuers]]` `{}`: `backchannel_url` {e}",
+                        resolved.name
+                    )
+                })?;
+                Some(bc.to_string())
+            }
+        };
         Ok(Some(Self {
             name: resolved.name.clone(),
             profile: resolved.profile.as_str(),
             issuer_url: (*url).clone(),
+            backchannel,
             client_id: resolved.audience.clone(),
             client_secret: p.client_secret.clone().filter(|s| !s.expose().is_empty()),
         }))
@@ -348,7 +364,7 @@ impl CodeFlow {
         if let Some(e) = cached {
             return Ok(e);
         }
-        let found = discover_code(&self.http, &login.issuer_url)
+        let found = discover_code(&self.http, &login.issuer_url, login.backchannel.as_deref())
             .await
             .map_err(|reason| {
                 tracing::warn!(issuer = %login.name, %reason, "browser sign-in discovery failed");
@@ -442,18 +458,36 @@ fn portless_loopback_host(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// Discover an issuer's authorization and token endpoints. The document must
-/// name `issuer` exactly and both endpoints must pass [`check_fetch_url`].
-pub async fn discover_code(http: &reqwest::Client, issuer: &str) -> Result<CodeEndpoints, String> {
+/// Discover an issuer's authorization and token endpoints, from `backchannel`
+/// when set (else from `issuer`); see [`code_endpoints`].
+pub async fn discover_code(
+    http: &reqwest::Client,
+    issuer: &str,
+    backchannel: Option<&str>,
+) -> Result<CodeEndpoints, String> {
     let url = format!(
         "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
+        backchannel.unwrap_or(issuer).trim_end_matches('/')
     );
     check_fetch_url(&url).map_err(|e| format!("the issuer URL {e}"))?;
     let (ok, doc) = fetch_json(http.get(&url), "discovery").await?;
     if !ok {
         return Err("discovery: the issuer refused".into());
     }
+    code_endpoints(&doc, issuer, backchannel)
+}
+
+/// The endpoints in a discovery document. It must name `issuer` exactly (a
+/// back-channel serves the public issuer's document), and both endpoints must pass
+/// [`check_fetch_url`]. With a `backchannel`, the browser keeps the public
+/// authorization endpoint, and the token endpoint, which only the agent calls, is
+/// moved onto the back-channel. It must then sit under `issuer`, at a `/` boundary,
+/// so the move can't change the host.
+pub fn code_endpoints(
+    doc: &Value,
+    issuer: &str,
+    backchannel: Option<&str>,
+) -> Result<CodeEndpoints, String> {
     if doc.get("issuer").and_then(Value::as_str) != Some(issuer) {
         return Err("discovery names a different issuer".into());
     }
@@ -465,9 +499,21 @@ pub async fn discover_code(http: &reqwest::Client, issuer: &str) -> Result<CodeE
         check_fetch_url(url).map_err(|e| format!("discovery `{key}` {e}"))?;
         Ok(url.to_string())
     };
+    let mut token = endpoint("token_endpoint")?;
+    if let Some(bc) = backchannel {
+        let base = issuer.trim_end_matches('/');
+        let rest = token
+            .strip_prefix(base)
+            .filter(|r| r.starts_with('/'))
+            .ok_or(
+            "discovery `token_endpoint` is not under the issuer, so it has no back-channel form",
+        )?;
+        token = format!("{}{rest}", bc.trim_end_matches('/'));
+        check_fetch_url(&token).map_err(|e| format!("the back-channel token endpoint {e}"))?;
+    }
     Ok(CodeEndpoints {
         authorization: endpoint("authorization_endpoint")?,
-        token: endpoint("token_endpoint")?,
+        token,
     })
 }
 

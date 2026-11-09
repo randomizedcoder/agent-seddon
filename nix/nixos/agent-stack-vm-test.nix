@@ -5,7 +5,8 @@
 # it in a QEMU VM and proves the units actually START in order: ClickHouse creds →
 # ClickHouse (admin hash from the env file) → schema + role passwords, and Postgres
 # creds → Postgres → role + password → gateway / sessions / fleet (telemetry writer
-# authenticated, stores migrated, roster seeded) → Envoy grpc-web + portal.
+# authenticated, stores migrated, roster seeded) → Envoy grpc-web + portal, and Dex
+# (mock connector) completing a PKCE code flow for the agent's client over loopback.
 #
 # Not in `nix flake check`: it needs KVM and minutes of VM time (the same reason
 # the postgres module only has an eval gate). Run it after touching the module.
@@ -69,6 +70,14 @@ pkgs.testers.runNixOSTest {
       services.agentSeddon.grafana = {
         enable = true;
         generateAdminPassword = true;
+      };
+      # Dex with the mock connector (S26). The issuer is a public-looking URL nothing
+      # serves: the test reaches Dex on loopback, as the agent's back-channel does.
+      services.agentSeddon.dex = {
+        enable = true;
+        issuer = "https://dex.test/dex";
+        redirectUris = [ "https://dex.test/auth/callback" ];
+        mockLogin = true;
       };
       environment.systemPackages = [ pkgs.curl ];
     };
@@ -174,10 +183,64 @@ pkgs.testers.runNixOSTest {
         applied()
         machine.succeed(user_api.format("echo line-ending-pw-0123"))
 
+    with subtest("dex: the agent's client signs in over loopback"):
+        import base64, hashlib, json, urllib.parse
+        machine.wait_for_unit("agent-seddon-dex-secret.service")
+        machine.succeed("stat -c %a /var/lib/agent-seddon-dex | grep -qx 700")
+        machine.succeed("grep -qE '^[0-9a-f]{64}$' /var/lib/agent-seddon-dex/agent-client.secret")
+        machine.wait_for_unit("dex.service")
+        machine.wait_for_open_port(5556)
+        # Loopback only, and the secret's path was replaced by the secret.
+        machine.fail("ss -Hltn 'sport = :5556' | grep -v '127.0.0.1:5556'")
+        machine.fail("grep -q agent-client.secret /run/dex/config.yaml")
+        local, public = "http://127.0.0.1:5556/dex", "https://dex.test/dex"
+        doc = json.loads(machine.succeed(f"curl -fsS {local}/.well-known/openid-configuration"))
+        assert doc["issuer"] == public, doc
+        assert doc["token_endpoint"] == f"{public}/token", doc
+        # The agent reads its copy of the secret as a credential.
+        machine.succeed(
+            "cmp /run/credentials/agent-seddon-gateway.service/dex-client "
+            "/var/lib/agent-seddon-dex/agent-client.secret"
+        )
+        verifier = "v" * 43
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        cb = "https://dex.test/auth/callback"
+        url = f"{local}/auth?" + urllib.parse.urlencode({
+            "client_id": "agent-seddon", "redirect_uri": cb, "response_type": "code",
+            "scope": "openid email", "state": "st-1", "nonce": "n-1",
+            "code_challenge": challenge, "code_challenge_method": "S256",
+        })
+        # Follow Dex's redirects (auth → mock connector → callback) until it returns to
+        # the agent's redirect URI; absolute ones name the public issuer.
+        for _ in range(8):
+            loc = machine.succeed(f"curl -sS -o /dev/null -w '%{{redirect_url}}' '{url}'").strip()
+            assert loc, f"no redirect from {url}"
+            if loc.startswith(cb):
+                break
+            url = loc.replace(public, local, 1) if loc.startswith(public) else urllib.parse.urljoin(url, loc)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
+        assert q["state"] == ["st-1"], loc
+        code = q["code"][0]
+        reply = json.loads(machine.succeed(
+            "curl -fsS -u agent-seddon:$(cat /var/lib/agent-seddon-dex/agent-client.secret) "
+            f"-d grant_type=authorization_code -d code={code} -d redirect_uri={cb} "
+            f"-d code_verifier={verifier} {local}/token"
+        ))
+        payload = reply["id_token"].split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        assert claims["iss"] == public and claims["aud"] == "agent-seddon", claims
+        assert claims["nonce"] == "n-1" and claims["email_verified"] is True, claims
+        # A wrong secret is refused.
+        machine.fail(
+            f"curl -fsS -u agent-seddon:wrong -d grant_type=authorization_code -d code={code} "
+            f"-d redirect_uri={cb} -d code_verifier={verifier} {local}/token"
+        )
+
     with subtest("units stay up"):
         machine.sleep(10)
         for unit in ["gateway", "sessions", "fleet", "grpc-web", "portal", "grafana-admin"]:
             machine.require_unit_state(f"agent-seddon-{unit}.service", "active")
         machine.require_unit_state("grafana.service", "active")
+        machine.require_unit_state("dex.service", "active")
   '';
 }
