@@ -40,6 +40,7 @@ fn pending(issuer: &str) -> Pending {
         redirect_uri: PORTAL.into(),
         challenge: CHALLENGE.into(),
         nonce: "n1".into(),
+        gate: None,
     }
 }
 
@@ -717,4 +718,125 @@ async fn negative_unreachable_issuer_is_unavailable() {
         flow.redeem("code", &state, VERIFIER).await.map(|_| ()),
         Err(CodeRefusal::IdpUnavailable)
     );
+}
+
+// --- Front-door sign-in (security-hardening 10, F3) ---------------------------------
+
+const LOGIN_COOKIE: &str = "login-cookie-of-this-browser";
+
+fn gate_pending(cookie: &str) -> Pending {
+    Pending {
+        gate: Some(GateLogin {
+            login_hash: sha256_hex(cookie),
+            rd: "/grafana/".into(),
+            verifier: VERIFIER.into(),
+        }),
+        ..pending("fake")
+    }
+}
+
+/// Which state the callback names, and which login cookie the browser sends.
+#[derive(Clone, Copy, Debug)]
+enum Cookie {
+    This,
+    Absent,
+    Wrong,
+    /// The cookie of another sign-in that is also in flight (the attacker's own).
+    OtherSignIn,
+    Empty,
+}
+
+/// Every refusal spends the `state`; the right cookie reaches the issuer (nothing
+/// listens on port 9, so that is `IdpUnavailable`).
+#[rstest]
+#[case::positive_this_browser_reaches_the_issuer(Cookie::This, CodeRefusal::IdpUnavailable)]
+#[case::negative_no_login_cookie(Cookie::Absent, CodeRefusal::NotThisBrowser)]
+#[case::corner_empty_login_cookie(Cookie::Empty, CodeRefusal::NotThisBrowser)]
+#[case::adversarial_wrong_login_cookie(Cookie::Wrong, CodeRefusal::NotThisBrowser)]
+#[case::adversarial_another_sign_ins_cookie(Cookie::OtherSignIn, CodeRefusal::NotThisBrowser)]
+#[tokio::test]
+async fn gate_redeem_needs_this_browsers_cookie(#[case] cookie: Cookie, #[case] want: CodeRefusal) {
+    let flow = flow();
+    let (state, _) = flow
+        .pending
+        .insert(gate_pending(LOGIN_COOKIE))
+        .expect("room");
+    let (_other, _) = flow
+        .pending
+        .insert(gate_pending("the-attackers-cookie"))
+        .expect("room");
+    let sent = match cookie {
+        Cookie::This => Some(LOGIN_COOKIE),
+        Cookie::Absent => None,
+        Cookie::Wrong => Some("guess"),
+        Cookie::OtherSignIn => Some("the-attackers-cookie"),
+        Cookie::Empty => Some(""),
+    };
+    assert_eq!(
+        flow.redeem_gate("code", &state, sent).await.map(|_| ()),
+        Err(want)
+    );
+    assert_eq!(
+        flow.redeem_gate("code", &state, Some(LOGIN_COOKIE))
+            .await
+            .map(|_| ()),
+        Err(CodeRefusal::UnknownState),
+        "the state is spent by its first use"
+    );
+}
+
+/// A `state` works only in the flow that began it, and is spent by the attempt.
+#[rstest]
+#[case::adversarial_gate_state_at_exchange(true)]
+#[case::adversarial_exchange_state_at_the_gate(false)]
+#[tokio::test]
+async fn states_do_not_cross_flows(#[case] gate_state: bool) {
+    let flow = flow();
+    let p = if gate_state {
+        gate_pending(LOGIN_COOKIE)
+    } else {
+        pending("fake")
+    };
+    let (state, _) = flow.pending.insert(p).expect("room");
+    let got = if gate_state {
+        flow.redeem("code", &state, VERIFIER).await.map(|_| ())
+    } else {
+        flow.redeem_gate("code", &state, Some(LOGIN_COOKIE))
+            .await
+            .map(|_| ())
+    };
+    assert_eq!(got, Err(CodeRefusal::WrongFlow));
+    assert_eq!(flow.pending_len(), 0);
+}
+
+/// `begin_gate` makes the PKCE pair and the login cookie itself; a refused one
+/// remembers nothing.
+#[rstest]
+#[case::negative_unknown_issuer("okta", PORTAL, CodeRefusal::UnknownIssuer)]
+#[case::adversarial_callback_not_registered(
+    "fake",
+    "https://evil.example/auth/callback",
+    CodeRefusal::RedirectNotAllowed
+)]
+#[tokio::test]
+async fn begin_gate_refusals(
+    #[case] issuer: &str,
+    #[case] redirect: &str,
+    #[case] want: CodeRefusal,
+) {
+    let flow = flow();
+    assert_eq!(
+        flow.begin_gate(issuer, redirect, "/").await.map(|_| ()),
+        Err(want)
+    );
+    assert_eq!(flow.pending_len(), 0);
+}
+
+#[test]
+fn positive_gate_reasons_are_distinct() {
+    assert_eq!(
+        CodeRefusal::NotThisBrowser.reason(),
+        "login_cookie_mismatch"
+    );
+    assert_eq!(CodeRefusal::WrongFlow.reason(), "wrong_flow");
 }

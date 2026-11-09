@@ -263,6 +263,126 @@ impl AuthSvc {
         revoked
     }
 
+    /// Browser sign-in, when configured: the front door's gate begins and redeems
+    /// its logins here (security-hardening 10, F3).
+    pub(crate) fn code_flow(&self) -> Option<&Arc<CodeFlow>> {
+        self.code.as_ref()
+    }
+
+    /// The gate's callback, after the code was redeemed for this browser: verify the
+    /// ID token, refuse a principal with no permission at all before any session
+    /// exists (F2), then open a `browser` session. Returns it with its cookie value.
+    pub(crate) async fn gate_sign_in(
+        &self,
+        redeemed: &super::code_flow::Redeemed,
+        meta: &str,
+    ) -> Result<(AuthSession, String), &'static str> {
+        let identity = self
+            .login
+            .verify(&redeemed.id_token)
+            .await
+            .map_err(|()| "login_invalid")?;
+        check_login(&identity.issuer, redeemed).map_err(CodeRefusal::reason)?;
+        let subject = Grant::from_login(&identity, "-").subject;
+        let who = Who {
+            tenant: &identity.tenant,
+            subject: &subject,
+            email: identity.email.as_deref(),
+            email_verified: identity.email_verified,
+            san: None,
+        };
+        let roles = self
+            .resolve(&identity.roles, &who)
+            .await
+            .map_err(|_| "bindings_unavailable")?;
+        let principal = agent_core::VerifiedPrincipal {
+            tenant: identity.tenant.clone(),
+            subject: subject.clone(),
+            roles,
+        };
+        if !super::gate::admits(
+            &agent_core::current_catalog(),
+            &principal,
+            super::gate::Need::AnyPermission,
+        ) {
+            return Err("unbound");
+        }
+        let (session, cookie) = self
+            .sessions
+            .open_browser(&identity, meta)
+            .await
+            .map_err(|e| {
+                tracing::warn!(reason = %e, "gate sign-in refused: no session");
+                "no_session"
+            })?;
+        tracing::info!(
+            tenant = %session.tenant,
+            subject = %session.subject,
+            sid = %session.sid,
+            "browser session opened"
+        );
+        record_auth_event(session_event(AuthEventKind::Login, &session));
+        Ok((session, cookie))
+    }
+
+    /// The live browser session `cookie` names and its roles, resolved now so a
+    /// binding change reaches the next request. `None` for anything else.
+    pub(crate) async fn gate_session(
+        &self,
+        cookie: &str,
+    ) -> Option<(AuthSession, agent_core::VerifiedPrincipal)> {
+        let session = self.sessions.by_cookie(cookie).await?;
+        let roles = self
+            .resolve(&session.roles, &session_who(&session))
+            .await
+            .ok()?;
+        let principal = agent_core::VerifiedPrincipal {
+            tenant: session.tenant.clone(),
+            subject: session.subject.clone(),
+            roles,
+        };
+        Some((session, principal))
+    }
+
+    /// An agent token for a browser session, carrying `principal`'s roles.
+    pub(crate) fn gate_mint(
+        &self,
+        session: &AuthSession,
+        principal: &agent_core::VerifiedPrincipal,
+    ) -> Option<super::token::MintedToken> {
+        let mut grant = session.grant();
+        grant.roles.clone_from(&principal.roles);
+        grant.not_after = grant.not_after.min(session.expires_at);
+        self.tokens
+            .mint(&grant, &perms_of(&grant))
+            .inspect_err(|e| {
+                tracing::warn!(reason = %e, "gate token refused");
+                record_mint_refused(GATE_CHECK, session);
+            })
+            .ok()
+    }
+
+    /// An agent token the client sent itself (the CLI, the native portal): signed by
+    /// this agent and its session still live.
+    pub(crate) async fn gate_bearer(&self, token: &str) -> Option<AgentClaims> {
+        let claims = self.tokens.verify(token).ok()?;
+        self.sessions
+            .is_live(&claims.tenant, &claims.sid)
+            .await
+            .then_some(claims)
+    }
+
+    /// End the browser session `cookie` names; `false` when it names none.
+    pub(crate) async fn gate_logout(&self, cookie: &str) -> bool {
+        let Some(s) = self.sessions.by_cookie(cookie).await else {
+            return false;
+        };
+        self.sessions
+            .revoke(&s.tenant, &s.sid, &s.subject, "logout")
+            .await
+            .unwrap_or(false)
+    }
+
     pub fn into_server(self) -> pb::auth_service_server::AuthServiceServer<Self> {
         pb::auth_service_server::AuthServiceServer::new(self)
     }
@@ -287,17 +407,7 @@ impl AuthSvc {
         session: &AuthSession,
         handle: String,
     ) -> Result<pb::ExchangeResponse, Status> {
-        let principal = agent_core::VerifiedPrincipal {
-            tenant: grant.tenant.clone(),
-            subject: grant.subject.clone(),
-            roles: grant.roles.clone(),
-        };
-        let perms: Vec<String> =
-            agent_core::effective_permissions(&agent_core::current_catalog(), &principal)
-                .into_iter()
-                .map(|(a, r)| format!("{}:{}", a.as_str(), r.as_str()))
-                .collect();
-        let minted = self.tokens.mint(grant, &perms).map_err(|e| {
+        let minted = self.tokens.mint(grant, &perms_of(grant)).map_err(|e| {
             tracing::warn!(reason = %e, "token refused");
             unauthenticated()
         })?;
@@ -312,12 +422,27 @@ impl AuthSvc {
     }
 }
 
+/// The permissions a token for `grant` carries, under the live catalog.
+fn perms_of(grant: &Grant) -> Vec<String> {
+    let principal = agent_core::VerifiedPrincipal {
+        tenant: grant.tenant.clone(),
+        subject: grant.subject.clone(),
+        roles: grant.roles.clone(),
+    };
+    agent_core::effective_permissions(&agent_core::current_catalog(), &principal)
+        .into_iter()
+        .map(|(a, r)| format!("{}:{}", a.as_str(), r.as_str()))
+        .collect()
+}
+
 fn unauthenticated() -> Status {
     Status::unauthenticated("unauthenticated")
 }
 
 const EXCHANGE: &str = "/agent.v1.AuthService/Exchange";
 const REFRESH: &str = "/agent.v1.AuthService/Refresh";
+/// The front door's check route, as audit rows name it.
+pub(crate) const GATE_CHECK: &str = "/auth/check";
 
 /// A refused `Exchange`: recorded with its reason, answered opaquely. Nothing the
 /// caller sent is proven, so the row names no tenant or subject.

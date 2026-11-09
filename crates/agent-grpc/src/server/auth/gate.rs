@@ -1,6 +1,6 @@
 //! The front door's gate (security-hardening 10, S27): what the browser's sign-in
 //! and Envoy's `ext_authz` check decide, as pure functions. The HTTP routes that
-//! call these (login, callback, logout, the check) land in S27b.
+//! call these (login, callback, logout, the check) are [`AuthGate`]'s, in `routes`.
 //!
 //! - [`return_path`]: `/auth/login?rd=` reduced to a path on the front door (F11).
 //! - [`route`]: which upstream a request path is for, default-deny (F5). A path
@@ -321,6 +321,12 @@ pub fn unauthenticated(
         }
     }
 }
+
+mod routes;
+pub use routes::{
+    cookie_value, raw_param, Ambiguous, AuthGate, CheckRequest, GateConfig, Reply, LOGIN_COOKIE,
+    MAX_CACHED_TOKENS, MAX_COOKIE_HEADER, MAX_QUERY, REMINT_BEFORE_SECS, SESSION_COOKIE,
+};
 
 #[cfg(test)]
 mod tests;

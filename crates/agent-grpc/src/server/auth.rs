@@ -406,6 +406,26 @@ impl AuthLayer {
         self
     }
 
+    /// The front door's gate (security-hardening 10, S27) over this layer's
+    /// `AuthService`: it needs agent tokens and browser sign-in with `cfg.issuer`.
+    #[cfg(feature = "auth")]
+    pub fn auth_gate(&self, cfg: gate::GateConfig) -> Result<gate::AuthGate, String> {
+        self.auth_gate_with_clock(cfg, Arc::new(jwt::SystemClock))
+    }
+
+    #[cfg(feature = "auth")]
+    pub(crate) fn auth_gate_with_clock(
+        &self,
+        cfg: gate::GateConfig,
+        clock: Arc<dyn jwt::Clock>,
+    ) -> Result<gate::AuthGate, String> {
+        let svc = self
+            .auth_service
+            .clone()
+            .ok_or("the gate needs `[auth.token]` (agent tokens)")?;
+        gate::AuthGate::new(svc, cfg, clock)
+    }
+
     /// Add `AuthService` to `router` when this layer has a token service; otherwise
     /// return it unchanged.
     pub fn serve_auth_service(&self, router: super::ServeRouter) -> super::ServeRouter {
