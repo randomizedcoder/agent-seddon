@@ -48,6 +48,7 @@ reuses the same pieces later; this design is the NixOS module.
                           ├── /grafana/      → Grafana 127.0.0.1:3000   (auth.proxy user + role)
                           └── /prometheus/   → Prometheus 127.0.0.1:9090
                          Envoy front door  :8444  (TLS, same check)  → HyperDX UI 127.0.0.1:8080
+                         (its own port, so HyperDX's UI is served from `/` as its image expects)
 
  Dex ──GitHub OAuth──► github.com      Dex is an OIDC issuer the agent already understands
 ```
@@ -58,8 +59,11 @@ reuses the same pieces later; this design is the NixOS module.
   NixOS (`services.dex`), turns a GitHub OAuth login into an OIDC ID token, and the agent takes it
   as one more `[[auth.issuers]]` entry with the `generic` profile. Nothing new in the agent for the
   provider itself. Dex serves under the front door at `/dex` so its issuer URL is the same origin.
-  The GitHub OAuth App's client secret and Dex's client secret for the agent are files
-  (`LoadCredential`), never in the store.
+  Dex mounts every route under its issuer's path (its own example config uses
+  `issuer: http://127.0.0.1:5556/dex`), so the front door forwards `/dex/*` unchanged. The GitHub
+  OAuth App's client secret and Dex's client secret for the agent are files (`LoadCredential`),
+  never in the store. The connector can also be limited to GitHub organizations (`orgs`), which
+  cuts who can even open a session before F2 turns them away.
 - **F2 — Deny by default.** Any GitHub user can finish a Dex login, so the gate admits only a
   principal with a permission for the route: the operator (`[auth] operator_subjects`, by verified
   email) and anyone given a binding in the portal's Access page (S22). An authenticated principal
@@ -71,8 +75,9 @@ reuses the same pieces later; this design is the NixOS module.
   `sid`, never a JWT, so a revoked session (`Logout`, `RevokeSession`) stops at the next request.
   Cookie: `__Host-seddon`, `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, no `Domain`. Because
   cookies are not port-scoped, the same cookie covers :8443 and :8444.
-- **F4 — Envoy checks every request with `ext_authz`** (gRPC `envoy.service.auth.v3.Authorization`)
-  against `AuthGate.Check` on loopback. `Check` maps the path to a required permission, resolves
+- **F4 — Envoy checks every request with `ext_authz`**, the HTTP flavour (`http_service`): Envoy
+  sends the request's headers to `AuthGate`'s check route on loopback and gets 200 (plus headers
+  to add), 302 or 403 back. It needs no protos, and the gate's routes are plain hyper anyway. `Check` maps the path to a required permission, resolves
   the session, and answers with headers for the upstream:
   - grpc-web routes: `authorization: Bearer <agent token>`, minted and cached per session until a
     minute before expiry. The existing `AuthLayer` verifies it as today, so every RPC keeps its
@@ -84,9 +89,12 @@ reuses the same pieces later; this design is the NixOS module.
   Envoy **removes** `authorization`, `x-seddon-*`, `x-agent-*` identity headers and `cookie` (for
   the tools) from the client request before routing, so a client cannot forge them. `Check`
   failing or timing out (1 s) fails closed (`failure_mode_allow: false`).
-- **F5 — Permissions.** New pairs in the RBAC catalogue: `view:observability` (Grafana Viewer,
-  Prometheus, HyperDX) and `edit:observability` (Grafana Editor). The portal itself needs only
-  what its RPCs already require; the gate checks "has any binding" for `/`.
+- **F5 — Permissions.** New pairs in the RBAC catalogue, named like the rest (`read:` / `write:`):
+  `read:observability` (Grafana Viewer, Prometheus, HyperDX) and `write:observability` (Grafana
+  Editor). They sit beside `read:telemetry`, which stays MetricsProxyService's: that one reads the
+  agent's own metrics through an RPC, these open the tools' web UIs. The portal itself needs only
+  what its RPCs already require; the gate lets a principal reach `/` with any permission at all,
+  so an operator with no binding row (`operator_subjects`) gets in, and an unbound user does not.
 - **F6 — Grafana uses `auth.proxy`.** `header_name = X-Seddon-User`, `headers = Role:X-Seddon-Role`,
   `auto_sign_up = true`, `whitelist = 127.0.0.1`, `enable_login_token = false`, login form and
   basic auth off, `root_url = https://<host>:8443/grafana/`, `serve_from_sub_path = true`. The
@@ -102,10 +110,12 @@ reuses the same pieces later; this design is the NixOS module.
   lands first (S25) because it is useful with or without the front door.
 - **F9 — Everything else moves to loopback.** With `frontDoor.enable`, the module binds the portal
   server, the grpc-web listeners, Grafana and (via an option the host sets) Prometheus to
-  `127.0.0.1`, stops opening 8090–8093, 8080, 3000 and 9090, and opens only 8443 and 8444.
-  Assertions refuse a configuration that enables the front door and still opens a tool's port.
-  HyperDX runs with `--network=host`, so its UI's bind address must be checked against the image
-  (open item); the firewall alone still closes it.
+  `127.0.0.1`, stops opening the ports it opens today (8090–8093 and HyperDX's UI), and opens only
+  8443 and 8444. 3000 and 9090 are opened by the host, not the module (l2's `lan-access.nix`), so
+  the host drops those itself; an assertion refuses a front door while the host's firewall still
+  lists a tool's port. HyperDX runs with `--network=host`, and all its listeners (UI 8080, API
+  8000, OpAMP 4320, OTLP 4317 / 4318) bind every address, so their bind addresses must be checked
+  against the image (open item); the firewall alone still closes them.
 - **F10 — CSRF.** `SameSite=Lax` stops cross-site sub-requests from carrying the cookie. grpc-web
   calls are non-simple requests (custom content type), so a cross-site page also needs a CORS
   preflight, which the front door allows only for its own origin. `/auth/logout` is POST-only.
@@ -113,6 +123,13 @@ reuses the same pieces later; this design is the NixOS module.
 - **F11 — Return address.** `/auth/login?rd=` accepts only a path on the front door (starts with
   one `/`, no `//`, no scheme, no backslash, bounded length); anything else becomes `/`. The value
   rides in the single-use `state` the agent already stores, never in a cookie.
+- **F12 — The agent reaches Dex on loopback.** Browsers use Dex's public issuer URL, but the agent
+  should not hairpin through its own front door (and trust its certificate) to talk to Dex. A
+  `generic` issuer gains `backchannel_url` (`http://127.0.0.1:5556/dex`): the agent fetches
+  discovery there and redeems codes there, while the authorization URL it hands the browser and
+  the `iss` it expects stay public. `jwks_url` points at the loopback key set. The token endpoint
+  moves to the back-channel only when it sits under the issuer at a `/` boundary, so a discovery
+  document cannot point the agent at another host.
 
 ## What the agent gains (Rust)
 
@@ -120,8 +137,8 @@ reuses the same pieces later; this design is the NixOS module.
   existing session store, so it survives restarts with `session_store = "file"` or `postgres`), the
   path → permission map, token minting and caching, and the three HTTP routes on a loopback
   listener (plain hyper, which the workspace already uses; no web framework added).
-- `envoy.service.auth.v3.Authorization` server: the `Check` RPC, protos vendored like the other
-  Envoy protos the repo uses (or a hand-written minimal subset; decided in S27).
+- The `ext_authz` check route (F4): the same hyper listener, no protos (the repo vendors no Envoy
+  protos; the gRPC flavour would need them).
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path) and for
   `rd` (`//evil`, `https://evil`, `/\evil`, encoded variants, 10 KB value); every row asserts the
@@ -132,11 +149,11 @@ reuses the same pieces later; this design is the NixOS module.
 | # | Increment | Lands |
 |---|---|---|
 | S25 | Grafana admin password from a file + reset oneshot (F8) | module, eval rows |
-| S26 | Dex in the module (GitHub connector, secrets as files) and the agent issuer wired | module, VM test with Dex's `mockCallback` connector |
+| S26 | Dex in the module (GitHub connector, secrets as files), the agent issuer wired, `backchannel_url` (F12) | module, Rust, tables, VM test with Dex's `mockCallback` connector |
 | S26b | GitHub App from a manifest: `/setup` bootstrap, secrets to files, Dex restart | Rust, module, tables |
 | S27 | `AuthGate`: login / callback / logout, cookie sessions, `Check` (F3, F4, F10, F11) | Rust, tables, `auth-e2e` row |
 | S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping (F4, F7) | `portal_envoy.py`, gate rows |
-| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port; RBAC pairs (F5, F6) | module, catalogue |
+| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port; RBAC pairs (F5, F6) | module, catalogue, `authz.toml` rows |
 | S30 | Loopback lockdown and firewall (F9) | module assertions; l2 config change |
 | S31 | Portal cookie mode (no token in JS) and tool links through the front door | portal, `portal-auth-e2e` |
 
@@ -183,14 +200,15 @@ l2 needs the dev PKI root trusted in the browser on `l`. Until S26b lands, Dex's
 made by hand (callback `https://172.16.50.46:8443/dex/callback`) with its secret in a root-only
 file; after it, `/setup` creates the App instead. l2's existing hand-made App (id 5390283) keeps
 working for reviews either way. The switch to the front door is
-one l2 deploy (S30), with your go-ahead, and `~/nixos/desktop/l2/lan-access.nix` then stops opening
-3000, 8080 and 9090.
+one l2 deploy (S30), with your go-ahead; `~/nixos/desktop/l2/lan-access.nix` then stops opening
+3000 and 9090, and the module stops opening 8080.
 
 ## Open items
 
 - Dex's GitHub connector with a GitHub App's OAuth client (S26b).
-- HyperDX's UI bind address under `--network=host` (can it be loopback-only?).
+- HyperDX's listeners under `--network=host` (can they be loopback-only?), and whether its UI can
+  serve under a sub-path, which would fold :8444 into :8443.
 - Whether Prometheus should be managed by the module or stay the host's, with the module only
   asserting it listens on loopback.
 - Grafana's `auth.proxy` role sync: confirm it updates the role on each request in the packaged
-  version (13.1).
+  version (nixpkgs' `grafana` 13.3.0 at the flake's pin).

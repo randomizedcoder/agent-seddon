@@ -39,6 +39,20 @@ Follow-ups, from the deferrals recorded in [`STATUS.md`](STATUS.md) once S1–S1
 | S23 | Native desktop sign-in: `agent token --json` prints a fresh access token from the CLI login (refresh under the CLI's lock); the native portal runs it | S13b deferral | S12 |
 | S24 | Native desktop TLS: `PORTAL_TLS_*` PEM settings for the native channels, never falling back to plaintext | S23 live-check gap | S23 |
 
+The follow-on front door ([10](10-sso-front-door.md)): one sign-in for the portal, Grafana, HyperDX
+and Prometheus.
+
+| # | Increment | Closes | Depends |
+|---|---|---|---|
+| S25 | Grafana's admin password from a file (or generated), reset after every Grafana start | 10 F8 | — |
+| S26 | Dex in the module (GitHub connector, secrets as files); the agent's Dex issuer with `backchannel_url` | 10 F1, F12 | S13a |
+| S26b | GitHub App from a manifest: `/setup` bootstrap code, secrets to files, Dex restart | 10 | S26 |
+| S27 | `AuthGate`: login / callback / logout, cookie sessions, the `ext_authz` check route | 10 F3, F4, F10, F11 | S26 |
+| S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping | 10 F4, F7 | S27 |
+| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port; `read:` / `write:observability` | 10 F5, F6 | S28 |
+| S30 | Loopback lockdown and firewall | 10 F9 | S28 |
+| S31 | Portal cookie mode (no token in JS) and tool links through the front door | 10 | S28 |
+
 The keyring backend for the CLI token file stays with parity spec
 [50](../../parity/50-secret-store.md)'s `SecretStore`.
 
@@ -52,6 +66,10 @@ S4 ──────────→ S10 ────────┘       │
 S6 → S12                            │
 S6, S8 → S13a → S13b → S14 ─────────┘
 S16, S17 independent
+
+S25 independent
+S26 → S26b
+S26 → S27 → S28 → S29, S30, S31
 ```
 
 Four lanes can run in parallel after S1: correctness (S2, S7), login / token / sessions (S3 → S8),
@@ -76,6 +94,7 @@ separate track. When it lands it adds `google.api.http` annotations for `AuthSer
 - `docs/design/portal/STATUS.md`: the mTLS follow-up resolved (S14).
 - `nix/clickhouse/schema.sql` comments (S11, S16).
 - `docs/gap-analysis/README.md` §10: tick each P0 as it closes.
+- `docs/deployment-nixos.md`: each front-door option and unit (S25–S30).
 
 ## Definition of done (every increment)
 

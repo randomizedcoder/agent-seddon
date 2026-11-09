@@ -162,5 +162,6 @@ the agent deciding access through `ext_authz`.
 `S1 → S2` (correctness, no new surface) · `S3 → S5 → S6 → S8` (login → token → sessions → bindings)
 · `S7` (RBAC model, after S2) · `S4 → S10` (PKI, independently) · `S9` (propagation, after S5) ·
 `S11` (audit, after S6 + S8) · `S12 / S13 → S14` (CLI, portal, Envoy) · `S15` (the end-to-end
-gate, last) · `S16`, `S17` (data plane, independently). Details and dependencies in
+gate, last) · `S16`, `S17` (data plane, independently) · then the follow-on front door
+`S25 … S31` ([10](10-sso-front-door.md)). Details and dependencies in
 [`09-increments.md`](09-increments.md).
