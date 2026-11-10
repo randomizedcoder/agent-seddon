@@ -3615,6 +3615,80 @@ pub struct AuthCfg {
     /// Service identity from mutual TLS (`[auth.mtls]`, security-hardening S10).
     #[serde(default)]
     pub mtls: Option<AuthMtlsCfg>,
+    /// The front door's gate (`[auth.gate]`, security-hardening 10, S27b): browser
+    /// sign-in and Envoy's `ext_authz` check on a loopback HTTP listener, served by
+    /// the `--serve-all` gateway. Needs `redirect_uris`.
+    #[serde(default)]
+    pub gate: Option<AuthGateCfg>,
+}
+
+/// `[auth.gate]`: where the gate listens and which sign-in it runs. Unknown keys
+/// are an error.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthGateCfg {
+    /// `127.0.0.1:<port>` (or `[::1]:<port>`): loopback only, since only Envoy
+    /// calls it.
+    pub listen: String,
+    /// The `[[auth.issuers]]` name browsers sign in with (Dex).
+    pub issuer: String,
+    /// The front door's main origin, `https://<host>:<port>`. Browsers come back
+    /// to `<main_origin>/auth/callback`, which must be one of `redirect_uris`.
+    pub main_origin: String,
+}
+
+impl AuthGateCfg {
+    /// Structural checks at load; the serve path checks the origin's canonical
+    /// form and the issuer's browser sign-in again when it builds the gate.
+    fn validate(&self, auth: &AuthCfg) -> Result<(), String> {
+        let listen: std::net::SocketAddr = self.listen.trim().parse().map_err(|_| {
+            format!(
+                "`[auth.gate] listen` `{}` is not an `ip:port` address",
+                self.listen
+            )
+        })?;
+        if !listen.ip().is_loopback() || listen.port() == 0 {
+            return Err(format!(
+                "`[auth.gate] listen` `{listen}` must be a loopback address with a port \
+                 (only Envoy calls the gate)"
+            ));
+        }
+        if auth.redirect_uris.is_empty() {
+            return Err(
+                "`[auth.gate]` needs `[auth] redirect_uris` (the gate runs the \
+                        browser sign-in)"
+                    .into(),
+            );
+        }
+        let issuer = self.issuer.trim();
+        let legacy = !auth.issuer.trim().is_empty() && issuer == "default";
+        if !legacy && !auth.issuers.iter().any(|i| i.name.trim() == issuer) {
+            return Err(format!(
+                "`[auth.gate] issuer` `{issuer}` names no `[[auth.issuers]]` entry"
+            ));
+        }
+        let origin = self
+            .main_origin
+            .strip_suffix('/')
+            .unwrap_or(&self.main_origin);
+        if !origin.starts_with("https://") {
+            return Err(format!(
+                "`[auth.gate] main_origin` `{}` must be an https origin",
+                self.main_origin
+            ));
+        }
+        let callback = format!("{origin}/auth/callback");
+        if !auth.redirect_uris.contains(&callback) {
+            return Err(format!(
+                "`[auth.gate]`: the callback `{callback}` must be one of `[auth] redirect_uris`"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `[auth.mtls]`: which client certificates are services, and where this process
@@ -4024,6 +4098,9 @@ impl AuthCfg {
                     .into());
             }
             check_redirect_uris(&self.redirect_uris)?;
+        }
+        if let Some(gate) = &self.gate {
+            gate.validate(self)?;
         }
         for issuer in &self.issuers {
             if agent_core::ApiKeyRef::parse(&issuer.client_secret).is_err() {
@@ -6577,6 +6654,23 @@ mod tests {
         }
     }
 
+    /// Browser sign-in through Dex with the front door's gate in front.
+    fn gated(edit: impl FnOnce(&mut AuthGateCfg, &mut AuthCfg)) -> AuthCfg {
+        let mut cfg = AuthCfg {
+            token: Some(token_cfg()),
+            redirect_uris: vec!["https://l2.example:8443/auth/callback".into()],
+            ..issuers(vec![dex_entry("http://127.0.0.1:5556/dex")])
+        };
+        let mut gate = AuthGateCfg {
+            listen: "127.0.0.1:8097".into(),
+            issuer: "dex".into(),
+            main_origin: "https://l2.example:8443".into(),
+        };
+        edit(&mut gate, &mut cfg);
+        cfg.gate = Some(gate);
+        cfg
+    }
+
     fn google_entry() -> AuthIssuerCfg {
         AuthIssuerCfg {
             name: "google".into(),
@@ -6699,6 +6793,21 @@ mod tests {
     #[case::boundary_session_ttl_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 900, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_000, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_below_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 899, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
+    // --- `[auth.gate]` (security-hardening 10, S27b) ---
+    #[case::positive_gate(gated(|_, _| {}), true, None)]
+    #[case::positive_gate_ipv6_loopback(gated(|g, _| g.listen = "[::1]:8097".into()), true, None)]
+    #[case::corner_gate_origin_trailing_slash(gated(|g, _| g.main_origin = "https://l2.example:8443/".into()), true, None)]
+    #[case::corner_gate_legacy_default_issuer(gated(|g, c| { g.issuer = "default".into(); c.issuer = "https://issuer.example".into(); c.audience = "agent".into(); c.jwks_url = GOOD_JWKS.into(); }), true, None)]
+    #[case::negative_gate_without_redirect_uris(gated(|_, c| c.redirect_uris.clear()), true, Some("needs `[auth] redirect_uris`"))]
+    #[case::negative_gate_unknown_issuer(gated(|g, _| g.issuer = "okta".into()), true, Some("names no `[[auth.issuers]]`"))]
+    #[case::negative_gate_default_without_legacy_issuer(gated(|g, _| g.issuer = "default".into()), true, Some("names no `[[auth.issuers]]`"))]
+    #[case::negative_gate_callback_not_registered(gated(|g, _| g.main_origin = "https://other.example".into()), true, Some("must be one of `[auth] redirect_uris`"))]
+    #[case::negative_gate_plain_http_origin(gated(|g, c| { g.main_origin = "http://127.0.0.1:8443".into(); c.redirect_uris = vec!["http://127.0.0.1:8443/auth/callback".into()]; }), true, Some("https origin"))]
+    #[case::negative_gate_listen_not_an_address(gated(|g, _| g.listen = "localhost:8097".into()), true, Some("not an `ip:port`"))]
+    #[case::boundary_gate_listen_port_zero(gated(|g, _| g.listen = "127.0.0.1:0".into()), true, Some("loopback address with a port"))]
+    #[case::adversarial_gate_listen_on_the_lan(gated(|g, _| g.listen = "172.16.50.46:8097".into()), true, Some("loopback"))]
+    #[case::adversarial_gate_listen_on_every_address(gated(|g, _| g.listen = "0.0.0.0:8097".into()), true, Some("loopback"))]
+    #[case::adversarial_gate_listen_mapped_loopback(gated(|g, _| g.listen = "[::ffff:127.0.0.1]:8097".into()), true, Some("loopback"))]
     // --- `[auth] redirect_uris` (security-hardening S13) ---
     #[case::positive_redirect_uris(AuthCfg { redirect_uris: vec!["https://portal.example/".into(), "http://127.0.0.1:8092/".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::negative_redirect_uris_without_token(AuthCfg { redirect_uris: vec!["https://portal.example/".into()], ..oidc(GOOD_JWKS) }, true, Some("redirect_uris` needs `[auth.token]`"))]

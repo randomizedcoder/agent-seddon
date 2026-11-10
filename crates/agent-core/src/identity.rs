@@ -33,6 +33,19 @@ pub fn safe_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Longest subject [`safe_subject`] accepts: an IdP's `sub` (at most 255 ASCII
+/// characters, OpenID Connect Core §2) under the `user:<issuer>/` prefix.
+pub const MAX_SUBJECT_LEN: usize = 512;
+
+/// A principal's subject that can travel as an HTTP header value (the front door's
+/// `x-seddon-user`) and an audit field: non-empty, at most [`MAX_SUBJECT_LEN`] bytes,
+/// and visible ASCII only (0x21–0x7E), so no CR/LF can split a header and no space or
+/// control byte can blur a log line. The `sub` claim is IdP-controlled, so it is
+/// checked where it is read.
+pub fn safe_subject(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_SUBJECT_LEN && s.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
 /// A full hex object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits, the form
 /// `git rev-parse` prints. Fail-closed: no `-` prefix, no ref name, no range, so a
 /// value that passes can only name an object.
@@ -342,6 +355,26 @@ pub async fn in_tenant<F: std::future::Future>(tenant: &str, fut: F) -> Option<F
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[rstest::rstest]
+    #[case::positive_github_numeric("1234567", true)]
+    #[case::positive_composed("user:dex/CgYxMjM0NTYSBmdpdGh1Yg", true)]
+    #[case::positive_email_like("user:google/a.b+c@example.com", true)]
+    #[case::negative_empty("", false)]
+    #[case::negative_space("user:dex/a b", false)]
+    #[case::negative_non_ascii("user:dex/é", false)]
+    #[case::boundary_longest(&"a".repeat(MAX_SUBJECT_LEN), true)]
+    #[case::boundary_one_over(&"a".repeat(MAX_SUBJECT_LEN + 1), false)]
+    #[case::boundary_tilde_is_visible("~", true)]
+    #[case::boundary_del("a\u{7f}", false)]
+    #[case::adversarial_crlf_header_split("u\r\nx-seddon-role: Admin", false)]
+    #[case::adversarial_bare_lf("u\nx", false)]
+    #[case::adversarial_nul("u\0x", false)]
+    #[case::adversarial_tab("u\tx", false)]
+    #[case::adversarial_huge(&"a".repeat(100_000), false)]
+    fn safe_subject_cases(#[case] s: &str, #[case] want: bool) {
+        assert_eq!(safe_subject(s), want, "{s:?}");
+    }
 
     #[rstest::rstest]
     #[case::positive_sha1(&"c".repeat(40), true)]

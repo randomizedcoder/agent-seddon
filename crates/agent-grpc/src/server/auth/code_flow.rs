@@ -288,6 +288,11 @@ impl CodeFlow {
         }))
     }
 
+    /// Whether the IdP may send a browser back to `uri` (`[auth] redirect_uris`).
+    pub fn allows_redirect(&self, uri: &str) -> bool {
+        redirect_allowed(&self.redirect_uris, uri)
+    }
+
     /// The issuers `Begin` accepts, as `(name, profile)`.
     pub fn issuers(&self) -> Vec<(String, &'static str)> {
         self.issuers

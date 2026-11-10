@@ -1,6 +1,7 @@
 //! The front door's gate (security-hardening 10, S27): what the browser's sign-in
 //! and Envoy's `ext_authz` check decide, as pure functions. The HTTP routes that
-//! call these (login, callback, logout, the check) are [`AuthGate`]'s, in `routes`.
+//! call these (login, callback, logout, the check) are [`AuthGate`]'s, in `routes`,
+//! and [`listener`] serves them on loopback.
 //!
 //! - [`return_path`]: `/auth/login?rd=` reduced to a path on the front door (F11).
 //! - [`route`]: which upstream a request path is for, default-deny (F5). A path
@@ -136,6 +137,15 @@ pub enum Need {
 }
 
 impl Route {
+    /// Every route, as `authz.toml`'s `[gate]` table lists them.
+    pub const ALL: [Route; 5] = [
+        Route::Portal,
+        Route::Rpc,
+        Route::Grafana,
+        Route::Prometheus,
+        Route::Hyperdx,
+    ];
+
     pub fn need(self) -> Need {
         match self {
             Route::Portal | Route::Rpc => Need::AnyPermission,
@@ -325,9 +335,12 @@ pub fn unauthenticated(
 
 mod routes;
 pub use routes::{
-    cookie_value, raw_param, Ambiguous, AuthGate, CheckRequest, GateConfig, Reply, LOGIN_COOKIE,
-    MAX_CACHED_TOKENS, MAX_COOKIE_HEADER, MAX_QUERY, REMINT_BEFORE_SECS, SESSION_COOKIE,
+    cookie_value, raw_param, Ambiguous, AuthGate, CheckRequest, GateConfig, Reply, CALLBACK_PATH,
+    LOGIN_COOKIE, MAX_BEARER, MAX_CACHED_TOKENS, MAX_COOKIE_HEADER, MAX_QUERY, REMINT_BEFORE_SECS,
+    SESSION_COOKIE,
 };
+
+pub mod listener;
 
 #[cfg(test)]
 mod tests;

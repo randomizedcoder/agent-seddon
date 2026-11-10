@@ -1396,6 +1396,18 @@ job         = "agent-seddon"
 # tenant  = "example.com"
 # roles   = ["svc_fleet"]
 #
+# The front door's gate (security-hardening 10, S27b): browser sign-in (`/auth/login`,
+# `/auth/callback`, `/auth/logout`) and Envoy's `ext_authz` check
+# (`/_check/main/<path>`, `/_check/hyperdx/<path>`) on a loopback HTTP listener. Only
+# `agent --serve-all` hosts it. The browser holds an opaque `__Host-seddon` cookie;
+# the check answers RPCs with the session's agent token and Grafana with
+# `x-seddon-user`/`x-seddon-role`. Needs `redirect_uris` to hold
+# `<main_origin>/auth/callback`, and `issuer` to name an `[[auth.issuers]]` entry.
+# [auth.gate]
+# listen      = "127.0.0.1:8097"               # loopback only; Envoy is its one client
+# issuer      = "dex"
+# main_origin = "https://l2.example:8443"      # the front door's main listener
+#
 # A person's credential (security-hardening S12). `agent login [--issuer NAME]` runs the
 # device flow at a login issuer above and keeps an agent token in
 # `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json` (0600); `agent whoami`, `agent logout`.

@@ -1090,29 +1090,30 @@ fn fleet_req<T>(msg: T, bearer: &str) -> tonic::Request<T> {
 
 /// desc: S19 — a queued `ReviewNow` and an `Approve` are attributed to the verified
 /// caller. expect: the trigger carries `tenant/subject` from the agent token, and the
-/// approver is handed the same label; a hostile subject arrives stripped and capped.
+/// approver is handed the same label. A subject with a control byte (S27b-ii) is
+/// refused at the exchange, so it never reaches a label.
 #[rstest]
-#[case::positive_person("alice", "alice")]
-#[case::adversarial_hostile_subject_stripped("x\u{1b}[2J", "x[2J")]
+#[case::positive_person("alice", Some("alice"))]
+#[case::adversarial_hostile_subject_refused("x\u{1b}[2J", None)]
 #[tokio::test(flavor = "multi_thread")]
 async fn review_now_and_approve_are_attributed_to_the_caller(
     #[case] sub: &str,
-    #[case] clean_sub: &str,
+    #[case] clean_sub: Option<&str>,
 ) {
     let rec = Arc::new(FleetRecorder::default());
     let h = Harness::start_fleet(rec.clone()).await;
-    let token = h
+    let exchanged = h
         .exchange(&h.id_token(json!({"sub": sub, "roles": ["reviewer"]})))
-        .await
-        .expect("exchange")
-        .access_token;
+        .await;
+    let Some(clean_sub) = clean_sub else {
+        let err = exchanged.expect_err("a hostile subject is refused");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
+        assert!(rec.triggers.lock().unwrap().is_empty());
+        return;
+    };
+    let token = exchanged.expect("exchange").access_token;
     let me = h.who_am_i(Some(&token)).await.expect("who am i");
-    // The verified subject keeps whatever the IdP signed (control bytes included); the
-    // stored label is that subject with control characters removed.
-    let want: String = format!("{}/{}", me.tenant, me.subject)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    let want = format!("{}/{}", me.tenant, me.subject);
     assert!(want.ends_with(clean_sub), "{want:?}");
 
     let mut fleet = ReviewFleetServiceClient::new(h.channel.clone());

@@ -378,15 +378,19 @@ impl AuthSvc {
             .then_some(claims)
     }
 
-    /// End the browser session `cookie` names; `false` when it names none.
-    pub(crate) async fn gate_logout(&self, cookie: &str) -> bool {
+    /// End the browser session `cookie` names, if it names one. A store error is
+    /// logged: the cookie is cleared either way.
+    pub(crate) async fn gate_logout(&self, cookie: &str) {
         let Some(s) = self.sessions.by_cookie(cookie).await else {
-            return false;
+            return;
         };
-        self.sessions
+        if let Err(e) = self
+            .sessions
             .revoke(&s.tenant, &s.sid, &s.subject, "logout")
             .await
-            .unwrap_or(false)
+        {
+            tracing::warn!(error = %e, "gate logout: the session was not revoked");
+        }
     }
 
     pub fn into_server(self) -> pb::auth_service_server::AuthServiceServer<Self> {

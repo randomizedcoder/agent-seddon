@@ -23,7 +23,12 @@ docs/design/security-hardening/04-service-integration.md, "Process wire":
   the handshake;
 - refresh rotates the handle, a replayed handle is refused, and a refresh after
   logout is refused;
-- a forwarding loop (`x-agent-hops` over the ceiling) is refused.
+- a forwarding loop (`x-agent-hops` over the ceiling) is refused;
+- the front door's gate (`[auth.gate]`, S27b) on server A's loopback listener:
+  `/auth/login` sends the browser to the issuer with a `__Host-` login cookie,
+  a callback without that cookie is refused, and Envoy's check answers a page
+  with a 302 to the login, an RPC with a 401, an agent bearer with that token,
+  and an unmapped path with a 403.
 
 Exit codes follow nix/lib/contract.sh: 0 ok, 1 harness (the setup broke), 2
 contract (the agent answered wrongly).
@@ -42,6 +47,9 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,6 +68,8 @@ TOKEN_AUDIENCE = "agent-e2e"
 DEPLOYMENT = "e2e"
 TENANT_A = "tenant-a"
 TENANT_B = "tenant-b"
+# The front door's main origin the gate is configured with; nothing listens there.
+FRONT = "https://front.e2e.invalid:8443"
 
 
 class HarnessError(Exception):
@@ -166,6 +176,9 @@ class Issuer:
             "issuer": self.url,
             "jwks_uri": f"{self.url}/jwks",
             "id_token_signing_alg_values_supported": ["ES256"],
+            # The gate's login sends the browser here; no step follows it.
+            "authorization_endpoint": f"{self.url}/authorize",
+            "token_endpoint": f"{self.url}/token",
         }
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
@@ -246,6 +259,8 @@ class Layout:
     issuer_url: str
     port_a: int
     port_b: int
+    # Server A's `[auth.gate] listen` port; 0 leaves the gate off.
+    port_gate: int = 0
 
     def leaf(self, service: str) -> tuple[Path, Path]:
         return self.pki / service / "cert.pem", self.pki / service / "key.pem"
@@ -261,6 +276,10 @@ class Layout:
     @property
     def addr_b(self) -> str:
         return f"127.0.0.1:{self.port_b}"
+
+    @property
+    def gate_url(self) -> str:
+        return f"http://127.0.0.1:{self.port_gate}"
 
 
 def spiffe(service: str) -> str:
@@ -333,9 +352,11 @@ def render_config(
             f"endpoint = {toml_str('https://' + lay.addr_b)}",
             "",
         ]
+    gate = server == "a" and lay.port_gate > 0
     lines += [
         "[auth]",
         'mode = "oidc"',
+        *([f"redirect_uris = [{toml_str(FRONT + '/auth/callback')}]"] if gate else []),
         "",
         "[[auth.issuers]]",
         'name = "fake"',
@@ -363,6 +384,17 @@ def render_config(
         f"tenant = {toml_str(TENANT_A)}",
         'roles = ["svc_fleet"]',
         "",
+        *(
+            [
+                "[auth.gate]",
+                f"listen = {toml_str(f'127.0.0.1:{lay.port_gate}')}",
+                'issuer = "fake"',
+                f"main_origin = {toml_str(FRONT)}",
+                "",
+            ]
+            if gate
+            else []
+        ),
         *extra,
     ]
     return "\n".join(lines)
@@ -670,6 +702,84 @@ def step_refresh_and_logout(ctx: Ctx) -> None:
     )
 
 
+@dataclass(frozen=True)
+class HttpReply:
+    status: int
+    headers: list[tuple[str, str]]
+
+    def header(self, name: str) -> str | None:
+        values = [v for n, v in self.headers if n.lower() == name]
+        return values[0] if len(values) == 1 else None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def gate_get(ctx: Ctx, path: str, headers: Mapping[str, str] | None = None) -> HttpReply:
+    """One GET to the gate's loopback listener, redirects not followed."""
+    req = urllib.request.Request(ctx.lay.gate_url + path, headers=dict(headers or {}))
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=10) as resp:
+            return HttpReply(resp.status, list(resp.headers.items()))
+    except urllib.error.HTTPError as e:
+        return HttpReply(e.code, list(e.headers.items()))
+    except OSError as e:
+        raise HarnessError(f"the gate at {ctx.lay.gate_url} did not answer {path}: {e}") from e
+
+
+def want_status(reply: HttpReply, status: int, what: str) -> HttpReply:
+    if reply.status != status:
+        raise ContractError(f"{what}: want HTTP {status}, got {reply.status} {reply.headers}")
+    return reply
+
+
+def step_gate_login(ctx: Ctx) -> None:
+    reply = want_status(gate_get(ctx, "/auth/login?rd=%2Fgrafana%2F"), 302, "gate login")
+    loc = urllib.parse.urlsplit(reply.header("location") or "")
+    query = urllib.parse.parse_qs(loc.query)
+    if f"{loc.scheme}://{loc.netloc}{loc.path}" != f"{ctx.issuer.url}/authorize":
+        raise ContractError(f"gate login went to {reply.header('location')}, not the issuer")
+    if query.get("redirect_uri") != [FRONT + "/auth/callback"] or query.get("code_challenge_method") != ["S256"]:
+        raise ContractError(f"gate login's authorization request is wrong: {query}")
+    if not query.get("state"):
+        raise ContractError("gate login's authorization request has no state")
+    cookie = reply.header("set-cookie") or ""
+    for attr in ("__Host-seddon-login=", "Secure", "HttpOnly", "SameSite=Lax", "Path=/"):
+        if attr not in cookie:
+            raise ContractError(f"gate login cookie lacks {attr!r}: {cookie!r}")
+    if reply.header("cache-control") != "no-store":
+        raise ContractError("gate login's answer may be cached")
+
+
+def step_gate_callback_needs_the_login_cookie(ctx: Ctx) -> None:
+    begun = gate_get(ctx, "/auth/login")
+    state = urllib.parse.parse_qs(urllib.parse.urlsplit(begun.header("location") or "").query).get("state", [""])[0]
+    reply = gate_get(ctx, f"/auth/callback?code=c&state={urllib.parse.quote(state)}")
+    want_status(reply, 403, "a callback with no login cookie")
+    if "__Host-seddon=" in (reply.header("set-cookie") or "").split(";")[0]:
+        raise ContractError("a refused callback set a session cookie")
+
+
+def step_gate_check(ctx: Ctx) -> None:
+    page = want_status(gate_get(ctx, "/_check/main/grafana/d/x"), 302, "check: a page with no credential")
+    if page.header("location") != "/auth/login?rd=/grafana/d/x":
+        raise ContractError(f"check: page sent to {page.header('location')}")
+    want_status(gate_get(ctx, "/_check/main/agent.v1.AuthService/WhoAmI"), 401, "check: an RPC with no credential")
+    hdx = want_status(gate_get(ctx, "/_check/hyperdx/search"), 302, "check: HyperDX with no credential")
+    if hdx.header("location") != FRONT + "/auth/login":
+        raise ContractError(f"check: HyperDX sent to {hdx.header('location')}")
+    bearer = {"authorization": f"Bearer {ctx.tokens['alice']['access']}"}
+    rpc = want_status(gate_get(ctx, "/_check/main/agent.v1.AuthService/WhoAmI", bearer), 200, "check: an agent bearer")
+    if rpc.header("authorization") != bearer["authorization"]:
+        raise ContractError("check: the agent bearer was not echoed for the RPC")
+    want_status(gate_get(ctx, "/_check/main/admin", bearer), 403, "check: an unmapped path")
+    forged = {"authorization": "Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0."}
+    want_status(gate_get(ctx, "/_check/main/agent.v1.AuthService/WhoAmI", forged), 401, "check: a forged bearer")
+
+
 STEPS: tuple[tuple[str, Callable[[Ctx], None]], ...] = (
     ("health is exempt", step_health_is_exempt),
     ("no bearer is refused", step_no_bearer_refused),
@@ -680,6 +790,9 @@ STEPS: tuple[tuple[str, Callable[[Ctx], None]], ...] = (
     ("chain forwards the tenant across a grpc seam", step_chain_forwards_tenant),
     ("forwarding loops are refused", step_hops_ceiling),
     ("mTLS service identity", step_mtls_service_identity),
+    ("gate login sends the browser to the issuer", step_gate_login),
+    ("gate callback needs the login cookie", step_gate_callback_needs_the_login_cookie),
+    ("gate check answers per route and credential", step_gate_check),
     ("refresh rotation and logout", step_refresh_and_logout),
 )
 
@@ -729,7 +842,7 @@ def main(argv: Sequence[str]) -> int:
     servers: list[Server] = []
     try:
         issuer.start()
-        lay = Layout(work, work / "pki", issuer.url, free_port(), free_port())
+        lay = Layout(work, work / "pki", issuer.url, free_port(), free_port(), free_port())
         mint_pki(args.pki_dev.split(), lay.pki)
         cli_cert, cli_key = lay.leaf("cli")
         fleet_cert, fleet_key = lay.leaf("fleet")

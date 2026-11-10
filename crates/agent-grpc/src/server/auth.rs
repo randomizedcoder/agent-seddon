@@ -700,16 +700,21 @@ fn is_exempt(path: &str) -> bool {
 }
 
 /// The bearer token from an `authorization: Bearer <token>` header, if well-formed.
-/// The scheme match is ASCII-case-insensitive per RFC 7235.
 fn bearer_token(headers: &http::HeaderMap) -> Option<String> {
     let raw = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
-    let rest = raw.strip_prefix("Bearer ").or_else(|| {
-        raw.get(..7)
-            .filter(|p| p.eq_ignore_ascii_case("bearer "))
-            .map(|_| &raw[7..])
-    })?;
+    bearer_of(raw).map(str::to_string)
+}
+
+/// The token in an `authorization` value `Bearer <token>`, trimmed; the scheme
+/// match is ASCII-case-insensitive per RFC 7235. The layer and the front door's
+/// gate both read it here, so they accept the same headers.
+pub(crate) fn bearer_of(raw: &str) -> Option<&str> {
+    let rest = raw
+        .get(..7)
+        .filter(|p| p.eq_ignore_ascii_case("bearer "))
+        .map(|_| &raw[7..])?;
     let token = rest.trim();
-    (!token.is_empty()).then(|| token.to_string())
+    (!token.is_empty()).then_some(token)
 }
 
 impl<S> Service<http::Request<BoxBody>> for Auth<S>

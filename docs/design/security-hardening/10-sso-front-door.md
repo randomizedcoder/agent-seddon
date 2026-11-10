@@ -258,6 +258,18 @@ reuses the same pieces later; this design is the NixOS module.
   redirect; hyper is not a direct dependency, and no web framework is added).
 - The `ext_authz` check route (F4): the same listener, no protos (the repo vendors no Envoy
   protos; the gRPC flavour would need them).
+- As built (S27b-ii): `[auth.gate]` (`listen`, loopback only; `issuer`; `main_origin`) is served
+  by the `--serve-all` gateway alone, so a config every unit shares binds the port once. The
+  listener (`gate/listener.rs`) answers `GET /auth/login`, `GET /auth/callback` and
+  `/auth/logout` (POST; anything else 405), and the check at `/_check/main/<path>` and
+  `/_check/hyperdx/<path>`: Envoy's `http_service` appends the original path to its
+  `path_prefix`, so each listener's filter names its own prefix and no client header chooses it.
+  The browser's routes answer `cache-control: no-store`. Two `authorization` headers are a 400;
+  `Cookie` headers are joined with `; ` (RFC 9113 §8.2.3), so a planted second session cookie
+  still shows as a repeat. No answer is written with a header value outside printable ASCII
+  (a 500 instead), and the IdP's `sub` must be visible ASCII of at most 255 bytes where it is
+  read, so `x-seddon-user` cannot split. The callback is `<main_origin>/auth/callback`, and must
+  be one of `[auth] redirect_uris`; `main_origin` must be a canonical `https` origin.
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches

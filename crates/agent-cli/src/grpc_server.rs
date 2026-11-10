@@ -837,7 +837,7 @@ fn add_seam_service(
 
 /// Serve `seam` (built into `agent`) until Ctrl-C.
 pub async fn serve(agent: &Agent, seam: Seam, listen: Endpoint) -> anyhow::Result<()> {
-    serve_seams(agent, &[seam], listen, /* skip_unavailable */ false).await
+    serve_seams(agent, &[seam], listen, /* gateway */ false).await
 }
 
 /// Serve **every** seam from one process on one endpoint.
@@ -859,7 +859,7 @@ pub async fn serve_all(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
             "serve-all: excluding seams per [grpc.gateway] exclude"
         );
     }
-    serve_seams(agent, &seams, listen, /* skip_unavailable */ true).await
+    serve_seams(agent, &seams, listen, /* gateway */ true).await
 }
 
 /// `ALL_SEAMS` minus the names in `[grpc.gateway] exclude`. A name that no longer
@@ -1064,6 +1064,7 @@ fn auth_layer(
 async fn serve_base(
     agent: &Agent,
     listen: &Endpoint,
+    gateway: bool,
 ) -> anyhow::Result<(
     ServeRouter,
     agent_grpc::server::HealthHandle,
@@ -1077,6 +1078,9 @@ async fn serve_base(
     };
     tracing::info!(endpoint = ?listen, transport = mode, "gRPC listener transport");
     let auth = auth_layer(agent, listen, tls.is_some())?;
+    if gateway {
+        start_auth_gate(agent, &auth)?;
+    }
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
@@ -1091,6 +1095,43 @@ async fn serve_base(
     // `[auth.token]` ⇒ this listener also serves `AuthService` (exchange, key set,
     // who-am-I) beside whatever seams the caller adds.
     Ok((auth.serve_auth_service(router), health, tls))
+}
+
+/// Start the front door's gate (`[auth.gate]`, security-hardening 10, S27b) on its
+/// loopback listener, over `auth`'s `AuthService`. Only the `--serve-all` gateway
+/// hosts it, so a config every unit shares binds the port once. A gate that is
+/// configured but can't be built or bound fails startup.
+fn start_auth_gate(agent: &Agent, auth: &agent_grpc::server::AuthLayer) -> anyhow::Result<()> {
+    let Some(g) = &agent.grpc_auth().gate else {
+        return Ok(());
+    };
+    #[cfg(feature = "auth")]
+    {
+        use agent_grpc::server::gate;
+        let routes = auth
+            .auth_gate(gate::GateConfig {
+                issuer: g.issuer.trim().to_string(),
+                main_origin: g.main_origin.trim().to_string(),
+            })
+            .map_err(|e| anyhow::anyhow!("[auth.gate]: {e}"))?;
+        let listen = g.listen.trim();
+        let server = tiny_http::Server::http(listen)
+            .map_err(|e| anyhow::anyhow!("[auth.gate]: could not bind {listen}: {e}"))?;
+        gate::listener::serve(server, Arc::new(routes), tokio::runtime::Handle::current())
+            .map_err(|e| anyhow::anyhow!("[auth.gate]: could not start its workers: {e}"))?;
+        tracing::info!(
+            listen,
+            check_main = gate::listener::CHECK_MAIN,
+            check_hyperdx = gate::listener::CHECK_HYPERDX,
+            "auth gate ready (sign-in and the ext_authz check)"
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "auth"))]
+    {
+        let _ = (auth, g);
+        anyhow::bail!("[auth.gate] requires an agent built with the `auth` feature")
+    }
 }
 
 /// Load the listener's TLS material when [`serves_tls`] says it should.
@@ -1130,7 +1171,7 @@ fn require_identity(configured: Option<bool>, listen: &Endpoint) -> bool {
 
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
     install_authz_observer(agent);
-    let (router, health, tls) = serve_base(agent, &listen).await?;
+    let (router, health, tls) = serve_base(agent, &listen, false).await?;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
     if !added {
         anyhow::bail!("session-stream seam not available in this build");
@@ -1181,7 +1222,7 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     }
 
     install_authz_observer(&agent);
-    let (router, health, tls) = serve_base(&agent, &listen).await?;
+    let (router, health, tls) = serve_base(&agent, &listen, false).await?;
     let router = router.add_service(
         srv::SessionRegistrySvc::new(mgr.clone() as Arc<dyn agent_core::SessionRegistry>)
             .into_server(),
@@ -1412,7 +1453,7 @@ pub async fn serve_fleet(
     };
 
     install_authz_observer(&agent);
-    let (router, health, tls) = serve_base(&agent, &listen).await?;
+    let (router, health, tls) = serve_base(&agent, &listen, false).await?;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
     // review-graph 5a: report each row's repo index status on List/Get.
     if let Some(indexer) = agent.fleet_indexer() {
@@ -1748,16 +1789,18 @@ pub fn resolve_sessions_listen(cfg: &Config, override_addr: Option<&str>) -> End
     }
 }
 
+/// `gateway` is `--serve-all`: it skips seams this build or config lacks, and it
+/// hosts the front door's gate (`[auth.gate]`).
 async fn serve_seams(
     agent: &Agent,
     seams: &[Seam],
     listen: Endpoint,
-    skip_unavailable: bool,
+    gateway: bool,
 ) -> anyhow::Result<()> {
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
     install_authz_observer(agent);
-    let (mut router, health, tls) = serve_base(agent, &listen).await?;
+    let (mut router, health, tls) = serve_base(agent, &listen, gateway).await?;
     let mut hosted: Vec<&str> = Vec::new();
     for &seam in seams {
         let (next, added) = add_seam_service(router, agent, seam)?;
@@ -1766,7 +1809,7 @@ async fn serve_seams(
             // Only now — a seam that wasn't added must not report SERVING.
             health.set_serving(seam.service_name()).await;
             hosted.push(seam.name());
-        } else if skip_unavailable {
+        } else if gateway {
             tracing::warn!(
                 seam = seam.name(),
                 "seam not enabled in this build/config; skipping"
