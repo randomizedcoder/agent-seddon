@@ -39,7 +39,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
-| S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | 🟡 | |
+| S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
@@ -1262,7 +1262,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     the cookie value `ck1.<tenant>.<sid>.<secret>`; `by_cookie` resolves one, refusing a
     revoked, expired or non-browser session, a wrong secret, and an `rh1` refresh handle.
     `refresh` refuses a browser session, and `ExchangeCode` can't open one (it maps the kind to
-    `unspecified`). Browser sessions share the per-subject cap.
+    `unspecified`). Browser sessions share the per-tenant cap.
   - **[`gate.rs`](../../../crates/agent-grpc/src/server/auth/gate.rs):**
     - `return_path` (F11): `rd` decoded once (two hex digits, UTF-8), then allowlisted: one
       leading `/`, at most 2048 bytes, printable ASCII without `\`; else `/`.
@@ -1327,6 +1327,11 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Query and cookie parsing are bounded and fail closed on a repeated key.
   - Tables: the cookie attributes, the callback's 8 refusals, a 16-row check matrix, the
     remint boundary, logout by method, crossed flows and the login-cookie variants.
+  - From #713's last draft (no must-fix): on HyperDX's listener `/auth/*` and `/dex/*` are
+    refused too (one `under` helper for every prefix); rows for an invalid-UTF-8 `rd` and a bare
+    trailing `%`; S27a's entry says browser sessions share the per-tenant cap. #713's drafts
+    twice lost their opening items and once were the reviewer's notes, not a review: a fleet
+    output bug, carried as its own PR.
   - From the #714 draft: the gate refuses a `cnf`-bound (service) agent token as a bearer, as
     the `AuthLayer` does off its mTLS connection; a role change remints at once (tested);
     `CodeRefusal::NoRandomness` replaces `Busy` for a random-source failure; `is_verifier` has its
