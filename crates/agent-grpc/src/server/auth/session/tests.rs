@@ -164,6 +164,10 @@ enum Spoil {
     CliHandleAsCookie,
     Raw(&'static str),
     Oversized,
+    /// The row behind the cookie can't be decoded: the store lookup errs.
+    UndecodableRow,
+    /// The row's body names another tenant than its key: the store lookup errs.
+    KeyMismatch,
 }
 
 #[rstest]
@@ -183,6 +187,9 @@ enum Spoil {
     false
 )]
 #[case::adversarial_oversized(Spoil::Oversized, false)]
+// A store error denies (fail closed), it never admits.
+#[case::negative_store_error_undecodable(Spoil::UndecodableRow, false)]
+#[case::adversarial_store_error_key_mismatch(Spoil::KeyMismatch, false)]
 #[tokio::test]
 async fn browser_cookie_cases(#[case] spoil: Spoil, #[case] found: bool) {
     let f = fixture();
@@ -227,6 +234,26 @@ async fn browser_cookie_cases(#[case] spoil: Spoil, #[case] found: bool) {
         }
         Spoil::Raw(r) => r.to_string(),
         Spoil::Oversized => "ck1.".to_string() + &"A".repeat(MAX_REFRESH_HANDLE_BYTES),
+        Spoil::UndecodableRow | Spoil::KeyMismatch => {
+            let blob = if matches!(spoil, Spoil::UndecodableRow) {
+                vec![0xff; 16]
+            } else {
+                let mut moved = s.clone();
+                moved.tenant = "other".into();
+                moved.encode()
+            };
+            f.backend
+                .apply(&[Write::Put {
+                    collection: COLLECTION,
+                    tenant: "acme".into(),
+                    id: s.sid.clone(),
+                    blob,
+                }])
+                .await
+                .unwrap();
+            assert!(f.store.raw_get("acme", &s.sid).await.is_err());
+            cookie.clone()
+        }
     };
     let got = f.store.by_cookie(&presented).await;
     assert_eq!(got.is_some(), found, "{spoil:?}");

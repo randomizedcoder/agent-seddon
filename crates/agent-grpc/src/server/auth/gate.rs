@@ -14,7 +14,8 @@
 //!   answers with, a closed set per route (F4's table).
 
 use agent_core::{
-    authorize, is_operator, Action, Resource, ResourceType, RoleCatalog, VerifiedPrincipal,
+    authorize, holds_any, is_operator, Action, Resource, ResourceType, RoleCatalog,
+    VerifiedPrincipal,
 };
 
 /// Longest `rd` kept, after percent-decoding (F11).
@@ -224,9 +225,7 @@ pub fn admits(catalog: &RoleCatalog, principal: &VerifiedPrincipal, need: Need) 
         .is_allowed()
     };
     match need {
-        Need::AnyPermission => Action::ALL
-            .iter()
-            .any(|a| ResourceType::ALL.iter().any(|r| holds(*a, *r))),
+        Need::AnyPermission => holds_any(catalog, principal),
         Need::Permission(a, r) => holds(a, r),
     }
 }

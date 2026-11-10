@@ -1287,6 +1287,13 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     `grafana_role` names the operator with `is_operator`, the test `authorize` uses; a page path
     longer than `MAX_RETURN_PATH` (but within `MAX_GATE_PATH`) goes to the login with no `rd`,
     rather than an `rd` the login would drop; 03's operator-global sentence is past tense.
+  - From the second #713 draft: `agent_core::holds_any` answers `AnyPermission` by scanning the
+    principal's role definitions (pinned equal to `!effective_permissions().is_empty()`), not
+    128 `authorize` calls; `by_cookie` rows for a store error (an undecodable row, a key/body
+    mismatch) prove it denies; the docs and comments that called `Config` the only
+    operator-global resource now name `Observability` too. Carried to S27b: a `%` literal and an
+    empty RPC service row, `by_cookie`'s store read per check, `normal_path`'s allocation,
+    `PORTAL_FILES`' provenance, a validated `main_origin`, and a path-style `rd` decoder.
 
 ## Cross-track note (not an S-increment)
 

@@ -104,7 +104,7 @@ model can influence neither the child's mode nor its tenant.
 (Principle 1 — the tenant-facing config surface is the per-tenant *stores*, never a per-tenant TOML;
 codified by `tenant_writable_config_sections()`, an empty set reconciled against the generated schema),
 and `ConfigService` **rejects tenant writes**. The RBAC role gate already enforced that under `oidc`
-(config C40/E1, #297/#308: `ResourceType::Config` is the sole operator-global resource, so a tenant
+(config C40/E1, #297/#308: `ResourceType::Config` is operator-global, as `Observability` is since security-hardening S27, so a tenant
 `org_admin` is denied even in its own tenant); C29 additionally closes the `[auth] mode = "none"` gap —
 under `[tenancy] per_tenant`, a caller presenting a non-`local` tenant `x-agent-user-id` is denied the
 operator-config write even with auth off (the RBAC gate is a pass-through there), while the bare operator

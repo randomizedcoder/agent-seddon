@@ -22,7 +22,8 @@
 //!    **opaque** reason string; the wire layer maps it to `PermissionDenied`
 //!    without leaking which check failed.
 //! 4. The **operator-global vs tenant split** (config C29/C40): a resource whose
-//!    type is [`ResourceType::is_operator_global`] (the bootstrap `Config` surface)
+//!    type is [`ResourceType::is_operator_global`] (the bootstrap `Config` surface,
+//!    and `Observability`, the operator's tools)
 //!    may be mutated **only by a host-global role** — a tenant-scoped role (e.g.
 //!    `org_admin`) is denied even in its own tenant, because operator-global keys
 //!    (ports/wiring, store DSN, auth issuer, telemetry) are host-owned, not
@@ -593,6 +594,30 @@ pub fn effective_permissions(
         .collect()
 }
 
+/// Whether `principal` holds any permission at all **in its own tenant**: the
+/// same answer as `!effective_permissions(..).is_empty()`, without walking the
+/// whole matrix. In its own tenant the tenant firewall always passes, so only the
+/// role definitions and the operator-global split decide. The front door's gate
+/// asks this on every request, most often for a principal with no binding (F2),
+/// which [`effective_permissions`] would answer only after every pair.
+pub fn holds_any(catalog: &RoleCatalog, principal: &VerifiedPrincipal) -> bool {
+    principal
+        .roles
+        .iter()
+        .filter_map(|n| catalog.get(n))
+        .any(|def| {
+            // A tenant-scoped role holds nothing on an operator-global type.
+            let usable = |r: ResourceType| def.crosses_tenants || !r.is_operator_global();
+            match &def.permissions {
+                PermissionSet::All => ResourceType::ALL.iter().any(|r| usable(*r)),
+                PermissionSet::ActionsOnAll(actions) => {
+                    !actions.is_empty() && ResourceType::ALL.iter().any(|r| usable(*r))
+                }
+                PermissionSet::Pairs(pairs) => pairs.iter().any(|(_, r)| usable(*r)),
+            }
+        })
+}
+
 /// The verified principal behind a request: the identity the auth layer derived
 /// from a validated bearer token. `roles` originate **only** from the token — the
 /// client cannot assert them — so they are trustworthy input to [`authorize`].
@@ -894,6 +919,50 @@ mod tests {
             subject: "sub-1".to_string(),
             roles: roles.iter().copied().map(String::from).collect(),
         }
+    }
+
+    // --- holds_any ----------------------------------------------------------
+
+    /// `holds_any` is `effective_permissions` non-empty, for the built-ins and for
+    /// roles whose only grant is operator-global.
+    #[rstest]
+    #[case::positive_reader(&[ROLE_READER], true)]
+    #[case::positive_agent_user(&[ROLE_AGENT_USER], true)]
+    #[case::positive_operator(&[ROLE_OPERATOR], true)]
+    #[case::negative_no_roles(&[], false)]
+    #[case::negative_unknown_role(&["superuser"], false)]
+    #[case::corner_unknown_then_known(&["superuser", ROLE_READER], true)]
+    #[case::positive_host_global_observer(&["obs_host"], true)]
+    // A tenant-scoped role whose only grant is operator-global holds nothing.
+    #[case::adversarial_tenant_role_on_operator_global(&["obs_tenant"], false)]
+    #[case::adversarial_tenant_role_all_actions_on_config(&["cfg_tenant"], false)]
+    #[case::negative_empty_actions(&["no_actions"], false)]
+    #[case::corner_tenant_all_still_holds_tenant_types(&["all_tenant"], true)]
+    fn holds_any_cases(#[case] roles: &[&str], #[case] want: bool) {
+        let mut catalog = RoleCatalog::builtin();
+        let obs = [(Action::Read, ResourceType::Observability)];
+        catalog.insert("obs_host", RoleDef::pairs(true, obs));
+        catalog.insert("obs_tenant", RoleDef::pairs(false, obs));
+        catalog.insert(
+            "cfg_tenant",
+            RoleDef::pairs(
+                false,
+                Action::ALL.iter().flat_map(|a| {
+                    [
+                        (*a, ResourceType::Config),
+                        (*a, ResourceType::Observability),
+                    ]
+                }),
+            ),
+        );
+        catalog.insert("no_actions", RoleDef::actions_on_all(false, []));
+        catalog.insert("all_tenant", RoleDef::admin(false));
+        let p = principal("acme", roles);
+        assert_eq!(holds_any(&catalog, &p), want);
+        assert_eq!(
+            holds_any(&catalog, &p),
+            !effective_permissions(&catalog, &p).is_empty()
+        );
     }
 
     // --- effective_permissions --------------------------------------------
