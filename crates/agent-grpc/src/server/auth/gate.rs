@@ -46,8 +46,10 @@ const PORTAL_DIRS: [&str; 3] = ["/assets/", "/canvaskit/", "/icons/"];
 
 /// `rd` as the path the browser returns to after signing in, or [`HOME`]. Checked
 /// on the percent-decoded value, by allowlist: one leading `/` (not `//`), at most
-/// [`MAX_RETURN_PATH`] bytes, and every byte printable ASCII other than `\`. So no
-/// scheme, host, space, tab or control byte reaches the `Location` header.
+/// [`MAX_RETURN_PATH`] bytes, every byte printable ASCII other than `\`, and a page
+/// [`route`] maps on the main listener. So no scheme, host, space, tab or control
+/// byte reaches the `Location` header, and the browser never lands on a `..` path,
+/// an RPC, `/auth/*` (a login loop or a bare callback) or `/dex/*`.
 pub fn return_path(rd: Option<&str>) -> String {
     let Some(decoded) = rd.and_then(percent_decode) else {
         return HOME.to_string();
@@ -57,7 +59,8 @@ pub fn return_path(rd: Option<&str>) -> String {
         && !decoded.starts_with("//")
         && decoded
             .bytes()
-            .all(|b| (0x21..=0x7e).contains(&b) && b != b'\\');
+            .all(|b| (0x21..=0x7e).contains(&b) && b != b'\\')
+        && route(Listener::Main, &decoded).is_some_and(|r| r != Route::Rpc);
     if ok {
         decoded
     } else {
@@ -156,8 +159,11 @@ impl Route {
 /// The route for `path` on `listener`, or `None`: refused. A query (`?…`) is not part
 /// of the path and is ignored, so a caller can pass `:path` as it came. Default-deny:
 /// only the listed paths map, and a path that isn't in normal form (`..` or `.`
-/// segments, `//`, a backslash, an encoded `/`, `\` or `.`, a control byte) maps
-/// to nothing, so it can't name one upstream to the gate and another to Envoy.
+/// segments, `//`, a backslash, a control byte, or an escape that is malformed or
+/// decodes to anything but a plain printable byte) maps to nothing, so it can't
+/// name one upstream to the gate and another to a proxy that decodes it. On
+/// HyperDX's listener every path is HyperDX's, except one shaped like a gRPC or
+/// Grafana path: those are never HyperDX's, so they're refused, not passed on.
 /// `/auth/*` and `/dex/*` aren't checked (Envoy routes them past the check), so
 /// they have no route here either.
 pub fn route(listener: Listener, path: &str) -> Option<Route> {
@@ -166,7 +172,12 @@ pub fn route(listener: Listener, path: &str) -> Option<Route> {
         return None;
     }
     if listener == Listener::Hyperdx {
-        return Some(Route::Hyperdx);
+        let foreign = path.starts_with("/agent.v1.")
+            || ["/grafana", "/prometheus"].iter().any(|base| {
+                path.strip_prefix(base)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            });
+        return (!foreign).then_some(Route::Hyperdx);
     }
     if let Some(rpc) = path.strip_prefix("/agent.v1.") {
         let (service, method) = rpc.split_once('/')?;
@@ -203,14 +214,37 @@ fn normal_path(path: &str) -> bool {
     {
         return false;
     }
-    let lower = path.to_ascii_lowercase();
-    if ["%2f", "%5c", "%2e", "%00"]
-        .iter()
-        .any(|e| lower.contains(e))
-    {
+    if !escapes_are_plain(path) {
         return false;
     }
     !path.split('/').any(|seg| seg == "." || seg == "..")
+}
+
+/// Every `%XX` in `path` is two hex digits that decode to a printable byte with no
+/// path meaning: not a control byte, space, DEL or non-ASCII, and not `/`, `\`,
+/// `.` or `%` (a second layer of encoding). By allowlist, so a decoding proxy and
+/// the gate read the same segments.
+fn escapes_are_plain(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let Some(b) = bytes
+                .get(i + 1..i + 3)
+                .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+                .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok())
+            else {
+                return false;
+            };
+            if !(0x21..=0x7e).contains(&b) || matches!(b, b'/' | b'\\' | b'.' | b'%') {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    true
 }
 
 /// Whether `principal` holds what `need` asks for, in its own tenant.
@@ -232,8 +266,10 @@ pub fn admits(catalog: &RoleCatalog, principal: &VerifiedPrincipal, need: Need) 
 
 /// Grafana's role for a principal the gate admitted to `/grafana/` (F4): `Admin`
 /// for the operator, `Editor` with `write:observability`, else `Viewer`. The
-/// operator is [`is_operator`], the same test `authorize` uses for the one
-/// principal that crosses tenants, so the two can't disagree on who it is.
+/// operator is [`is_operator`]: the built-in role's name, which no role card can
+/// take (`RoleCatalog::is_builtin` reserves it). It is the name test the
+/// permission-management rules use, not `authorize`'s host-global check: another
+/// host-global role a card defines gets `Editor` or `Viewer` by its grants.
 pub fn grafana_role(catalog: &RoleCatalog, principal: &VerifiedPrincipal) -> &'static str {
     if is_operator(principal) {
         "Admin"

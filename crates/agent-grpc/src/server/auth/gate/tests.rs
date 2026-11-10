@@ -15,12 +15,20 @@ const MAIN: &str = "https://l2.example:8443";
 #[case::positive_deep_path(Some("/assets/x.png"), "/assets/x.png")]
 #[case::positive_query_kept(Some("/grafana/d/abc?orgId=1"), "/grafana/d/abc?orgId=1")]
 #[case::positive_encoded_path(Some("%2Fgrafana%2F"), "/grafana/")]
-#[case::corner_plus_is_literal(Some("/a+b"), "/a+b")]
+#[case::corner_plus_is_literal(Some("/assets/a+b"), "/assets/a+b")]
 #[case::corner_absent(None, "/")]
 #[case::corner_empty(Some(""), "/")]
 #[case::boundary_longest(Some(LONGEST), LONGEST)]
 #[case::boundary_one_over(Some(ONE_OVER), "/")]
 #[case::negative_relative(Some("grafana/"), "/")]
+// Only a page the gate maps: never a `..` path, an RPC, the gate's own routes or Dex.
+#[case::negative_unmapped_page(Some("/admin"), "/")]
+#[case::negative_rpc(Some("/agent.v1.AgentService/Send"), "/")]
+#[case::adversarial_login_loop(Some("/auth/login?rd=/auth/login"), "/")]
+#[case::adversarial_bare_callback(Some("/auth/callback"), "/")]
+#[case::adversarial_dex(Some("/dex/auth?client_id=x"), "/")]
+#[case::adversarial_dotdot(Some("/grafana/../auth/logout"), "/")]
+#[case::adversarial_encoded_dotdot(Some("/grafana/%2e%2e/x"), "/")]
 #[case::adversarial_protocol_relative(Some("//evil.example"), "/")]
 #[case::adversarial_scheme(Some("https://evil.example"), "/")]
 #[case::adversarial_javascript(Some("javascript:alert(1)"), "/")]
@@ -37,34 +45,39 @@ const MAIN: &str = "https://l2.example:8443";
 #[case::adversarial_truncated_escape(Some("/%2"), "/")]
 #[case::adversarial_signed_escape(Some("/%+1"), "/")]
 // Decoded once: a double-encoded `//` stays a literal path on this host.
-#[case::corner_double_encoded(Some("/%252F%252Fevil"), "/%2F%2Fevil")]
+#[case::corner_double_encoded(Some("/assets/%2541"), "/assets/%41")]
+#[case::adversarial_double_encoded_slash(Some("/assets/%252F%252Fevil"), "/")]
 #[case::adversarial_double_encoded_no_slash(Some("%252F%252Fevil"), "/")]
 fn return_path_cases(#[case] rd: Option<&str>, #[case] want: &str) {
     assert_eq!(return_path(rd), want);
 }
 
 const LONGEST: &str = {
-    const B: [u8; MAX_RETURN_PATH] = {
-        let mut b = [b'a'; MAX_RETURN_PATH];
-        b[0] = b'/';
-        b
-    };
+    const B: [u8; MAX_RETURN_PATH] = asset_bytes();
     match std::str::from_utf8(&B) {
         Ok(s) => s,
         Err(_) => panic!(),
     }
 };
 const ONE_OVER: &str = {
-    const B: [u8; MAX_RETURN_PATH + 1] = {
-        let mut b = [b'a'; MAX_RETURN_PATH + 1];
-        b[0] = b'/';
-        b
-    };
+    const B: [u8; MAX_RETURN_PATH + 1] = asset_bytes();
     match std::str::from_utf8(&B) {
         Ok(s) => s,
         Err(_) => panic!(),
     }
 };
+
+/// `/assets/aaa…`, `N` bytes: a page path of any length.
+const fn asset_bytes<const N: usize>() -> [u8; N] {
+    let mut b = [b'a'; N];
+    let p = b"/assets/";
+    let mut i = 0;
+    while i < p.len() {
+        b[i] = p[i];
+        i += 1;
+    }
+    b
+}
 
 // --- the path map (F5) -----------------------------------------------------------
 
@@ -104,6 +117,20 @@ const ONE_OVER: &str = {
 #[case::adversarial_nul_encoded(Listener::Main, "/assets/%00", None)]
 #[case::adversarial_space(Listener::Main, "/assets/a b", None)]
 #[case::adversarial_hyperdx_dotdot(Listener::Hyperdx, "/../x", None)]
+// Never HyperDX's: a gRPC or Grafana path on its listener is refused, not passed on.
+#[case::adversarial_rpc_on_hyperdx(Listener::Hyperdx, "/agent.v1.AgentService/Send", None)]
+#[case::adversarial_grafana_on_hyperdx(Listener::Hyperdx, "/grafana/d/x", None)]
+#[case::adversarial_prometheus_on_hyperdx(Listener::Hyperdx, "/prometheus", None)]
+#[case::corner_grafana_prefix_is_hyperdx(Listener::Hyperdx, "/grafanaish", Some(Route::Hyperdx))]
+// Escapes must decode to a plain printable byte.
+#[case::positive_plain_escape(Listener::Main, "/assets/%41.png", Some(Route::Portal))]
+#[case::adversarial_encoded_crlf(Listener::Main, "/assets/%0d%0a", None)]
+#[case::adversarial_encoded_del(Listener::Main, "/grafana/%7f", None)]
+#[case::adversarial_encoded_space(Listener::Main, "/assets/a%20b", None)]
+#[case::adversarial_encoded_percent(Listener::Main, "/assets/%252f", None)]
+#[case::adversarial_encoded_non_ascii(Listener::Main, "/assets/%c3%a9", None)]
+#[case::adversarial_malformed_escape(Listener::Main, "/assets/%zz", None)]
+#[case::adversarial_truncated_escape(Listener::Main, "/assets/%4", None)]
 #[case::adversarial_relative(Listener::Main, "grafana/", None)]
 #[case::adversarial_empty(Listener::Main, "", None)]
 #[case::boundary_longest_path(Listener::Main, LONG_ASSET, Some(Route::Portal))]

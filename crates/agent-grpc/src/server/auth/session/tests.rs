@@ -183,7 +183,9 @@ enum Spoil {
 #[case::adversarial_empty(Spoil::Raw(""), false)]
 #[case::adversarial_garbage(Spoil::Raw("ck1.x"), false)]
 #[case::adversarial_traversal(
-    Spoil::Raw("ck1.Li4vYWNtZQ.00000000000000000000000000000000.AAAA"),
+    // Only the tenant is wrong: the secret has the right shape, so this row
+    // fails on `safe_segment` alone.
+    Spoil::Raw("ck1.Li4vYWNtZQ.00000000000000000000000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
     false
 )]
 #[case::adversarial_oversized(Spoil::Oversized, false)]

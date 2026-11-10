@@ -1294,6 +1294,14 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     operator-global resource now name `Observability` too. Carried to S27b: a `%` literal and an
     empty RPC service row, `by_cookie`'s store read per check, `normal_path`'s allocation,
     `PORTAL_FILES`' provenance, a validated `main_origin`, and a path-style `rd` decoder.
+  - From the third #713 draft: `rd` must also be a page `route` maps on the main listener, so
+    it never lands on a `..` path, an RPC, `/auth/*` or `/dex/*`; on HyperDX's listener a gRPC,
+    Grafana or Prometheus path is refused rather than passed to HyperDX; `normal_path` takes an
+    escape only when it decodes to a plain printable byte (no control byte, space, DEL,
+    non-ASCII, `/`, `\`, `.` or `%`); `grafana_role`'s comment says `is_operator` is a reserved
+    name test, not `authorize`'s host-global check; the cookie traversal row has a well-formed
+    secret, so only the tenant fails. Carried to S27b-ii: trim a trailing `/` from `main_origin`;
+    a short cache for `by_cookie`'s store read; browser sessions never touch `last_seen_at`.
 
 ## Cross-track note (not an S-increment)
 
