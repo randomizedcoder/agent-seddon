@@ -32,6 +32,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
+| draft-time | The draft header's `Review time` line (h/m/s, then total seconds) | [review-fleet](../../components/review-fleet.md) | 🟡 | — |
 
 **Build order:** 1 first (the collectors and the condensed review depend on a correct changed
 set), then 1b-i straight after (it removes the head-of-line blocking; 1b-ii/iii follow). Then 2, which brings value on today's path. 5a/5b can land before 3/4, because the
@@ -373,3 +374,8 @@ single-session review also uses the richer brief. 3 → 4 next. 6 and 7 are inde
   still-`drafted` draft of that head; posted and skipped drafts are left alone. Coalescing
   keeps the flag. Tables: `forced_trigger_cases`, `coalesced_force_cases`, and the wire
   round trip.
+- **2026-11-10** — draft-time (a user request): the draft header gains `- Review time: 1h 02m
+  03s (3723 s)`. `FleetOrchestrator::handle` starts the clock and `DraftRequest.elapsed`
+  carries it to `render_draft`. `agent_review::review_time` truncates sub-seconds and keeps
+  counting hours past a day, with no day unit. Tests cover the carries, zero,
+  `Duration::MAX`, and the line being absent when the review wasn't timed.

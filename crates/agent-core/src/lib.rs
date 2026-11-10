@@ -6636,6 +6636,9 @@ pub struct DraftRequest {
     pub prior: Vec<Feedback>,
     /// Who asked for this round (S19), copied onto the draft record.
     pub requested_by: Vec<String>,
+    /// Wall-clock from the trigger being handled to the draft, shown in the draft's
+    /// header. `None` when the caller didn't time the review.
+    pub elapsed: Option<std::time::Duration>,
 }
 
 /// Renders a finished review into a redacted `.md` and persists its
