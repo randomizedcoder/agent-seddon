@@ -32,7 +32,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 5b-iii | `find_symbol`/`find_references` on a symbol index, `wait_for_index_secs`, overview/call-graph/history context (after 5a-ii) | [04](04-repo-knowledge.md#consumption) | ⬜ | — |
 | 6 | Nix + C/C++ static suite, phase-snippet shellcheck, toolbox + checks, nixpkgs lens fragments (the fragments are only consumed once 3–4 land; the analyzers work on the single-session path) | [05](05-nix-and-native-analysis.md#nix-static-suite-increment-6) | ⬜ | — |
 | 7 | Sandboxed `nix_eval` collector (daemon-socket spike first) | [05](05-nix-and-native-analysis.md#sandboxed-eval-collector-increment-7-opt-in) | ⬜ | — |
-| draft-time | The draft header's `Review time` line (h/m/s, then total seconds) | [review-fleet](../../components/review-fleet.md) | 🟡 | — |
+| draft-time | The draft header's `Review time` line (h/m/s, then total seconds) | [review-fleet](../../components/review-fleet.md) | 🟡 | #718 |
 
 **Build order:** 1 first (the collectors and the condensed review depend on a correct changed
 set), then 1b-i straight after (it removes the head-of-line blocking; 1b-ii/iii follow). Then 2, which brings value on today's path. 5a/5b can land before 3/4, because the
