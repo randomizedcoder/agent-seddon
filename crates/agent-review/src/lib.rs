@@ -45,6 +45,18 @@ pub fn render_facts(facts: &ReviewFacts) -> String {
     render_facts_with(facts, DEFAULT_CONTEXT_BUDGET)
 }
 
+/// A review's wall-clock as `1h 02m 03s (3723 s)`: hours, minutes and seconds, then
+/// the total seconds. Sub-second parts are dropped.
+pub fn review_time(elapsed: std::time::Duration) -> String {
+    let total = elapsed.as_secs();
+    format!(
+        "{}h {:02}m {:02}s ({total} s)",
+        total / 3600,
+        total / 60 % 60,
+        total % 60
+    )
+}
+
 /// The hard cap on a rendered draft `.md` (review-fleet C13). The narrative is
 /// model-authored and the facts are attacker-influenced diff content, so the whole
 /// document is clamped — a huge review degrades to a truncation notice, never floods
@@ -64,6 +76,7 @@ pub fn render_draft(
     facts: &ReviewFacts,
     narrative: &str,
     prior: &[agent_core::Feedback],
+    elapsed: Option<std::time::Duration>,
 ) -> String {
     let ch = &facts.change;
     let mut out = String::new();
@@ -81,7 +94,7 @@ pub fn render_draft(
         None => ch.files.len().to_string(),
     };
     out.push_str(&format!(
-        "- Files changed: {}\n- Risk: {:.2} (gate {})\n- Static-analysis findings: {}\n\n",
+        "- Files changed: {}\n- Risk: {:.2} (gate {})\n- Static-analysis findings: {}\n",
         files_changed,
         facts.risk.max_score,
         if facts.risk.gate_failed {
@@ -91,6 +104,10 @@ pub fn render_draft(
         },
         facts.analysis.findings.len(),
     ));
+    if let Some(elapsed) = elapsed {
+        out.push_str(&format!("- Review time: {}\n", review_time(elapsed)));
+    }
+    out.push('\n');
 
     // The model's review — the human-facing narrative, ordered by the skill (C11).
     out.push_str("## Review\n\n");
@@ -933,7 +950,12 @@ mod draft_tests {
     fn positive_renders_ordered_sections() {
         // desc: a draft has the review header, the model narrative, and the facts, in
         // order. expect: all present with the narrative before the grounded facts.
-        let md = render_draft(&facts(), "Looks good overall. One must-fix in x.rs.", &[]);
+        let md = render_draft(
+            &facts(),
+            "Looks good overall. One must-fix in x.rs.",
+            &[],
+            None,
+        );
         assert!(md.starts_with("# Review draft"), "header first: {md:.40}");
         let review_at = md.find("## Review").expect("review section");
         let facts_at = md.find("## Grounded facts").expect("facts section");
@@ -950,6 +972,55 @@ mod draft_tests {
             "the count says whose findings it is"
         );
         assert!(!md.contains("\n- Findings:"), "no bare `Findings` count");
+    }
+
+    #[rstest::rstest]
+    // desc: a typical review. expect: h/m/s, two-digit minutes and seconds, then seconds.
+    #[case::positive_mixed(3_723_000, "1h 02m 03s (3723 s)")]
+    // desc: under a minute. expect: the zero units still shown.
+    #[case::positive_seconds_only(7_000, "0h 00m 07s (7 s)")]
+    // desc: no time at all. expect: all zero.
+    #[case::boundary_zero(0, "0h 00m 00s (0 s)")]
+    // desc: a second short of an hour. expect: 59m 59s, no carry.
+    #[case::boundary_just_under_an_hour(3_599_000, "0h 59m 59s (3599 s)")]
+    // desc: exactly an hour. expect: the carry into hours.
+    #[case::boundary_an_hour(3_600_000, "1h 00m 00s (3600 s)")]
+    // desc: milliseconds past a whole second. expect: truncated, never rounded up.
+    #[case::corner_sub_second_dropped(61_999, "0h 01m 01s (61 s)")]
+    // desc: past a day. expect: hours keep counting (no day unit to misread).
+    #[case::corner_over_a_day(90_061_000, "25h 01m 01s (90061 s)")]
+    fn review_time_cases(#[case] ms: u64, #[case] want: &str) {
+        assert_eq!(review_time(std::time::Duration::from_millis(ms)), want);
+    }
+
+    #[test]
+    fn adversarial_review_time_max_duration_does_not_overflow() {
+        // desc: a clock that went wild (Duration::MAX). expect: rendered, no panic.
+        let got = review_time(std::time::Duration::MAX);
+        assert!(got.ends_with(&format!("({} s)", u64::MAX)), "{got}");
+    }
+
+    #[rstest::rstest]
+    // desc: the fleet timed the review. expect: the line, inside the header list.
+    #[case::positive_timed(Some(3723), Some("- Review time: 1h 02m 03s (3723 s)\n\n## Review"))]
+    // desc: an untimed caller. expect: no line, and the header list still ends cleanly.
+    #[case::negative_untimed(None, None)]
+    fn draft_header_review_time(#[case] secs: Option<u64>, #[case] want: Option<&str>) {
+        let md = render_draft(
+            &facts(),
+            "narrative",
+            &[],
+            secs.map(std::time::Duration::from_secs),
+        );
+        match want {
+            Some(want) => assert!(md.contains(want), "{md:.400}"),
+            None => {
+                assert!(!md.contains("Review time"), "{md:.400}");
+                let n = facts().analysis.findings.len();
+                let end = format!("- Static-analysis findings: {n}\n\n## Review");
+                assert!(md.contains(&end), "{md:.400}");
+            }
+        }
     }
 
     /// The change-set collector's outcome decides how the file count reads. A failed
@@ -991,7 +1062,7 @@ mod draft_tests {
                 duration_ms: 1,
             });
         }
-        let md = render_draft(&f, "narrative", &[]);
+        let md = render_draft(&f, "narrative", &[], None);
         let brief = render_facts_with(&f, 0);
         match unknown {
             None => {
@@ -1016,7 +1087,7 @@ mod draft_tests {
     fn positive_lists_steps_taken() {
         // desc: the "steps taken" section lists which collectors ran. expect: both the
         // ok and the skipped collector appear, the skipped one with its reason.
-        let md = render_draft(&facts(), "narrative", &[]);
+        let md = render_draft(&facts(), "narrative", &[], None);
         assert!(md.contains("## Steps taken"));
         assert!(md.contains("shellcheck — ok"));
         assert!(
@@ -1048,7 +1119,7 @@ mod draft_tests {
             fb("unchecked unwrap", "line 12", "open", ""),
             fb("missing error check", "was line 8", "addressed", "cccc"),
         ];
-        let md = render_draft(&facts(), "narrative", &prior);
+        let md = render_draft(&facts(), "narrative", &prior, None);
         assert!(md.contains("## Prior feedback status"));
         assert!(
             md.contains("Resolved on this head"),
@@ -1072,7 +1143,7 @@ mod draft_tests {
             "open",
             "",
         )];
-        let md = render_draft(&facts(), "narrative", &prior);
+        let md = render_draft(&facts(), "narrative", &prior, None);
         assert!(
             !md.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
             "token in prior feedback must be redacted: {md}"
@@ -1085,7 +1156,7 @@ mod draft_tests {
         // neither the token nor the header value survives into the rendered draft.
         let narrative = "I found a token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and \
                          Authorization: Bearer sk-supersecretvalue in the diff.";
-        let md = render_draft(&facts(), narrative, &[]);
+        let md = render_draft(&facts(), narrative, &[], None);
         assert!(
             !md.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
             "GitHub token must be redacted: {md}"
@@ -1102,7 +1173,7 @@ mod draft_tests {
         // desc: an enormous narrative. expect: the whole document is clamped to the cap
         // (+ a small truncation notice), never unbounded.
         let narrative = "x".repeat(MAX_DRAFT_BYTES * 2);
-        let md = render_draft(&facts(), &narrative, &[]);
+        let md = render_draft(&facts(), &narrative, &[], None);
         assert!(
             md.len() <= MAX_DRAFT_BYTES + 64,
             "capped near MAX_DRAFT_BYTES, got {}",

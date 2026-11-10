@@ -646,6 +646,8 @@ impl FleetOrchestrator {
     /// it). A duplicate `(session_id, pr_number)` returns [`Handled::Duplicate`] without
     /// touching the forge, the engine, or the session.
     pub async fn handle(&self, trigger: FleetTrigger) -> agent_core::Result<Handled> {
+        // The review's total time (grounding + the model's run), for the draft header.
+        let started = std::time::Instant::now();
         let kt = trigger_key(&trigger);
         // Reap completed reviews first, so a finished (session, PR) neither blocks a
         // re-trigger (a new commit → re-review) nor leaks its JoinHandle — the prod
@@ -983,6 +985,7 @@ impl FleetOrchestrator {
                                 workspace,
                                 prior: open_items,
                                 requested_by,
+                                elapsed: Some(started.elapsed()),
                             };
                             // CH6b: record the draft (and its review/collector/feedback
                             // rows) under this review's identity, not the fleet process's.
@@ -4145,6 +4148,8 @@ mod tests {
         let drafts = drafter.drafts();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].requested_by, ["acme/alice"]);
+        // The fleet times every review it drafts, for the draft's header.
+        assert!(drafts[0].elapsed.is_some(), "the review was timed");
     }
 
     // ---- intake → drain → orchestrator → draft (the serve_fleet wiring) ----

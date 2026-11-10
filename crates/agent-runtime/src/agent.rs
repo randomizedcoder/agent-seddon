@@ -617,7 +617,7 @@ impl agent_core::ReviewDrafter for EngineDrafter {
         // under `<workspace>/reviews/`. `review_id` is a server-minted Uuid and
         // `pr_number` a u64, so the file name is a safe segment; `workspace` is the
         // confined session root (C4).
-        let md = agent_review::render_draft(&req.facts, &req.narrative, &prior_status);
+        let md = agent_review::render_draft(&req.facts, &req.narrative, &prior_status, req.elapsed);
         let dir = req.workspace.join("reviews");
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(format!("pr-{}-r{}.md", req.pr_number, req.review_id));
@@ -8337,6 +8337,7 @@ mod tests {
             workspace: agent_testkit::tempdir(),
             prior: Vec::new(),
             requested_by,
+            elapsed: None,
         };
         agent_core::ReviewDrafter::draft(&drafter, req)
             .await

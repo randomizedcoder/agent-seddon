@@ -254,6 +254,11 @@ inside the review's prep timeout. If the diff still fails, the draft says `Files
 the diff could not be computed (…)` and the brief tells the model the change is not empty, rather
 than both reading as "0 files".
 
+**The draft header says how long the review took.** Under the files, risk and finding counts,
+`- Review time: 1h 02m 03s (3723 s)` is the wall-clock from the orchestrator handling the trigger
+to the draft: grounding plus the model's run. It comes from
+`DraftRequest.elapsed`; a caller that doesn't time the review (`None`) gets no line.
+
 **Review session tools are rooted at the PR.** Grounding reads the worktree, and so must the
 model's own tools. The orchestrator passes a
 [`ReviewWorkspace`](../../crates/agent-core/src/lib.rs) `{ worktree, repo }` (the per-review
