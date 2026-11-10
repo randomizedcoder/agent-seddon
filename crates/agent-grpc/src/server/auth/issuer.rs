@@ -94,7 +94,11 @@ pub enum ClaimRejection {
     DomainNotAllowed,
     TenantNotAllowed,
     UnsafeTenant,
+    UnsafeSubject,
 }
+
+/// Longest IdP `sub` accepted (OpenID Connect Core §2: at most 255 ASCII characters).
+pub const MAX_IDP_SUBJECT_LEN: usize = 255;
 
 impl ResolvedIssuer {
     /// Apply the profile's defaults and check the combination is usable. Every
@@ -317,6 +321,12 @@ impl ResolvedIssuer {
             return Err(ClaimRejection::EmailNotVerified);
         }
         let subject = str_claim(&self.subject_claim).ok_or(ClaimRejection::MissingSubject)?;
+        // The subject is IdP-controlled and reaches an HTTP header (the front door's
+        // `x-seddon-user`) and the audit stream, so it must be visible ASCII: a CR/LF
+        // in it would split the header.
+        if subject.len() > MAX_IDP_SUBJECT_LEN || !agent_core::safe_subject(subject) {
+            return Err(ClaimRejection::UnsafeSubject);
+        }
 
         let tenant = match self.profile {
             Profile::Google => match str_claim(&self.tenant_claim) {

@@ -379,6 +379,8 @@ fn adversarial_idp_token_presented_to_seam_rejected() {
 #[case::adversarial_traversal_tenant(Some(TOKEN_TYP), json!({"tenant": "../other"}))]
 #[case::adversarial_no_tenant(Some(TOKEN_TYP), json!({"tenant": null}))]
 #[case::adversarial_empty_subject(Some(TOKEN_TYP), json!({"sub": ""}))]
+#[case::adversarial_crlf_subject(Some(TOKEN_TYP), json!({"sub": "user:dex/a\r\nx-seddon-role: Admin"}))]
+#[case::adversarial_space_in_subject(Some(TOKEN_TYP), json!({"sub": "user:dex/a b"}))]
 #[case::adversarial_roles_not_an_array(Some(TOKEN_TYP), json!({"roles": "operator"}))]
 #[case::adversarial_non_string_role(Some(TOKEN_TYP), json!({"roles": [1]}))]
 #[case::adversarial_no_sid(Some(TOKEN_TYP), json!({"sid": null}))]

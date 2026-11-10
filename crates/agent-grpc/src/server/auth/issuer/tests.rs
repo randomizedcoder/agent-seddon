@@ -6,8 +6,13 @@ use serde_json::{json, Value};
 
 use super::{
     ClaimRejection, KeySource, Profile, ResolvedIssuer, ENTRA_JWKS, GOOGLE_ISSUERS, GOOGLE_JWKS,
+    MAX_IDP_SUBJECT_LEN,
 };
 use crate::server::auth::IssuerParams;
+
+/// A `sub` of exactly [`MAX_IDP_SUBJECT_LEN`] bytes.
+static LONGEST_SUB: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| "s".repeat(MAX_IDP_SUBJECT_LEN));
 
 fn google() -> IssuerParams {
     IssuerParams {
@@ -240,6 +245,31 @@ fn with(base: IssuerParams, edit: impl FnOnce(&mut IssuerParams)) -> IssuerParam
     generic(),
     json!({"sub": " ", "org": "acme"}),
     Err(ClaimRejection::MissingSubject)
+)]
+#[case::adversarial_generic_crlf_subject(
+    generic(),
+    json!({"sub": "u-1\r\nx-seddon-role: Admin", "org": "acme"}),
+    Err(ClaimRejection::UnsafeSubject)
+)]
+#[case::adversarial_generic_space_in_subject(
+    generic(),
+    json!({"sub": "u 1", "org": "acme"}),
+    Err(ClaimRejection::UnsafeSubject)
+)]
+#[case::adversarial_generic_non_ascii_subject(
+    generic(),
+    json!({"sub": "ü", "org": "acme"}),
+    Err(ClaimRejection::UnsafeSubject)
+)]
+#[case::boundary_generic_longest_subject(
+    generic(),
+    json!({"sub": LONGEST_SUB.as_str(), "org": "acme"}),
+    Ok(("acme", LONGEST_SUB.as_str(), vec![], None))
+)]
+#[case::boundary_generic_subject_one_over(
+    generic(),
+    json!({"sub": "s".repeat(MAX_IDP_SUBJECT_LEN + 1), "org": "acme"}),
+    Err(ClaimRejection::UnsafeSubject)
 )]
 #[case::adversarial_generic_traversal_tenant(
     generic(),

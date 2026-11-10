@@ -162,6 +162,21 @@ class RenderConfig(unittest.TestCase):
         (binding,) = cfg["auth"]["mtls"]["bindings"]
         self.assertEqual((binding["san"], binding["tenant"]), ("spiffe://agent.e2e/svc/fleet", ae.TENANT_A))
 
+    def test_negative_gate_off_by_default(self):
+        cfg = tomllib.loads(ae.render_config(layout(Path("/w")), "a"))
+        self.assertNotIn("gate", cfg["auth"])
+        self.assertNotIn("redirect_uris", cfg["auth"])
+
+    def test_positive_gate_on_server_a(self):
+        lay = ae.Layout(Path("/w"), Path("/w/pki"), "http://127.0.0.1:9", 50001, 50002, 50003)
+        auth = tomllib.loads(ae.render_config(lay, "a"))["auth"]
+        self.assertEqual(auth["gate"], {"listen": "127.0.0.1:50003", "issuer": "fake", "main_origin": ae.FRONT})
+        self.assertEqual(auth["redirect_uris"], [ae.FRONT + "/auth/callback"])
+
+    def test_corner_gate_never_on_server_b(self):
+        lay = ae.Layout(Path("/w"), Path("/w/pki"), "http://127.0.0.1:9", 50001, 50002, 50003)
+        self.assertNotIn("gate", tomllib.loads(ae.render_config(lay, "b"))["auth"])
+
     def test_adversarial_path_cannot_inject_keys(self):
         hostile = Path('/w"\nmode = "none"\n[x]\ny = "')
         cfg = tomllib.loads(ae.render_config(layout(hostile), "b"))

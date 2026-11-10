@@ -86,7 +86,6 @@ fn harness(sub: &str, operator: bool) -> Harness {
         .auth_gate_with_clock(
             GateConfig {
                 issuer: "fake".into(),
-                callback_url: CALLBACK_URL.into(),
                 main_origin: MAIN.into(),
             },
             clock.clone(),
@@ -288,6 +287,8 @@ enum Back {
     NoState,
     StateTwice,
     BadEscape,
+    /// The real code and `state`, in a query one byte over [`MAX_QUERY`].
+    QueryTooLong,
 }
 
 #[rstest]
@@ -299,6 +300,7 @@ enum Back {
 #[case::negative_no_state(Back::NoState)]
 #[case::adversarial_state_twice(Back::StateTwice)]
 #[case::adversarial_bad_escape(Back::BadEscape)]
+#[case::boundary_query_too_long(Back::QueryTooLong)]
 #[tokio::test]
 async fn callback_refusals_open_no_session(#[case] back: Back) {
     let h = harness("alice", true);
@@ -327,6 +329,10 @@ async fn callback_refusals_open_no_session(#[case] back: Back) {
         ),
         Back::StateTwice => (format!("{query}&state=other"), Some(mine)),
         Back::BadEscape => (format!("{query}%zz"), Some(mine)),
+        Back::QueryTooLong => {
+            let pad = MAX_QUERY - query.len() - "&pad=".len() + 1;
+            (format!("{query}&pad={}", "a".repeat(pad)), Some(mine))
+        }
     };
     let before = h.sessions().await;
     let reply = h.gate.callback(&query, cookie.as_deref(), "ua").await;
@@ -372,6 +378,13 @@ enum Cred {
     /// An agent token for the live session but bound to a certificate (`cnf`): a
     /// service token is good only on its own mTLS connection.
     BoundBearer,
+    /// The own token under a lowercase scheme and padded (RFC 7235: the scheme is
+    /// case-insensitive), as the `AuthLayer` reads it.
+    OwnBearerLowercasePadded,
+    /// A scheme with no token.
+    BareScheme,
+    /// A bearer one byte over [`MAX_BEARER`].
+    OversizedBearer,
 }
 
 #[rstest]
@@ -392,6 +405,9 @@ enum Cred {
 #[case::adversarial_forged_bearer_rpc(Cred::ForgedBearer, Listener::Main, RPC, 401, &[])]
 #[case::adversarial_cert_bound_bearer_rpc(Cred::BoundBearer, Listener::Main, RPC, 401, &[])]
 #[case::adversarial_cert_bound_bearer_grafana(Cred::BoundBearer, Listener::Main, "/grafana/d/x", 302, &["location"])]
+#[case::corner_lowercase_padded_bearer_echoed(Cred::OwnBearerLowercasePadded, Listener::Main, RPC, 200, &["authorization"])]
+#[case::negative_bare_scheme(Cred::BareScheme, Listener::Main, RPC, 401, &[])]
+#[case::adversarial_oversized_bearer(Cred::OversizedBearer, Listener::Main, RPC, 401, &[])]
 #[case::adversarial_cookie_wins_over_forged_bearer(Cred::SessionAndForgedBearer, Listener::Main, RPC, 200, &["authorization"])]
 #[tokio::test]
 async fn check_cases(
@@ -427,6 +443,11 @@ async fn check_cases(
         format!("Bearer {}", minted.token)
     };
     let two = format!("{jar}; {SESSION_COOKIE}=ck1.x.y.z");
+    let padded = format!(
+        "bearer   {}  ",
+        own.strip_prefix("Bearer ").expect("bearer")
+    );
+    let oversized = format!("Bearer {}", "a".repeat(MAX_BEARER + 1));
     let (cookie, auth): (Option<&str>, Option<&str>) = match cred {
         Cred::None => (None, None),
         Cred::Session => (Some(&jar), None),
@@ -436,6 +457,9 @@ async fn check_cases(
         Cred::ForgedBearer => (None, Some(forged)),
         Cred::SessionAndForgedBearer => (Some(&jar), Some(forged)),
         Cred::BoundBearer => (None, Some(&bound)),
+        Cred::OwnBearerLowercasePadded => (None, Some(&padded)),
+        Cred::BareScheme => (None, Some("Bearer ")),
+        Cred::OversizedBearer => (None, Some(&oversized)),
     };
     let reply = h.gate.check(check(listener, path, cookie, auth)).await;
     assert_eq!(reply.status, status, "{reply:?}");
@@ -605,17 +629,70 @@ async fn corner_logout_without_a_session_still_clears() {
 
 // --- construction --------------------------------------------------------------------
 
-#[test]
-fn negative_gate_needs_a_browser_issuer() {
+#[rstest]
+#[case::positive_canonical("fake", MAIN, None)]
+#[case::corner_one_trailing_slash_dropped("fake", "https://front.test:8443/", None)]
+#[case::negative_not_a_browser_issuer("okta", MAIN, Some("`okta`"))]
+#[case::negative_callback_not_registered("fake", "https://other.test:8443", Some("redirect_uris"))]
+#[case::negative_plain_http("fake", "http://front.test:8443", Some("must be https"))]
+#[case::negative_not_a_url("fake", "front.test:8443", Some("must be https"))]
+#[case::negative_relative("fake", "/auth", Some("is not a URL"))]
+#[case::negative_path("fake", "https://front.test:8443/portal", Some("no path"))]
+#[case::negative_query("fake", "https://front.test:8443/?x=1", Some("no path"))]
+#[case::negative_empty_fragment("fake", "https://front.test:8443/#", Some("no path"))]
+#[case::boundary_two_trailing_slashes("fake", "https://front.test:8443//", Some("no path"))]
+#[case::boundary_uppercase_host(
+    "fake",
+    "https://FRONT.test:8443",
+    Some("write `https://front.test:8443`")
+)]
+#[case::boundary_default_port_spelled(
+    "fake",
+    "https://front.test:443",
+    Some("write `https://front.test`")
+)]
+#[case::adversarial_userinfo("fake", "https://evil@front.test:8443", Some("userinfo"))]
+#[case::adversarial_crlf("fake", "https://front.test:8443\r\nx: y", Some("main_origin"))]
+fn gate_construction_cases(
+    #[case] issuer: &str,
+    #[case] main_origin: &str,
+    #[case] want_err: Option<&str>,
+) {
     let h = harness("alice", true);
-    let err = h
+    let got = h.layer.auth_gate(GateConfig {
+        issuer: issuer.into(),
+        main_origin: main_origin.into(),
+    });
+    match (got, want_err) {
+        (Ok(_), None) => {}
+        (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+        (Ok(_), Some(want)) => panic!("{main_origin:?}: built, want an error with {want:?}"),
+        (Err(e), None) => panic!("{main_origin:?}: refused: {e}"),
+    }
+}
+
+#[tokio::test]
+async fn corner_trailing_slash_origin_sends_hyperdx_logins_without_a_double_slash() {
+    let mut h = harness("alice", true);
+    h.gate = h
         .layer
         .auth_gate(GateConfig {
-            issuer: "okta".into(),
-            callback_url: CALLBACK_URL.into(),
-            main_origin: MAIN.into(),
+            issuer: "fake".into(),
+            main_origin: format!("{MAIN}/"),
         })
-        .err()
-        .expect("refused");
-    assert!(err.contains("okta"), "{err}");
+        .expect("gate builds");
+    let reply = h
+        .gate
+        .check(CheckRequest {
+            listener: Listener::Hyperdx,
+            path: "/",
+            cookie: None,
+            authorization: None,
+        })
+        .await;
+    assert_eq!(reply.status, 302);
+    assert_eq!(
+        reply.header("location"),
+        Some("https://front.test:8443/auth/login")
+    );
 }

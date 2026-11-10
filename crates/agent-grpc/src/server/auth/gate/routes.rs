@@ -22,6 +22,9 @@ pub const SESSION_COOKIE: &str = "__Host-seddon";
 pub const LOGIN_COOKIE: &str = "__Host-seddon-login";
 /// Longest `Cookie` header the gate reads; a longer one carries no session.
 pub const MAX_COOKIE_HEADER: usize = 8 * 1024;
+/// Longest agent token the gate reads from `authorization`; agent tokens are well
+/// under 2 KiB.
+pub const MAX_BEARER: usize = 8 * 1024;
 /// Longest query string the gate reads.
 pub const MAX_QUERY: usize = 8 * 1024;
 /// A cached agent token is minted again this long before it expires (F4).
@@ -40,7 +43,7 @@ pub struct Reply {
 }
 
 impl Reply {
-    fn new(status: u16, body: &'static str) -> Self {
+    pub(super) fn new(status: u16, body: &'static str) -> Self {
         Self {
             status,
             headers: Vec::new(),
@@ -52,7 +55,7 @@ impl Reply {
         Self::new(302, "").with("location", location)
     }
 
-    fn with(mut self, name: &str, value: String) -> Self {
+    pub(super) fn with(mut self, name: &str, value: String) -> Self {
         self.headers.push((name.to_string(), value));
         self
     }
@@ -67,14 +70,18 @@ impl Reply {
     }
 }
 
+/// Where the issuer sends the browser back, on the main origin.
+pub const CALLBACK_PATH: &str = "/auth/callback";
+
 /// The front door's settings for the gate.
 #[derive(Clone, Debug)]
 pub struct GateConfig {
     /// The `[[auth.issuers]]` name browsers sign in with (Dex).
     pub issuer: String,
-    /// `https://<publicHost>:<port>/auth/callback`, one of `[auth] redirect_uris`.
-    pub callback_url: String,
-    /// `https://<publicHost>:<port>`: where HyperDX's listener sends a login.
+    /// `https://<publicHost>:<port>`, the front door's main origin: browsers come
+    /// back to `<main_origin>/auth/callback`, which must be one of `[auth]
+    /// redirect_uris`, and HyperDX's listener sends a login here. One trailing `/`
+    /// is dropped; anything else must already be the origin's canonical form.
     pub main_origin: String,
 }
 
@@ -92,7 +99,11 @@ pub struct CheckRequest<'a> {
 /// door's routes.
 pub struct AuthGate {
     svc: AuthSvc,
-    cfg: GateConfig,
+    issuer: String,
+    /// [`GateConfig::main_origin`], canonical, with no trailing `/`.
+    main_origin: String,
+    /// `<main_origin>/auth/callback`.
+    callback_url: String,
     clock: Arc<dyn Clock>,
     tokens: Mutex<HashMap<String, Cached>>,
 }
@@ -104,9 +115,11 @@ struct Cached {
 }
 
 impl AuthGate {
-    /// Refused when `svc` has no browser sign-in, or `cfg.issuer` isn't one of its
-    /// browser issuers. Only the name is checked here: whether the issuer answers
-    /// discovery is learned at each login, which is then a 503.
+    /// Refused when `svc` has no browser sign-in, `cfg.issuer` isn't one of its
+    /// browser issuers, `cfg.main_origin` isn't an `https` origin, or the callback
+    /// on it isn't one of `[auth] redirect_uris`. Only the issuer's name is checked
+    /// here: whether it answers discovery is learned at each login, which is then a
+    /// 503.
     pub(crate) fn new(
         svc: AuthSvc,
         cfg: GateConfig,
@@ -121,9 +134,18 @@ impl AuthGate {
                 cfg.issuer
             ));
         }
+        let main_origin = front_origin(&cfg.main_origin)?;
+        let callback_url = format!("{main_origin}{CALLBACK_PATH}");
+        if !code.allows_redirect(&callback_url) {
+            return Err(format!(
+                "the gate's callback `{callback_url}` is not one of `[auth] redirect_uris`"
+            ));
+        }
         Ok(Self {
             svc,
-            cfg,
+            issuer: cfg.issuer,
+            main_origin,
+            callback_url,
             clock,
             tokens: Mutex::new(HashMap::new()),
         })
@@ -137,10 +159,7 @@ impl AuthGate {
         let Some(code) = self.svc.code_flow() else {
             return Reply::new(503, "sign-in is not configured");
         };
-        match code
-            .begin_gate(&self.cfg.issuer, &self.cfg.callback_url, &rd)
-            .await
-        {
+        match code.begin_gate(&self.issuer, &self.callback_url, &rd).await {
             Ok(g) => Reply::redirect(g.begun.authorize_url).with(
                 "set-cookie",
                 set_cookie(LOGIN_COOKIE, &g.login_cookie, LOGIN_COOKIE_SECS),
@@ -218,7 +237,7 @@ impl AuthGate {
             Ok(c) => c,
             Err(reason) => {
                 crate::server::audit::refused(GATE_CHECK, reason, Default::default());
-                return match unauthenticated(req.listener, r, path, &self.cfg.main_origin) {
+                return match unauthenticated(req.listener, r, path, &self.main_origin) {
                     Unauthenticated::Login(loc) => Reply::redirect(loc),
                     Unauthenticated::Status401 => Reply::new(401, "unauthenticated"),
                 };
@@ -241,14 +260,14 @@ impl AuthGate {
         let mut ok = Reply::new(200, "");
         match r {
             Route::Rpc => {
-                let token = match &caller {
+                let value = match &caller {
                     Caller::Session(s, p) => match self.token_for(s, p) {
-                        Some(t) => t,
+                        Some(t) => format!("Bearer {t}"),
                         None => return Reply::new(401, "unauthenticated"),
                     },
-                    Caller::Bearer(t, _, _) => t.clone(),
+                    Caller::Bearer(t, _, _) => format!("Bearer {t}"),
                 };
-                ok = ok.with("authorization", format!("Bearer {token}"));
+                ok = ok.with("authorization", value);
             }
             Route::Grafana => {
                 ok = ok
@@ -280,8 +299,8 @@ impl AuthGate {
         }
         let Some(token) = req
             .authorization
-            .and_then(|a| a.strip_prefix("Bearer "))
-            .filter(|t| !t.is_empty() && t.len() <= MAX_COOKIE_HEADER)
+            .and_then(crate::server::auth::bearer_of)
+            .filter(|t| t.len() <= MAX_BEARER)
         else {
             return Err("no_credential");
         };
@@ -355,6 +374,31 @@ impl Caller {
             Caller::Bearer(_, _, sid) => sid,
         }
     }
+}
+
+/// `raw` as a canonical `https` origin with no trailing `/`: no userinfo, path,
+/// query or fragment, and spelled as the URL parser writes it (lowercase host, no
+/// default port), so the callback compares exactly with `[auth] redirect_uris`.
+fn front_origin(raw: &str) -> Result<String, String> {
+    let bad = |why: &str| format!("the gate's `main_origin` `{raw}` {why}");
+    let trimmed = raw.strip_suffix('/').unwrap_or(raw);
+    let url = url::Url::parse(raw).map_err(|e| bad(&format!("is not a URL ({e})")))?;
+    if url.scheme() != "https" {
+        return Err(bad(
+            "must be https (the cookies are `__Host-`, so `Secure`)",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(bad("must not carry userinfo"));
+    }
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(bad("must be an origin, with no path, query or fragment"));
+    }
+    let canonical = url.origin().ascii_serialization();
+    if trimmed != canonical {
+        return Err(bad(&format!("is not canonical; write `{canonical}`")));
+    }
+    Ok(canonical)
 }
 
 /// A query or `Cookie` header the gate won't read: too long, or naming one key

@@ -40,8 +40,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
-| S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | |
-| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ⬜ | |
+| S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
+| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | #715 |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
@@ -1338,6 +1338,39 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     doc comment back; `AuthGate::new` says it checks the issuer's name only. Carried to S27b-ii:
     `/auth/login` fills the shared 1024-entry pending table (rate-limit `/auth/*` at Envoy, S28),
     and a shared hex helper for `sha256_hex` and `random_hex`.
+
+- From the #714 draft (no must-fix; merged as 638212cc): carried into S27b-ii below.
+
+- **2026-11-10 — S27b-ii: the gate on a socket.** `[auth.gate]` (`listen`, `issuer`,
+  `main_origin`) starts the gate's loopback listener in the `--serve-all` gateway only, so a
+  config every unit shares binds its port once; a gate that can't be built or bound fails
+  startup.
+  - **Listener** (`gate/listener.rs`, `tiny_http`, 16 workers, no request body read):
+    `GET /auth/login`, `GET /auth/callback`, `/auth/logout`, and Envoy's check at
+    `/_check/main/<path>` and `/_check/hyperdx/<path>` (the listener is in the path prefix,
+    never a client header). Unknown paths are 404, a URL over 12 KiB 414, two `authorization`
+    headers 400; `Cookie` headers are joined (RFC 9113 §8.2.3). The browser's routes answer
+    `no-store`. An answer with a header value outside printable ASCII is never written (500).
+  - **From the #714 draft:** the IdP's `sub` is refused unless it is visible ASCII of at most
+    255 bytes (`ClaimRejection::UnsafeSubject`; `agent_core::safe_subject` on agent tokens
+    too), so `x-seddon-user` can't split a header; the gate reads `authorization` with the
+    layer's own RFC 7235 parser (`bearer_of`: any-case scheme, trimmed); `main_origin` must be
+    a canonical `https` origin (a trailing `/` dropped) and `<main_origin>/auth/callback` one
+    of `redirect_uris`, checked at load and when the gate is built, which replaces the
+    separate `callback_url`; `gate_logout` returns nothing and logs a store error; the bearer
+    has its own bound (`MAX_BEARER`); the token is formatted once.
+  - **`authz.toml`** gains `[gate]`: each route's permission, kept equal to `Route::need` by
+    a Rust test (`--dump-authz` writes `[rpcs]` only).
+  - **`auth-e2e`** runs server A with the gate: the login's 302 to the issuer (PKCE, the
+    callback on the main origin, the `__Host-` login cookie), a callback with no login cookie
+    refused, and the check's 302 / 401 / 200 (bearer echoed) / 403 / forged-bearer 401.
+  - Tables: the listener's dispatch (20 rows), its header screen, two socket round trips, the
+    gate's construction (15 rows), `[auth.gate]` at load (14 rows), `safe_subject`, the
+    hostile-`sub` rows, the bearer variants, a callback query over the cap.
+  - Still carried: partition the pending-login table per flow (or rate-limit `/auth/*` at
+    Envoy, S28); a short cache for `by_cookie`; browser sessions' `last_seen_at`; a shared hex
+    helper; `PORTAL_FILES`' provenance; `normal_path`'s allocation; a path-style `rd` decoder;
+    an eviction test for `MAX_CACHED_TOKENS`.
 
 ## Cross-track note (not an S-increment)
 

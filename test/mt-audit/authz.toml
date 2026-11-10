@@ -13,6 +13,19 @@
 # Regenerate after an intentional change with `python3 test/mt-audit/audit.py --dump-authz`,
 # then review the diff.
 
+# `[gate]`: the permission each front-door route needs at the gate's `ext_authz` check
+# (security-hardening 10, S27b; `Route::need` in crates/agent-grpc/src/server/auth/gate.rs).
+# `any` is any permission at all (the portal and its RPCs, whose own rows below decide the
+# rest); a principal no one bound holds none. The `authz_toml_gate_rows_match_route_need`
+# test keeps the two equal. `--dump-authz` writes `[rpcs]` only: keep this table by hand.
+
+[gate]
+portal = "any"
+rpc = "any"
+grafana = "read:observability"
+prometheus = "read:observability"
+hyperdx = "read:observability"
+
 [rpcs]
 "AgentSessionService.Send" = "use:agent"
 "AgentSessionService.Snapshot" = "field-checked:use:agent"

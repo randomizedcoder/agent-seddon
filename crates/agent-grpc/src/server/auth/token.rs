@@ -256,7 +256,8 @@ impl AgentClaims {
                 Some(_) => None,
             }
         };
-        let subject = s("sub").filter(|v| !v.is_empty())?;
+        // The subject reaches a header at the front door (`x-seddon-user`): visible ASCII.
+        let subject = s("sub").filter(|v| agent_core::safe_subject(v))?;
         let tenant = s("tenant").filter(|t| agent_core::safe_segment(t))?;
         // Every agent token names its session; one without is not ours.
         let sid = s("sid").filter(|v| agent_core::safe_segment(v))?;

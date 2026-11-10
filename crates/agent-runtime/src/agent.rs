@@ -139,6 +139,8 @@ pub struct GrpcAuthSettings {
     pub mtls: Option<crate::config::AuthMtlsCfg>,
     /// `[auth] redirect_uris`: browser sign-in's allowed return URIs (S13).
     pub redirect_uris: Vec<String>,
+    /// `[auth.gate]`: the front door's gate, served by `--serve-all` (S27b).
+    pub gate: Option<crate::config::AuthGateCfg>,
     /// The backend `[auth.token] session_store` resolved to (S6); `None` ⇒ memory.
     #[cfg(feature = "auth")]
     pub sessions: Option<agent_grpc::server::SessionBackend>,

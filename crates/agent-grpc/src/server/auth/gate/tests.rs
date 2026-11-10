@@ -319,3 +319,52 @@ fn replaced_cases(#[case] r: Route, #[case] want: &[&str]) {
         .iter()
         .any(|h| matches!(*h, "cookie" | "x-agent-user-id")));
 }
+
+// --- authz.toml's [gate] rows ----------------------------------------------------------
+
+/// `[gate]` in `test/mt-audit/authz.toml`, as `(route, need)` lines.
+fn gate_rows() -> Vec<(String, String)> {
+    let toml = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/mt-audit/authz.toml"
+    ));
+    toml.lines()
+        .map(str::trim)
+        .skip_while(|l| *l != "[gate]")
+        .skip(1)
+        .take_while(|l| !l.starts_with('['))
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let (k, v) = l.split_once('=').expect("`key = \"value\"`");
+            (k.trim().to_string(), v.trim().trim_matches('"').to_string())
+        })
+        .collect()
+}
+
+fn route_name(r: Route) -> &'static str {
+    match r {
+        Route::Portal => "portal",
+        Route::Rpc => "rpc",
+        Route::Grafana => "grafana",
+        Route::Prometheus => "prometheus",
+        Route::Hyperdx => "hyperdx",
+    }
+}
+
+fn need_name(n: Need) -> String {
+    match n {
+        Need::AnyPermission => "any".into(),
+        Need::Permission(a, r) => format!("{}:{}", a.as_str(), r.as_str()),
+    }
+}
+
+/// Each route's permission is reviewed in `authz.toml`, like each RPC's: a changed
+/// `Route::need` or a new route fails here until the table says so too.
+#[test]
+fn authz_toml_gate_rows_match_route_need() {
+    let want: Vec<(String, String)> = Route::ALL
+        .iter()
+        .map(|r| (route_name(*r).to_string(), need_name(r.need())))
+        .collect();
+    assert_eq!(gate_rows(), want);
+}
