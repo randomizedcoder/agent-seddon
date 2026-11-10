@@ -41,7 +41,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
-| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | |
+| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | #715 |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
