@@ -758,12 +758,10 @@ enum Cookie {
 async fn gate_redeem_needs_this_browsers_cookie(#[case] cookie: Cookie, #[case] want: CodeRefusal) {
     let flow = flow();
     let (state, _) = flow
-        .pending
-        .insert(gate_pending(LOGIN_COOKIE))
+        .insert_pending(gate_pending(LOGIN_COOKIE))
         .expect("room");
     let (_other, _) = flow
-        .pending
-        .insert(gate_pending("the-attackers-cookie"))
+        .insert_pending(gate_pending("the-attackers-cookie"))
         .expect("room");
     let sent = match cookie {
         Cookie::This => Some(LOGIN_COOKIE),
@@ -797,7 +795,7 @@ async fn states_do_not_cross_flows(#[case] gate_state: bool) {
     } else {
         pending("fake")
     };
-    let (state, _) = flow.pending.insert(p).expect("room");
+    let (state, _) = flow.insert_pending(p).expect("room");
     let got = if gate_state {
         flow.redeem("code", &state, VERIFIER).await.map(|_| ())
     } else {
@@ -807,6 +805,32 @@ async fn states_do_not_cross_flows(#[case] gate_state: bool) {
     };
     assert_eq!(got, Err(CodeRefusal::WrongFlow));
     assert_eq!(flow.pending_len(), 0);
+}
+
+/// The two flows have a table each: a front door whose table is full of anonymous
+/// logins still lets `Begin` start one, and the reverse.
+#[rstest]
+#[case::adversarial_front_door_flood_leaves_begin_room(true)]
+#[case::corner_begin_flood_leaves_the_front_door_room(false)]
+fn a_full_flow_leaves_the_other_room(#[case] flood_gate: bool) {
+    let flow = flow();
+    let one = |gate: bool| {
+        if gate {
+            gate_pending(LOGIN_COOKIE)
+        } else {
+            pending("fake")
+        }
+    };
+    for _ in 0..MAX_PENDING {
+        flow.insert_pending(one(flood_gate)).expect("room");
+    }
+    assert_eq!(
+        flow.insert_pending(one(flood_gate)).map(|_| ()),
+        Err(CodeRefusal::Busy)
+    );
+    flow.insert_pending(one(!flood_gate))
+        .expect("the other flow has its own room");
+    assert_eq!(flow.pending_len(), MAX_PENDING + 1);
 }
 
 /// `begin_gate` makes the PKCE pair and the login cookie itself; a refused one

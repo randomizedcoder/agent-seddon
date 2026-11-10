@@ -368,3 +368,74 @@ fn authz_toml_gate_rows_match_route_need() {
         .collect();
     assert_eq!(gate_rows(), want);
 }
+
+/// The front door's header table (F4), as Nix renders every route's removals from it.
+fn front_door_headers() -> serde_json::Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../nix/portal/front-door-headers.json"
+    )))
+    .expect("front-door-headers.json is JSON")
+}
+
+/// The headers the table marks `replaced` on `column`.
+fn replaced_in(table: &serde_json::Value, column: &str) -> Vec<String> {
+    let mut out: Vec<String> = table["headers"]
+        .as_object()
+        .expect("headers")
+        .iter()
+        .filter(|(_, row)| row[column] == "replaced")
+        .map(|(name, _)| name.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// What a route's check answers with is exactly what Envoy lets overwrite the
+/// client's value on that route: a header `Check` adds that the table removes would
+/// be dropped by the router, and one the table says is replaced but `Check` never
+/// sends would let the client's own value through.
+#[test]
+fn front_door_header_table_matches_route_replaced() {
+    let table = front_door_headers();
+    for r in Route::ALL {
+        let mut want: Vec<String> = r.replaced().iter().map(ToString::to_string).collect();
+        want.sort();
+        assert_eq!(replaced_in(&table, route_name(r)), want, "{r:?}");
+    }
+}
+
+/// The routes the check never sees (sign-in, Dex) can't have a header replaced,
+/// and every route the table names has a value for every header.
+#[rstest]
+#[case::negative_auth_is_unchecked("auth")]
+#[case::negative_dex_is_unchecked("dex")]
+fn front_door_unchecked_routes_replace_nothing(#[case] column: &str) {
+    assert_eq!(
+        replaced_in(&front_door_headers(), column),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn front_door_header_table_is_complete() {
+    let table = front_door_headers();
+    let routes: Vec<&str> = table["routes"]
+        .as_array()
+        .expect("routes")
+        .iter()
+        .map(|r| r.as_str().expect("a route name"))
+        .collect();
+    for r in Route::ALL {
+        assert!(routes.contains(&route_name(r)), "{r:?} has no column");
+    }
+    for (name, row) in table["headers"].as_object().expect("headers") {
+        for route in &routes {
+            let v = row[*route].as_str().unwrap_or("");
+            assert!(
+                ["kept", "removed", "replaced"].contains(&v),
+                "{name} on {route}: {v:?}"
+            );
+        }
+    }
+}

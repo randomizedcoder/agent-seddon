@@ -330,17 +330,16 @@ impl AuthGate {
         let MintedToken {
             token, expires_at, ..
         } = self.svc.gate_mint(session, principal)?;
-        cache.retain(|_, c| now < c.expires_at);
-        if cache.len() < MAX_CACHED_TOKENS || cache.contains_key(&session.sid) {
-            cache.insert(
-                session.sid.clone(),
-                Cached {
-                    roles: principal.roles.clone(),
-                    token: token.clone(),
-                    expires_at,
-                },
-            );
-        }
+        remember(
+            &mut cache,
+            now,
+            &session.sid,
+            Cached {
+                roles: principal.roles.clone(),
+                token: token.clone(),
+                expires_at,
+            },
+        );
         Some(token)
     }
 
@@ -456,6 +455,16 @@ fn set_cookie(name: &str, value: &str, max_age: u64) -> String {
 
 fn clear_cookie(name: &str) -> String {
     set_cookie(name, "", 0)
+}
+
+/// Cache `entry` for `sid` after dropping lapsed entries. A full cache keeps what it
+/// has and the token is served uncached (minted again next time), so a flood of
+/// sessions can't evict a live one; `sid`'s own entry is always replaced.
+fn remember(cache: &mut HashMap<String, Cached>, now: u64, sid: &str, entry: Cached) {
+    cache.retain(|_, c| now < c.expires_at);
+    if cache.len() < MAX_CACHED_TOKENS || cache.contains_key(sid) {
+        cache.insert(sid.to_string(), entry);
+    }
 }
 
 #[cfg(test)]

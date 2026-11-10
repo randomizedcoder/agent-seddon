@@ -528,7 +528,7 @@ class EnvoyValidate(unittest.TestCase):
         # The real spec nix renders (PORTAL_ENVOY_SPEC), else this file's mirror of it.
         cls.spec = d / "spec.json"
         real = os.environ.get("PORTAL_ENVOY_SPEC")
-        cls.spec.write_text(Path(real).read_text() if real else json.dumps(SPEC_RAW))
+        cls.spec.write_text(Path(real).read_text() if real else json.dumps({**SPEC_RAW, "front_door": FRONT_RAW}))
 
     @classmethod
     def tearDownClass(cls):
@@ -550,6 +550,8 @@ class EnvoyValidate(unittest.TestCase):
         tls = {"PORTAL_TLS_CERT": str(d / "leaf.crt"), "PORTAL_TLS_KEY": str(d / "leaf.key"),
                "PORTAL_UPSTREAM_CA": str(d / "ca.crt"), "PORTAL_UPSTREAM_CERT": str(d / "leaf.crt"),
                "PORTAL_UPSTREAM_KEY": str(d / "leaf.key")}
+        front = {"PORTAL_FRONT_DOOR": "on", "PORTAL_FRONT_DOOR_CERT": str(d / "leaf.crt"),
+                 "PORTAL_FRONT_DOOR_KEY": str(d / "leaf.key")}
         on = {"PORTAL_AUTH": "on", "PORTAL_JWT_JWKS": str(d / "jwks.json"),
               "PORTAL_JWT_ISSUER": "https://agent.example", "PORTAL_JWT_AUDIENCE": "agent-seddon"}
         return {
@@ -559,6 +561,10 @@ class EnvoyValidate(unittest.TestCase):
             "positive_lan_bind_two_origins": {"PORTAL_AUTH": "off", "PORTAL_GRPC_WEB_HOST": "0.0.0.0",
                                               "PORTAL_WEB_ORIGIN": "http://10.0.0.5:8092,https://portal.example"},
             "positive_tls_and_upstream_mtls_with_auth": {**on, **tls},
+            "positive_front_door": {**front, "PORTAL_AUTH": "off"},
+            "positive_front_door_lan_origin_and_upstream_mtls": {
+                **front, **tls, "PORTAL_AUTH": "off", "PORTAL_FRONT_DOOR_HOST": "0.0.0.0",
+                "PORTAL_FRONT_DOOR_ORIGINS": "https://other.example"},
         }
 
     def test_every_mode_validates(self):
@@ -586,6 +592,32 @@ class EnvoyValidate(unittest.TestCase):
         for name, breaker in (("adversarial_corrupt_jwks", corrupt_jwks),
                               ("negative_unknown_provider", unknown_provider),
                               ("negative_missing_key_file", missing_key)):
+            with self.subTest(name):
+                cfg = json.loads(json.dumps(base))
+                breaker(cfg)
+                path = self.dir / f"{name}.json"
+                path.write_text(json.dumps(cfg))
+                self.assertNotEqual(self.validate(path).returncode, 0, f"{name} must fail validate")
+
+    def test_check_the_checks_validate_rejects_a_broken_front_door(self):
+        base = json.loads(self.render("front_base", self.modes()["positive_front_door"]).read_text())
+
+        # Envoy resolves ext_authz's http_service cluster at run time, so validate
+        # passes a missing one; FrontDoorRender's every-cluster-exists row covers it.
+        def route_cluster_missing(cfg):
+            front_routes_of(cfg)[-1]["route"]["cluster"] = "nobody"
+
+        def per_route_wrong_type(cfg):
+            front_routes_of(cfg)[0]["typed_per_filter_config"]["envoy.filters.http.ext_authz"]["@type"] = \
+                E.any_type("envoy.extensions.filters.http.ext_authz.v3.Nope")
+
+        def front_key_missing(cfg):
+            chain = front_listener_of(cfg)["filter_chains"][0]
+            chain["transport_socket"]["typed_config"]["common_tls_context"]["tls_certificates"][0]["private_key"]["filename"] = str(self.dir / "nope.key")
+
+        for name, breaker in (("negative_route_cluster_missing", route_cluster_missing),
+                              ("adversarial_per_route_type_unknown", per_route_wrong_type),
+                              ("negative_front_door_key_missing", front_key_missing)):
             with self.subTest(name):
                 cfg = json.loads(json.dumps(base))
                 breaker(cfg)
@@ -899,6 +931,293 @@ class WebhookListener(unittest.TestCase):
         self.assertFalse([l for l in cfg["static_resources"]["listeners"] if l["name"] == "fleet_webhook"])
         self.assertFalse([c for c in cfg["static_resources"]["clusters"]
                           if c["name"] == "agent_fleet_webhook"])
+
+
+
+# ---------------------------------------------------------------- the front door
+
+
+def header_table() -> dict:
+    """F4's table: the real spec's copy when the nix check passes one, else the repo's."""
+    real = os.environ.get("PORTAL_ENVOY_SPEC")
+    if real:
+        return json.loads(Path(real).read_text())["front_door"]["headers"]
+    here = Path(__file__).resolve().parents[2] / "nix" / "portal" / "front-door-headers.json"
+    return json.loads(here.read_text())
+
+
+FRONT_RAW = {
+    "main": {"name": "front_door", "port": 8443, "check": "/_check/main"},
+    "hyperdx": {"name": "front_door_hyperdx", "port": 8444, "check": "/_check/hyperdx"},
+    "upstreams": {"gate": 8097, "dex": 5556, "portal": 8092, "gateway": 50100, "sessions": 50080,
+                  "fleet": 50086, "grafana": 3000, "prometheus": 9090, "hyperdx": 8080},
+    "rpc_services": {"sessions": ["agent.v1.AgentSessionService", "agent.v1.SessionRegistryService"],
+                     "fleet": ["agent.v1.ReviewFleetService"]},
+    "headers": header_table(),
+}
+FRONT_ENV = {"PORTAL_FRONT_DOOR": "on", "PORTAL_FRONT_DOOR_CERT": "/h/front.crt",
+             "PORTAL_FRONT_DOOR_KEY": "/h/front.key"}
+
+
+def front_spec(**edit) -> E.Spec:
+    raw = json.loads(json.dumps(FRONT_RAW))
+    raw.update(edit)
+    return E.Spec(listeners=SPEC.listeners, otel_port=4317, gateway_port=50100,
+                  front_door=E.load_front_door(raw))
+
+
+def front_rendered(env: dict | None = None) -> dict:
+    spec = front_spec()
+    return E.render(spec, E.knobs_from_env({**FRONT_ENV, **(env or {})}, spec), None, {})
+
+
+def front_listener_of(cfg: dict, name: str = "front_door") -> dict:
+    return next(l for l in cfg["static_resources"]["listeners"] if l["name"] == name)
+
+
+def front_hcm(cfg: dict, name: str = "front_door") -> dict:
+    return front_listener_of(cfg, name)["filter_chains"][0]["filters"][0]["typed_config"]
+
+
+def front_routes_of(cfg: dict, name: str = "front_door") -> list[dict]:
+    return front_hcm(cfg, name)["route_config"]["virtual_hosts"][0]["routes"]
+
+
+def authz_of(cfg: dict, name: str = "front_door") -> dict:
+    return next(f for f in front_hcm(cfg, name)["http_filters"]
+                if f["name"] == "envoy.filters.http.ext_authz")["typed_config"]
+
+
+def route_to(cfg: dict, match: dict) -> dict:
+    return next(r for r in front_routes_of(cfg) if r["match"] == match)
+
+
+def edited_table(header: str, column: str, action: str) -> dict:
+    t = json.loads(json.dumps(header_table()))
+    t["headers"][header][column] = action
+    return t
+
+
+class LoadFrontDoor(unittest.TestCase):
+    def test_positive_the_real_table_loads(self):
+        fd = front_spec().front_door
+        self.assertEqual(fd.replaced("rpc"), ["authorization"])
+        self.assertEqual(fd.replaced("grafana"), ["x-seddon-role", "x-seddon-user"])
+        self.assertIn("cookie", fd.removed("rpc"))
+        self.assertNotIn("cookie", fd.removed("auth"))
+
+    def test_table(self):
+        hdr = header_table()
+        bad_name = json.loads(json.dumps(hdr))
+        bad_name["headers"]["x-seddon-user\r\nx-evil"] = bad_name["headers"].pop("x-seddon-user")
+        upper = json.loads(json.dumps(hdr))
+        upper["headers"]["Cookie"] = upper["headers"].pop("cookie")
+        missing_col = json.loads(json.dumps(hdr))
+        del missing_col["headers"]["cookie"]["hyperdx"]
+        cases = {
+            "negative_unknown_action": ({"headers": edited_table("cookie", "rpc", "maybe")}, "is not one of"),
+            "negative_missing_column": ({"headers": missing_col}, "exactly the columns"),
+            "negative_reordered_routes": ({"headers": {**hdr, "routes": list(reversed(hdr["routes"]))}}, "routes must be"),
+            "negative_check_prefix": ({"main": {**FRONT_RAW["main"], "check": "/auth/login"}}, "check prefix"),
+            "negative_shared_port": ({"hyperdx": {**FRONT_RAW["hyperdx"], "port": 8443}}, "own port"),
+            "negative_missing_upstream": ({"upstreams": {k: v for k, v in FRONT_RAW["upstreams"].items() if k != "gate"}}, "upstreams must be"),
+            "boundary_port_zero": ({"upstreams": {**FRONT_RAW["upstreams"], "dex": 0}}, "out of range"),
+            "boundary_port_65536": ({"main": {**FRONT_RAW["main"], "port": 65536}}, "out of range"),
+            "adversarial_replaced_on_unchecked_auth": ({"headers": edited_table("x-seddon-user", "auth", "replaced")}, "never checked"),
+            "adversarial_replaced_on_unchecked_dex": ({"headers": edited_table("authorization", "dex", "replaced")}, "never checked"),
+            "adversarial_client_authorization_kept": ({"headers": edited_table("authorization", "grafana", "kept")}, "never passed through"),
+            "adversarial_crlf_header_name": ({"headers": bad_name}, "lowercase header name"),
+            "adversarial_uppercase_header_name": ({"headers": upper}, "lowercase header name"),
+            "adversarial_service_path_injection": ({"rpc_services": {"sessions": ["agent.v1.X/../grafana"], "fleet": []}}, "not an agent.v1"),
+            "adversarial_service_prefix_widening": ({"rpc_services": {"sessions": ["agent.v1."], "fleet": []}}, "not an agent.v1"),
+            "adversarial_service_on_two_processes": ({"rpc_services": {"sessions": ["agent.v1.ReviewFleetService"], "fleet": ["agent.v1.ReviewFleetService"]}}, "two processes"),
+        }
+        for name, (edit, want) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(E.EnvoyError) as e:
+                    front_spec(**edit)
+                self.assertIn(want, str(e.exception))
+
+    def test_negative_bad_spec_is_reported_as_one(self):
+        raw = {**SPEC_RAW, "front_door": {k: v for k, v in FRONT_RAW.items() if k != "upstreams"}}
+        with self.assertRaises(E.EnvoyError):
+            E.Spec.load(raw)
+
+    def test_boundary_no_front_door_key_is_backward_compatible(self):
+        self.assertIsNone(E.Spec.load(SPEC_RAW).front_door)
+
+
+class FrontDoorKnobs(unittest.TestCase):
+    def test_positive_off_by_default_renders_nothing(self):
+        spec = front_spec()
+        cfg = E.render(spec, E.knobs_from_env({}, spec), None, {})
+        names = {l["name"] for l in cfg["static_resources"]["listeners"]}
+        self.assertFalse(names & {"front_door", "front_door_hyperdx"})
+        self.assertFalse([c for c in cfg["static_resources"]["clusters"] if c["name"].startswith("front_")])
+
+    def test_table(self):
+        cases = {
+            "negative_on_without_a_certificate": ({"PORTAL_FRONT_DOOR": "on"}, "HTTPS only"),
+            "negative_on_with_a_cert_and_no_key": ({"PORTAL_FRONT_DOOR": "on", "PORTAL_FRONT_DOOR_CERT": "/c"}, "HTTPS only"),
+            "negative_unknown_mode": ({"PORTAL_FRONT_DOOR": "yes"}, "must be one of"),
+            "negative_knob_while_off": ({"PORTAL_FRONT_DOOR_CERT": "/c"}, "not on"),
+            "negative_relative_certificate": ({**FRONT_ENV, "PORTAL_FRONT_DOOR_CERT": "front.crt"}, "absolute path"),
+            "negative_http_origin": ({**FRONT_ENV, "PORTAL_FRONT_DOOR_ORIGINS": "http://other.example"}, "https"),
+            "adversarial_host_name_not_ip": ({**FRONT_ENV, "PORTAL_FRONT_DOOR_HOST": "evil.example"}, "not an IP"),
+            "adversarial_wildcard_origin": ({**FRONT_ENV, "PORTAL_FRONT_DOOR_ORIGINS": "*"}, "no wildcards"),
+            "adversarial_origin_with_crlf": ({**FRONT_ENV, "PORTAL_FRONT_DOOR_ORIGINS": "https://a.example\r\nx: y"}, "control character"),
+        }
+        spec = front_spec()
+        for name, (env, want) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(E.EnvoyError) as e:
+                    E.knobs_from_env(env, spec)
+                self.assertIn(want, str(e.exception))
+
+    def test_negative_on_without_a_front_door_in_the_spec(self):
+        with self.assertRaises(E.EnvoyError) as e:
+            E.knobs_from_env(FRONT_ENV, SPEC)
+        self.assertIn("no front_door", str(e.exception))
+
+
+class FrontDoorRender(unittest.TestCase):
+    def test_positive_both_listeners_bind_the_host_over_tls(self):
+        cfg = front_rendered({"PORTAL_FRONT_DOOR_HOST": "0.0.0.0"})
+        for name, port in (("front_door", 8443), ("front_door_hyperdx", 8444)):
+            l = front_listener_of(cfg, name)
+            self.assertEqual(l["address"]["socket_address"], {"address": "0.0.0.0", "port_value": port})
+            tls = l["filter_chains"][0]["transport_socket"]["typed_config"]["common_tls_context"]
+            self.assertEqual(tls["tls_certificates"][0]["private_key"]["filename"], "/h/front.key")
+
+    def test_positive_each_route_removes_exactly_its_table_column(self):
+        cfg = front_rendered()
+        fd = front_spec().front_door
+        column = {"front_gate": "auth", "front_dex": "dex", "front_rpc_gateway": "rpc",
+                  "front_rpc_sessions": "rpc", "front_rpc_fleet": "rpc", "front_grafana": "grafana",
+                  "front_prometheus": "prometheus", "front_portal": "portal", "front_hyperdx": "hyperdx"}
+        routes = front_routes_of(cfg) + front_routes_of(cfg, "front_door_hyperdx")
+        self.assertEqual({r["route"]["cluster"] for r in routes}, set(column))
+        for r in routes:
+            with self.subTest(r["match"]):
+                col = column[r["route"]["cluster"]]
+                self.assertEqual(sorted(r.get("request_headers_to_remove", [])), fd.removed(col))
+
+    def test_positive_a_check_may_set_only_the_replaced_headers(self):
+        cfg = front_rendered()
+        main = authz_of(cfg)["http_service"]["authorization_response"]
+        self.assertEqual([p["exact"] for p in main["allowed_upstream_headers"]["patterns"]],
+                         ["authorization", "x-seddon-role", "x-seddon-user"])
+        hdx = authz_of(cfg, "front_door_hyperdx")["http_service"]["authorization_response"]
+        self.assertNotIn("allowed_upstream_headers", hdx)
+
+    def test_positive_the_check_fails_closed_per_listener(self):
+        cfg = front_rendered()
+        for name, prefix in (("front_door", "/_check/main"), ("front_door_hyperdx", "/_check/hyperdx")):
+            with self.subTest(name):
+                a = authz_of(cfg, name)
+                self.assertIs(a["failure_mode_allow"], False)
+                self.assertEqual(a["http_service"]["path_prefix"], prefix)
+                self.assertEqual(a["http_service"]["server_uri"]["timeout"], "1s")
+                self.assertEqual(a["http_service"]["server_uri"]["cluster"], "front_gate")
+                self.assertEqual([p["exact"] for p in a["allowed_headers"]["patterns"]],
+                                 ["cookie", "authorization"])
+
+    def test_negative_every_cluster_the_front_door_names_is_rendered(self):
+        # `envoy --mode validate` does not resolve ext_authz's cluster, so this does.
+        cfg = front_rendered()
+        clusters = {c["name"] for c in cfg["static_resources"]["clusters"]}
+        for name in ("front_door", "front_door_hyperdx"):
+            with self.subTest(name):
+                self.assertIn(authz_of(cfg, name)["http_service"]["server_uri"]["cluster"], clusters)
+                for r in front_routes_of(cfg, name):
+                    self.assertIn(r["route"]["cluster"], clusters)
+
+    def test_positive_a_denial_reaches_the_browser_with_its_redirect(self):
+        client = authz_of(front_rendered())["http_service"]["authorization_response"]["allowed_client_headers"]
+        names = [p["exact"] for p in client["patterns"]]
+        self.assertIn("location", names)
+        self.assertIn("set-cookie", names)
+
+    def test_positive_only_sign_in_and_dex_skip_the_check(self):
+        cfg = front_rendered()
+        skipped = [r["match"] for r in front_routes_of(cfg) + front_routes_of(cfg, "front_door_hyperdx")
+                   if "envoy.filters.http.ext_authz" in r.get("typed_per_filter_config", {})]
+        self.assertEqual(skipped, [{"path": p} for p in E.GATE_PATHS] + [{"path_separated_prefix": "/dex"}])
+        for r in front_routes_of(cfg)[:4]:
+            self.assertIs(r["typed_per_filter_config"]["envoy.filters.http.ext_authz"]["disabled"], True)
+
+    def test_positive_rpcs_reach_the_process_that_serves_them(self):
+        cfg = front_rendered()
+        self.assertEqual(route_to(cfg, {"prefix": "/agent.v1.AgentSessionService/"})["route"]["cluster"],
+                         "front_rpc_sessions")
+        self.assertEqual(route_to(cfg, {"prefix": "/agent.v1.ReviewFleetService/"})["route"]["cluster"],
+                         "front_rpc_fleet")
+        matches = [r["match"] for r in front_routes_of(cfg)]
+        self.assertLess(matches.index({"prefix": "/agent.v1.ReviewFleetService/"}),
+                        matches.index({"prefix": "/agent.v1."}), "specific services before the gateway")
+        self.assertEqual(matches[-1], {"prefix": "/"}, "the portal is last")
+        self.assertEqual(route_to(cfg, {"prefix": "/agent.v1."})["route"]["timeout"], "0s")
+
+    def test_adversarial_lookalike_paths_are_not_routed_as_the_tool(self):
+        # `/dexfoo` and `/grafanax` fall through to the portal route, which the gate
+        # checks (and its allowlist refuses); `/auth/x` is not a gate route either.
+        matches = [r["match"] for r in front_routes_of(front_rendered())]
+        for m in matches:
+            self.assertNotIn(m.get("prefix"), ("/dex", "/grafana", "/prometheus", "/auth/", "/auth", "/_check/"))
+        self.assertIn({"path_separated_prefix": "/dex"}, matches)
+
+    def test_adversarial_path_tricks_are_normalised_or_refused(self):
+        h = front_hcm(front_rendered())
+        self.assertIs(h["normalize_path"], True)
+        self.assertIs(h["merge_slashes"], True)
+        self.assertEqual(h["path_with_escaped_slashes_action"], "REJECT_REQUEST")
+        self.assertIs(h["use_remote_address"], True)
+
+    def test_positive_hsts_on_both_listeners(self):
+        cfg = front_rendered()
+        for name in ("front_door", "front_door_hyperdx"):
+            vh = front_hcm(cfg, name)["route_config"]["virtual_hosts"][0]
+            self.assertEqual(vh["response_headers_to_add"][0]["header"],
+                             {"key": "strict-transport-security", "value": E.HSTS})
+
+    def test_positive_no_cross_origin_by_default(self):
+        cfg = front_rendered()
+        for name in ("front_door", "front_door_hyperdx"):
+            h = front_hcm(cfg, name)
+            self.assertNotIn("envoy.filters.http.cors", [f["name"] for f in h["http_filters"]])
+            self.assertNotIn("typed_per_filter_config", h["route_config"]["virtual_hosts"][0])
+
+    def test_corner_listed_origin_is_answered_before_the_check_and_never_credentialed(self):
+        cfg = front_rendered({"PORTAL_FRONT_DOOR_ORIGINS": "https://other.example"})
+        names = [f["name"] for f in front_hcm(cfg)["http_filters"]]
+        self.assertEqual(names, ["envoy.filters.http.cors", "envoy.filters.http.ext_authz",
+                                 "envoy.filters.http.grpc_web", "envoy.filters.http.router"])
+        policy = front_hcm(cfg)["route_config"]["virtual_hosts"][0]["typed_per_filter_config"]["envoy.filters.http.cors"]
+        self.assertNotIn("allow_credentials", policy)
+        self.assertEqual(policy["allow_origin_string_match"], [{"exact": "https://other.example"}])
+        hdx = [f["name"] for f in front_hcm(cfg, "front_door_hyperdx")["http_filters"]]
+        self.assertNotIn("envoy.filters.http.cors", hdx, "HyperDX's page makes no cross-origin calls")
+
+    def test_corner_rpc_clusters_follow_upstream_tls_and_the_rest_stay_plain_h1(self):
+        cfg = front_rendered({"PORTAL_UPSTREAM_CA": "/h/ca.crt"})
+        clusters = {c["name"]: c for c in cfg["static_resources"]["clusters"]}
+        for n in ("front_rpc_gateway", "front_rpc_sessions", "front_rpc_fleet"):
+            self.assertIn("transport_socket", clusters[n])
+            self.assertIn("typed_extension_protocol_options", clusters[n])
+        for n in ("front_gate", "front_dex", "front_portal", "front_grafana", "front_prometheus", "front_hyperdx"):
+            self.assertNotIn("transport_socket", clusters[n])
+            self.assertNotIn("typed_extension_protocol_options", clusters[n])
+
+    def test_positive_container_paths_remap_the_front_door_certificate(self):
+        k = E.knobs_from_env(FRONT_ENV, front_spec())
+        paths = E.container_paths(k)
+        self.assertEqual(paths["/h/front.crt"], f"{E.CONTAINER_TLS_DIR}/front.crt")
+        self.assertEqual(paths["/h/front.key"], f"{E.CONTAINER_TLS_DIR}/front.key")
+
+    def test_adversarial_values_cannot_escape_their_string(self):
+        cfg = front_rendered({"PORTAL_OTLP_AUTHORIZATION": 'k", "x": "y'})
+        self.assertEqual(json.loads(json.dumps(cfg)), cfg)
+        self.assertNotIn("x", front_hcm(cfg))
 
 
 if __name__ == "__main__":

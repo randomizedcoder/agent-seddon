@@ -37,6 +37,14 @@ pub fn safe_segment(s: &str) -> bool {
 /// characters, OpenID Connect Core §2) under the `user:<issuer>/` prefix.
 pub const MAX_SUBJECT_LEN: usize = 512;
 
+/// Longest `sub` an IdP may sign (OpenID Connect Core §2).
+pub const MAX_IDP_SUBJECT_LEN: usize = 255;
+
+// A login's subject is `user:<issuer>/<sub>`, and an issuer name is a
+// [`safe_segment`]: the longest name with the longest `sub` still fits, so a token
+// the agent mints always passes [`safe_subject`] when it is read back.
+const _: () = assert!("user:/".len() + MAX_SEGMENT_LEN + MAX_IDP_SUBJECT_LEN <= MAX_SUBJECT_LEN);
+
 /// A principal's subject that can travel as an HTTP header value (the front door's
 /// `x-seddon-user`) and an audit field: non-empty, at most [`MAX_SUBJECT_LEN`] bytes,
 /// and visible ASCII only (0x21–0x7E), so no CR/LF can split a header and no space or
@@ -372,6 +380,7 @@ mod tests {
     #[case::adversarial_nul("u\0x", false)]
     #[case::adversarial_tab("u\tx", false)]
     #[case::adversarial_huge(&"a".repeat(100_000), false)]
+    #[case::boundary_longest_login(&format!("user:{}/{}", "i".repeat(MAX_SEGMENT_LEN), "s".repeat(MAX_IDP_SUBJECT_LEN)), true)]
     fn safe_subject_cases(#[case] s: &str, #[case] want: bool) {
         assert_eq!(safe_subject(s), want, "{s:?}");
     }

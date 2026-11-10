@@ -14,7 +14,13 @@
 //! It binds loopback only (`[auth.gate] listen`, checked at load) and never reads a
 //! request body. `tiny_http` has no per-connection read timeout, so a slow client
 //! holds a worker until it finishes or disconnects; only Envoy reaches it.
+//!
+//! Login and callback wait on the IdP (discovery, the token endpoint), so they hold a
+//! worker for up to the IdP timeout. At most [`BROWSER_WORKERS`] answer them at once
+//! and the next gets a 503, so the rest of [`WORKERS`] stay free for Envoy's checks:
+//! a slow IdP slows sign-in, never every request through the front door.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,6 +36,10 @@ pub const CHECK_HYPERDX: &str = "/_check/hyperdx";
 pub const MAX_URL: usize = MAX_QUERY + 4 * 1024;
 /// Requests answered at once; more wait in `tiny_http`'s queue.
 pub const WORKERS: usize = 16;
+/// Browser routes (`/auth/*`) answered at once, out of [`WORKERS`].
+pub const BROWSER_WORKERS: usize = WORKERS / 2;
+/// Longest header name a log line repeats when an answer can't be written.
+const MAX_LOGGED_NAME: usize = 64;
 
 /// What the listener calls: [`AuthGate`]'s routes, behind a trait so the adapter's
 /// mapping is tested on its own.
@@ -150,6 +160,11 @@ fn checked(url: &str) -> Option<(Listener, &str)> {
 /// the header early. Every value the routes write is checked upstream; this is
 /// the last line before the socket.
 pub fn writable(reply: &Reply) -> bool {
+    unwritable(reply).is_none()
+}
+
+/// The name of the first header [`writable`] refuses.
+fn unwritable(reply: &Reply) -> Option<&str> {
     let token = |n: &str| {
         !n.is_empty()
             && n.bytes()
@@ -158,7 +173,31 @@ pub fn writable(reply: &Reply) -> bool {
     reply
         .headers
         .iter()
-        .all(|(n, v)| token(n) && v.bytes().all(|b| (0x20..=0x7e).contains(&b)))
+        .find(|(n, v)| !token(n) || !v.bytes().all(|b| (0x20..=0x7e).contains(&b)))
+        .map(|(n, _)| n.as_str())
+}
+
+/// Whether `url` is one of the browser's routes, which wait on the IdP.
+fn is_browser(url: &str) -> bool {
+    url.starts_with("/auth/")
+}
+
+/// One of the [`BROWSER_WORKERS`] slots, given back on drop.
+pub(super) struct BrowserSlot<'a>(&'a AtomicUsize);
+
+impl Drop for BrowserSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A browser slot, or `None` when [`BROWSER_WORKERS`] are already taken.
+pub(super) fn browser_slot(busy: &AtomicUsize) -> Option<BrowserSlot<'_>> {
+    busy.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        (n < BROWSER_WORKERS).then(|| n + 1)
+    })
+    .ok()
+    .map(|_| BrowserSlot(busy))
 }
 
 /// Serve `server` on [`WORKERS`] threads until the process ends. Each request is
@@ -169,14 +208,16 @@ pub fn serve(
     runtime: tokio::runtime::Handle,
 ) -> std::io::Result<()> {
     let server = Arc::new(server);
+    let busy = Arc::new(AtomicUsize::new(0));
     for n in 0..WORKERS {
         let (server, gate, runtime) = (server.clone(), gate.clone(), runtime.clone());
+        let busy = busy.clone();
         // unscoped-spawn: a listener worker; each request carries its own credentials.
         std::thread::Builder::new()
             .name(format!("auth-gate-{n}"))
             .spawn(move || loop {
                 match server.recv() {
-                    Ok(req) => answer(req, gate.as_ref(), &runtime),
+                    Ok(req) => answer(req, gate.as_ref(), &runtime, &busy),
                     Err(e) => {
                         tracing::error!(error = %e, "auth gate: the listener failed; worker stops");
                         break;
@@ -187,9 +228,21 @@ pub fn serve(
     Ok(())
 }
 
-fn answer(req: tiny_http::Request, gate: &dyn GateRoutes, runtime: &tokio::runtime::Handle) {
+fn answer(
+    req: tiny_http::Request,
+    gate: &dyn GateRoutes,
+    runtime: &tokio::runtime::Handle,
+    busy: &AtomicUsize,
+) {
     let method = req.method().as_str().to_string();
     let url = req.url().to_string();
+    let slot = is_browser(&url).then(|| browser_slot(busy));
+    if let Some(None) = slot {
+        let reply = Reply::new(503, "sign-in is busy; try again")
+            .with("retry-after", "1".into())
+            .with("cache-control", "no-store".into());
+        return respond(req, reply);
+    }
     let owned: Vec<(String, String)> = req
         .headers()
         .iter()
@@ -199,7 +252,7 @@ fn answer(req: tiny_http::Request, gate: &dyn GateRoutes, runtime: &tokio::runti
         .iter()
         .map(|(n, v)| (n.as_str(), v.as_str()))
         .collect();
-    let mut reply = runtime.block_on(dispatch(
+    let reply = runtime.block_on(dispatch(
         gate,
         Incoming {
             method: &method,
@@ -207,22 +260,36 @@ fn answer(req: tiny_http::Request, gate: &dyn GateRoutes, runtime: &tokio::runti
             headers: &headers,
         },
     ));
-    let mut built = headers_of(&reply);
-    if built.is_none() {
-        tracing::error!(
-            status = reply.status,
-            "auth gate: an answer had an unwritable header"
-        );
-        reply = Reply::new(500, "internal error");
-        built = Some(Vec::new());
-    }
+    drop(slot);
+    respond(req, reply);
+}
+
+/// Write `reply`, or a bare 500 when [`writable`] refuses one of its headers.
+fn respond(req: tiny_http::Request, reply: Reply) {
+    let reply = safe_to_write(reply);
     let mut response = tiny_http::Response::from_string(reply.body).with_status_code(reply.status);
-    for h in built.into_iter().flatten() {
+    for h in headers_of(&reply).into_iter().flatten() {
         response.add_header(h);
     }
     if let Err(e) = req.respond(response) {
         tracing::debug!(error = %e, "auth gate: the client went away");
     }
+}
+
+/// `reply`, or in its place a 500 that carries none of its headers but
+/// `cache-control: no-store`. The log names the refused header (escaped and cut
+/// short), never its value, which may hold a token.
+pub(super) fn safe_to_write(reply: Reply) -> Reply {
+    let Some(name) = unwritable(&reply) else {
+        return reply;
+    };
+    let name: String = name.escape_debug().take(MAX_LOGGED_NAME).collect();
+    tracing::error!(
+        status = reply.status,
+        header = %name,
+        "auth gate: an answer had an unwritable header"
+    );
+    Reply::new(500, "internal error").with("cache-control", "no-store".into())
 }
 
 /// `reply`'s headers for `tiny_http`, after a content type; `None` unless

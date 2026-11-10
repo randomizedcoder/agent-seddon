@@ -1,0 +1,60 @@
+{
+  "_doc": "security-hardening 10, F4: what reaches each front-door route's upstream, per identity header. removed: dropped from the request. replaced: the ext_authz check's 200 always carries it, and Envoy overwrites the client's value. kept: passed through. Read by nix/portal/envoy-spec.nix (rendered by test/portal-envoy/portal_envoy.py) and by the gate's Rust tests (Route::replaced), so a header added to the gate is one new row here.",
+  "routes": ["rpc", "portal", "auth", "dex", "grafana", "prometheus", "hyperdx"],
+  "headers": {
+    "authorization": {
+      "rpc": "replaced",
+      "portal": "removed",
+      "auth": "removed",
+      "dex": "removed",
+      "grafana": "removed",
+      "prometheus": "removed",
+      "hyperdx": "removed"
+    },
+    "cookie": {
+      "rpc": "removed",
+      "portal": "removed",
+      "auth": "kept",
+      "dex": "kept",
+      "grafana": "removed",
+      "prometheus": "removed",
+      "hyperdx": "removed"
+    },
+    "x-seddon-user": {
+      "rpc": "removed",
+      "portal": "removed",
+      "auth": "removed",
+      "dex": "removed",
+      "grafana": "replaced",
+      "prometheus": "removed",
+      "hyperdx": "removed"
+    },
+    "x-seddon-role": {
+      "rpc": "removed",
+      "portal": "removed",
+      "auth": "removed",
+      "dex": "removed",
+      "grafana": "replaced",
+      "prometheus": "removed",
+      "hyperdx": "removed"
+    },
+    "x-agent-user-id": {
+      "rpc": "removed",
+      "portal": "removed",
+      "auth": "removed",
+      "dex": "removed",
+      "grafana": "removed",
+      "prometheus": "removed",
+      "hyperdx": "removed"
+    },
+    "x-agent-session-id": {
+      "rpc": "kept",
+      "portal": "removed",
+      "auth": "removed",
+      "dex": "removed",
+      "grafana": "removed",
+      "prometheus": "removed",
+      "hyperdx": "removed"
+    }
+  }
+}

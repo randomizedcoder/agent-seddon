@@ -16,10 +16,12 @@ enum Called {
     Check(Listener, String, Option<String>, Option<String>),
 }
 
-/// Records each call and answers with `reply`.
+/// Records each call and answers with `reply`. With `idp`, a login waits for a
+/// permit first, as one waiting on a slow IdP would.
 struct Fake {
     calls: Mutex<Vec<Called>>,
     reply: Reply,
+    idp: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Fake {
@@ -27,6 +29,7 @@ impl Fake {
         Self {
             calls: Mutex::new(Vec::new()),
             reply,
+            idp: None,
         }
     }
 
@@ -43,7 +46,11 @@ impl Fake {
 #[async_trait]
 impl GateRoutes for Fake {
     async fn login(&self, query: &str) -> Reply {
-        self.saw(Called::Login(query.into()))
+        let reply = self.saw(Called::Login(query.into()));
+        if let Some(idp) = &self.idp {
+            idp.acquire().await.expect("permit").forget();
+        }
+        reply
     }
     async fn callback(&self, query: &str, cookie: Option<&str>, user_agent: &str) -> Reply {
         self.saw(Called::Callback(
@@ -178,11 +185,44 @@ fn writable_cases(#[case] reply: Reply, #[case] want: bool) {
     assert_eq!(writable(&reply), want, "{reply:?}");
 }
 
+#[rstest]
+#[case::positive_first(0, true)]
+#[case::boundary_last_free(BROWSER_WORKERS - 1, true)]
+#[case::boundary_all_taken(BROWSER_WORKERS, false)]
+#[case::adversarial_over_count(usize::MAX, false)]
+fn browser_slot_cases(#[case] taken: usize, #[case] granted: bool) {
+    let busy = AtomicUsize::new(taken);
+    let slot = browser_slot(&busy);
+    assert_eq!(slot.is_some(), granted);
+    let held = if granted { taken + 1 } else { taken };
+    assert_eq!(busy.load(Ordering::Acquire), held);
+    drop(slot);
+    assert_eq!(busy.load(Ordering::Acquire), taken, "a slot is given back");
+}
+
+#[rstest]
+#[case::positive_written_as_is(with_header("location", "/grafana/"), 200, Some("/grafana/"))]
+#[case::adversarial_crlf_value(with_header("location", "/\r\nset-cookie: x"), 500, None)]
+#[case::adversarial_name_with_newline(with_header("x\ny", "v"), 500, None)]
+fn safe_to_write_cases(#[case] reply: Reply, #[case] status: u16, #[case] location: Option<&str>) {
+    let out = safe_to_write(reply);
+    assert_eq!(out.status, status);
+    assert_eq!(out.header("location"), location);
+    if status == 500 {
+        assert_eq!(out.header("cache-control"), Some("no-store"));
+        assert_eq!(out.headers.len(), 1, "{out:?}");
+    }
+}
+
 /// Serve `fake` on a loopback port.
 fn serving(fake: Fake) -> String {
+    serving_shared(Arc::new(fake))
+}
+
+fn serving_shared(fake: Arc<Fake>) -> String {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
     let addr = server.server_addr().to_ip().expect("ip");
-    serve(server, Arc::new(fake), tokio::runtime::Handle::current()).expect("serve");
+    serve(server, fake, tokio::runtime::Handle::current()).expect("serve");
     format!("http://{addr}")
 }
 
@@ -236,4 +276,81 @@ async fn adversarial_unwritable_answer_becomes_500_with_none_of_its_headers() {
     assert_eq!(resp.status().as_u16(), 500);
     assert!(resp.headers().get("x-seddon-user").is_none());
     assert!(resp.headers().get("x-seddon-role").is_none());
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+}
+
+/// Send one `GET path` on its own connection and return the status line, without
+/// a client pool between the test and the listener.
+fn raw_get(base: &str, path: &str) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let addr = base.trim_start_matches("http://");
+    let mut conn = std::net::TcpStream::connect(addr).expect("connect");
+    write!(
+        conn,
+        "GET {path} HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n"
+    )
+    .expect("send");
+    let mut line = String::new();
+    BufReader::new(conn)
+        .read_line(&mut line)
+        .expect("status line");
+    line.trim_end().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corner_a_stalled_idp_leaves_the_checks_their_workers() {
+    let idp = Arc::new(tokio::sync::Semaphore::new(0));
+    let fake = Arc::new(Fake {
+        idp: Some(idp.clone()),
+        ..Fake::new(ok())
+    });
+    let base = serving_shared(fake.clone());
+    let held: Vec<_> = (0..BROWSER_WORKERS)
+        .map(|_| {
+            let base = base.clone();
+            std::thread::spawn(move || raw_get(&base, "/auth/login"))
+        })
+        .collect();
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while fake.calls().len() < BROWSER_WORKERS {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "every sign-in reached the IdP: {} of {BROWSER_WORKERS}",
+        fake.calls().len()
+    );
+
+    let client = no_redirects();
+    let one_more = client
+        .get(format!("{base}/auth/login"))
+        .send()
+        .await
+        .expect("answered");
+    assert_eq!(one_more.status().as_u16(), 503);
+    assert_eq!(
+        one_more
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    let check = client
+        .get(format!("{base}/_check/main/grafana/"))
+        .send()
+        .await
+        .expect("answered");
+    assert_eq!(check.status().as_u16(), 200, "the check is not queued");
+
+    idp.add_permits(BROWSER_WORKERS);
+    for h in held {
+        assert_eq!(h.join().expect("joined"), "HTTP/1.1 200 OK");
+    }
 }

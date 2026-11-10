@@ -671,6 +671,48 @@ fn gate_construction_cases(
     }
 }
 
+/// `[auth.gate] issuer = "default"` names the single-issuer form (`[auth] issuer`),
+/// which the config accepts at load; the gate builds over it and sends a login there.
+#[tokio::test]
+async fn corner_legacy_default_issuer_serves_sign_in() {
+    let idp = FakeIssuer::start_code(
+        TestKey::Rsa,
+        CodeScript {
+            client_id: CLIENT.into(),
+            client_secret: None,
+            claims: json!({"sub": "alice", "org": TENANT, "exp": now() + 600}),
+        },
+    );
+    let dir = agent_testkit::tempdir();
+    let key = dir.join("token-signer.key");
+    std::fs::write(&key, EC_PRIV_SEC1_PEM).expect("write key");
+    let layer = AuthLayer::from_params(AuthParams {
+        mode: "oidc".into(),
+        issuer: idp.issuer().into(),
+        audience: CLIENT.into(),
+        jwks_url: idp.jwks_url(),
+        token: Some(TokenParams {
+            issuer: "https://agent.test".into(),
+            audience: "agent-seddon".into(),
+            signing_key: key.to_string_lossy().into_owned(),
+            ..TokenParams::default()
+        }),
+        redirect_uris: vec![CALLBACK_URL.into()],
+        ..AuthParams::default()
+    })
+    .expect("layer builds");
+    let gate = layer
+        .auth_gate(GateConfig {
+            issuer: "default".into(),
+            main_origin: MAIN.into(),
+        })
+        .expect("the legacy issuer is a browser issuer");
+    let login = gate.login("rd=%2F").await;
+    assert_eq!(login.status, 302, "{login:?}");
+    let to = login.header("location").expect("to the issuer");
+    assert!(to.starts_with(idp.issuer()), "{to}");
+}
+
 #[tokio::test]
 async fn corner_trailing_slash_origin_sends_hyperdx_logins_without_a_double_slash() {
     let mut h = harness("alice", true);
@@ -695,4 +737,56 @@ async fn corner_trailing_slash_origin_sends_hyperdx_logins_without_a_double_slas
         reply.header("location"),
         Some("https://front.test:8443/auth/login")
     );
+}
+
+fn cached(token: &str, expires_at: u64) -> Cached {
+    Cached {
+        roles: vec![],
+        token: token.into(),
+        expires_at,
+    }
+}
+
+/// What a full token cache does with one more session.
+#[derive(Clone, Copy, Debug)]
+enum Fill {
+    /// Room for one more.
+    OneShort,
+    /// Full of live entries.
+    Full,
+    /// Full, and the new session's own entry is one of them.
+    FullWithOwn,
+    /// Full, but one entry has lapsed.
+    FullOneLapsed,
+}
+
+#[rstest]
+#[case::boundary_last_room(Fill::OneShort, true, MAX_CACHED_TOKENS)]
+#[case::adversarial_full_of_live_sessions_keeps_them(Fill::Full, false, MAX_CACHED_TOKENS)]
+#[case::corner_own_entry_is_replaced_when_full(Fill::FullWithOwn, true, MAX_CACHED_TOKENS)]
+#[case::corner_a_lapsed_entry_makes_room(Fill::FullOneLapsed, true, MAX_CACHED_TOKENS)]
+fn token_cache_cap_cases(#[case] fill: Fill, #[case] cached_new: bool, #[case] len: usize) {
+    const NOW: u64 = 1_000;
+    let mut cache: HashMap<String, Cached> = (0..MAX_CACHED_TOKENS)
+        .map(|i| (format!("sid-{i}"), cached("old", NOW + 600)))
+        .collect();
+    let sid = match fill {
+        Fill::OneShort => {
+            cache.remove("sid-0");
+            "new"
+        }
+        Fill::Full => "new",
+        Fill::FullWithOwn => "sid-7",
+        Fill::FullOneLapsed => {
+            cache.insert("sid-0".into(), cached("old", NOW));
+            "new"
+        }
+    };
+    remember(&mut cache, NOW, sid, cached("fresh", NOW + 600));
+    assert_eq!(
+        cache.get(sid).map(|c| c.token.as_str()) == Some("fresh"),
+        cached_new,
+        "{fill:?}"
+    );
+    assert_eq!(cache.len(), len, "{fill:?}");
 }
