@@ -22,7 +22,8 @@
 //!    **opaque** reason string; the wire layer maps it to `PermissionDenied`
 //!    without leaking which check failed.
 //! 4. The **operator-global vs tenant split** (config C29/C40): a resource whose
-//!    type is [`ResourceType::is_operator_global`] (the bootstrap `Config` surface)
+//!    type is [`ResourceType::is_operator_global`] (the bootstrap `Config` surface,
+//!    and `Observability`, the operator's tools)
 //!    may be mutated **only by a host-global role** — a tenant-scoped role (e.g.
 //!    `org_admin`) is denied even in its own tenant, because operator-global keys
 //!    (ports/wiring, store DSN, auth issuer, telemetry) are host-owned, not
@@ -114,7 +115,8 @@ impl Action {
 /// their history (so approving a review is not a roster write); `Agent` is the
 /// interactive agent and the seams it runs on; `Exec` is served arbitrary
 /// execution; `Binding` is who holds which role; `Telemetry` is metrics, digests
-/// and the auth audit.
+/// and the auth audit; `Observability` is the tools' web UIs behind the front door
+/// (Grafana, Prometheus, HyperDX), which show every tenant's data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     Config,
@@ -132,11 +134,12 @@ pub enum ResourceType {
     Binding,
     Telemetry,
     Theme,
+    Observability,
 }
 
 impl ResourceType {
     /// Every resource type, in declaration order (see [`Action::ALL`]).
-    pub const ALL: [ResourceType; 15] = [
+    pub const ALL: [ResourceType; 16] = [
         ResourceType::Config,
         ResourceType::Registry,
         ResourceType::Fleet,
@@ -152,6 +155,7 @@ impl ResourceType {
         ResourceType::Binding,
         ResourceType::Telemetry,
         ResourceType::Theme,
+        ResourceType::Observability,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -171,6 +175,7 @@ impl ResourceType {
             ResourceType::Binding => "binding",
             ResourceType::Telemetry => "telemetry",
             ResourceType::Theme => "theme",
+            ResourceType::Observability => "observability",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -190,6 +195,7 @@ impl ResourceType {
             "binding" => ResourceType::Binding,
             "telemetry" => ResourceType::Telemetry,
             "theme" => ResourceType::Theme,
+            "observability" => ResourceType::Observability,
             _ => return None,
         })
     }
@@ -198,13 +204,15 @@ impl ResourceType {
     /// rather than tenant-owned. The operator/tenant split (config C29/C40): an
     /// operator-global key may be mutated only by a host-global role
     /// ([`RoleDef::crosses_tenants`]); a tenant-scoped role is denied even in its
-    /// own tenant. Only [`ResourceType::Config`] (the bootstrap TOML surface —
-    /// ports/wiring, store DSN, auth issuer, telemetry) is operator-global today;
-    /// every card registry is tenant-owned. Kept as an explicit `match` (no
-    /// wildcard) so a newly added resource type must consciously choose its side.
+    /// own tenant. Two are operator-global: [`ResourceType::Config`] (the bootstrap
+    /// TOML surface — ports/wiring, store DSN, auth issuer, telemetry) and
+    /// [`ResourceType::Observability`] (the tools show every tenant's data, so only
+    /// a host-global granter may bind it). Every card registry is tenant-owned.
+    /// Kept as an explicit `match` (no wildcard) so a newly added resource type
+    /// must consciously choose its side.
     pub fn is_operator_global(&self) -> bool {
         match self {
-            ResourceType::Config => true,
+            ResourceType::Config | ResourceType::Observability => true,
             ResourceType::Registry
             | ResourceType::Fleet
             | ResourceType::Prompt
@@ -586,6 +594,30 @@ pub fn effective_permissions(
         .collect()
 }
 
+/// Whether `principal` holds any permission at all **in its own tenant**: the
+/// same answer as `!effective_permissions(..).is_empty()`, without walking the
+/// whole matrix. In its own tenant the tenant firewall always passes, so only the
+/// role definitions and the operator-global split decide. The front door's gate
+/// asks this on every request, most often for a principal with no binding (F2),
+/// which [`effective_permissions`] would answer only after every pair.
+pub fn holds_any(catalog: &RoleCatalog, principal: &VerifiedPrincipal) -> bool {
+    principal
+        .roles
+        .iter()
+        .filter_map(|n| catalog.get(n))
+        .any(|def| {
+            // A tenant-scoped role holds nothing on an operator-global type.
+            let usable = |r: ResourceType| def.crosses_tenants || !r.is_operator_global();
+            match &def.permissions {
+                PermissionSet::All => ResourceType::ALL.iter().any(|r| usable(*r)),
+                PermissionSet::ActionsOnAll(actions) => {
+                    !actions.is_empty() && ResourceType::ALL.iter().any(|r| usable(*r))
+                }
+                PermissionSet::Pairs(pairs) => pairs.iter().any(|(_, r)| usable(*r)),
+            }
+        })
+}
+
 /// The verified principal behind a request: the identity the auth layer derived
 /// from a validated bearer token. `roles` originate **only** from the token — the
 /// client cannot assert them — so they are trustworthy input to [`authorize`].
@@ -889,15 +921,59 @@ mod tests {
         }
     }
 
+    // --- holds_any ----------------------------------------------------------
+
+    /// `holds_any` is `effective_permissions` non-empty, for the built-ins and for
+    /// roles whose only grant is operator-global.
+    #[rstest]
+    #[case::positive_reader(&[ROLE_READER], true)]
+    #[case::positive_agent_user(&[ROLE_AGENT_USER], true)]
+    #[case::positive_operator(&[ROLE_OPERATOR], true)]
+    #[case::negative_no_roles(&[], false)]
+    #[case::negative_unknown_role(&["superuser"], false)]
+    #[case::corner_unknown_then_known(&["superuser", ROLE_READER], true)]
+    #[case::positive_host_global_observer(&["obs_host"], true)]
+    // A tenant-scoped role whose only grant is operator-global holds nothing.
+    #[case::adversarial_tenant_role_on_operator_global(&["obs_tenant"], false)]
+    #[case::adversarial_tenant_role_all_actions_on_config(&["cfg_tenant"], false)]
+    #[case::negative_empty_actions(&["no_actions"], false)]
+    #[case::corner_tenant_all_still_holds_tenant_types(&["all_tenant"], true)]
+    fn holds_any_cases(#[case] roles: &[&str], #[case] want: bool) {
+        let mut catalog = RoleCatalog::builtin();
+        let obs = [(Action::Read, ResourceType::Observability)];
+        catalog.insert("obs_host", RoleDef::pairs(true, obs));
+        catalog.insert("obs_tenant", RoleDef::pairs(false, obs));
+        catalog.insert(
+            "cfg_tenant",
+            RoleDef::pairs(
+                false,
+                Action::ALL.iter().flat_map(|a| {
+                    [
+                        (*a, ResourceType::Config),
+                        (*a, ResourceType::Observability),
+                    ]
+                }),
+            ),
+        );
+        catalog.insert("no_actions", RoleDef::actions_on_all(false, []));
+        catalog.insert("all_tenant", RoleDef::admin(false));
+        let p = principal("acme", roles);
+        assert_eq!(holds_any(&catalog, &p), want);
+        assert_eq!(
+            holds_any(&catalog, &p),
+            !effective_permissions(&catalog, &p).is_empty()
+        );
+    }
+
     // --- effective_permissions --------------------------------------------
 
     #[rstest]
-    // desc: reader gets read on every resource type except the operator-global config.
+    // desc: reader gets read on every resource type except the operator-global ones.
     #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 14)]
-    // desc: org_admin: every action on every tenant resource, still not config.
+    // desc: org_admin: every action on every tenant resource, still not the operator-global ones.
     #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 8 * 14)]
-    // desc: operator: the whole matrix, config included.
-    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 15)]
+    // desc: operator: the whole matrix, config and observability included.
+    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 16)]
     // desc: agent_user is exactly its seven grants (four + its own themes).
     #[case::positive_agent_user_seven(&[ROLE_AGENT_USER], 7)]
     // desc: no roles ⇒ nothing.
@@ -1019,6 +1095,8 @@ mod tests {
     #[case::negative_review_is_tenant_owned(ResourceType::Review, false)]
     #[case::negative_binding_is_tenant_owned(ResourceType::Binding, false)]
     #[case::negative_telemetry_is_tenant_owned(ResourceType::Telemetry, false)]
+    // desc: the tools' UIs show every tenant's data (security-hardening 10 F5).
+    #[case::positive_observability_is_operator_global(ResourceType::Observability, true)]
     fn operator_global_classification(
         #[case] resource_type: ResourceType,
         #[case] expect_operator_global: bool,
@@ -1113,6 +1191,7 @@ mod tests {
     #[case::positive_review(ResourceType::Review)]
     #[case::positive_binding(ResourceType::Binding)]
     #[case::positive_telemetry(ResourceType::Telemetry)]
+    #[case::positive_observability(ResourceType::Observability)]
     fn resource_type_round_trips(#[case] r: ResourceType) {
         assert_eq!(ResourceType::parse(r.as_str()), Some(r));
     }
@@ -1523,8 +1602,8 @@ mod tests {
     #[case::negative_reviewer_to_fleet_admin(&[ROLE_REVIEWER], &[ROLE_FLEET_ADMIN], 10)]
     // desc: granting nothing exceeds nothing.
     #[case::boundary_empty_grant(&[], &[], 0)]
-    // desc: org_admin granting operator exceeds by the config surface (tenant-local view).
-    #[case::corner_operator_exceeds_org_admin_by_config(&[ROLE_ORG_ADMIN], &[ROLE_OPERATOR], 8)]
+    // desc: the operator holds what org_admin lacks: every action on the two operator-global types.
+    #[case::corner_operator_exceeds_org_admin_by_config_and_observability(&[ROLE_ORG_ADMIN], &[ROLE_OPERATOR], 8 * 2)]
     // desc: access_admin cannot hand out exec.
     #[case::adversarial_access_admin_exec(&[ROLE_ACCESS_ADMIN], &[ROLE_ORG_ADMIN], 8 * 14 - 7)]
     fn exceeding_permissions_cases(

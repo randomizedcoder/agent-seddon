@@ -659,6 +659,9 @@ let
         # A loopback issuer on another port than dex.port (5556): sign-in would 404.
         "http://127.0.0.1:9999/dex"
         "http://127.0.0.1/dex"
+        # Leading zeros are read as the number: 999 isn't dex.port, 0 is out of range.
+        "http://127.0.0.1:00999/dex"
+        "https://l2.example:00000/dex"
       ]
       && dexFails { redirectUris = [ ]; }
       && dexFails { mockLogin = false; }
@@ -697,6 +700,7 @@ let
         ""
       ]
       && !(dexFails { issuer = "http://127.0.0.1:5556/dex"; })
+      && !(dexFails { issuer = "http://127.0.0.1:05556/dex"; })
       && !(dexFails { issuer = "https://l2.example:65535/dex"; })
       # The rule follows dex.port, not a constant.
       && !(dexFails {

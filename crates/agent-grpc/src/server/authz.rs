@@ -30,8 +30,8 @@
 //! The **operator-global vs tenant split** (config C29/C40) rides entirely inside
 //! [`agent_core::authorize`]: an operator-global resource
 //! ([`ResourceType::is_operator_global`] — the bootstrap `Config` surface behind
-//! `ConfigService`) is granted only to a host-global role, so a tenant `org_admin`
-//! is denied even in its own tenant.
+//! `ConfigService`, and `Observability`, the operator's tools) is granted only to
+//! a host-global role, so a tenant `org_admin` is denied even in its own tenant.
 //!
 //! This is distinct from the per-`ToolCall` `Policy` seam: that decides what the
 //! *model* may run; this decides what an authenticated *caller* may do.

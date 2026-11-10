@@ -948,6 +948,10 @@ mod mtls;
 #[cfg(feature = "auth")]
 mod service;
 
+/// The front door's gate: return paths, the path map, permissions, deny shapes.
+#[cfg(feature = "auth")]
+pub mod gate;
+
 #[cfg(feature = "auth")]
 pub use binding::{
     resolve_roles, BindingStore, Granter, OperatorSubjects, RoleBinding, SubjectKind, Who,

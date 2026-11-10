@@ -90,7 +90,8 @@ fn session_ttl_cases(#[case] ttl: u64, #[case] want: Option<u64>) {
 #[case::positive_portal("portal", "portal")]
 #[case::corner_case_folded("CLI", "cli")]
 #[case::corner_padded(" service ", "service")]
-#[case::negative_unknown("browser", "unspecified")]
+#[case::positive_browser("browser", "browser")]
+#[case::negative_unknown("kiosk", "unspecified")]
 #[case::adversarial_injection("portal\nx", "unspecified")]
 fn client_kind_cases(#[case] raw: &str, #[case] want: &str) {
     assert_eq!(client_kind(raw), want);
@@ -147,6 +148,172 @@ async fn boundary_per_tenant_cap() {
         .open(&identity("other", "bob"), "cli", "")
         .await
         .is_ok());
+}
+
+// --- browser sessions (the front door's cookie) ----------------------------------
+
+/// How a test spoils the cookie (or the session behind it) before the lookup.
+#[derive(Clone, Copy, Debug)]
+enum Spoil {
+    Nothing,
+    Expire,
+    Revoke,
+    WrongSecret,
+    AsRefreshHandle,
+    OtherTenant,
+    CliHandleAsCookie,
+    Raw(&'static str),
+    Oversized,
+    /// The row behind the cookie can't be decoded: the store lookup errs.
+    UndecodableRow,
+    /// The row's body names another tenant than its key: the store lookup errs.
+    KeyMismatch,
+}
+
+#[rstest]
+#[case::positive_live(Spoil::Nothing, true)]
+#[case::negative_expired(Spoil::Expire, false)]
+#[case::negative_revoked(Spoil::Revoke, false)]
+#[case::adversarial_wrong_secret(Spoil::WrongSecret, false)]
+// The refresh handle's prefix on the cookie's own parts.
+#[case::adversarial_refresh_prefix(Spoil::AsRefreshHandle, false)]
+#[case::adversarial_swapped_tenant(Spoil::OtherTenant, false)]
+// A CLI session's refresh handle, recast as a cookie: right secret, wrong kind.
+#[case::adversarial_cli_handle_as_cookie(Spoil::CliHandleAsCookie, false)]
+#[case::adversarial_empty(Spoil::Raw(""), false)]
+#[case::adversarial_garbage(Spoil::Raw("ck1.x"), false)]
+#[case::adversarial_traversal(
+    // Only the tenant is wrong: the secret has the right shape, so this row
+    // fails on `safe_segment` alone.
+    Spoil::Raw("ck1.Li4vYWNtZQ.00000000000000000000000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    false
+)]
+#[case::adversarial_oversized(Spoil::Oversized, false)]
+// A store error denies (fail closed), it never admits.
+#[case::negative_store_error_undecodable(Spoil::UndecodableRow, false)]
+#[case::adversarial_store_error_key_mismatch(Spoil::KeyMismatch, false)]
+#[tokio::test]
+async fn browser_cookie_cases(#[case] spoil: Spoil, #[case] found: bool) {
+    let f = fixture();
+    let (s, cookie) = f
+        .store
+        .open_browser(&identity("acme", "alice"), "Mozilla/5.0")
+        .await
+        .expect("open");
+    assert_eq!(s.client_kind, BROWSER);
+    assert!(cookie.starts_with("ck1."), "{cookie}");
+    let parts: Vec<&str> = cookie.split('.').collect();
+    let presented = match spoil {
+        Spoil::Nothing => cookie.clone(),
+        Spoil::Expire => {
+            f.clock.set(T0 + TTL);
+            cookie.clone()
+        }
+        Spoil::Revoke => {
+            assert!(f
+                .store
+                .revoke("acme", &s.sid, "alice", "logout")
+                .await
+                .unwrap());
+            cookie.clone()
+        }
+        Spoil::WrongSecret => format!(
+            "ck1.{}.{}.{}",
+            parts[1],
+            parts[2],
+            URL_SAFE_NO_PAD.encode([7u8; SECRET_BYTES])
+        ),
+        Spoil::AsRefreshHandle => format!("rh1.{}.{}.{}", parts[1], parts[2], parts[3]),
+        Spoil::OtherTenant => format!(
+            "ck1.{}.{}.{}",
+            URL_SAFE_NO_PAD.encode("other"),
+            parts[2],
+            parts[3]
+        ),
+        Spoil::CliHandleAsCookie => {
+            let (_, h) = open(&f, "acme").await;
+            h.replacen("rh1.", "ck1.", 1)
+        }
+        Spoil::Raw(r) => r.to_string(),
+        Spoil::Oversized => "ck1.".to_string() + &"A".repeat(MAX_REFRESH_HANDLE_BYTES),
+        Spoil::UndecodableRow | Spoil::KeyMismatch => {
+            let blob = if matches!(spoil, Spoil::UndecodableRow) {
+                vec![0xff; 16]
+            } else {
+                let mut moved = s.clone();
+                moved.tenant = "other".into();
+                moved.encode()
+            };
+            f.backend
+                .apply(&[Write::Put {
+                    collection: COLLECTION,
+                    tenant: "acme".into(),
+                    id: s.sid.clone(),
+                    blob,
+                }])
+                .await
+                .unwrap();
+            assert!(f.store.raw_get("acme", &s.sid).await.is_err());
+            cookie.clone()
+        }
+    };
+    let got = f.store.by_cookie(&presented).await;
+    assert_eq!(got.is_some(), found, "{spoil:?}");
+    if found {
+        assert_eq!(got.unwrap().sid, s.sid);
+    }
+}
+
+/// A browser session's cookie, recast as a refresh handle, mints nothing: the
+/// cookie is good only at the front door.
+#[tokio::test]
+async fn adversarial_cookie_recast_as_refresh_handle_is_refused() {
+    let f = fixture();
+    let (_, cookie) = f
+        .store
+        .open_browser(&identity("acme", "alice"), "")
+        .await
+        .expect("open");
+    let recast = cookie.replacen("ck1.", "rh1.", 1);
+    assert_eq!(
+        f.store.refresh(&recast).await.unwrap_err(),
+        RefreshError::Invalid
+    );
+    // And the cookie still works: the refused refresh rotated nothing.
+    assert!(f.store.by_cookie(&cookie).await.is_some());
+}
+
+/// `Exchange` names its own client kind; it can't open a browser session.
+#[tokio::test]
+async fn adversarial_exchange_cannot_open_a_browser_session() {
+    let f = fixture();
+    let (s, h) = f
+        .store
+        .open(&identity("acme", "alice"), "browser", "")
+        .await
+        .expect("open");
+    assert_eq!(s.client_kind, "unspecified");
+    assert!(f
+        .store
+        .by_cookie(&h.replacen("rh1.", "ck1.", 1))
+        .await
+        .is_none());
+}
+
+/// Browser sessions count against the tenant's cap like any other.
+#[tokio::test]
+async fn boundary_browser_sessions_share_the_cap() {
+    let f = fixture_with(2);
+    f.store
+        .open_browser(&identity("acme", "alice"), "")
+        .await
+        .expect("first");
+    open(&f, "acme").await;
+    assert!(f
+        .store
+        .open_browser(&identity("acme", "bob"), "")
+        .await
+        .is_err());
 }
 
 // --- refresh -------------------------------------------------------------------

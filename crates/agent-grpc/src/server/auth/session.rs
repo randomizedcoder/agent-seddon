@@ -55,11 +55,17 @@ const KEEP_DEAD_SECS: u64 = 24 * 3600;
 const MAX_CLIENT_META: usize = 256;
 /// The refresh-handle format version.
 const HANDLE_PREFIX: &str = "rh1";
+/// A browser session's cookie handle (security-hardening 10 F3). Same shape as a
+/// refresh handle, but never refreshed, and only a `browser` session accepts it.
+const COOKIE_PREFIX: &str = "ck1";
+/// The client kind of a session the front door opened; only [`SessionStore::open_browser`]
+/// records it.
+pub const BROWSER: &str = "browser";
 /// Random bytes in a handle secret.
 const SECRET_BYTES: usize = 32;
 
 /// The client kinds a session records; anything else is `unspecified`.
-const CLIENT_KINDS: [&str; 4] = ["portal", "cli", "service", "unspecified"];
+const CLIENT_KINDS: [&str; 5] = ["portal", "cli", "service", BROWSER, "unspecified"];
 
 /// `client_kind` as recorded: one of [`CLIENT_KINDS`].
 pub fn client_kind(raw: &str) -> &'static str {
@@ -288,23 +294,31 @@ struct Handle {
 
 impl Handle {
     fn render(&self) -> String {
+        self.render_as(HANDLE_PREFIX)
+    }
+
+    fn render_as(&self, prefix: &str) -> String {
         format!(
-            "{HANDLE_PREFIX}.{}.{}.{}",
+            "{prefix}.{}.{}.{}",
             URL_SAFE_NO_PAD.encode(&self.tenant),
             self.sid,
             self.secret
         )
     }
 
-    /// Parse, failing closed on anything that is not exactly our shape.
     fn parse(raw: &str) -> Option<Self> {
+        Self::parse_as(raw, HANDLE_PREFIX)
+    }
+
+    /// Parse, failing closed on anything that is not exactly our shape.
+    fn parse_as(raw: &str, want: &str) -> Option<Self> {
         if raw.len() > MAX_REFRESH_HANDLE_BYTES {
             return None;
         }
         let mut parts = raw.split('.');
         let (prefix, tenant, sid, secret) =
             (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
-        if prefix != HANDLE_PREFIX || parts.next().is_some() {
+        if prefix != want || parts.next().is_some() {
             return None;
         }
         let tenant = String::from_utf8(URL_SAFE_NO_PAD.decode(tenant).ok()?).ok()?;
@@ -387,6 +401,33 @@ impl SessionStore {
         kind: &str,
         meta: &str,
     ) -> Result<(AuthSession, String), String> {
+        // Only the front door opens a browser session: its handle is a cookie.
+        let kind = match client_kind(kind) {
+            BROWSER => "unspecified",
+            k => k,
+        };
+        let (session, handle) = self.open_login(id, kind, meta).await?;
+        Ok((session, handle.render()))
+    }
+
+    /// Open a session for a browser that signed in through the front door; returns
+    /// it and its cookie handle. The cookie is never refreshed: the session lives
+    /// until it expires or is revoked.
+    pub async fn open_browser(
+        &self,
+        id: &VerifiedIdentity,
+        meta: &str,
+    ) -> Result<(AuthSession, String), String> {
+        let (session, handle) = self.open_login(id, BROWSER, meta).await?;
+        Ok((session, handle.render_as(COOKIE_PREFIX)))
+    }
+
+    async fn open_login(
+        &self,
+        id: &VerifiedIdentity,
+        kind: &str,
+        meta: &str,
+    ) -> Result<(AuthSession, Handle), String> {
         self.open_session(
             &id.tenant,
             |sid| Grant::from_login(id, sid),
@@ -400,6 +441,24 @@ impl SessionStore {
             },
         )
         .await
+    }
+
+    /// The live browser session `cookie` names, or `None`: malformed, unknown,
+    /// expired, revoked, the wrong secret, or not a browser session. Fails closed
+    /// on a store error.
+    pub async fn by_cookie(&self, cookie: &str) -> Option<AuthSession> {
+        let handle = Handle::parse_as(cookie, COOKIE_PREFIX)?;
+        let session = match self.raw_get(&handle.tenant, &handle.sid).await {
+            Ok(found) => found?.0,
+            Err(e) => {
+                tracing::warn!(error = %e, "cookie session lookup failed: denying");
+                return None;
+            }
+        };
+        (session.client_kind == BROWSER
+            && session.is_live(self.now())
+            && hash(&handle.secret) == session.handle_hash)
+            .then_some(session)
     }
 
     /// Open a session for a known service that presented its client certificate
@@ -438,7 +497,7 @@ impl SessionStore {
         tenant: &str,
         grant_for: impl FnOnce(&str) -> Grant,
         o: Opened<'_>,
-    ) -> Result<(AuthSession, String), String> {
+    ) -> Result<(AuthSession, Handle), String> {
         self.gc(tenant).await;
         let now = self.now();
         let handle = Handle {
@@ -473,7 +532,7 @@ impl SessionStore {
             .put(tenant, session)
             .await
             .map_err(|e| format!("opening the session: {e}"))?;
-        Ok((session, handle.render()))
+        Ok((session, handle))
     }
 
     /// Rotate `raw` for a new handle on a live session.
@@ -491,6 +550,11 @@ impl SessionStore {
         // A service session is never refreshed: its handle was never handed out,
         // and its token is bound to a certificate only a new exchange can prove.
         if session.peer_san.is_some() {
+            return Err(RefreshError::Invalid);
+        }
+        // Nor is a browser session: its handle is a cookie, recast as a refresh
+        // handle it would mint a token outside the front door.
+        if session.client_kind == BROWSER {
             return Err(RefreshError::Invalid);
         }
         let presented = hash(&handle.secret);

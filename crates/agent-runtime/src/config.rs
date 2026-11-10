@@ -6670,6 +6670,7 @@ mod tests {
     #[case::adversarial_discovery_plain_http_remote(issuers(vec![AuthIssuerCfg { issuer: "http://idp.example".into(), ..generic_entry("kc") }]), true, Some("used for discovery"))]
     // --- `backchannel_url` (security-hardening S26) ---
     #[case::positive_backchannel_loopback(issuers(vec![dex_entry("http://127.0.0.1:5556/dex")]), true, None)]
+    #[case::positive_backchannel_https(issuers(vec![dex_entry("https://dex.internal:5556/dex")]), true, None)]
     #[case::negative_backchannel_without_jwks(issuers(vec![AuthIssuerCfg { jwks_url: String::new(), ..dex_entry("http://127.0.0.1:5556/dex") }]), true, Some("needs `jwks_url`"))]
     #[case::negative_backchannel_on_google(issuers(vec![AuthIssuerCfg { backchannel_url: "http://127.0.0.1:5556".into(), ..google_entry() }]), true, Some("for a `generic` issuer"))]
     #[case::corner_backchannel_whitespace_is_unset(issuers(vec![AuthIssuerCfg { jwks_url: String::new(), ..dex_entry("  ") }]), true, None)]
