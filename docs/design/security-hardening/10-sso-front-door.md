@@ -274,6 +274,12 @@ reuses the same pieces later; this design is the NixOS module.
   `nix/portal/envoy-spec.nix`'s `front_door` section with `PORTAL_FRONT_DOOR=on`; F4's header
   table is `nix/portal/front-door-headers.json`, which the gate's Rust tests read too. Envoy's
   `--mode validate` does not resolve an `ext_authz` cluster, so a renderer row checks it.
+- As built (S28b): `services.agentSeddon.frontDoor` turns it on in the module. The module sets
+  the gateway's `[auth.gate]` (on the spec's gate port), Dex's issuer and callback, and F7's
+  certificate: a dev-PKI leaf for `publicHost` (`pki-dev --san … --renew-within 720h`, root-only,
+  re-minted daily under the same root when due) or the operator's `certFile` / `keyFile`, both
+  as Envoy credentials. The host's `[auth]` stays the host's; the build refuses a front door
+  without it. The VM walks Dex's mock sign-in through `:8443`.
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches

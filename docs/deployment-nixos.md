@@ -274,6 +274,50 @@ Two things about the `issuerSettings` entry:
   override the field when merging the entry into `settings.auth.issuers`; binding
   (F2) then matches an email nobody proved they own.
 
+### The front door (single sign-in)
+
+`frontDoor.enable = true` serves `https://<publicHost>:8443` (the portal, its RPCs,
+`/dex`, `/grafana`, `/prometheus`) and `:8444` (HyperDX) from the same Envoy, and the
+gateway's `[auth.gate]` checks every request
+([security-hardening 10](design/security-hardening/10-sso-front-door.md)). A page with no
+session goes to `/auth/login`, an RPC gets a 401, and a signed-in browser's RPCs carry
+its agent token (the client's own `authorization` is overwritten).
+
+The module sets `[auth.gate]` on the gateway (listen `127.0.0.1:8097`, `frontDoor.issuer`,
+main origin `frontDoor.origin`), Dex's issuer to `<origin>/dex`, and adds the gate's
+callback to Dex's redirect URIs. Turning `[auth]` on stays the host's step, and the
+build refuses a front door until it is done:
+
+```nix
+services.agentSeddon = {
+  frontDoor.enable = true;
+  dex = { enable = true; github = { … }; };
+  gateway.settings.auth = {
+    mode = "oidc";
+    redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
+    issuers = [ config.services.agentSeddon.dex.issuerSettings ];
+    operator_subjects = [ "email:you@example.org" ];   # or role bindings
+    token = {
+      issuer = "https://172.16.50.46:8443";
+      audience = "agent-seddon";
+      signing_key = "/run/credentials/@unit@/token-signer.key";  # credentials."token-signer.key"
+      session_store = "postgres";
+    };
+  };
+};
+```
+
+The certificate: with `frontDoor.certFile` / `keyFile` unset, the
+`agent-seddon-front-door-pki` unit mints a leaf for `publicHost` from the dev PKI
+(`nix run .#pki-dev`'s tool) in `/var/lib/agent-seddon-front-door` (root, 0700). A
+daily timer re-mints it under the same root when it has 30 days left or `publicHost`
+changed, and restarts Envoy to load it. Trust `/var/lib/agent-seddon-front-door/pki/ca/root.crt`
+in the browser once. A real certificate is the two file options. Envoy (a
+`DynamicUser`) reads either pair as credentials, so the key stays root-only on disk.
+
+With `openFirewall` on a LAN `publicHost`, 8443 and 8444 open too. The old ports stay
+open until S30 moves everything else to loopback.
+
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
 
@@ -289,7 +333,12 @@ in the host flake, then `nixos-rebuild switch`.
   config checks the dashboards provider, the ClickHouse source as `agent_viewer` with a
   `$__file` credential, the `LoadCredential` and ordering, the plugin link (with `declarativePlugins` unset), and that a
   Prometheus source appears only when asked for. A bad
-  `frontendUrl` or HyperDX without ClickHouse is refused.
+  `frontendUrl` or HyperDX without ClickHouse is refused. A front-door config checks
+  `[auth.gate]` on the gateway only (on Envoy's gate port), Dex's issuer and callback,
+  the dev-PKI unit, timer and Envoy credentials (or an operator certificate's), and
+  8443 / 8444 in the firewall; it refuses a missing grpc-web or gateway, a lone or
+  unsafe cert/key path, an http or wildcard origin, an unusable `publicHost`, and a
+  gateway `[auth]` without oidc, the callback, or the issuer.
 - **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
   the module in a QEMU VM and checks that each step comes up in order:
   - creds, ClickHouse, then the schema; it also checks that a passwordless
@@ -300,6 +349,16 @@ in the host flake, then `nixos-rebuild switch`.
   - the declared roster is seeded into Postgres, and a fleet restart does not
     duplicate it;
   - Envoy and the portal are serving the branded bundle, and Envoy's CORS allows
-    the `publicHost` origin and an `extraOrigins` alias but not an unknown origin.
+    the `publicHost` origin and an `extraOrigins` alias but not an unknown origin;
+  - the front door: the dev-PKI leaf (root-only directory, the SAN record) verifies
+    against the root and not without it; both listeners send HSTS; `/dex` is unchecked
+    and names the public issuer; `/dexfoo`, `/admin` and a malformed RPC path get 403;
+    with no session a page goes to sign-in (HyperDX's too) and an RPC (forged bearer
+    or none) gets 401;
+  - Dex's mock sign-in walked through `:8443`: refused for an unbound user (no
+    session cookie; `unbound` and `unmapped_path` audit rows in ClickHouse), and, once
+    a specialisation binds the user, a `Secure; HttpOnly; SameSite=Lax` session whose
+    `WhoAmI` succeeds through the door even with a forged `authorization`, until
+    logout sends the next page back to sign-in.
 
   Run it after touching the module.

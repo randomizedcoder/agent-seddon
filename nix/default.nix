@@ -673,6 +673,8 @@ let
     # k8s-secrets, kept out of the agent runtime.
     hyperdxProvision = "${agent-unwrapped}/bin/hyperdx-provision";
     grafanaDashboards = grafana.dashboardsDir;
+    # The front door's default certificate (security-hardening 10, F7).
+    pkiDev = pki-dev;
   };
 
   # Opt-in VM boot test of `nixosModules.agent-stack` (KVM; not in the gate — the

@@ -122,6 +122,23 @@ let
   dexGenDir = "/var/lib/agent-seddon-dex";
   dexClientSecret = "${dexGenDir}/agent-client.secret";
   dexClientId = "agent-seddon";
+
+  # The SSO front door (security-hardening 10, S28b): Envoy's :8443 / :8444, each
+  # request checked by the gateway's `[auth.gate]`.
+  fd = cfg.frontDoor;
+  fdOrigin = "https://${cfg.publicHost}:${toString ports.frontDoor}";
+  fdCallback = "${fdOrigin}/auth/callback";
+  fdUnit = "agent-seddon-grpc-web";
+  # Default (no certFile): a leaf from the dev PKI (F7), minted for publicHost and
+  # renewed by a daily timer. The root (`${fdPkiDir}/ca/root.crt`) is what a
+  # browser trusts once.
+  fdDevCert = fd.certFile == null;
+  fdPkiDir = "/var/lib/agent-seddon-front-door/pki";
+  fdCertSrc = if fdDevCert then "${fdPkiDir}/front-door/cert.pem" else fd.certFile;
+  fdKeySrc = if fdDevCert then "${fdPkiDir}/front-door/key.pem" else fd.keyFile;
+  # Envoy (DynamicUser) reads them as credentials, so the key stays root-only on disk.
+  fdCred = name: "/run/credentials/${fdUnit}.service/${name}";
+  gwAuth = (config.services.agentSeddon.renderedSettings.gateway or { }).auth or { };
   # What `grafana cli` needs to find the database: the server's paths and database
   # sections, rendered the way the nixpkgs module renders the server's config.ini.
   grafCliIni =
@@ -242,7 +259,15 @@ let
     gateway = {
       flag = "--serve-all";
       port = ports.gateway;
-      extra = { };
+      # Only the --serve-all gateway hosts the gate (S27b-ii); its port is the one the
+      # rendered Envoy dials, so the two can't drift.
+      extra = lib.optionalAttrs fd.enable {
+        auth.gate = {
+          listen = "127.0.0.1:${toString ports.gate}";
+          inherit (fd) issuer;
+          main_origin = fdOrigin;
+        };
+      };
     };
     sessions = {
       flag = "--serve-sessions";
@@ -307,6 +332,16 @@ let
     ]
     ++ lib.optional lan "http://localhost:${toString ports.portalWeb}"
     ++ cfg.extraOrigins;
+    frontDoor =
+      if fd.enable then
+        {
+          cert = fdCred "front.crt";
+          key = fdCred "front.key";
+          host = bindHost;
+          origins = fd.extraOrigins;
+        }
+      else
+        null;
   };
 
   webBundle = seddon.mkWebBundle {
@@ -734,6 +769,61 @@ in
       };
     };
 
+    frontDoor = {
+      enable = lib.mkEnableOption ''
+        the SSO front door (security-hardening 10): Envoy serves `https://<publicHost>:${toString ports.frontDoor}`
+        (the portal, its RPCs, `/dex`, `/grafana`, `/prometheus`) and `:${toString ports.frontDoorHyperdx}` (HyperDX),
+        and the gateway's `[auth.gate]` checks every request. The module sets `[auth.gate]`
+        on the gateway; turning on `[auth]` stays the host's step (an issuer, `[auth.token]`,
+        and `frontDoor.callbackUrl` in `redirect_uris`), as for `dex`. Needs `grpcWeb` and
+        the gateway
+      '';
+      issuer = lib.mkOption {
+        type = lib.types.str;
+        default = "dex";
+        description = "The `[[auth.issuers]]` name browsers sign in with at the front door.";
+      };
+      certFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/acme/l2/fullchain.pem";
+        description = ''
+          The front door's certificate (PEM chain), with `keyFile`. Null: a leaf from the
+          dev PKI for `publicHost`, renewed daily when it nears expiry; trust its root,
+          `${fdPkiDir}/ca/root.crt`, in the browser once.
+        '';
+      };
+      keyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/secrets/front-door.key";
+        description = "The key for `certFile`: an absolute path outside the Nix store.";
+      };
+      extraOrigins = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "https://l2:8443" ];
+        description = ''
+          Other https origins the front door allows by CORS (non-credentialed). The portal
+          and its RPCs share the main origin, so most hosts need none.
+        '';
+      };
+      origin = lib.mkOption {
+        type = lib.types.str;
+        readOnly = true;
+        default = fdOrigin;
+        defaultText = lib.literalExpression ''"https://''${publicHost}:${toString ports.frontDoor}"'';
+        description = "The front door's main origin (the gate's `main_origin`).";
+      };
+      callbackUrl = lib.mkOption {
+        type = lib.types.str;
+        readOnly = true;
+        default = fdCallback;
+        defaultText = lib.literalExpression ''"https://''${publicHost}:${toString ports.frontDoor}/auth/callback"'';
+        description = "Where the IdP returns a browser: put it in the gateway's `settings.auth.redirect_uris`.";
+      };
+    };
+
     portal = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -860,6 +950,10 @@ in
             ++ lib.optional cfg.fleet.enable ports.grpcWebFleet
           )
           ++ lib.optional hdxEnabled hdx.ports.ui
+          ++ lib.optionals (fd.enable && cfg.grpcWeb.enable) [
+            ports.frontDoor
+            ports.frontDoorHyperdx
+          ]
         );
       }
 
@@ -873,6 +967,115 @@ in
             ExecStart = "${seddon.envoy}/bin/envoy -c ${envoyConfig} --disable-hot-restart --log-level warn";
             Restart = "on-failure";
             RestartSec = 5;
+          };
+        };
+      })
+
+      (lib.mkIf fd.enable {
+        assertions = [
+          {
+            assertion = cfg.grpcWeb.enable && cfg.gateway.enable;
+            message = "services.agentSeddon.frontDoor needs grpcWeb.enable (its Envoy) and gateway.enable (its gate).";
+          }
+          {
+            # One SAN and one URL authority: a host name or IPv4, nothing to split on.
+            assertion = builtins.match "[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?" cfg.publicHost != null;
+            message = "services.agentSeddon.frontDoor: publicHost must be a host name or IPv4 address.";
+          }
+          {
+            assertion = (fd.certFile == null) == (fd.keyFile == null);
+            message = "services.agentSeddon.frontDoor: certFile and keyFile go together.";
+          }
+          {
+            assertion =
+              builtins.all
+                (
+                  f:
+                  f == null
+                  || (
+                    lib.hasPrefix "/" f
+                    && !(lib.hasPrefix builtins.storeDir f)
+                    && builtins.match ".*[[:space:]:].*" f == null
+                  )
+                )
+                [
+                  fd.certFile
+                  fd.keyFile
+                ];
+            message = "services.agentSeddon.frontDoor: certFile and keyFile must be absolute paths outside the Nix store, with no whitespace or ':'.";
+          }
+          {
+            assertion = builtins.all (
+              o: builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?" o != null
+            ) fd.extraOrigins;
+            message = "services.agentSeddon.frontDoor.extraOrigins: https://host[:port] only.";
+          }
+          {
+            # The gate needs the host's `[auth]`; checked here so a missing piece fails
+            # the build, not the gateway at start.
+            assertion = (gwAuth.mode or "") == "oidc";
+            message = "services.agentSeddon.frontDoor: the gateway needs `[auth] mode = \"oidc\"` (settings.auth or gateway.settings.auth).";
+          }
+          {
+            assertion = builtins.elem fdCallback (gwAuth.redirect_uris or [ ]);
+            message = "services.agentSeddon.frontDoor: add frontDoor.callbackUrl (${fdCallback}) to the gateway's `[auth] redirect_uris`.";
+          }
+          {
+            assertion = builtins.any (i: (i.name or "") == fd.issuer) (gwAuth.issuers or [ ]);
+            message = "services.agentSeddon.frontDoor.issuer `${fd.issuer}` names no `[[auth.issuers]]` entry on the gateway (merge dex.issuerSettings).";
+          }
+        ];
+
+        # Dex behind the door: browsers reach it at <origin>/dex and come back to the gate.
+        services.agentSeddon.dex = {
+          issuer = lib.mkDefault "${fdOrigin}/dex";
+          redirectUris = [ fdCallback ];
+        };
+
+        systemd.services.${fdUnit} = {
+          after = lib.optional fdDevCert "agent-seddon-front-door-pki.service";
+          requires = lib.optional fdDevCert "agent-seddon-front-door-pki.service";
+          serviceConfig.LoadCredential = [
+            "front.crt:${fdCertSrc}"
+            "front.key:${fdKeySrc}"
+          ];
+        };
+      })
+
+      (lib.mkIf (fd.enable && fdDevCert) {
+        systemd.services.agent-seddon-front-door-pki = {
+          description = "agent-seddon front door certificate (dev PKI; mint, or renew near expiry)";
+          before = [ "${fdUnit}.service" ];
+          path = [
+            pkgs.coreutils
+            config.systemd.package
+          ];
+          # Root, 0700: the root CA's key never leaves this directory. A new publicHost
+          # or a leaf within 30 days of expiry gets a new leaf under the same root; Envoy
+          # then restarts to load it (credentials are copied at start).
+          script = ''
+            leaf=${fdPkiDir}/front-door/cert.pem
+            before=$(sha256sum "$leaf" 2>/dev/null || true)
+            ${seddon.pkiDev}/bin/pki-dev --out ${fdPkiDir} --service front-door \
+              --san ${cfg.publicHost} --renew-within 720h
+            if [ "$before" != "$(sha256sum "$leaf")" ] && [ -n "$before" ]; then
+              systemctl try-restart ${fdUnit}.service
+            fi
+          '';
+          # Not RemainAfterExit: the timer re-runs it.
+          serviceConfig = {
+            Type = "oneshot";
+            UMask = "0077";
+            StateDirectory = "agent-seddon-front-door";
+            StateDirectoryMode = "0700";
+          };
+        };
+        systemd.timers.agent-seddon-front-door-pki = {
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            OnCalendar = "daily";
+            RandomizedDelaySec = "1h";
+            Persistent = true;
           };
         };
       })

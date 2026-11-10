@@ -887,14 +887,27 @@ let
         "http://127.0.0.1:${toString portalWebPort}"
         "http://localhost:${toString portalWebPort}"
       ],
+      # The SSO front door (security-hardening 10): null leaves it off, else
+      # `{ cert; key; host; origins; }`. cert/key are runtime paths Envoy reads, not
+      # store paths: the key never enters the store.
+      frontDoor ? null,
     }:
     pkgs.runCommand "agent-grpc-web-envoy.json"
-      {
-        nativeBuildInputs = [ pkgs.python3 ];
-        PORTAL_AUTH = "off";
-        PORTAL_GRPC_WEB_HOST = host;
-        PORTAL_WEB_ORIGIN = lib.concatStringsSep "," origins;
-      }
+      (
+        {
+          nativeBuildInputs = [ pkgs.python3 ];
+          PORTAL_AUTH = "off";
+          PORTAL_GRPC_WEB_HOST = host;
+          PORTAL_WEB_ORIGIN = lib.concatStringsSep "," origins;
+        }
+        // lib.optionalAttrs (frontDoor != null) {
+          PORTAL_FRONT_DOOR = "on";
+          PORTAL_FRONT_DOOR_CERT = frontDoor.cert;
+          PORTAL_FRONT_DOOR_KEY = frontDoor.key;
+          PORTAL_FRONT_DOOR_HOST = frontDoor.host;
+          PORTAL_FRONT_DOOR_ORIGINS = lib.concatStringsSep "," frontDoor.origins;
+        }
+      )
       ''
         python3 ${../../test/portal-envoy}/portal_envoy.py --spec ${envoySpec.file} \
           render --out "$out"
