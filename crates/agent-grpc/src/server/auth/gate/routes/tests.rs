@@ -249,7 +249,8 @@ async fn positive_login_sets_the_bound_cookie_with_f3_attributes() {
 #[case::adversarial_protocol_relative("%2F%2Fevil.example", "/")]
 #[case::adversarial_scheme("https%3A%2F%2Fevil.example", "/")]
 // Decoded once at the login, never again at the callback.
-#[case::adversarial_double_encoded("%2Fa%252F%252Fevil", "/a%2F%2Fevil")]
+#[case::adversarial_double_encoded("%2Fassets%2F%2541", "/assets/%41")]
+#[case::adversarial_double_encoded_slash("%2Fassets%2F%252F%252Fevil", "/")]
 #[tokio::test]
 async fn callback_returns_to_the_checked_rd(#[case] rd: &str, #[case] want: &str) {
     let h = harness("alice", true);
