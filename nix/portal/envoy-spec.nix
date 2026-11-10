@@ -36,10 +36,23 @@ let
     # OTLP/gRPC collector (the decomposed HyperDX otel-collector), reached on host
     # loopback since envoy runs --network host.
     otelCollector = versions.otlpGrpcPort;
+    # The front door (security-hardening 10): one TLS origin for the portal, its RPCs
+    # and the observability tools, and HyperDX on its own port (its UI is served
+    # from `/`). Every request is checked by the agent's gate first.
+    frontDoor = 8443;
+    frontDoorHyperdx = 8444;
+    gate = 8097; # the agent's `[auth.gate] listen` (loopback; Envoy's ext_authz)
+    dex = 5556;
+    grafana = 3000;
+    prometheus = 9090;
+    hyperdxUi = 8080;
   };
+  # F4's header table: what reaches each route's upstream (one source with the
+  # gate's Rust tests).
+  frontDoorHeaders = builtins.fromJSON (builtins.readFile ./front-door-headers.json);
 in
 {
-  inherit ports;
+  inherit ports frontDoorHeaders;
   file = pkgs.writeText "portal-envoy-spec.json" (
     builtins.toJSON {
       listeners = [
@@ -89,6 +102,41 @@ in
         upstream_port = ports.fleetWebhook;
         path = "/webhooks/github";
         max_body = 1048576; # = the receiver's MAX_WEBHOOK_BODY
+      };
+      # The front door (security-hardening 10, S28): rendered only with
+      # PORTAL_FRONT_DOOR=on, which needs its own TLS certificate.
+      front_door = {
+        main = {
+          name = "front_door";
+          port = ports.frontDoor;
+          check = "/_check/main"; # the gate's check prefix for this listener
+        };
+        hyperdx = {
+          name = "front_door_hyperdx";
+          port = ports.frontDoorHyperdx;
+          check = "/_check/hyperdx";
+        };
+        upstreams = {
+          gate = ports.gate;
+          dex = ports.dex;
+          portal = ports.portalWeb;
+          gateway = ports.gateway;
+          sessions = ports.sessions;
+          fleet = ports.fleet;
+          grafana = ports.grafana;
+          prometheus = ports.prometheus;
+          hyperdx = ports.hyperdxUi;
+        };
+        # The RPC services the portal dials on the sessions and fleet processes;
+        # every other `/agent.v1.*` goes to the gateway (`--serve-all`).
+        rpc_services = {
+          sessions = [
+            "agent.v1.AgentSessionService"
+            "agent.v1.SessionRegistryService"
+          ];
+          fleet = [ "agent.v1.ReviewFleetService" ];
+        };
+        headers = frontDoorHeaders;
       };
       otel_port = ports.otelCollector;
       gateway_port = ports.gateway;

@@ -1080,6 +1080,9 @@ async fn serve_base(
     let auth = auth_layer(agent, listen, tls.is_some())?;
     if gateway {
         start_auth_gate(agent, &auth)?;
+    } else if agent.grpc_auth().gate.is_some() {
+        // A shared config names the gate for every unit; only the gateway binds it.
+        tracing::info!("[auth.gate] is configured; only the --serve-all gateway hosts it");
     }
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
@@ -1171,7 +1174,7 @@ fn require_identity(configured: Option<bool>, listen: &Endpoint) -> bool {
 
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
     install_authz_observer(agent);
-    let (router, health, tls) = serve_base(agent, &listen, false).await?;
+    let (router, health, tls) = serve_base(agent, &listen, /* gateway */ false).await?;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
     if !added {
         anyhow::bail!("session-stream seam not available in this build");
@@ -1222,7 +1225,7 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     }
 
     install_authz_observer(&agent);
-    let (router, health, tls) = serve_base(&agent, &listen, false).await?;
+    let (router, health, tls) = serve_base(&agent, &listen, /* gateway */ false).await?;
     let router = router.add_service(
         srv::SessionRegistrySvc::new(mgr.clone() as Arc<dyn agent_core::SessionRegistry>)
             .into_server(),
@@ -1453,7 +1456,7 @@ pub async fn serve_fleet(
     };
 
     install_authz_observer(&agent);
-    let (router, health, tls) = serve_base(&agent, &listen, false).await?;
+    let (router, health, tls) = serve_base(&agent, &listen, /* gateway */ false).await?;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
     // review-graph 5a: report each row's repo index status on List/Get.
     if let Some(indexer) = agent.fleet_indexer() {

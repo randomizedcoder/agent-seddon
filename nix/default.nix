@@ -71,6 +71,9 @@ let
         # case table shared with the portal's Dart tests.
         || (lib.hasInfix "/portal/assets/themes/" path)
         || (lib.hasSuffix "/test/themes/validation_cases.json" path)
+        # The front door's header table: Nix renders Envoy's per-route removals from
+        # it and the gate's tests (`agent-grpc`) check it against `Route::replaced`.
+        || (lib.hasSuffix "/nix/portal/front-door-headers.json" path)
         # `agent-config-store`'s postgres tier embeds its schema DDL via
         # `include_str!("../migrations/*.sql")` (config C41 / A2), so the SQL must
         # survive the filter or the crate won't compile under `--all-features`.

@@ -586,6 +586,7 @@ browser.
   - The `state` is random, single use and good for 10 minutes. It binds the issuer, the redirect
     URI, the challenge and an OIDC `nonce`.
   - At most 1024 sign-ins can be in flight; beyond that `Begin` answers `RESOURCE_EXHAUSTED`.
+    The front door's logins (below) have their own 1024, so they can't use up `Begin`'s.
 - The IdP redirects to `redirect_uri?code&state`. The client then calls
   `AuthService.Exchange{code, state, code_verifier}` (`client_kind` defaults to `portal`). The
   agent:
@@ -600,6 +601,28 @@ browser.
   `nonce_mismatch`, `malformed_code`, `code_flow_off`. `Issuers` and `Begin` need no bearer.
 - With browser sign-in on, the serve path resolves each issuer's `client_secret` at startup. A
   reference that does not resolve refuses to start.
+
+**The front door's sign-in** (security-hardening 10, S27,
+[`server/auth/gate/`](../crates/agent-grpc/src/server/auth/gate.rs)). A browser that loads the
+portal or an observability tool through the Envoy front door signs in once and holds a session
+cookie, not a token. `[auth.gate]` turns it on:
+
+```toml
+[auth.gate]
+listen = "127.0.0.1:8097"                 # loopback only; Envoy is its one client
+issuer = "dex"                            # an [[auth.issuers]] name ("default": [auth] issuer)
+main_origin = "https://172.16.50.46:8443" # the front door; <origin>/auth/callback must be in redirect_uris
+```
+
+- Only the `--serve-all` gateway binds it, so a config every unit shares binds the port once;
+  another unit logs that it leaves the gate to the gateway.
+- It answers `GET /auth/login?rd=<page>`, `GET /auth/callback` and `POST /auth/logout`, and
+  Envoy's `ext_authz` check at `/_check/main/<path>` and `/_check/hyperdx/<path>`.
+- A check that admits answers with the upstream's headers: the session's agent token as
+  `authorization` on an RPC, `x-seddon-user` / `x-seddon-role` on Grafana. A page with no
+  session gets a 302 to the login, an RPC a 401.
+- Login and callback wait on the IdP, so at most half the gate's workers answer them; the next
+  gets a 503 and the checks keep the rest.
 
 **Audit trail** (S11, [`server/audit.rs`](../crates/agent-grpc/src/server/audit.rs)). Every
 auth event is a row in ClickHouse `agent.agent_auth_events` when `[telemetry]` is on.

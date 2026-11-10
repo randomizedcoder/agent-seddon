@@ -27,8 +27,14 @@ Knobs (environment; the defaults are the safe ones):
     PORTAL_UPSTREAM_SNI    SNI + the DNS SAN the agent's certificate must carry
                                                                   localhost
     PORTAL_OTLP_AUTHORIZATION | CLICKSTACK_INGESTION_API_KEY  OTLP ingestion key
+    PORTAL_FRONT_DOOR      off | on: the front door (:8443, :8444) off
+                           every request checked by the agent's gate (ext_authz)
+    PORTAL_FRONT_DOOR_CERT/_KEY  its TLS certificate (needed when on)
+    PORTAL_FRONT_DOOR_HOST       its bind                         127.0.0.1
+    PORTAL_FRONT_DOOR_ORIGINS    comma list of other origins allowed CORS (none)
 
-Design: docs/design/security-hardening/06-portal-and-edge.md.
+Design: docs/design/security-hardening/06-portal-and-edge.md, and
+10-sso-front-door.md for the front door.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -130,6 +137,111 @@ def validate_webhook(w: Webhook) -> Webhook:
     return w
 
 
+# ---------------------------------------------------------------- the front door
+#
+# security-hardening 10, F4/F7/F10: one TLS origin for the portal, its RPCs and the
+# observability tools, plus HyperDX on its own port. Envoy asks the agent's gate
+# (`[auth.gate]`, an `ext_authz` http_service on loopback) about every request but
+# sign-in and Dex, and each route's upstream sees exactly the identity headers the
+# table (nix/portal/front-door-headers.json) gives it.
+
+FRONT_DOOR_MODES = ("off", "on")
+# The table's columns: the gate's routes, plus the two it never checks.
+FRONT_DOOR_COLUMNS = ("rpc", "portal", "auth", "dex", "grafana", "prometheus", "hyperdx")
+UNCHECKED_COLUMNS = ("auth", "dex")
+HEADER_ACTIONS = ("kept", "removed", "replaced")
+FRONT_DOOR_UPSTREAMS = (
+    "gate", "dex", "portal", "gateway", "sessions", "fleet", "grafana", "prometheus", "hyperdx")
+# The gate's own routes on the main listener; anything else under /auth/ is checked.
+GATE_PATHS = ("/auth/login", "/auth/callback", "/auth/logout")
+# What a denied check may send the browser (Envoy adds status and Location itself).
+DENIED_CLIENT_HEADERS = ("location", "set-cookie", "cache-control", "retry-after", "content-type")
+CHECK_TIMEOUT = "1s"
+HSTS = "max-age=31536000"
+GATE_CLUSTER = "front_gate"
+HEADER_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+SERVICE_NAME = re.compile(r"agent\.v1\.[A-Z][A-Za-z0-9]{0,63}")
+
+
+@dataclass(frozen=True)
+class FrontListener:
+    name: str
+    port: int
+    check: str  # the gate's check prefix for this listener (`/_check/main`)
+
+
+@dataclass(frozen=True)
+class FrontDoor:
+    main: FrontListener
+    hyperdx: FrontListener
+    upstreams: Mapping[str, int]
+    sessions: tuple[str, ...]  # services on the sessions process
+    fleet: tuple[str, ...]  # services on the fleet process
+    headers: Mapping[str, Mapping[str, str]]  # header -> column -> action
+
+    def removed(self, column: str) -> list[str]:
+        return sorted(h for h, row in self.headers.items() if row[column] == "removed")
+
+    def replaced(self, column: str) -> list[str]:
+        return sorted(h for h, row in self.headers.items() if row[column] == "replaced")
+
+
+def front_listener(raw: Mapping) -> FrontListener:
+    l = FrontListener(str(raw["name"]), int(raw["port"]), str(raw["check"]))
+    if not re.fullmatch(r"/_check/[a-z]{1,16}", l.check):
+        raise EnvoyError(f"front door check prefix {l.check!r} is not /_check/<listener>")
+    if not 0 < l.port < 65536:
+        raise EnvoyError(f"front door port {l.port} is out of range")
+    return l
+
+
+def validate_header_table(raw: Mapping) -> dict[str, dict[str, str]]:
+    """F4's table, fail closed: every header a lowercase token with an action on
+    every column, nothing replaced where the gate never answers, and `authorization`
+    never passed through as the client sent it."""
+    if tuple(raw.get("routes", ())) != FRONT_DOOR_COLUMNS:
+        raise EnvoyError(f"front door header table routes must be {FRONT_DOOR_COLUMNS}")
+    headers = raw.get("headers")
+    if not isinstance(headers, Mapping) or not headers:
+        raise EnvoyError("front door header table has no headers")
+    out: dict[str, dict[str, str]] = {}
+    for name, row in headers.items():
+        if not isinstance(name, str) or not HEADER_NAME.fullmatch(name):
+            raise EnvoyError(f"front door header {name!r} is not a lowercase header name")
+        if not isinstance(row, Mapping) or set(row) != set(FRONT_DOOR_COLUMNS):
+            raise EnvoyError(f"front door header {name}: needs exactly the columns {FRONT_DOOR_COLUMNS}")
+        for col, action in row.items():
+            if action not in HEADER_ACTIONS:
+                raise EnvoyError(f"front door header {name} on {col}: {action!r} is not one of {HEADER_ACTIONS}")
+            if action == "replaced" and col in UNCHECKED_COLUMNS:
+                raise EnvoyError(f"front door header {name}: {col} is never checked, so nothing replaces it")
+        if name == "authorization" and "kept" in row.values():
+            raise EnvoyError("front door: a client's own authorization header is never passed through")
+        out[name] = dict(row)
+    return out
+
+
+def load_front_door(raw: Mapping) -> FrontDoor:
+    main, hyperdx = front_listener(raw["main"]), front_listener(raw["hyperdx"])
+    if main.port == hyperdx.port or main.check == hyperdx.check:
+        raise EnvoyError("the front door's two listeners need their own port and check prefix")
+    up = {str(k): int(v) for k, v in raw["upstreams"].items()}
+    if set(up) != set(FRONT_DOOR_UPSTREAMS):
+        raise EnvoyError(f"front door upstreams must be exactly {FRONT_DOOR_UPSTREAMS}")
+    for name, port in up.items():
+        if not 0 < port < 65536:
+            raise EnvoyError(f"front door upstream {name} port {port} is out of range")
+    svc = raw["rpc_services"]
+    sessions = tuple(str(x) for x in svc["sessions"])
+    fleet = tuple(str(x) for x in svc["fleet"])
+    for name in sessions + fleet:
+        if not SERVICE_NAME.fullmatch(name):
+            raise EnvoyError(f"front door rpc service {name!r} is not an agent.v1 service name")
+    if len(set(sessions + fleet)) != len(sessions + fleet):
+        raise EnvoyError("a front door rpc service is routed to two processes")
+    return FrontDoor(main, hyperdx, up, sessions, fleet, validate_header_table(raw["headers"]))
+
+
 # The transcoder `services` list is derived from the descriptor (nix/rest-descriptor.nix);
 # a value far above the ~40-service surface means a malformed services file, so cap it.
 MAX_SERVICES = 512
@@ -169,6 +281,7 @@ class Spec:
     gateway_port: int
     rest: Rest | None = None
     webhook: Webhook | None = None
+    front_door: FrontDoor | None = None
 
     @staticmethod
     def load(raw: Mapping) -> "Spec":
@@ -191,7 +304,10 @@ class Spec:
                 webhook = validate_webhook(Webhook(
                     str(w["name"]), int(w["port"]), str(w["cluster"]),
                     int(w["upstream_port"]), str(w["path"]), int(w["max_body"])))
-            return Spec(listeners, int(raw["otel_port"]), int(raw["gateway_port"]), rest, webhook)
+            fd = raw.get("front_door")
+            front_door = load_front_door(fd) if fd is not None else None
+            return Spec(listeners, int(raw["otel_port"]), int(raw["gateway_port"]), rest, webhook,
+                        front_door)
         except (KeyError, TypeError, ValueError) as e:
             raise EnvoyError(f"bad spec: {e}") from e
 
@@ -236,6 +352,11 @@ class Knobs:
     upstream_key: str = ""
     upstream_sni: str = "localhost"
     otlp_authorization: str = ""
+    front_door: str = "off"
+    front_host: str = "127.0.0.1"
+    front_cert: str = ""
+    front_key: str = ""
+    front_origins: tuple[str, ...] = ()
     notes: list[str] = field(default_factory=list)
 
 
@@ -388,7 +509,9 @@ def knobs_from_env(env: Mapping[str, str], spec: Spec) -> Knobs:
         "the OTLP ingestion key",
         env.get("PORTAL_OTLP_AUTHORIZATION") or env.get("CLICKSTACK_INGESTION_API_KEY") or "",
     )
-    for path in (k.tls_cert, k.tls_key, k.upstream_ca, k.upstream_cert, k.upstream_key):
+    front_door_knobs(env, spec, k)
+    for path in (k.tls_cert, k.tls_key, k.upstream_ca, k.upstream_cert, k.upstream_key,
+                 k.front_cert, k.front_key):
         if path and not os.path.isabs(path):
             raise EnvoyError(f"{path!r} must be an absolute path")
     if not is_loopback_host(k.host):
@@ -397,6 +520,30 @@ def knobs_from_env(env: Mapping[str, str], spec: Spec) -> Knobs:
             + ", ".join(k.origins)
         )
     return k
+
+
+def front_door_knobs(env: Mapping[str, str], spec: Spec, k: Knobs) -> None:
+    g = lambda n: env.get(n, "").strip()  # noqa: E731
+    k.front_door = g("PORTAL_FRONT_DOOR") or "off"
+    if k.front_door not in FRONT_DOOR_MODES:
+        raise EnvoyError(f"PORTAL_FRONT_DOOR must be one of {'|'.join(FRONT_DOOR_MODES)}, not {k.front_door!r}")
+    extra = [n for n in ("PORTAL_FRONT_DOOR_CERT", "PORTAL_FRONT_DOOR_KEY", "PORTAL_FRONT_DOOR_HOST",
+                         "PORTAL_FRONT_DOOR_ORIGINS") if g(n)]
+    if k.front_door == "off":
+        if extra:
+            raise EnvoyError(f"{', '.join(extra)} set but PORTAL_FRONT_DOOR is not on")
+        return
+    if spec.front_door is None:
+        raise EnvoyError("PORTAL_FRONT_DOOR=on but the spec has no front_door")
+    k.front_cert, k.front_key = g("PORTAL_FRONT_DOOR_CERT"), g("PORTAL_FRONT_DOOR_KEY")
+    if not (k.front_cert and k.front_key):
+        raise EnvoyError("the front door is HTTPS only: set PORTAL_FRONT_DOOR_CERT and PORTAL_FRONT_DOOR_KEY")
+    if g("PORTAL_FRONT_DOOR_HOST"):
+        k.front_host = validate_host(g("PORTAL_FRONT_DOOR_HOST"))
+    if g("PORTAL_FRONT_DOOR_ORIGINS"):
+        k.front_origins = validate_origins(g("PORTAL_FRONT_DOOR_ORIGINS"))
+        if any(o.startswith("http://") for o in k.front_origins):
+            raise EnvoyError("PORTAL_FRONT_DOOR_ORIGINS: the front door is https, so are its other origins")
 
 
 # ---------------------------------------------------------------- the JWKS
@@ -842,6 +989,160 @@ def webhook_listener(w: Webhook, k: Knobs, tls: Tls | None) -> dict:
     }
 
 
+def downstream_tls(tls: Tls) -> dict:
+    return {
+        "name": "envoy.transport_sockets.tls",
+        "typed_config": {
+            "@type": any_type("envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext"),
+            "common_tls_context": {
+                "alpn_protocols": ["h2", "http/1.1"],
+                "tls_certificates": [{
+                    "certificate_chain": {"filename": tls.cert},
+                    "private_key": {"filename": tls.key},
+                }],
+            },
+        },
+    }
+
+
+def ext_authz_filter(fd: FrontDoor, l: FrontListener, upstream: Sequence[str]) -> dict:
+    """Envoy's check with the gate, fail closed: an error or a 1 s timeout denies.
+    The gate sees only the cookie and the bearer (plus method, path and host); a 200
+    may set exactly `upstream`, overwriting what the client sent."""
+    response: dict = {
+        "allowed_client_headers": {"patterns": [{"exact": h} for h in DENIED_CLIENT_HEADERS]},
+    }
+    if upstream:
+        response["allowed_upstream_headers"] = {"patterns": [{"exact": h} for h in upstream]}
+    return {
+        "name": "envoy.filters.http.ext_authz",
+        "typed_config": {
+            "@type": any_type("envoy.extensions.filters.http.ext_authz.v3.ExtAuthz"),
+            "http_service": {
+                "server_uri": {
+                    "uri": f"http://127.0.0.1:{fd.upstreams['gate']}",
+                    "cluster": GATE_CLUSTER,
+                    "timeout": CHECK_TIMEOUT,
+                },
+                "path_prefix": l.check,
+                "authorization_response": response,
+            },
+            "allowed_headers": {"patterns": [{"exact": "cookie"}, {"exact": "authorization"}]},
+            "failure_mode_allow": False,
+        },
+    }
+
+
+def unchecked() -> dict:
+    return {"envoy.filters.http.ext_authz": {
+        "@type": any_type("envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute"),
+        "disabled": True,
+    }}
+
+
+def front_route(match: dict, cluster_name: str, removed: Sequence[str], timeout: str = "60s",
+                check: bool = True) -> dict:
+    r: dict = {"match": match, "route": {"cluster": cluster_name, "timeout": timeout}}
+    if removed:
+        r["request_headers_to_remove"] = list(removed)
+    if not check:
+        r["typed_per_filter_config"] = unchecked()
+    return r
+
+
+def front_routes(fd: FrontDoor) -> list[dict]:
+    """The main listener's routes, most specific first. `path_separated_prefix`
+    matches `/dex` and `/dex/…` but never `/dexfoo`; the gate's own routes are exact
+    paths, so the check prefixes can't be reached through them."""
+    out = [front_route({"path": p}, GATE_CLUSTER, fd.removed("auth"), "15s", check=False)
+           for p in GATE_PATHS]
+    out.append(front_route({"path_separated_prefix": "/dex"}, "front_dex", fd.removed("dex"),
+                           "15s", check=False))
+    rpc = fd.removed("rpc")
+    for cluster_name, services in (("front_rpc_sessions", fd.sessions), ("front_rpc_fleet", fd.fleet)):
+        out += [front_route({"prefix": f"/{s}/"}, cluster_name, rpc, "0s") for s in services]
+    out.append(front_route({"prefix": "/agent.v1."}, "front_rpc_gateway", rpc, "0s"))
+    out.append(front_route({"path_separated_prefix": "/grafana"}, "front_grafana", fd.removed("grafana")))
+    out.append(front_route({"path_separated_prefix": "/prometheus"}, "front_prometheus",
+                           fd.removed("prometheus")))
+    out.append(front_route({"prefix": "/"}, "front_portal", fd.removed("portal")))
+    return out
+
+
+def front_listener_config(name: str, port: int, k: Knobs, tls: Tls, routes: list[dict],
+                          filters: list[dict], cors: Sequence[str]) -> dict:
+    vhost: dict = {
+        "name": name,
+        "domains": ["*"],
+        "routes": routes,
+        "response_headers_to_add": [{
+            "header": {"key": "strict-transport-security", "value": HSTS},
+            "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+        }],
+    }
+    if cors:
+        vhost["typed_per_filter_config"] = {"envoy.filters.http.cors": cors_policy(cors)}
+    hcm = {
+        "@type": any_type(
+            "envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"),
+        "stat_prefix": name,
+        "codec_type": "AUTO",
+        "use_remote_address": True,
+        "normalize_path": True,
+        "merge_slashes": True,
+        "path_with_escaped_slashes_action": "REJECT_REQUEST",
+        "request_headers_timeout": "10s",
+        "access_log": access_log(k.otlp_authorization),
+        "tracing": tracing(k.otlp_authorization),
+        "route_config": {"name": f"{name}_route", "virtual_hosts": [vhost]},
+        "http_filters": filters,
+    }
+    return {
+        "name": name,
+        "address": {"socket_address": {"address": k.front_host, "port_value": port}},
+        "filter_chains": [{
+            "filters": [{"name": "envoy.filters.network.http_connection_manager", "typed_config": hcm}],
+            "transport_socket": downstream_tls(tls),
+        }],
+    }
+
+
+def front_door(fd: FrontDoor, k: Knobs, tls: Tls, up: Upstream | None) -> tuple[list[dict], list[dict]]:
+    """The front door's listeners and clusters. No CORS unless an origin is listed
+    (the portal and its RPCs share :8443), and then never credentialed (F10)."""
+    def f(name: str, typ: str) -> dict:
+        return {"name": name, "typed_config": {"@type": any_type(typ)}}
+
+    cors = [f("envoy.filters.http.cors", "envoy.extensions.filters.http.cors.v3.Cors")] if k.front_origins else []
+    router = f("envoy.filters.http.router", "envoy.extensions.filters.http.router.v3.Router")
+    main_upstream = sorted({h for c in FRONT_DOOR_COLUMNS if c not in UNCHECKED_COLUMNS + ("hyperdx",)
+                            for h in fd.replaced(c)})
+    main = front_listener_config(
+        fd.main.name, fd.main.port, k, tls, front_routes(fd),
+        cors + [ext_authz_filter(fd, fd.main, main_upstream),
+                f("envoy.filters.http.grpc_web", "envoy.extensions.filters.http.grpc_web.v3.GrpcWeb"),
+                router],
+        k.front_origins)
+    hyperdx = front_listener_config(
+        fd.hyperdx.name, fd.hyperdx.port, k, tls,
+        [front_route({"prefix": "/"}, "front_hyperdx", fd.removed("hyperdx"))],
+        [ext_authz_filter(fd, fd.hyperdx, fd.replaced("hyperdx")), router], ())
+    u = fd.upstreams
+    rpc_tls = upstream_tls(up) if up else None
+    clusters = [
+        cluster(GATE_CLUSTER, "127.0.0.1", u["gate"], h2=False),
+        cluster("front_dex", "127.0.0.1", u["dex"], h2=False),
+        cluster("front_portal", "127.0.0.1", u["portal"], h2=False),
+        cluster("front_grafana", "127.0.0.1", u["grafana"], h2=False),
+        cluster("front_prometheus", "127.0.0.1", u["prometheus"], h2=False),
+        cluster("front_hyperdx", "127.0.0.1", u["hyperdx"], h2=False),
+        cluster("front_rpc_gateway", "127.0.0.1", u["gateway"], tls=rpc_tls),
+        cluster("front_rpc_sessions", "127.0.0.1", u["sessions"], tls=rpc_tls),
+        cluster("front_rpc_fleet", "127.0.0.1", u["fleet"], tls=rpc_tls),
+    ]
+    return [main, hyperdx], clusters
+
+
 def jwks_cluster(url: str) -> dict:
     u = urlsplit(url)
     host = u.hostname or ""
@@ -875,6 +1176,10 @@ def render(spec: Spec, k: Knobs, jwt: Jwt | None, paths: Mapping[str, str]) -> d
         # Its own HTTP/1.1 cluster: tiny_http speaks no h2, and no upstream TLS.
         clusters.append(cluster(spec.webhook.cluster, "127.0.0.1", spec.webhook.upstream_port, h2=False))
         listeners.append(webhook_listener(spec.webhook, k, tls))
+    if k.front_door == "on" and spec.front_door is not None:
+        fls, fcs = front_door(spec.front_door, k, Tls(p(k.front_cert), p(k.front_key)), up)
+        listeners += fls
+        clusters += fcs
     return {"static_resources": {"listeners": listeners, "clusters": clusters}}
 
 
@@ -884,6 +1189,7 @@ def container_paths(k: Knobs) -> dict[str, str]:
         k.tls_cert: "listener.crt", k.tls_key: "listener.key",
         k.upstream_ca: "upstream-ca.crt",
         k.upstream_cert: "upstream.crt", k.upstream_key: "upstream.key",
+        k.front_cert: "front.crt", k.front_key: "front.key",
     }
     return {h: f"{CONTAINER_TLS_DIR}/{n}" for h, n in files.items() if h}
 
@@ -920,7 +1226,8 @@ def cmd_render(args: argparse.Namespace, env: Mapping[str, str], runner: Runner)
     write_private(Path(args.out), json.dumps(cfg, indent=2) + "\n")
     for n in k.notes:
         print(f"portal-envoy: note — {n}", file=sys.stderr)
-    print(f"portal-envoy: wrote {args.out} (jwt_authn {'on' if jwt else 'off'})")
+    print(f"portal-envoy: wrote {args.out} (jwt_authn {'on' if jwt else 'off'}, "
+          f"front door {k.front_door})")
     return 0
 
 
@@ -958,6 +1265,11 @@ def cmd_up(args: argparse.Namespace, env: Mapping[str, str], runner: Runner) -> 
         w = spec.webhook
         print(f"      {scheme}://{k.host}:{w.port}{w.path}  -> 127.0.0.1:{w.upstream_port} "
               f"({w.cluster}, GitHub webhooks, HMAC-verified by the agent, no edge JWT)")
+    if k.front_door == "on" and spec.front_door is not None:
+        fd = spec.front_door
+        print(f"      https://{k.front_host}:{fd.main.port}  front door (portal, RPCs, /grafana, "
+              f"/prometheus, /dex), checked by the gate on 127.0.0.1:{fd.upstreams['gate']}")
+        print(f"      https://{k.front_host}:{fd.hyperdx.port}  front door (HyperDX), checked the same")
     print(f"      CORS origins: {', '.join(k.origins)}")
     argv = [rt, "run", "-d", "--name", args.name, "--network", "host",
             # the container user must read the 0600 config (and any TLS keys) we own

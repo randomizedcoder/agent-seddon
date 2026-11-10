@@ -98,7 +98,7 @@ pub enum ClaimRejection {
 }
 
 /// Longest IdP `sub` accepted (OpenID Connect Core §2: at most 255 ASCII characters).
-pub const MAX_IDP_SUBJECT_LEN: usize = 255;
+pub const MAX_IDP_SUBJECT_LEN: usize = agent_core::MAX_IDP_SUBJECT_LEN;
 
 impl ResolvedIssuer {
     /// Apply the profile's defaults and check the combination is usable. Every

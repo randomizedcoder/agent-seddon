@@ -41,8 +41,9 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
-| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | #715 |
-| S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
+| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
+| S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | 🟡 | #716 |
+| S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
@@ -1371,6 +1372,48 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     Envoy, S28); a short cache for `by_cookie`; browser sessions' `last_seen_at`; a shared hex
     helper; `PORTAL_FILES`' provenance; `normal_path`'s allocation; a path-style `rd` decoder;
     an eviction test for `MAX_CACHED_TOKENS`.
+
+- **2026-11-10 — S28a: the front door, rendered.** S28 is split: S28a renders and validates
+  Envoy's front door; S28b puts it in the module and walks a sign-in through it in the VM.
+  - `nix/portal/front-door-headers.json` is F4's header table, one source: `envoy-spec.nix`
+    passes it to the renderer, and the gate's tests require each route's `replaced` set to
+    equal `Route::replaced` (and nothing replaced on `/auth/*` or `/dex/*`, which the check
+    never sees).
+  - `portal_envoy.py` renders, with `PORTAL_FRONT_DOOR=on` and its own certificate
+    (`PORTAL_FRONT_DOOR_CERT` / `_KEY`, HTTPS only), `:8443` and `:8444`:
+    - `ext_authz` (`http_service`) to the gate's cluster with the listener's `path_prefix`,
+      1 s timeout, `failure_mode_allow: false`. The gate sees `cookie` and `authorization`; a
+      200 may set only the replaced headers; a denial passes `location` and `set-cookie`.
+    - Routes, most specific first: the three gate paths exactly and `/dex` (both unchecked),
+      the sessions and fleet services by name, every other `/agent.v1.` to the gateway,
+      `/grafana`, `/prometheus`, then the portal. `path_separated_prefix`, so `/dexfoo`
+      reaches the portal's route and its check. Each route removes its column's `removed`
+      headers.
+    - Paths normalised, slashes merged, escaped slashes refused; HSTS on both listeners. No
+      CORS filter unless `PORTAL_FRONT_DOOR_ORIGINS` lists one (https, never credentialed),
+      and never on `:8444`.
+    - Every mode passes `envoy --mode validate`. Validate does not resolve an `ext_authz`
+      cluster, so a table row checks that every cluster the front door names is rendered.
+  - **#715 draft (no must-fix; merged as e345d6db), handled here:**
+    - At most half the gate's workers (`BROWSER_WORKERS`) answer `/auth/*`, which waits on the
+      IdP; the next gets a 503 with `retry-after: 1`, so a stalled IdP never queues Envoy's
+      checks (a socket test holds the IdP and gets a 200 check through).
+    - A non-gateway unit with `[auth.gate]` logs that it leaves the gate to the gateway
+      (`info`, not `warn`: every unit sharing the config says it on every boot).
+    - The 500 that replaces an unwritable answer keeps `cache-control: no-store`, and the log
+      names the refused header (escaped, cut to 64), never its value.
+    - The draft's "long issuer name mints an unverifiable subject" can't happen: an issuer name
+      is a `safe_segment` (at most 128 bytes), so `user:<name>/<sub>` is at most 389. A
+      compile-time assertion now pins that against `MAX_SUBJECT_LEN`, and
+      `MAX_IDP_SUBJECT_LEN` moved to `agent-core` beside it.
+    - The legacy `issuer = "default"` gets a serve-path row; the `serve_base` call sites say
+      `/* gateway */ false`; `docs/grpc.md` documents `[auth.gate]`.
+  - From #714: `Begin` and the front door have a pending-login table each (`MAX_PENDING`
+    apiece), so anonymous `/auth/login`s can't refuse a CLI its `Begin`; and a table row
+    for `MAX_CACHED_TOKENS` (a full cache keeps its live entries and serves uncached).
+  - Still carried: a short cache for `by_cookie`; browser sessions' `last_seen_at`; a shared
+    hex helper; `PORTAL_FILES`' provenance; `normal_path`'s allocation; a path-style `rd`
+    decoder.
 
 ## Cross-track note (not an S-increment)
 

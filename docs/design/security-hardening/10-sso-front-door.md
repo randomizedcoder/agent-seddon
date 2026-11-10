@@ -270,6 +270,10 @@ reuses the same pieces later; this design is the NixOS module.
   (a 500 instead), and the IdP's `sub` must be visible ASCII of at most 255 bytes where it is
   read, so `x-seddon-user` cannot split. The callback is `<main_origin>/auth/callback`, and must
   be one of `[auth] redirect_uris`; `main_origin` must be a canonical `https` origin.
+- As built (S28a): the front door is rendered by `test/portal-envoy/portal_envoy.py` from
+  `nix/portal/envoy-spec.nix`'s `front_door` section with `PORTAL_FRONT_DOOR=on`; F4's header
+  table is `nix/portal/front-door-headers.json`, which the gate's Rust tests read too. Envoy's
+  `--mode validate` does not resolve an `ext_authz` cluster, so a renderer row checks it.
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches

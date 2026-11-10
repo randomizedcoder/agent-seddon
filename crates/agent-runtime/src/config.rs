@@ -6760,6 +6760,8 @@ mod tests {
     #[case::boundary_duplicate_entry_names(issuers(vec![generic_entry("kc"), generic_entry("kc")]), true, Some("named `kc`"))]
     #[case::adversarial_entry_named_default_collides_with_legacy(AuthCfg { issuers: vec![generic_entry("default")], ..oidc(GOOD_JWKS) }, true, Some("named `default`"))]
     #[case::adversarial_entry_name_traversal(issuers(vec![generic_entry("../kc")]), true, Some("plain identifier"))]
+    #[case::boundary_entry_name_longest(issuers(vec![generic_entry(&"k".repeat(agent_core::MAX_SEGMENT_LEN))]), true, None)]
+    #[case::boundary_entry_name_one_over(issuers(vec![generic_entry(&"k".repeat(agent_core::MAX_SEGMENT_LEN + 1))]), true, Some("plain identifier"))]
     #[case::adversarial_entry_jwks_plain_http_remote(issuers(vec![AuthIssuerCfg { jwks_url: "http://idp.example/k".into(), ..google_entry() }]), true, Some("must use https"))]
     #[case::adversarial_discovery_plain_http_remote(issuers(vec![AuthIssuerCfg { issuer: "http://idp.example".into(), ..generic_entry("kc") }]), true, Some("used for discovery"))]
     // --- `backchannel_url` (security-hardening S26) ---

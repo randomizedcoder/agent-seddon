@@ -27,8 +27,10 @@ use crate::client::login::fetch_json;
 
 /// How long a `state` from `Begin` stays redeemable.
 pub const STATE_TTL_SECS: u64 = 600;
-/// Sign-ins started and not yet finished, across every client. A full table
-/// refuses new ones rather than evicting someone mid sign-in.
+/// Sign-ins started and not yet finished, per flow: `Begin` (the CLI, the native
+/// portal) and the front door's `/auth/login` each have a table this size, so a
+/// flood of anonymous front-door logins can't refuse a client its `Begin`. A full
+/// table refuses new ones rather than evicting someone mid sign-in.
 pub const MAX_PENDING: usize = 1024;
 /// Largest authorization code `Exchange` will send on. Real ones are short.
 pub const MAX_CODE_BYTES: usize = 4096;
@@ -248,7 +250,10 @@ impl PendingLogins {
 pub struct CodeFlow {
     issuers: Vec<BrowserIssuer>,
     redirect_uris: Vec<String>,
+    /// `Begin`'s sign-ins.
     pending: PendingLogins,
+    /// The front door's sign-ins ([`Self::begin_gate`]).
+    gate_pending: PendingLogins,
     /// Discovered endpoints by issuer name; fetched on first use.
     endpoints: Mutex<HashMap<String, CodeEndpoints>>,
     http: reqwest::Client,
@@ -282,7 +287,8 @@ impl CodeFlow {
         Ok(Some(Self {
             issuers: browser,
             redirect_uris: redirect_uris.to_vec(),
-            pending: PendingLogins::new(clock),
+            pending: PendingLogins::new(clock.clone()),
+            gate_pending: PendingLogins::new(clock),
             endpoints: Mutex::new(HashMap::new()),
             http,
         }))
@@ -361,7 +367,7 @@ impl CodeFlow {
         }
         let endpoints = self.endpoints(login).await?;
         let nonce = random_token(16).ok_or(CodeRefusal::NoRandomness)?;
-        let (state, expires_at) = self.pending.insert(Pending {
+        let (state, expires_at) = self.insert_pending(Pending {
             issuer: login.name.clone(),
             redirect_uri: redirect_uri.to_string(),
             challenge: challenge.to_string(),
@@ -391,10 +397,9 @@ impl CodeFlow {
         state: &str,
         verifier: &str,
     ) -> Result<Redeemed, CodeRefusal> {
-        let pending = self.pending.take(state)?;
-        if pending.gate.is_some() {
-            return Err(CodeRefusal::WrongFlow);
-        }
+        let Ok(pending) = self.pending.take(state) else {
+            return Err(self.other_flow(&self.gate_pending, state));
+        };
         self.redeem_pending(pending, code, verifier).await
     }
 
@@ -407,7 +412,9 @@ impl CodeFlow {
         state: &str,
         login_cookie: Option<&str>,
     ) -> Result<(Redeemed, String), CodeRefusal> {
-        let mut pending = self.pending.take(state)?;
+        let Ok(mut pending) = self.gate_pending.take(state) else {
+            return Err(self.other_flow(&self.pending, state));
+        };
         let Some(gate) = pending.gate.take() else {
             return Err(CodeRefusal::WrongFlow);
         };
@@ -491,9 +498,27 @@ impl CodeFlow {
         Ok(found)
     }
 
+    /// Remember `p` in its flow's table.
+    fn insert_pending(&self, p: Pending) -> Result<(String, u64), CodeRefusal> {
+        if p.gate.is_some() {
+            self.gate_pending.insert(p)
+        } else {
+            self.pending.insert(p)
+        }
+    }
+
+    /// Why a `state` missing from one flow's table was refused: begun by the other
+    /// flow (spent here all the same, so it is tried once), or unknown.
+    fn other_flow(&self, other: &PendingLogins, state: &str) -> CodeRefusal {
+        match other.take(state) {
+            Ok(_) => CodeRefusal::WrongFlow,
+            Err(e) => e,
+        }
+    }
+
     #[cfg(test)]
     fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.gate_pending.len()
     }
 }
 
