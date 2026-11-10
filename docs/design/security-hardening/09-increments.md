@@ -48,8 +48,9 @@ and Prometheus.
 | S26 | Dex in the module (GitHub connector, secrets as files); the agent's Dex issuer with `backchannel_url` | 10 F1, F12 | S13a |
 | S26b | GitHub App from a manifest: `/setup` bootstrap code, secrets to files, Dex restart | 10 | S27 |
 | S27a | `AuthGate` core, pure: `read:` / `write:observability`, the path map, `rd`, browser cookie sessions | 10 F3, F5, F11 | S26 |
-| S27b | `AuthGate` routes: login / callback / logout, the `ext_authz` check route (cookie or the client's own agent token), the token cache, the `auth-e2e` row | 10 F3, F4, F10 | S27a |
-| S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping, CORS | 10 F4, F7, F10 | S27b |
+| S27b-i | `AuthGate` route logic: login / callback / logout, the `ext_authz` check (cookie or the client's own agent token), the token cache; no socket | 10 F3, F4, F10 | S27a |
+| S27b-ii | The gate's loopback HTTP listener (`tiny_http`), its config and gateway wiring, `authz.toml` rows, the `auth-e2e` row | 10 F3, F4, F10 | S27b-i |
+| S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping, CORS | 10 F4, F7, F10 | S27b-ii |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path (the host's `--web.external-url`), HyperDX port | 10 F6 | S28 |
 | S30 | Loopback lockdown and firewall; the webhook receiver gets its own bind | 10 F9 | S28 |
 | S31 | Portal cookie mode (no token in JS) and tool links through the front door | 10 | S28 |
@@ -69,8 +70,8 @@ S6, S8 → S13a → S13b → S14 ─────────┘
 S16, S17 independent
 
 S25 independent (useful without the front door)
-S13a → S26 → S27a → S27b → S28 → S29, S30, S31
-              S27b → S26b   (/setup is an AuthGate route; see 10's open items)
+S13a → S26 → S27a → S27b-i → S27b-ii → S28 → S29, S30, S31
+              S27b-ii → S26b   (/setup is an AuthGate route; see 10's open items)
 ```
 
 Four lanes can run in parallel after S1: correctness (S2, S7), login / token / sessions (S3 → S8),

@@ -283,7 +283,8 @@ reuses the same pieces later; this design is the NixOS module.
 | S26 | Dex in the module (GitHub connector, secrets as files), the agent issuer wired, `backchannel_url` (F12) | module, Rust, tables, VM test with Dex's `mockCallback` connector |
 | S26b | GitHub App from a manifest: `/setup` bootstrap, secrets to files, Dex restart | Rust, module, tables |
 | S27a | `AuthGate` core: RBAC pairs (F5), the path map, `rd` (F11), browser cookie sessions (F3) | Rust, tables, catalogue |
-| S27b | `AuthGate` routes: login / callback / logout, `Check` (F4; F10's cookie attributes), the token cache | Rust, tables, `authz.toml` rows, `auth-e2e` row |
+| S27b-i | `AuthGate` route logic: login / callback / logout, `Check` (F4; F10's cookie attributes), the token cache | Rust, tables |
+| S27b-ii | The gate's loopback listener, config and wiring | Rust, `authz.toml` rows, `auth-e2e` row |
 | S28 | Envoy front door: TLS, `ext_authz`, routes, header stripping, CORS (F4, F7, F10) | `portal_envoy.py`, gate rows |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port (F6) | module |
 | S30 | Loopback lockdown and firewall (F9) | module assertions; l2 config change |

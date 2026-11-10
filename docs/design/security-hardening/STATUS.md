@@ -39,8 +39,9 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
-| S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | 🟡 | |
-| S27b | `AuthGate` routes: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ⬜ | |
+| S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
+| S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | 🟡 | |
+| S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ⬜ | |
 | S28 | Envoy front door (TLS, `ext_authz`, routes, header stripping, CORS) | [10](10-sso-front-door.md) F4, F7, F10 | ⬜ | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
@@ -1261,7 +1262,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     the cookie value `ck1.<tenant>.<sid>.<secret>`; `by_cookie` resolves one, refusing a
     revoked, expired or non-browser session, a wrong secret, and an `rh1` refresh handle.
     `refresh` refuses a browser session, and `ExchangeCode` can't open one (it maps the kind to
-    `unspecified`). Browser sessions share the per-subject cap.
+    `unspecified`). Browser sessions share the per-tenant cap.
   - **[`gate.rs`](../../../crates/agent-grpc/src/server/auth/gate.rs):**
     - `return_path` (F11): `rd` decoded once (two hex digits, UTF-8), then allowlisted: one
       leading `/`, at most 2048 bytes, printable ASCII without `\`; else `/`.
@@ -1302,6 +1303,41 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     name test, not `authorize`'s host-global check; the cookie traversal row has a well-formed
     secret, so only the tenant fails. Carried to S27b-ii: trim a trailing `/` from `main_origin`;
     a short cache for `by_cookie`'s store read; browser sessions never touch `last_seen_at`.
+
+- **2026-11-09 — S27b-i: the `AuthGate` routes, as functions over a request.** S27b is split
+  again: S27b-i is what each route answers, testable without a socket; S27b-ii is the loopback
+  listener that calls it, its config and wiring.
+  - **Gate logins (F3).** The agent is the PKCE client. `CodeFlow::begin_gate` keeps the
+    verifier, the checked `rd` and the SHA-256 of a fresh login cookie with the `state`;
+    `redeem_gate` refuses a callback whose `__Host-seddon-login` cookie is absent, empty or
+    another sign-in's (`login_cookie_mismatch`). A gate state is refused at the RPC `Exchange`
+    and an RPC state at the gate (`wrong_flow`), so the two flows can't cross.
+  - **`AuthGate`** (`gate/routes.rs`): `login` (302 to the IdP, sets the login cookie, Max-Age
+    600); `callback` (always clears the login cookie; on success opens a browser session and
+    302s to the stored `rd`, never decoding it again; any refusal is a 403 with an audit row,
+    and no session); `logout` (POST only, 405 otherwise; revokes and clears); `check`.
+  - **`check` (F4).** The session cookie wins; with none, an agent bearer that verifies and
+    whose session is live. A cookie naming no live session does not fall back to the bearer.
+    An RPC gets `authorization: Bearer` with a token minted per session and cached until a
+    minute before expiry or a role change (at most 4096 sessions); Grafana gets
+    `x-seddon-user` and `x-seddon-role`. Unmapped is 403, a page 302 to the login, an RPC
+    401, and HyperDX's listener goes to the main origin's login. Denials are audited.
+  - **Unbound principals (F2)** are refused at the callback, before any session exists
+    (`unbound`).
+  - Query and cookie parsing are bounded and fail closed on a repeated key.
+  - Tables: the cookie attributes, the callback's 8 refusals, a 16-row check matrix, the
+    remint boundary, logout by method, crossed flows and the login-cookie variants.
+  - From #713's last draft (no must-fix): on HyperDX's listener `/auth/*` and `/dex/*` are
+    refused too (one `under` helper for every prefix); rows for an invalid-UTF-8 `rd` and a bare
+    trailing `%`; S27a's entry says browser sessions share the per-tenant cap. #713's drafts
+    twice lost their opening items and once were the reviewer's notes, not a review: a fleet
+    output bug, carried as its own PR.
+  - From the #714 draft: the gate refuses a `cnf`-bound (service) agent token as a bearer, as
+    the `AuthLayer` does off its mTLS connection; a role change remints at once (tested);
+    `CodeRefusal::NoRandomness` replaces `Busy` for a random-source failure; `is_verifier` has its
+    doc comment back; `AuthGate::new` says it checks the issuer's name only. Carried to S27b-ii:
+    `/auth/login` fills the shared 1024-entry pending table (rate-limit `/auth/*` at Envoy, S28),
+    and a shared hex helper for `sha256_hex` and `random_hex`.
 
 ## Cross-track note (not an S-increment)
 

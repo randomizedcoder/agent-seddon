@@ -60,6 +60,14 @@ pub enum CodeRefusal {
     IssuerMismatch,
     /// The ID token's `nonce` is not the one this sign-in sent.
     NonceMismatch,
+    /// A front-door callback without the login cookie of the browser that began
+    /// this sign-in (security-hardening 10, F3): login CSRF.
+    NotThisBrowser,
+    /// A `state` from the other flow: the gate's at `Exchange`, or `Begin`'s at
+    /// the gate's callback.
+    WrongFlow,
+    /// The system's random source failed: no state, nonce or verifier to send.
+    NoRandomness,
 }
 
 impl CodeRefusal {
@@ -78,6 +86,9 @@ impl CodeRefusal {
             CodeRefusal::IdpRefused => "code_refused",
             CodeRefusal::IssuerMismatch => "issuer_mismatch",
             CodeRefusal::NonceMismatch => "nonce_mismatch",
+            CodeRefusal::NotThisBrowser => "login_cookie_mismatch",
+            CodeRefusal::WrongFlow => "wrong_flow",
+            CodeRefusal::NoRandomness => "no_randomness",
         }
     }
 }
@@ -174,6 +185,26 @@ struct Pending {
     redirect_uri: String,
     challenge: String,
     nonce: String,
+    /// `Some` for a front-door sign-in ([`CodeFlow::begin_gate`]).
+    gate: Option<GateLogin>,
+}
+
+/// What a front-door sign-in keeps server-side with its `state`: the browser
+/// holds only the login cookie, whose hash is here (F3), and comes back to `rd`
+/// (F11). The agent is the PKCE client, so the verifier never leaves it.
+#[derive(Clone, Debug)]
+struct GateLogin {
+    login_hash: String,
+    rd: String,
+    verifier: String,
+}
+
+/// What [`CodeFlow::begin_gate`] hands back: the browser goes to
+/// `begun.authorize_url` carrying `login_cookie`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateBegun {
+    pub begun: Begun,
+    pub login_cookie: String,
 }
 
 /// The single-use `state` table: [`agent_core::pending::PendingTable`] on this
@@ -279,6 +310,43 @@ impl CodeFlow {
         redirect_uri: &str,
         challenge: &str,
     ) -> Result<Begun, CodeRefusal> {
+        self.begin_inner(issuer, redirect_uri, challenge, None)
+            .await
+    }
+
+    /// Start a front-door sign-in (security-hardening 10, F3): the agent makes the
+    /// PKCE pair itself, and binds the `state` to a fresh login cookie and to the
+    /// return path `rd` (already checked, F11).
+    pub async fn begin_gate(
+        &self,
+        issuer: &str,
+        redirect_uri: &str,
+        rd: &str,
+    ) -> Result<GateBegun, CodeRefusal> {
+        let verifier = random_token(32).ok_or(CodeRefusal::NoRandomness)?;
+        let login_cookie = random_token(32).ok_or(CodeRefusal::NoRandomness)?;
+        let challenge = s256(&verifier);
+        let gate = GateLogin {
+            login_hash: sha256_hex(&login_cookie),
+            rd: rd.to_string(),
+            verifier,
+        };
+        let begun = self
+            .begin_inner(issuer, redirect_uri, &challenge, Some(gate))
+            .await?;
+        Ok(GateBegun {
+            begun,
+            login_cookie,
+        })
+    }
+
+    async fn begin_inner(
+        &self,
+        issuer: &str,
+        redirect_uri: &str,
+        challenge: &str,
+        gate: Option<GateLogin>,
+    ) -> Result<Begun, CodeRefusal> {
         let login = self.issuer(issuer)?;
         if !redirect_allowed(&self.redirect_uris, redirect_uri) {
             return Err(CodeRefusal::RedirectNotAllowed);
@@ -287,12 +355,13 @@ impl CodeFlow {
             return Err(CodeRefusal::BadChallenge);
         }
         let endpoints = self.endpoints(login).await?;
-        let nonce = random_token(16).ok_or(CodeRefusal::Busy)?;
+        let nonce = random_token(16).ok_or(CodeRefusal::NoRandomness)?;
         let (state, expires_at) = self.pending.insert(Pending {
             issuer: login.name.clone(),
             redirect_uri: redirect_uri.to_string(),
             challenge: challenge.to_string(),
             nonce: nonce.clone(),
+            gate,
         })?;
         let authorize_url = authorize_url(
             &endpoints.authorization,
@@ -318,6 +387,38 @@ impl CodeFlow {
         verifier: &str,
     ) -> Result<Redeemed, CodeRefusal> {
         let pending = self.pending.take(state)?;
+        if pending.gate.is_some() {
+            return Err(CodeRefusal::WrongFlow);
+        }
+        self.redeem_pending(pending, code, verifier).await
+    }
+
+    /// Finish a front-door sign-in: spend `state`, then redeem `code` only for the
+    /// browser holding the login cookie [`Self::begin_gate`] set (F3). Returns the
+    /// redeemed token and the checked return path.
+    pub async fn redeem_gate(
+        &self,
+        code: &str,
+        state: &str,
+        login_cookie: Option<&str>,
+    ) -> Result<(Redeemed, String), CodeRefusal> {
+        let mut pending = self.pending.take(state)?;
+        let Some(gate) = pending.gate.take() else {
+            return Err(CodeRefusal::WrongFlow);
+        };
+        if login_cookie.is_none_or(|c| sha256_hex(c) != gate.login_hash) {
+            return Err(CodeRefusal::NotThisBrowser);
+        }
+        let redeemed = self.redeem_pending(pending, code, &gate.verifier).await?;
+        Ok((redeemed, gate.rd))
+    }
+
+    async fn redeem_pending(
+        &self,
+        pending: Pending,
+        code: &str,
+        verifier: &str,
+    ) -> Result<Redeemed, CodeRefusal> {
         if code.is_empty() || code.len() > MAX_CODE_BYTES || !is_verifier(verifier) {
             return Err(CodeRefusal::Malformed);
         }
@@ -568,6 +669,15 @@ pub fn is_challenge(s: &str) -> bool {
     s.len() == 43
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Lowercase hex SHA-256: how a login cookie is kept beside its `state`.
+fn sha256_hex(s: &str) -> String {
+    ring::digest::digest(&ring::digest::SHA256, s.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A PKCE verifier (RFC 7636 §4.1): 43 to 128 unreserved characters.

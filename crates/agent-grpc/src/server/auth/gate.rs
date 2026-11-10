@@ -1,6 +1,6 @@
 //! The front door's gate (security-hardening 10, S27): what the browser's sign-in
 //! and Envoy's `ext_authz` check decide, as pure functions. The HTTP routes that
-//! call these (login, callback, logout, the check) land in S27b.
+//! call these (login, callback, logout, the check) are [`AuthGate`]'s, in `routes`.
 //!
 //! - [`return_path`]: `/auth/login?rd=` reduced to a path on the front door (F11).
 //! - [`route`]: which upstream a request path is for, default-deny (F5). A path
@@ -162,8 +162,9 @@ impl Route {
 /// segments, `//`, a backslash, a control byte, or an escape that is malformed or
 /// decodes to anything but a plain printable byte) maps to nothing, so it can't
 /// name one upstream to the gate and another to a proxy that decodes it. On
-/// HyperDX's listener every path is HyperDX's, except one shaped like a gRPC or
-/// Grafana path: those are never HyperDX's, so they're refused, not passed on.
+/// HyperDX's listener every path is HyperDX's, except one shaped like a gRPC,
+/// Grafana, Prometheus, gate or Dex path: those are never HyperDX's, so they're
+/// refused, not passed on, on either listener.
 /// `/auth/*` and `/dex/*` aren't checked (Envoy routes them past the check), so
 /// they have no route here either.
 pub fn route(listener: Listener, path: &str) -> Option<Route> {
@@ -171,22 +172,22 @@ pub fn route(listener: Listener, path: &str) -> Option<Route> {
     if !normal_path(path) {
         return None;
     }
+    // `base` itself or a path below it, not `/grafanaevil`.
+    let under = |base: &str| {
+        path.strip_prefix(base)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
     if listener == Listener::Hyperdx {
         let foreign = path.starts_with("/agent.v1.")
-            || ["/grafana", "/prometheus"].iter().any(|base| {
-                path.strip_prefix(base)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-            });
+            || ["/grafana", "/prometheus", "/auth", "/dex"]
+                .iter()
+                .any(|base| under(base));
         return (!foreign).then_some(Route::Hyperdx);
     }
     if let Some(rpc) = path.strip_prefix("/agent.v1.") {
         let (service, method) = rpc.split_once('/')?;
         return (ident(service) && ident(method)).then_some(Route::Rpc);
     }
-    let under = |base: &str| {
-        path.strip_prefix(base)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-    };
     if under("/grafana") {
         return Some(Route::Grafana);
     }
@@ -321,6 +322,12 @@ pub fn unauthenticated(
         }
     }
 }
+
+mod routes;
+pub use routes::{
+    cookie_value, raw_param, Ambiguous, AuthGate, CheckRequest, GateConfig, Reply, LOGIN_COOKIE,
+    MAX_CACHED_TOKENS, MAX_COOKIE_HEADER, MAX_QUERY, REMINT_BEFORE_SECS, SESSION_COOKIE,
+};
 
 #[cfg(test)]
 mod tests;
