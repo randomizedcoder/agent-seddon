@@ -42,8 +42,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
-| S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | 🟡 | #716 |
-| S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ⬜ | |
+| S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | ✅ | #716 |
+| S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | 🟡 | |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
@@ -1414,6 +1414,40 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Still carried: a short cache for `by_cookie`; browser sessions' `last_seen_at`; a shared
     hex helper; `PORTAL_FILES`' provenance; `normal_path`'s allocation; a path-style `rd`
     decoder.
+
+- **2026-11-10 — S28b: the front door in the module.** S28a merged as #716 (e981aa12).
+  - `services.agentSeddon.frontDoor`: `enable`, `issuer` (default `dex`), `certFile` /
+    `keyFile`, `extraOrigins`, and read-only `origin` / `callbackUrl`. On, the module:
+    - renders Envoy with `PORTAL_FRONT_DOOR=on`, the bind and origins, and the certificate
+      as `/run/credentials/agent-seddon-grpc-web.service/front.{crt,key}` (`LoadCredential`,
+      so the key stays root-only and out of the store);
+    - sets `[auth.gate]` on the gateway alone, listening on the port the spec gives Envoy
+      (`ports.gate`), which settles #716's "gate port written twice" item;
+    - defaults Dex's issuer to `<origin>/dex` and adds the gate's callback to Dex;
+    - opens 8443 / 8444 with `openFirewall` on a LAN host (the rest is S30).
+  - The host still turns on `[auth]`; assertions refuse a front door until the gateway has
+    `mode = "oidc"`, `callbackUrl` in `redirect_uris` and an issuer named `frontDoor.issuer`,
+    as well as a missing grpc-web or gateway, a lone or unsafe cert/key path (`:` is
+    `LoadCredential`'s separator), a non-https origin, and a `publicHost` that isn't one
+    host name or IPv4 address.
+  - F7's default certificate: `pki-dev` gains `--san` (a host name or IP, validated) and
+    `--renew-within` (whole hours, under the leaf's 90 days). It records each leaf's SANs
+    in `<leaf>/sans` and re-mints the leaf, never the root, when they change or it expires
+    within the window; a corrupt leaf (`needs-renewal` errors) is re-minted too. The module
+    runs it as root (`agent-seddon-front-door-pki`, 0700) before Envoy and on a daily timer,
+    restarting Envoy when the leaf changed.
+  - Eval rows (in the gate): the wiring on a LAN host, an operator certificate, off by
+    default, and every refusal. VM rows: the certificate, HSTS, `/dex` vs `/dexfoo`,
+    unmapped paths, 302 / 401 with no session, a Dex mock sign-in through `:8443` refused
+    for an unbound user (audit rows `unbound`, `unmapped_path`), then a bound user's
+    session, `WhoAmI` through the door (a forged `authorization` overwritten) and logout.
+  - #716's draft (no must-fix): its item 1 is recorded in the header table's `_doc`: the
+    portal stamps `x-agent-session-id` from `WhoAmI`, and partitioning uses the token's own
+    sid, so the kept header only satisfies `identity_policy`'s presence check. S31's cookie
+    mode has the gate replace it. Its item 2 (`fetch_update` deprecated) doesn't hold for
+    the pinned toolchain: clippy runs with `-D warnings` and passes.
+  - Carried: the browser slot is taken before `MAX_URL`'s screen (momentary); the rest of
+    S28a's carry list.
 
 ## Cross-track note (not an S-increment)
 

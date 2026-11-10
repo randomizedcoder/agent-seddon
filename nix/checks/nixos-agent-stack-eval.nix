@@ -116,6 +116,35 @@ let
     failedAssertions (evalWith {
       services.agentSeddon.dex = lib.recursiveUpdate (dexBase // { mockLogin = true; }) extra;
     }) != [ ];
+  # The front door (S28b): LAN host, Dex behind it, the host's `[auth]` on the gateway.
+  fdModule =
+    extra:
+    { config, ... }:
+    {
+      services.agentSeddon = lib.recursiveUpdate {
+        publicHost = "172.16.50.46";
+        openFirewall = true;
+        frontDoor.enable = true;
+        dex = {
+          enable = true;
+          mockLogin = true;
+        };
+        gateway.settings.auth = {
+          mode = "oidc";
+          redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
+          issuers = [ config.services.agentSeddon.dex.issuerSettings ];
+        };
+      } extra;
+    };
+  fd = evalWith (fdModule { });
+  fdFile = evalWith (fdModule {
+    frontDoor = {
+      certFile = "/var/lib/acme/l2/fullchain.pem";
+      keyFile = "/run/secrets/front-door.key";
+    };
+  });
+  fdFails = extra: failedAssertions (evalWith (fdModule extra)) != [ ];
+  fdCreds = c: (svc c "agent-seddon-grpc-web").serviceConfig.LoadCredential or [ ];
   grafDs =
     c:
     let
@@ -707,6 +736,90 @@ let
         issuer = "http://127.0.0.1:9999/dex";
         port = 9999;
       });
+    frontDoorOffByDefault =
+      !(lo.systemd.services ? agent-seddon-front-door-pki)
+      && !(lo.services.agentSeddon.renderedSettings.gateway ? auth)
+      && !(has lan 8443);
+    frontDoorWiring =
+      let
+        gw = fd.services.agentSeddon.renderedSettings;
+        pki = svc fd "agent-seddon-front-door-pki";
+      in
+      failedAssertions fd == [ ]
+      # The gate on the gateway only, on the port the rendered Envoy dials.
+      &&
+        gw.gateway.auth.gate == {
+          listen = "127.0.0.1:8097";
+          issuer = "dex";
+          main_origin = "https://172.16.50.46:8443";
+        }
+      && !(gw.sessions ? auth)
+      && !(gw.fleet ? auth)
+      # Dex behind the door, and the gate's callback registered with it.
+      && fd.services.agentSeddon.dex.issuer == "https://172.16.50.46:8443/dex"
+      && builtins.elem "https://172.16.50.46:8443/auth/callback" fd.services.agentSeddon.dex.redirectUris
+      # The dev-PKI leaf for publicHost, renewed daily, handed to Envoy as credentials.
+      &&
+        fdCreds fd == [
+          "front.crt:/var/lib/agent-seddon-front-door/pki/front-door/cert.pem"
+          "front.key:/var/lib/agent-seddon-front-door/pki/front-door/key.pem"
+        ]
+      && builtins.elem "agent-seddon-front-door-pki.service" (svc fd "agent-seddon-grpc-web").requires
+      && lib.hasInfix "--san 172.16.50.46 --renew-within 720h" pki.script
+      && pki.serviceConfig.StateDirectoryMode == "0700"
+      && !(pki.serviceConfig ? User)
+      && fd.systemd.timers.agent-seddon-front-door-pki.timerConfig.OnCalendar == "daily"
+      && has fd 8443
+      && has fd 8444
+      # An operator certificate: no dev PKI.
+      && failedAssertions fdFile == [ ]
+      && !(fdFile.systemd.services ? agent-seddon-front-door-pki)
+      &&
+        fdCreds fdFile == [
+          "front.crt:/var/lib/acme/l2/fullchain.pem"
+          "front.key:/run/secrets/front-door.key"
+        ];
+    frontDoorRejects =
+      fdFails { grpcWeb.enable = false; }
+      && fdFails { gateway.enable = false; }
+      && fdFails { frontDoor.certFile = "/var/lib/acme/l2/fullchain.pem"; }
+      && fdFails { frontDoor.keyFile = "/run/secrets/front-door.key"; }
+      &&
+        lib.all
+          (
+            k:
+            fdFails {
+              frontDoor = {
+                certFile = "/var/lib/acme/l2/fullchain.pem";
+                keyFile = k;
+              };
+            }
+          )
+          [
+            "relative.key"
+            "${builtins.storeDir}/abc-front.key"
+            "/run/secrets/a b"
+            "/run/secrets/x\nExecStartPre=/bin/sh"
+            # LoadCredential's own separator.
+            "/run/secrets/a:b"
+          ]
+      && lib.all (o: fdFails { frontDoor.extraOrigins = [ o ]; }) [
+        "http://l2:8443"
+        "https://l2:8443/path"
+        "https://*.example"
+        ""
+      ]
+      && lib.all (h: fdFails { publicHost = h; }) [
+        "l2 --force"
+        "fd00::1"
+        "-l2"
+        "l2/x"
+      ]
+      # The host's `[auth]` is incomplete.
+      && fdFails { gateway.settings.auth.mode = "off"; }
+      && fdFails { gateway.settings.auth.redirect_uris = [ "https://172.16.50.46:8443/other" ]; }
+      && fdFails { frontDoor.issuer = "google"; }
+      && !(fdFails { frontDoor.extraOrigins = [ "https://l2.example:8443" ]; });
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;

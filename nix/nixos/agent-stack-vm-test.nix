@@ -7,7 +7,10 @@
 # creds → Postgres → role + password → gateway / sessions / fleet (telemetry writer
 # authenticated, stores migrated, roster seeded) → Envoy grpc-web + portal, and Dex
 # (mock connector) completing a PKCE code flow for the agent's client over loopback, then
-# (a specialisation) the GitHub connector starting with the operator's secret spliced in.
+# (a specialisation) the GitHub connector starting with the operator's secret spliced in,
+# and the SSO front door (security-hardening 10, S28b): its dev-PKI certificate, the
+# gate's check on each route, and a Dex sign-in walked through :8443 (refused for an
+# unbound user; a bound one gets a session its RPCs carry).
 #
 # Not in `nix flake check`: it needs KVM and minutes of VM time (the same reason
 # the postgres module only has an eval gate). Run it after touching the module.
@@ -24,7 +27,12 @@ pkgs.testers.runNixOSTest {
   name = "nixos-agent-stack-vm";
 
   nodes.machine =
-    { pkgs, lib, ... }:
+    {
+      pkgs,
+      lib,
+      config,
+      ...
+    }:
     {
       imports = [ module ];
       virtualisation = {
@@ -78,14 +86,37 @@ pkgs.testers.runNixOSTest {
         generateAdminPassword = lib.mkForce false;
         adminPasswordFile = "/run/secrets/grafana-admin";
       };
-      # Dex with the mock connector (S26). The issuer is a public-looking URL nothing
-      # serves: the test reaches Dex on loopback, as the agent's back-channel does.
+      # Dex with the mock connector (S26). Its issuer defaults to the front door's /dex;
+      # the S26 rows reach Dex on loopback, as the agent's back-channel does.
       services.agentSeddon.dex = {
         enable = true;
-        issuer = "https://dex.test/dex";
         redirectUris = [ "https://dex.test/auth/callback" ];
         mockLogin = true;
       };
+      # The front door (S28b), with the dev-PKI certificate. The module sets the
+      # gateway's `[auth.gate]`; `[auth]` is the host's, as below.
+      services.agentSeddon.frontDoor.enable = true;
+      services.agentSeddon.credentials."token-signer.key" =
+        # A store path, like the dummy LLM key: fine for a test VM, never a host.
+        pkgs.runCommand "vm-token-signer.key" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+          openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$out"
+        '';
+      services.agentSeddon.gateway.settings.auth = {
+        mode = "oidc";
+        redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
+        issuers = [ config.services.agentSeddon.dex.issuerSettings ];
+        token = {
+          issuer = "https://agent.test";
+          audience = "agent-seddon";
+          signing_key = "/run/credentials/@unit@/token-signer.key";
+          session_store = "file";
+          session_path = "/var/lib/agent-seddon/auth-sessions";
+        };
+      };
+      # Dex's mock user, bound: the base system leaves it unbound.
+      specialisation.signin.configuration.services.agentSeddon.gateway.settings.auth.operator_subjects = [
+        "email:kilgore@kilgore.trout"
+      ];
       # The GitHub connector instead (#708 draft): Dex starts with the operator's client
       # secret spliced in by `replace-secret`. Nothing dials github.com.
       specialisation.dexgh.configuration.services.agentSeddon.dex = {
@@ -223,7 +254,7 @@ pkgs.testers.runNixOSTest {
         # Loopback only, and the secret's path was replaced by the secret.
         machine.fail("ss -Hltn 'sport = :5556' | grep -v '127.0.0.1:5556'")
         machine.fail("grep -q agent-client.secret /run/dex/config.yaml")
-        local, public = "http://127.0.0.1:5556/dex", "https://dex.test/dex"
+        local, public = "http://127.0.0.1:5556/dex", "https://127.0.0.1:8443/dex"
         doc = json.loads(machine.succeed(f"curl -fsS {local}/.well-known/openid-configuration"))
         assert doc["issuer"] == public, doc
         assert doc["token_endpoint"] == f"{public}/token", doc
@@ -268,6 +299,110 @@ pkgs.testers.runNixOSTest {
             f"-d redirect_uri={cb} -d code_verifier={verifier} {local}/token"
         )
 
+    door, ca = "https://127.0.0.1:8443", "/var/lib/agent-seddon-front-door/pki/ca/root.crt"
+
+    def door_get(url, jar="/tmp/jar", extra=""):
+        """One request through the front door, redirects not followed: (status, location, headers)."""
+        out = machine.succeed(
+            f"curl -sS --cacert {ca} -b {jar} -c {jar} -D /tmp/hdr -o /tmp/body "
+            f"-w '%{{http_code}} %{{redirect_url}}' {extra} '{url}'"
+        ).strip()
+        status, _, loc = out.partition(" ")
+        return int(status), loc, machine.succeed("cat /tmp/hdr").lower()
+
+    def who_am_i(jar="/tmp/jar", extra=""):
+        """AuthService.WhoAmI as grpc-web through the door: (status, body)."""
+        status, _, _ = door_get(
+            f"{door}/agent.v1.AuthService/WhoAmI", jar,
+            "-X POST -H 'content-type: application/grpc-web+proto' -H 'x-grpc-web: 1' "
+            f"--data-binary @/tmp/empty-frame {extra}",
+        )
+        return status, machine.succeed("cat /tmp/body")
+
+    def sign_in(jar="/tmp/jar"):
+        """Walk Dex's mock sign-in through the door; the callback's (status, location, headers)."""
+        machine.succeed(f"rm -f {jar}")
+        status, loc, headers = door_get(f"{door}/auth/login?rd=%2F", jar)
+        assert status == 302 and loc.startswith(f"{door}/dex/auth?"), (status, loc)
+        assert "cache-control: no-store" in headers, headers
+        url = loc
+        for _ in range(8):
+            status, loc, _ = door_get(url, jar)
+            assert status in (302, 303) and loc, (status, url)
+            if loc.startswith(f"{door}/auth/callback?"):
+                return door_get(loc, jar)
+            url = urllib.parse.urljoin(url, loc)
+        raise AssertionError(f"Dex never returned to the gate; last redirect {loc}")
+
+    with subtest("front door: certificate, routes and the gate's check"):
+        machine.succeed("printf '\\0\\0\\0\\0\\0' > /tmp/empty-frame")
+        machine.wait_for_unit("agent-seddon-grpc-web.service")
+        machine.wait_for_open_port(8443)
+        machine.wait_for_open_port(8444)
+        machine.wait_for_open_port(8097)
+        # The dev PKI: root-only, the leaf names publicHost, and Envoy holds a copy.
+        machine.succeed("stat -c %a /var/lib/agent-seddon-front-door | grep -qx 700")
+        machine.succeed(f"stat -c %a {ca.replace('root.crt', 'root.key')} | grep -qx 600")
+        machine.succeed("grep -qx 127.0.0.1 /var/lib/agent-seddon-front-door/pki/front-door/sans")
+        # Untrusted without the dev root; trusted with it, and HSTS on both listeners.
+        machine.fail(f"curl -fsS -o /dev/null {door}/dex/.well-known/openid-configuration")
+        for port in [8443, 8444]:
+            _, _, headers = door_get(f"https://127.0.0.1:{port}/")
+            assert "strict-transport-security: max-age=" in headers, headers
+        # /dex is unchecked and names the public issuer; /dexfoo is not Dex.
+        status, _, _ = door_get(f"{door}/dex/.well-known/openid-configuration")
+        assert status == 200, status
+        assert json.loads(machine.succeed("cat /tmp/body"))["issuer"] == f"{door}/dex"
+        for path in ["/dexfoo", "/admin", "/agent.v1.AuthService"]:
+            status, _, _ = door_get(f"{door}{path}")
+            assert status == 403, (path, status)
+        # No session: a page goes to sign-in (HyperDX's too, on the main origin); an RPC is 401.
+        status, loc, _ = door_get(f"{door}/")
+        assert status == 302 and loc == f"{door}/auth/login?rd=/", (status, loc)
+        status, loc, _ = door_get("https://127.0.0.1:8444/search")
+        # HyperDX's own path is not carried across origins: plain sign-in on the main one.
+        assert status == 302 and loc == f"{door}/auth/login", (status, loc)
+        status, _ = who_am_i()
+        assert status == 401, status
+        # A forged bearer is not a credential.
+        status, _ = who_am_i(extra="-H 'authorization: Bearer forged.jwt.value'")
+        assert status == 401, status
+
+    with subtest("front door: an unbound user's sign-in is refused"):
+        status, _, headers = sign_in()
+        assert status == 403, status
+        assert "__host-seddon=" not in headers, headers
+        # Both refusals are audit rows: the unbound sign-in and the unmapped path.
+        audit = (
+            "CLICKHOUSE_PASSWORD=$(cat /var/lib/agent-seddon/clickhouse/admin.password) "
+            "clickhouse-client --query \"SELECT count() FROM agent.agent_auth_events "
+            "WHERE event = 'verify_fail' AND reason = '{}'\" | grep -qvx 0"
+        )
+        for reason in ["unbound", "unmapped_path"]:
+            machine.wait_until_succeeds(audit.format(reason), timeout=120)
+
+    with subtest("front door: a bound user signs in, and the RPCs carry the session"):
+        machine.succeed(f"{base}/specialisation/signin/bin/switch-to-configuration test")
+        machine.wait_for_unit("agent-seddon-gateway.service")
+        machine.wait_for_open_port(8097)
+        status, loc, headers = sign_in()
+        assert status == 302 and loc == f"{door}/", (status, loc, headers)
+        assert "httponly" in headers and "secure" in headers and "samesite=lax" in headers, headers
+        status, _, _ = door_get(f"{door}/")
+        assert status == 200, status
+        machine.succeed("grep -q '<title>Agent Seddon</title>' /tmp/body")
+        status, body = who_am_i()
+        assert status == 200 and "grpc-status:0" in body, (status, body)
+        assert "kilgore" in body, body
+        # The client's own authorization is overwritten by the gate's, not passed on.
+        status, body = who_am_i(extra="-H 'authorization: Bearer forged.jwt.value'")
+        assert status == 200 and "grpc-status:0" in body, (status, body)
+        # Signing out ends the session: the next page goes back to sign-in.
+        status, loc, _ = door_get(f"{door}/auth/logout", extra="-X POST")
+        assert status == 302, status
+        status, loc, _ = door_get(f"{door}/")
+        assert status == 302 and "/auth/login" in loc, (status, loc)
+
     with subtest("units stay up"):
         machine.sleep(10)
         for unit in ["gateway", "sessions", "fleet", "grpc-web", "portal", "grafana-admin"]:
@@ -282,7 +417,7 @@ pkgs.testers.runNixOSTest {
             f"(umask 077 && printf {gh_secret} > /run/secrets/dex-github)"
         )
         # Its own names, so the subtest doesn't lean on the mock-login one's locals.
-        local, public = "http://127.0.0.1:5556/dex", "https://dex.test/dex"
+        local, public = "http://127.0.0.1:5556/dex", "https://127.0.0.1:8443/dex"
         cb = "https://dex.test/auth/callback"
         machine.succeed(f"{base}/specialisation/dexgh/bin/switch-to-configuration test")
         machine.wait_for_unit("dex.service")
