@@ -363,9 +363,15 @@ impl AuthSvc {
     }
 
     /// An agent token the client sent itself (the CLI, the native portal): signed by
-    /// this agent and its session still live.
+    /// this agent, its session still live, and not bound to a certificate. A
+    /// `cnf`-bound service token is good only on the mTLS connection that proves
+    /// its key (S10); the front door is a browser path that proves none, so a
+    /// leaked one is refused here as the `AuthLayer` refuses it off its connection.
     pub(crate) async fn gate_bearer(&self, token: &str) -> Option<AgentClaims> {
         let claims = self.tokens.verify(token).ok()?;
+        if claims.cnf.is_some() {
+            return None;
+        }
         self.sessions
             .is_live(&claims.tenant, &claims.sid)
             .await

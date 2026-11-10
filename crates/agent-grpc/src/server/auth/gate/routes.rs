@@ -104,8 +104,9 @@ struct Cached {
 }
 
 impl AuthGate {
-    /// `None` when `svc` has no browser sign-in, or `cfg` names an issuer it
-    /// doesn't offer.
+    /// Refused when `svc` has no browser sign-in, or `cfg.issuer` isn't one of its
+    /// browser issuers. Only the name is checked here: whether the issuer answers
+    /// discovery is learned at each login, which is then a 503.
     pub(crate) fn new(
         svc: AuthSvc,
         cfg: GateConfig,
@@ -116,7 +117,7 @@ impl AuthGate {
             .ok_or("the gate needs browser sign-in (`[auth] redirect_uris`)")?;
         if !code.issuers().iter().any(|(n, _)| *n == cfg.issuer) {
             return Err(format!(
-                "the gate's issuer `{}` is not a browser sign-in issuer",
+                "the gate's issuer `{}` is not one of the browser sign-in issuers",
                 cfg.issuer
             ));
         }
@@ -132,6 +133,7 @@ impl AuthGate {
     /// it to the issuer.
     pub async fn login(&self, query: &str) -> Reply {
         let rd = return_path(raw_param(query, "rd").ok().flatten());
+        // `new` refused a gate without a code flow; this keeps the path panic-free.
         let Some(code) = self.svc.code_flow() else {
             return Reply::new(503, "sign-in is not configured");
         };
@@ -171,6 +173,7 @@ impl AuthGate {
         let Ok(login) = cookie_value(cookie, LOGIN_COOKIE) else {
             return refused("login_cookie_mismatch");
         };
+        // As in `login`: unreachable after `new`, and refused rather than a panic.
         let Some(code) = self.svc.code_flow() else {
             return refused("code_flow_off");
         };

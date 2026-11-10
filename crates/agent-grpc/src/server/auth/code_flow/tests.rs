@@ -839,4 +839,5 @@ fn positive_gate_reasons_are_distinct() {
         "login_cookie_mismatch"
     );
     assert_eq!(CodeRefusal::WrongFlow.reason(), "wrong_flow");
+    assert_eq!(CodeRefusal::NoRandomness.reason(), "no_randomness");
 }

@@ -368,6 +368,9 @@ enum Cred {
     ForgedBearer,
     /// The session cookie and a forged bearer: the cookie wins, the bearer is replaced.
     SessionAndForgedBearer,
+    /// An agent token for the live session but bound to a certificate (`cnf`): a
+    /// service token is good only on its own mTLS connection.
+    BoundBearer,
 }
 
 #[rstest]
@@ -386,6 +389,8 @@ enum Cred {
 #[case::adversarial_forged_cookie(Cred::ForgedCookie, Listener::Main, "/", 302, &["location"])]
 #[case::adversarial_two_session_cookies(Cred::TwoSessionCookies, Listener::Main, "/", 302, &["location"])]
 #[case::adversarial_forged_bearer_rpc(Cred::ForgedBearer, Listener::Main, RPC, 401, &[])]
+#[case::adversarial_cert_bound_bearer_rpc(Cred::BoundBearer, Listener::Main, RPC, 401, &[])]
+#[case::adversarial_cert_bound_bearer_grafana(Cred::BoundBearer, Listener::Main, "/grafana/d/x", 302, &["location"])]
 #[case::adversarial_cookie_wins_over_forged_bearer(Cred::SessionAndForgedBearer, Listener::Main, RPC, 200, &["authorization"])]
 #[tokio::test]
 async fn check_cases(
@@ -406,6 +411,20 @@ async fn check_cases(
         .expect("token")
         .to_string();
     let forged = "Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.";
+    let bound = {
+        let value = session.as_str();
+        let (s, _) = h.gate.svc.gate_session(value).await.expect("live");
+        let mut grant = s.grant();
+        grant.cnf = Some("A".repeat(43));
+        let minted = h
+            .layer
+            .tokens
+            .as_ref()
+            .expect("tokens")
+            .mint(&grant, &[])
+            .expect("mint");
+        format!("Bearer {}", minted.token)
+    };
     let two = format!("{jar}; {SESSION_COOKIE}=ck1.x.y.z");
     let (cookie, auth): (Option<&str>, Option<&str>) = match cred {
         Cred::None => (None, None),
@@ -415,6 +434,7 @@ async fn check_cases(
         Cred::OwnBearer => (None, Some(&own)),
         Cred::ForgedBearer => (None, Some(forged)),
         Cred::SessionAndForgedBearer => (Some(&jar), Some(forged)),
+        Cred::BoundBearer => (None, Some(&bound)),
     };
     let reply = h.gate.check(check(listener, path, cookie, auth)).await;
     assert_eq!(reply.status, status, "{reply:?}");
@@ -499,6 +519,37 @@ async fn token_cache_remints_a_minute_before_expiry() {
     );
     assert_ne!(second, third, "minted again a minute before");
     assert_eq!(h.gate.cached_tokens(), 1);
+}
+
+/// F4: a change in the session's roles mints a new token at once, carrying the new
+/// roles, rather than serving the cached one until it expires.
+#[tokio::test]
+async fn token_cache_remints_on_a_role_change() {
+    let h = harness("alice", true);
+    let value = signed_in(&h).await;
+    let (s, p) = h.gate.svc.gate_session(&value).await.expect("live");
+    let roles_of = |t: &str| {
+        h.layer
+            .tokens
+            .as_ref()
+            .expect("tokens")
+            .verify(t)
+            .expect("verifies")
+            .roles
+    };
+    let first = h.gate.token_for(&s, &p).expect("token");
+    assert_eq!(h.gate.token_for(&s, &p).as_deref(), Some(first.as_str()));
+    let mut fewer = p.clone();
+    fewer.roles = vec![agent_core::ROLE_READER.to_string()];
+    let second = h.gate.token_for(&s, &fewer).expect("token");
+    assert_ne!(first, second, "a role change is minted again");
+    assert_eq!(roles_of(&second), fewer.roles);
+    assert_eq!(
+        h.gate.token_for(&s, &fewer).as_deref(),
+        Some(second.as_str()),
+        "the new token is the cached one now"
+    );
+    assert_eq!(h.gate.cached_tokens(), 1, "one entry per session, replaced");
 }
 
 // --- logout --------------------------------------------------------------------------

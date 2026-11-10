@@ -1327,6 +1327,12 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Query and cookie parsing are bounded and fail closed on a repeated key.
   - Tables: the cookie attributes, the callback's 8 refusals, a 16-row check matrix, the
     remint boundary, logout by method, crossed flows and the login-cookie variants.
+  - From the #714 draft: the gate refuses a `cnf`-bound (service) agent token as a bearer, as
+    the `AuthLayer` does off its mTLS connection; a role change remints at once (tested);
+    `CodeRefusal::NoRandomness` replaces `Busy` for a random-source failure; `is_verifier` has its
+    doc comment back; `AuthGate::new` says it checks the issuer's name only. Carried to S27b-ii:
+    `/auth/login` fills the shared 1024-entry pending table (rate-limit `/auth/*` at Envoy, S28),
+    and a shared hex helper for `sha256_hex` and `random_hex`.
 
 ## Cross-track note (not an S-increment)
 

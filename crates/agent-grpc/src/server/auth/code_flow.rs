@@ -66,6 +66,8 @@ pub enum CodeRefusal {
     /// A `state` from the other flow: the gate's at `Exchange`, or `Begin`'s at
     /// the gate's callback.
     WrongFlow,
+    /// The system's random source failed: no state, nonce or verifier to send.
+    NoRandomness,
 }
 
 impl CodeRefusal {
@@ -86,6 +88,7 @@ impl CodeRefusal {
             CodeRefusal::NonceMismatch => "nonce_mismatch",
             CodeRefusal::NotThisBrowser => "login_cookie_mismatch",
             CodeRefusal::WrongFlow => "wrong_flow",
+            CodeRefusal::NoRandomness => "no_randomness",
         }
     }
 }
@@ -320,8 +323,8 @@ impl CodeFlow {
         redirect_uri: &str,
         rd: &str,
     ) -> Result<GateBegun, CodeRefusal> {
-        let verifier = random_token(32).ok_or(CodeRefusal::Busy)?;
-        let login_cookie = random_token(32).ok_or(CodeRefusal::Busy)?;
+        let verifier = random_token(32).ok_or(CodeRefusal::NoRandomness)?;
+        let login_cookie = random_token(32).ok_or(CodeRefusal::NoRandomness)?;
         let challenge = s256(&verifier);
         let gate = GateLogin {
             login_hash: sha256_hex(&login_cookie),
@@ -352,7 +355,7 @@ impl CodeFlow {
             return Err(CodeRefusal::BadChallenge);
         }
         let endpoints = self.endpoints(login).await?;
-        let nonce = random_token(16).ok_or(CodeRefusal::Busy)?;
+        let nonce = random_token(16).ok_or(CodeRefusal::NoRandomness)?;
         let (state, expires_at) = self.pending.insert(Pending {
             issuer: login.name.clone(),
             redirect_uri: redirect_uri.to_string(),
@@ -668,7 +671,6 @@ pub fn is_challenge(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// A PKCE verifier (RFC 7636 §4.1): 43 to 128 unreserved characters.
 /// Lowercase hex SHA-256: how a login cookie is kept beside its `state`.
 fn sha256_hex(s: &str) -> String {
     ring::digest::digest(&ring::digest::SHA256, s.as_bytes())
@@ -678,6 +680,7 @@ fn sha256_hex(s: &str) -> String {
         .collect()
 }
 
+/// A PKCE verifier (RFC 7636 §4.1): 43 to 128 unreserved characters.
 pub fn is_verifier(s: &str) -> bool {
     (43..=128).contains(&s.len())
         && s.bytes()
