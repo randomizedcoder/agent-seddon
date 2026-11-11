@@ -64,7 +64,8 @@ pub fn review_time(elapsed: std::time::Duration) -> String {
 pub const MAX_DRAFT_BYTES: usize = 64_000;
 
 /// Render a finished review into the human-approvable draft `.md` (review-fleet C13):
-/// a header (repo/PR/head + risk gate), the model's `narrative` (the actual review,
+/// a header (repo/PR/head + risk gate, and the review's wall-clock when `elapsed` is
+/// given), the model's `narrative` (the actual review,
 /// ordered by the skill: good → must-fix → minor), the deterministic "steps taken"
 /// (which collectors ran), a "prior feedback status" section from `prior` (empty until
 /// inc 6b), and the grounded facts appended for the approver's reference.

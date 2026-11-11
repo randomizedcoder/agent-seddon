@@ -4149,7 +4149,9 @@ mod tests {
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].requested_by, ["acme/alice"]);
         // The fleet times every review it drafts, for the draft's header.
-        assert!(drafts[0].elapsed.is_some(), "the review was timed");
+        // And plausible: the fakes finish in milliseconds.
+        let elapsed = drafts[0].elapsed.expect("the review was timed");
+        assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
     }
 
     // ---- intake → drain → orchestrator → draft (the serve_fleet wiring) ----

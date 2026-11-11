@@ -138,6 +138,34 @@ let
   fdKeySrc = if fdDevCert then "${fdPkiDir}/front-door/key.pem" else fd.keyFile;
   # Envoy (DynamicUser) reads them as credentials, so the key stays root-only on disk.
   fdCred = name: "/run/credentials/${fdUnit}.service/${name}";
+  fdHyperdxOrigin = "https://${cfg.publicHost}:${toString ports.frontDoorHyperdx}";
+  # Where the door sends `/prometheus` (the host's Prometheus must serve that prefix).
+  fdPromUrl = "${fdOrigin}/prometheus/";
+
+  # A front-door host: an IPv4 address, or a lowercase host name the way pki-dev's
+  # `validate_san` takes one (dot-separated 1-63 char labels, at most 253 chars, a
+  # TLD that isn't all digits). Lowercase only, since pki-dev lowercases the SAN and
+  # the origin is compared as a string.
+  fdHostOk =
+    h:
+    let
+      labels = lib.splitString "." h;
+      octet = l: builtins.match "0|[1-9][0-9]{0,2}" l != null && lib.toInt l <= 255;
+      label = l: builtins.match "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" l != null;
+    in
+    (builtins.length labels == 4 && builtins.all octet labels)
+    || (
+      builtins.stringLength h <= 253
+      && builtins.all label labels
+      && builtins.match "[0-9]+" (lib.last labels) == null
+    );
+  # `https://<fdHostOk host>[:1-65535]`, nothing after it.
+  fdOriginOk =
+    o:
+    let
+      m = builtins.match "https://([^:/]*)(:[0-9]{1,5})?" o;
+    in
+    m != null && fdHostOk (builtins.head m) && portOk o;
   gwAuth = (config.services.agentSeddon.renderedSettings.gateway or { }).auth or { };
   # What `grafana cli` needs to find the database: the server's paths and database
   # sections, rendered the way the nixpkgs module renders the server's config.ini.
@@ -613,8 +641,10 @@ in
       };
       frontendUrl = lib.mkOption {
         type = lib.types.str;
-        default = urlFor hdx.ports.ui;
-        defaultText = lib.literalExpression ''"http://''${publicHost}:${toString hdx.ports.ui}"'';
+        default = if fd.enable then fdHyperdxOrigin else urlFor hdx.ports.ui;
+        defaultText = lib.literalExpression ''
+          if frontDoor.enable then "https://''${publicHost}:${toString ports.frontDoorHyperdx}"
+          else "http://''${publicHost}:${toString hdx.ports.ui}"'';
         example = "http://l2:8080";
         description = ''
           The URL browsers open HyperDX at. Its session cookie binds to this host, so it
@@ -978,9 +1008,10 @@ in
             message = "services.agentSeddon.frontDoor needs grpcWeb.enable (its Envoy) and gateway.enable (its gate).";
           }
           {
-            # One SAN and one URL authority: a host name or IPv4, nothing to split on.
-            assertion = builtins.match "[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?" cfg.publicHost != null;
-            message = "services.agentSeddon.frontDoor: publicHost must be a host name or IPv4 address.";
+            # One SAN and one URL authority. Checked as pki-dev checks the SAN, so a bad
+            # host fails the build, not the certificate unit (and Envoy with it) at boot.
+            assertion = fdHostOk cfg.publicHost;
+            message = "services.agentSeddon.frontDoor: publicHost must be an IPv4 address or a lowercase host name (dot-separated labels of 1-63 letters, digits and '-', at most 253 chars, a TLD that isn't all digits).";
           }
           {
             assertion = (fd.certFile == null) == (fd.keyFile == null);
@@ -1005,10 +1036,8 @@ in
             message = "services.agentSeddon.frontDoor: certFile and keyFile must be absolute paths outside the Nix store, with no whitespace or ':'.";
           }
           {
-            assertion = builtins.all (
-              o: builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?" o != null
-            ) fd.extraOrigins;
-            message = "services.agentSeddon.frontDoor.extraOrigins: https://host[:port] only.";
+            assertion = builtins.all fdOriginOk fd.extraOrigins;
+            message = "services.agentSeddon.frontDoor.extraOrigins: https://host[:port] only (a host as for publicHost, a port of 1-65535).";
           }
           {
             # The gate needs the host's `[auth]`; checked here so a missing piece fails
@@ -1024,7 +1053,63 @@ in
             assertion = builtins.any (i: (i.name or "") == fd.issuer) (gwAuth.issuers or [ ]);
             message = "services.agentSeddon.frontDoor.issuer `${fd.issuer}` names no `[[auth.issuers]]` entry on the gateway (merge dex.issuerSettings).";
           }
+          {
+            # F6: the gate is HyperDX's sign-in, so nobody signs in twice.
+            assertion = !hdxEnabled || !hdxAuth;
+            message = "services.agentSeddon.frontDoor: set hyperdx.auth = false; the front door is HyperDX's sign-in.";
+          }
+          {
+            # HyperDX's session and redirects bind to the origin browsers use.
+            assertion = !hdxEnabled || cfg.hyperdx.frontendUrl == fdHyperdxOrigin;
+            message = "services.agentSeddon.frontDoor: hyperdx.frontendUrl must be the door's HyperDX origin, ${fdHyperdxOrigin} (the default with the door on).";
+          }
+          {
+            # The door sends /grafana to 127.0.0.1:${toString ports.grafana}.
+            assertion = !graf.enable || graf.settings.server.http_port == ports.grafana;
+            message = "services.agentSeddon.frontDoor: the door routes /grafana to port ${toString ports.grafana}; set services.grafana.settings.server.http_port to it.";
+          }
+          {
+            assertion = !graf.enable || graf.settings.server.protocol == "http";
+            message = "services.agentSeddon.frontDoor: the door speaks plain HTTP to Grafana on loopback; set services.grafana.settings.server.protocol = \"http\".";
+          }
         ];
+
+        # The host's Prometheus is the host's (F6 open item): the door only routes to it.
+        warnings =
+          let
+            prom = config.services.prometheus;
+          in
+          lib.optional (prom.enable && prom.webExternalUrl != fdPromUrl) ''
+            services.agentSeddon.frontDoor routes ${fdPromUrl} to Prometheus, which then needs
+            services.prometheus.webExternalUrl = "${fdPromUrl}" (it serves under /prometheus/ from
+            then on, so local clients such as Grafana's data source use http://127.0.0.1:${toString ports.prometheus}/prometheus).
+          ''
+          ++ lib.optional (prom.enable && prom.port != ports.prometheus) ''
+            services.agentSeddon.frontDoor routes /prometheus to port ${toString ports.prometheus}, but services.prometheus.port is ${toString prom.port}.
+          '';
+
+        # F6: Grafana signs users in from the gate's headers. Envoy replaces
+        # X-Seddon-User / X-Seddon-Role on /grafana (front-door-headers.json), and
+        # Grafana takes them only from 127.0.0.1, where Envoy connects from. Basic auth
+        # stays on for the break-glass `admin` (F8's password): Envoy drops
+        # `authorization` on /grafana, so it works on loopback only.
+        services.grafana.settings = lib.mkIf graf.enable {
+          server = {
+            root_url = "${fdOrigin}/grafana/";
+            serve_from_sub_path = true;
+          };
+          "auth.proxy" = {
+            enabled = true;
+            header_name = "X-Seddon-User";
+            header_property = "username";
+            headers = "Role:X-Seddon-Role";
+            auto_sign_up = true;
+            whitelist = "127.0.0.1";
+            enable_login_token = false;
+          };
+          auth.disable_login_form = true;
+          security.cookie_secure = true;
+        };
 
         # Dex behind the door: browsers reach it at <origin>/dex and come back to the gate.
         services.agentSeddon.dex = {

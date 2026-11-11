@@ -280,6 +280,11 @@ reuses the same pieces later; this design is the NixOS module.
   re-minted daily under the same root when due) or the operator's `certFile` / `keyFile`, both
   as Envoy credentials. The host's `[auth]` stays the host's; the build refuses a front door
   without it. The VM walks Dex's mock sign-in through `:8443`.
+- As built (S29): the module turns on Grafana's `auth.proxy` behind the door as F6 says, except
+  that basic auth stays on, for the break-glass `admin` on loopback only (Envoy drops
+  `authorization` on `/grafana`). HyperDX needs `auth = false`, and its `frontendUrl` is the
+  door's `:8444`. Prometheus stays the host's, with a build warning naming its
+  `webExternalUrl`.
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches
