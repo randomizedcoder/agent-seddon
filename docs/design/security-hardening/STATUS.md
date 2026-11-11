@@ -1480,6 +1480,15 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     #717's host and origin rows. VM rows: `/grafana/` with no session goes to sign-in, the
     signed-in user reaches `/grafana/api/user` as themself with the Admin role, and a forged
     `X-Seddon-User` / `X-Seddon-Role` is replaced.
+  - #719's draft (no must-fix), fixed here: should-fix 1, the door forced HyperDX's login off
+    while `openFirewall` still opened its raw UI port (8080) to the LAN, a login-less way
+    round the door. 8080 now opens only without the door, and the LAN warning about it is
+    gone with it. Should-fix 2: Grafana's `http_addr` is asserted to be `127.0.0.1`, so
+    break-glass basic auth really is loopback-only (l2 sets `0.0.0.0`; it changes with S30's
+    deploy). Minor: `hyperdx.auth` defaults to `!frontDoor.enable`, and a 253/254-char
+    `publicHost` boundary pair. Carried: should-fix 3 (a Prometheus port other than 9090 stays a
+    warning, since a host may not want `/prometheus` at all), and the obs_editor/Viewer role
+    rows, which the gate's Rust tests cover (`grafana_role`), not the VM.
 
 ## Cross-track note (not an S-increment)
 

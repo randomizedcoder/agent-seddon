@@ -654,9 +654,11 @@ in
       };
       auth = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = !fd.enable;
+        defaultText = lib.literalExpression "!frontDoor.enable";
         description = ''
-          Require a HyperDX login. `false` runs HyperDX's local app mode: no sign-up
+          Require a HyperDX login (off by default with the front door on, which is
+          HyperDX's sign-in then, and must stay off). `false` runs HyperDX's local app mode: no sign-up
           and no login, one built-in team whose sources and connections are seeded from
           the managed ClickHouse at start, and a collector that accepts OTLP without an
           ingestion key (so the key timer is not installed and the agents export with no
@@ -979,7 +981,8 @@ in
             ++ lib.optional cfg.sessions.enable ports.grpcWebSessions
             ++ lib.optional cfg.fleet.enable ports.grpcWebFleet
           )
-          ++ lib.optional hdxEnabled hdx.ports.ui
+          # Behind the door the UI's only entrance is ${toString ports.frontDoorHyperdx}: its raw port has no login.
+          ++ lib.optional (hdxEnabled && !fd.enable) hdx.ports.ui
           ++ lib.optionals (fd.enable && cfg.grpcWeb.enable) [
             ports.frontDoor
             ports.frontDoorHyperdx
@@ -1067,6 +1070,12 @@ in
             # The door sends /grafana to 127.0.0.1:${toString ports.grafana}.
             assertion = !graf.enable || graf.settings.server.http_port == ports.grafana;
             message = "services.agentSeddon.frontDoor: the door routes /grafana to port ${toString ports.grafana}; set services.grafana.settings.server.http_port to it.";
+          }
+          {
+            # Basic auth (break-glass admin) is on: off loopback it would be a second,
+            # door-less way in.
+            assertion = !graf.enable || graf.settings.server.http_addr == "127.0.0.1";
+            message = "services.agentSeddon.frontDoor: Grafana keeps basic auth for break-glass, so it must listen on loopback only; set services.grafana.settings.server.http_addr = \"127.0.0.1\" (the door is its network entrance).";
           }
           {
             assertion = !graf.enable || graf.settings.server.protocol == "http";
@@ -1645,11 +1654,14 @@ in
               }
             ''
             # The likelier exposure: the UI is opened to the LAN on purpose.
-            ++ lib.optional (!hdxAuth && cfg.openFirewall && lan && config.networking.firewall.enable) ''
-              services.agentSeddon.hyperdx: auth = false and openFirewall open the HyperDX UI
-              (${toString hdx.ports.ui}) to the network with no login; anyone who reaches
-              ${cfg.hyperdx.frontendUrl} has full HyperDX access.
-            '';
+            ++
+              lib.optional
+                (!hdxAuth && !fd.enable && cfg.openFirewall && lan && config.networking.firewall.enable)
+                ''
+                  services.agentSeddon.hyperdx: auth = false and openFirewall open the HyperDX UI
+                  (${toString hdx.ports.ui}) to the network with no login; anyone who reaches
+                  ${cfg.hyperdx.frontendUrl} has full HyperDX access.
+                '';
 
           virtualisation.oci-containers.containers = {
             ${mongo} = {

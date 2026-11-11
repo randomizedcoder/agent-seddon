@@ -329,18 +329,20 @@ boot.
   and Grafana takes them only from 127.0.0.1. The login form is off, and Grafana serves from
   `<origin>/grafana/` (`root_url`, `serve_from_sub_path`). Basic auth stays on, so the `admin`
   account with `grafana.adminPasswordFile` / `generateAdminPassword` is the break-glass login.
-  Envoy drops `authorization` on `/grafana`, so it works on loopback only. The build needs
-  Grafana on `http_port` 3000 over `protocol = "http"`, which is where the door sends it.
-- **HyperDX**: the door is its sign-in, so the build needs `hyperdx.auth = false`, and
-  `hyperdx.frontendUrl` defaults to (and must be) `https://<publicHost>:8444`.
+  Envoy drops `authorization` on `/grafana`, so it works on loopback only, and the build
+  needs Grafana to listen there (`http_addr = "127.0.0.1"`, nixpkgs' default). It also needs
+  `http_port` 3000 over `protocol = "http"`, which is where the door sends it.
+- **HyperDX**: the door is its sign-in, so `hyperdx.auth` defaults to (and must be) `false`,
+  and `hyperdx.frontendUrl` defaults to (and must be) `https://<publicHost>:8444`. The UI's
+  own port (8080) has no login then, so `openFirewall` no longer opens it: 8444 is the way in.
 - **Prometheus** stays the host's. The door sends `/prometheus/` to `127.0.0.1:9090`, and a
   build warning names what the host sets:
   `services.prometheus.webExternalUrl = "https://<publicHost>:8443/prometheus/"`. From then on
   Prometheus serves under `/prometheus/`, so local clients (a Grafana data source,
   `grafana.prometheusUrl`) use `http://127.0.0.1:9090/prometheus`.
 
-With `openFirewall` on a LAN `publicHost`, 8443 and 8444 open too. The old ports stay
-open until S30 moves everything else to loopback.
+With `openFirewall` on a LAN `publicHost`, 8443 and 8444 open too. The other old ports
+stay open until S30 moves everything else to loopback.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
@@ -364,8 +366,9 @@ in the host flake, then `nixos-rebuild switch`.
   unsafe cert/key path, an http or wildcard origin, an unusable `publicHost` (including
   what pki-dev refuses: an empty label, an over-long label, a numeric TLD, upper case), and
   a gateway `[auth]` without oidc, the callback, or the issuer. With the host's Grafana it
-  checks `auth.proxy`, the sub-path and the login form off, and refuses Grafana off port 3000
-  or on a socket. HyperDX behind the door needs `auth = false` and the door's origin, and
+  checks `auth.proxy`, the sub-path and the login form off, and refuses Grafana off loopback,
+  off port 3000 or on a socket. HyperDX behind the door needs `auth = false` (the default
+  there) and the door's origin, and its 8080 stays closed while 8444 opens; and
   the host's Prometheus gets a warning until `webExternalUrl` is the door's `/prometheus/`.
 - **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
   the module in a QEMU VM and checks that each step comes up in order:
