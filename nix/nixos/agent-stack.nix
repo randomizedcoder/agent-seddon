@@ -223,7 +223,48 @@ let
   isLoopback = h: h == "127.0.0.1" || h == "localhost" || h == "::1";
   lan = !(isLoopback cfg.publicHost);
   bindHost = if lan then "0.0.0.0" else "127.0.0.1";
+  # S30 (F9): behind the front door only the door and the webhook listen beyond loopback.
+  innerHost = if fd.enable then "127.0.0.1" else bindHost;
   urlFor = port: "http://${cfg.publicHost}:${toString port}";
+
+  # F9: the ports the door stands in front of, and what the host's firewall must not open
+  # with it on. The webhook (GitHub's, HMAC-checked) and the door's own two are not tools.
+  fdToolPorts = lib.unique (
+    lib.attrValues (
+      removeAttrs ports [
+        "frontDoor"
+        "frontDoorHyperdx"
+        "webhook"
+      ]
+    )
+    ++ lib.attrValues hdx.ports
+    ++ [
+      cfg.clickhouse.nativePort
+      8123
+      config.services.postgresql.settings.port
+    ]
+  );
+  fw = config.networking.firewall;
+  fwOpens =
+    tcp: ranges: p:
+    builtins.elem p tcp || lib.any (r: r.from <= p && p <= r.to) ranges;
+  # Each place the NixOS firewall opens a port: the global lists, then each interface's
+  # (`lo` is loopback already).
+  fwScopes = [
+    {
+      at = "networking.firewall";
+      tcp = fw.allowedTCPPorts;
+      ranges = fw.allowedTCPPortRanges;
+    }
+  ]
+  ++ lib.mapAttrsToList (n: i: {
+    at = "networking.firewall.interfaces.${n}";
+    tcp = i.allowedTCPPorts or [ ];
+    ranges = i.allowedTCPPortRanges or [ ];
+  }) (removeAttrs fw.interfaces [ "lo" ]);
+  fdOpenedToolPorts = lib.concatMap (
+    sc: map (p: "${toString p} (${sc.at})") (lib.filter (fwOpens sc.tcp sc.ranges) fdToolPorts)
+  ) fwScopes;
 
   # The repo's example config is the base: the agent requires most of its sections
   # (`[agent]`, `[provider]`, ...), and it is what a hand-started process runs with. Its
@@ -354,7 +395,8 @@ let
   rosterFile = pkgs.writeText "agent-seddon-roster.json" (builtins.toJSON cfg.fleet.roster);
 
   envoyConfig = seddon.mkEnvoyConfig {
-    host = bindHost;
+    host = innerHost;
+    webhookHost = bindHost;
     origins = [
       (urlFor ports.portalWeb)
     ]
@@ -373,10 +415,11 @@ let
   };
 
   webBundle = seddon.mkWebBundle {
+    # Behind the door the portal's RPCs go to its own origin, which routes each service.
     defines = {
-      PORTAL_GRPC_WEB_URL = urlFor ports.grpcWeb;
-      PORTAL_SESSIONS_GRPC_WEB_URL = urlFor ports.grpcWebSessions;
-      PORTAL_FLEET_GRPC_WEB_URL = urlFor ports.grpcWebFleet;
+      PORTAL_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWeb;
+      PORTAL_SESSIONS_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWebSessions;
+      PORTAL_FLEET_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWebFleet;
       # Empty hides the Launch card; a loopback URL is rewritten to the page's host.
       PORTAL_HYPERDX_URL = if hdxEnabled then cfg.hyperdx.frontendUrl else "";
     }
@@ -510,7 +553,9 @@ in
         The host browsers use to reach the portal and bridge. It is baked into the web
         bundle (endpoints are compile-time) and is the bridge's only CORS origin. A
         loopback value keeps everything on 127.0.0.1 (reach it over an SSH tunnel); any
-        other value binds the bridge and portal to 0.0.0.0.
+        other value binds the bridge and portal to 0.0.0.0. With `frontDoor.enable`, only
+        the door (8443, 8444) and the GitHub webhook listener bind it; the rest stay on
+        loopback behind the door.
       '';
     };
 
@@ -974,19 +1019,22 @@ in
         systemd.services = lib.mapAttrs' agentUnit enabledAgents;
         services.agentSeddon.renderedSettings = lib.mapAttrs mergedSettings enabledAgents;
 
+        # F9: behind the door, the door is the only way in (the tools' own ports have no
+        # login of their own, or one the door replaces).
         networking.firewall.allowedTCPPorts = lib.mkIf (cfg.openFirewall && lan) (
-          lib.optional cfg.portal.enable ports.portalWeb
-          ++ lib.optionals cfg.grpcWeb.enable (
-            lib.optional cfg.gateway.enable ports.grpcWeb
-            ++ lib.optional cfg.sessions.enable ports.grpcWebSessions
-            ++ lib.optional cfg.fleet.enable ports.grpcWebFleet
-          )
-          # Behind the door the UI's only entrance is ${toString ports.frontDoorHyperdx}: its raw port has no login.
-          ++ lib.optional (hdxEnabled && !fd.enable) hdx.ports.ui
-          ++ lib.optionals (fd.enable && cfg.grpcWeb.enable) [
-            ports.frontDoor
-            ports.frontDoorHyperdx
-          ]
+          if fd.enable then
+            lib.optionals cfg.grpcWeb.enable [
+              ports.frontDoor
+              ports.frontDoorHyperdx
+            ]
+          else
+            lib.optional cfg.portal.enable ports.portalWeb
+            ++ lib.optionals cfg.grpcWeb.enable (
+              lib.optional cfg.gateway.enable ports.grpcWeb
+              ++ lib.optional cfg.sessions.enable ports.grpcWebSessions
+              ++ lib.optional cfg.fleet.enable ports.grpcWebFleet
+            )
+            ++ lib.optional hdxEnabled hdx.ports.ui
         );
       }
 
@@ -1080,6 +1128,32 @@ in
           {
             assertion = !graf.enable || graf.settings.server.protocol == "http";
             message = "services.agentSeddon.frontDoor: the door speaks plain HTTP to Grafana on loopback; set services.grafana.settings.server.protocol = \"http\".";
+          }
+          # F9: the loopback binds don't cover HyperDX (host network, every address), so the
+          # firewall is what keeps the tools behind the door. These read the NixOS firewall
+          # options only; rules from extraCommands / extraInputRules / a hand-written
+          # nftables ruleset are invisible here.
+          {
+            assertion = fw.enable;
+            message = "services.agentSeddon.frontDoor: the firewall keeps the tools' own ports (HyperDX binds every address) behind the door; networking.firewall.enable must stay true.";
+          }
+          {
+            assertion = lib.all (i: i == "lo") fw.trustedInterfaces;
+            message = "services.agentSeddon.frontDoor: networking.firewall.trustedInterfaces (${lib.concatStringsSep ", " fw.trustedInterfaces}) opens every port, the tools' included, on those interfaces; open what each needs with networking.firewall.interfaces.<name>.allowedTCPPorts instead.";
+          }
+          {
+            assertion = fdOpenedToolPorts == [ ];
+            message = "services.agentSeddon.frontDoor: the firewall opens tool ports the door stands in front of: ${lib.concatStringsSep ", " fdOpenedToolPorts}. Close them; ${toString ports.frontDoor} and ${toString ports.frontDoorHyperdx} are the way in.";
+          }
+          {
+            assertion =
+              !config.services.prometheus.enable
+              || builtins.elem config.services.prometheus.listenAddress [
+                "127.0.0.1"
+                "localhost"
+                "[::1]"
+              ];
+            message = "services.agentSeddon.frontDoor: the door is Prometheus's entrance (/prometheus); set services.prometheus.listenAddress = \"127.0.0.1\".";
           }
         ];
 
@@ -1183,7 +1257,7 @@ in
             DynamicUser = true;
             # --cache-control-headers=false: the bundle's file names are not hashed, so the
             # default one-year cache would pin a stale portal after a redeploy (see portal-web).
-            ExecStart = "${seddon.staticWebServer}/bin/static-web-server --root ${webBundle} --host ${bindHost} --port ${toString ports.portalWeb} --cache-control-headers=false";
+            ExecStart = "${seddon.staticWebServer}/bin/static-web-server --root ${webBundle} --host ${innerHost} --port ${toString ports.portalWeb} --cache-control-headers=false";
             Restart = "on-failure";
             RestartSec = 5;
           };

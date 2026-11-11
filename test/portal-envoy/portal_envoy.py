@@ -9,6 +9,8 @@ from the environment can break out of the string it lands in.
 Knobs (environment; the defaults are the safe ones):
 
     PORTAL_GRPC_WEB_HOST   listener bind for every listener       127.0.0.1
+    PORTAL_WEBHOOK_HOST    the GitHub webhook listener's bind     PORTAL_GRPC_WEB_HOST
+                           (GitHub must reach it when the rest stays on loopback)
     PORTAL_WEB_ORIGIN      comma list of exact CORS origins       http://127.0.0.1:8092,
                                                                   http://localhost:8092
     PORTAL_AUTH            auto | on | off                        auto
@@ -338,6 +340,7 @@ class Jwt:
 @dataclass
 class Knobs:
     host: str = "127.0.0.1"
+    webhook_host: str = ""  # empty: follows `host`
     origins: tuple[str, ...] = DEFAULT_ORIGINS
     auth: str = "auto"
     jwks: str = ""
@@ -369,12 +372,12 @@ def no_controls(what: str, value: str) -> str:
     return value
 
 
-def validate_host(value: str) -> str:
+def validate_host(value: str, knob: str = "PORTAL_GRPC_WEB_HOST") -> str:
     """An IP literal: Envoy binds a socket_address, and a name would need a resolver."""
     try:
         return str(ipaddress.ip_address(value.strip()))
     except ValueError:
-        raise EnvoyError(f"PORTAL_GRPC_WEB_HOST {value!r} is not an IP address") from None
+        raise EnvoyError(f"{knob} {value!r} is not an IP address") from None
 
 
 def is_loopback_host(host: str) -> bool:
@@ -478,6 +481,9 @@ def knobs_from_env(env: Mapping[str, str], spec: Spec) -> Knobs:
     k = Knobs()
     if g("PORTAL_GRPC_WEB_HOST"):
         k.host = validate_host(g("PORTAL_GRPC_WEB_HOST"))
+    k.webhook_host = (
+        validate_host(g("PORTAL_WEBHOOK_HOST"), "PORTAL_WEBHOOK_HOST") if g("PORTAL_WEBHOOK_HOST") else k.host
+    )
     if g("PORTAL_WEB_ORIGIN"):
         k.origins = validate_origins(g("PORTAL_WEB_ORIGIN"))
     k.auth = g("PORTAL_AUTH") or "auto"
@@ -539,7 +545,7 @@ def front_door_knobs(env: Mapping[str, str], spec: Spec, k: Knobs) -> None:
     if not (k.front_cert and k.front_key):
         raise EnvoyError("the front door is HTTPS only: set PORTAL_FRONT_DOOR_CERT and PORTAL_FRONT_DOOR_KEY")
     if g("PORTAL_FRONT_DOOR_HOST"):
-        k.front_host = validate_host(g("PORTAL_FRONT_DOOR_HOST"))
+        k.front_host = validate_host(g("PORTAL_FRONT_DOOR_HOST"), "PORTAL_FRONT_DOOR_HOST")
     if g("PORTAL_FRONT_DOOR_ORIGINS"):
         k.front_origins = validate_origins(g("PORTAL_FRONT_DOOR_ORIGINS"))
         if any(o.startswith("http://") for o in k.front_origins):
@@ -932,7 +938,8 @@ def webhook_listener(w: Webhook, k: Knobs, tls: Tls | None) -> dict:
     direct 404: the agent's other surfaces are never reachable through this listener.
     `buffer` enforces the body cap at the edge (413), and the header/request timeouts
     absorb slow clients the receiver's tiny_http would otherwise hold a thread for.
-    Binds the host knob (GitHub must reach it) and terminates the same downstream TLS;
+    Binds its own knob (GitHub must reach it, even when every other listener is on
+    loopback behind the front door) and terminates the same downstream TLS;
     the upstream hop is plain HTTP to the loopback receiver."""
     hcm = {
         "@type": any_type(
@@ -984,7 +991,7 @@ def webhook_listener(w: Webhook, k: Knobs, tls: Tls | None) -> dict:
         }
     return {
         "name": w.name,
-        "address": {"socket_address": {"address": k.host, "port_value": w.port}},
+        "address": {"socket_address": {"address": k.webhook_host or k.host, "port_value": w.port}},
         "filter_chains": [chain],
     }
 

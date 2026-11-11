@@ -44,8 +44,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
 | S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | ✅ | #716 |
 | S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
-| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | 🟡 | #719 |
-| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
+| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ✅ | #719 |
+| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | 🟡 | |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
 
 ## As-built log
@@ -1489,6 +1489,28 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     `publicHost` boundary pair. Carried: should-fix 3 (a Prometheus port other than 9090 stays a
     warning, since a host may not want `/prometheus` at all), and the obs_editor/Viewer role
     rows, which the gate's Rust tests cover (`grafana_role`), not the VM.
+- **2026-11-11 — S30: everything else on loopback (F9).** S29 merged as #719 (7a65e35e).
+  - Binds: with the door on, the portal server and the grpc-web listeners use 127.0.0.1;
+    the door and the GitHub webhook listener keep `publicHost`'s bind. The webhook got its
+    own knob, `PORTAL_WEBHOOK_HOST` (`mkEnvoyConfig { webhookHost; }`, default: the
+    grpc-web host), with a table in `test_portal_envoy.py` (adversarial: a name, a smuggled
+    port, a list, a newline).
+  - The portal bundle calls all three services at the door's origin, which routes them
+    (S28a); so the portal works through the door before S31's cookie mode.
+  - Firewall: `openFirewall` opens only 8443 / 8444 with the door. Assertions refuse the
+    firewall off, a trusted interface other than `lo`, and any tool port in the global or
+    per-interface (`lo` aside) `allowedTCPPorts` / `allowedTCPPortRanges`. The tool ports are
+    the spec's ports except the door's two and the webhook, plus HyperDX's, ClickHouse's
+    (native, 8123) and Postgres's. The message lists each port and where it was opened.
+  - Prometheus: an assertion wants `listenAddress` on loopback when the host runs it beside
+    the door (F9's "via an option the host sets"). The `webExternalUrl` and port stay
+    warnings (#719's should-fix 3, carried).
+  - Not covered, as F9 says: `extraCommands`, `extraInputRules`, hand-written nftables.
+    HyperDX's own bind addresses (open item) are unchanged: the firewall closes them.
+  - Eval rows: `frontDoorLockdown`. VM rows: a `lan` specialisation (publicHost = the VM's
+    LAN address, `openFirewall`) probed from a second node; 8443 / 8444 answer, a page with
+    no session goes to sign-in, 8090-8094 and 3000 are bound to loopback, and every other
+    listening port is closed from outside.
 
 ## Cross-track note (not an S-increment)
 

@@ -922,6 +922,38 @@ class WebhookListener(unittest.TestCase):
         self.assertEqual(l["address"]["socket_address"]["address"], "0.0.0.0")
         self.assertIn("transport_socket", l["filter_chains"][0])
 
+    def test_webhook_host_knob(self):
+        # S30: behind the front door every listener moves to loopback but this one.
+        cases = {
+            "positive_own_bind_while_the_rest_stay_on_loopback": (
+                {"PORTAL_WEBHOOK_HOST": "0.0.0.0"}, "0.0.0.0", "127.0.0.1"),
+            "positive_ipv6": ({"PORTAL_WEBHOOK_HOST": "::"}, "::", "127.0.0.1"),
+            "negative_unset_follows_the_host_knob": (
+                {"PORTAL_GRPC_WEB_HOST": "0.0.0.0"}, "0.0.0.0", "0.0.0.0"),
+            "corner_loopback_while_the_rest_bind_wide": (
+                {"PORTAL_GRPC_WEB_HOST": "0.0.0.0", "PORTAL_WEBHOOK_HOST": "127.0.0.1"},
+                "127.0.0.1", "0.0.0.0"),
+            "boundary_blank_follows_the_host_knob": ({"PORTAL_WEBHOOK_HOST": "  "}, "127.0.0.1", "127.0.0.1"),
+        }
+        for name, (env, hook, rest) in cases.items():
+            with self.subTest(name):
+                cfg = self.render(env)
+                self.assertEqual(hook_listener_of(cfg)["address"]["socket_address"]["address"], hook)
+                others = [l for l in cfg["static_resources"]["listeners"] if l["name"] != "fleet_webhook"]
+                self.assertTrue(others)
+                for l in others:
+                    self.assertEqual(l["address"]["socket_address"]["address"], rest, l["name"])
+
+    def test_adversarial_webhook_host_must_be_an_ip(self):
+        for name, value in {
+            "adversarial_name": "evil.example",
+            "adversarial_port_smuggled": "0.0.0.0:80",
+            "adversarial_list": "0.0.0.0,127.0.0.1",
+            "adversarial_newline": "0.0.0.0\nx",
+        }.items():
+            with self.subTest(name), self.assertRaisesRegex(E.EnvoyError, "PORTAL_WEBHOOK_HOST .* not an IP"):
+                E.knobs_from_env({"PORTAL_WEBHOOK_HOST": value}, SPEC_HOOK)
+
     def test_corner_no_cors_on_the_webhook(self):
         vh = hook_hcm(self.render({}))["route_config"]["virtual_hosts"][0]
         self.assertNotIn("typed_per_filter_config", vh)
