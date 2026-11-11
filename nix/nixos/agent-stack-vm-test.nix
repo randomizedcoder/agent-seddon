@@ -330,14 +330,18 @@ pkgs.testers.runNixOSTest {
         status, _, loc = out.partition(" ")
         return int(status), loc, machine.succeed("cat /tmp/hdr").lower()
 
-    def who_am_i(jar="/tmp/jar", extra=""):
-        """AuthService.WhoAmI as grpc-web through the door: (status, body)."""
+    def grpc_web(method, jar="/tmp/jar", extra=""):
+        """An empty-request grpc-web call through the door: (status, body)."""
         status, _, _ = door_get(
-            f"{door}/agent.v1.AuthService/WhoAmI", jar,
+            f"{door}/{method}", jar,
             "-X POST -H 'content-type: application/grpc-web+proto' -H 'x-grpc-web: 1' "
             f"--data-binary @/tmp/empty-frame {extra}",
         )
         return status, machine.succeed("cat /tmp/body")
+
+    def who_am_i(jar="/tmp/jar", extra=""):
+        """AuthService.WhoAmI as grpc-web through the door: (status, body)."""
+        return grpc_web("agent.v1.AuthService/WhoAmI", jar, extra)
 
     def sign_in(jar="/tmp/jar"):
         """Walk Dex's mock sign-in through the door; the callback's (status, location, headers)."""
@@ -419,6 +423,12 @@ pkgs.testers.runNixOSTest {
         # The client's own authorization is overwritten by the gate's, not passed on.
         status, body = who_am_i(extra="-H 'authorization: Bearer forged.jwt.value'")
         assert status == 200 and "grpc-status:0" in body, (status, body)
+        # S31: the portal's cookie mode sends no token and names no session. The gate
+        # names it from the token, so a tenant-keyed service (which refuses a call
+        # with no session) runs, and a forged session header is overwritten.
+        for extra in ["", "-H 'x-agent-session-id: forged-sid'"]:
+            status, body = grpc_web("agent.v1.PromptService/List", extra=extra)
+            assert status == 200 and "grpc-status:0" in body, (extra, status, body)
         # S29 (F6): Grafana signs the user in from the gate's headers, under /grafana/,
         # as the role the gate maps (an operator is Admin).
         status, _, _ = door_get(f"{door}/grafana/api/user")

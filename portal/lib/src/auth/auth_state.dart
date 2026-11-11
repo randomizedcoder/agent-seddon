@@ -4,7 +4,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 // `GrpcError` from the entry point that builds for both web and native.
-import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError;
+import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError, StatusCode;
 import 'package:grpc/service_api.dart';
 
 import '../gen/agent/v1/auth.pbgrpc.dart';
@@ -16,14 +16,28 @@ import 'pkce.dart';
 
 /// `--dart-define=PORTAL_AUTH=`: `auto` (default) signs in when the agent offers
 /// browser sign-in and runs anonymously when it does not; `on` insists on
-/// sign-in; `off` never asks (loopback dev).
-enum AuthMode { auto, on, off }
+/// sign-in; `off` never asks (loopback dev); `door` is the portal behind the
+/// front door (security-hardening 10, S31): the door's cookie is the
+/// credential, so the portal holds no token and signs in at `/auth/login`.
+enum AuthMode { auto, on, off, door }
 
 AuthMode parseAuthMode(String raw) => switch (raw.trim()) {
       'on' => AuthMode.on,
       'off' => AuthMode.off,
+      'door' => AuthMode.door,
       _ => AuthMode.auto,
     };
+
+/// The front door's sign-in for [page]: `/auth/login?rd=<the page's path>`. Only
+/// the path goes back, never a query (a callback's `code` must not round-trip),
+/// and the gate checks `rd` again.
+String doorLoginUrl(Uri page) {
+  final path = page.path.isEmpty ? '/' : page.path;
+  return '/auth/login?rd=${Uri.encodeQueryComponent(path)}';
+}
+
+/// The front door's sign-out, a POST (F10: a link cannot sign anyone out).
+const doorLogoutUrl = '/auth/logout';
 
 /// Where sign-in stands.
 enum AuthPhase {
@@ -100,6 +114,14 @@ class AuthState extends ChangeNotifier {
   static const pendingKey = 'agent-seddon.signin';
   static const sessionKey = 'agent-seddon.session';
 
+  /// When this tab last went to the front door's sign-in (unix seconds), so a
+  /// door that signs the browser in but whose calls still come back 401 shows
+  /// an error rather than bouncing between the two forever.
+  static const doorLoginKey = 'agent-seddon.door-login';
+
+  /// How soon after a trip to the door's sign-in a 401 counts as a loop.
+  static const doorLoopSecs = 30;
+
   final AuthServiceClient client;
   final AuthPlatform platform;
   final AuthMode mode;
@@ -155,9 +177,10 @@ class AuthState extends ChangeNotifier {
   /// A signed-in call carries a principal, so the agent refuses a scoped service
   /// (prompts, providers, graphs, config) that names no session (S2, found by
   /// the S15c browser run). Empty when signed out or sign-in is off.
+  /// Behind the front door the gate sets the session from the cookie's token.
   Map<String, String> get identityHeaders {
     final p = session?.principal;
-    if (p == null) return const {};
+    if (p == null || mode == AuthMode.door) return const {};
     return {
       if (p.tenant.isNotEmpty) 'x-agent-user-id': p.tenant,
       if (p.sid.isNotEmpty) 'x-agent-session-id': p.sid,
@@ -212,6 +235,10 @@ class AuthState extends ChangeNotifier {
     }
     if (mode == AuthMode.off) {
       _set(AuthPhase.off);
+      return;
+    }
+    if (mode == AuthMode.door) {
+      await _doorSignIn();
       return;
     }
     if (cliLogin != null) {
@@ -451,6 +478,12 @@ class AuthState extends ChangeNotifier {
   /// Revoke the session at the agent (best effort) and forget it here. A CLI
   /// session is only forgotten here: revoking it would sign the terminal out.
   Future<void> signOut() async {
+    if (mode == AuthMode.door) {
+      _clear();
+      _set(AuthPhase.redirecting);
+      platform.post(doorLogoutUrl);
+      return;
+    }
     if (cliLogin != null && (session?.refreshHandle.isEmpty ?? false)) {
       _clear();
       expired = false;
@@ -469,6 +502,57 @@ class AuthState extends ChangeNotifier {
     _clear();
     expired = false;
     await _listIssuers();
+  }
+
+  /// Behind the front door: who the cookie says we are. No token is sent or kept;
+  /// the door adds one to each call. Signed out there, the browser goes to the
+  /// door's sign-in, which comes back to this page.
+  Future<void> _doorSignIn() async {
+    try {
+      final me = await client.whoAmI(WhoAmIRequest());
+      platform.remove(doorLoginKey);
+      session = SignedIn('', 0, '', me);
+      expired = false;
+      _set(AuthPhase.signedIn);
+    } on GrpcError catch (e) {
+      session = null;
+      switch (e.code) {
+        case StatusCode.unauthenticated:
+          _toDoorLogin();
+        case StatusCode.permissionDenied:
+          _set(AuthPhase.signedOut,
+              error: 'You are signed in, but have no access to this agent. '
+                  'Ask its operator for a binding.');
+        default:
+          _set(AuthPhase.signedOut,
+              error: 'The agent is unavailable (${e.codeName}).');
+      }
+    }
+  }
+
+  void _toDoorLogin() {
+    final last = int.tryParse(platform.read(doorLoginKey) ?? '');
+    final now = nowSecs();
+    if (last != null && now >= last && now - last < doorLoopSecs) {
+      platform.remove(doorLoginKey);
+      _set(AuthPhase.signedOut,
+          error: 'The front door signed you in, but the agent did not accept '
+              'the session.');
+      return;
+    }
+    platform.write(doorLoginKey, '$now');
+    _set(AuthPhase.redirecting);
+    platform.navigate(doorLoginUrl(platform.currentUri));
+  }
+
+  /// A call came back unauthenticated. Behind the front door that means the
+  /// cookie's session has ended, so go and sign in again; elsewhere the refresh
+  /// timer and the sign-in page already handle it.
+  void sessionLost() {
+    if (mode != AuthMode.door || phase != AuthPhase.signedIn) return;
+    _clear();
+    expired = true;
+    _toDoorLogin();
   }
 
   void _clear() {

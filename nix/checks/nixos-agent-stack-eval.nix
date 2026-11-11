@@ -980,6 +980,38 @@ let
         ) == 1
       && fdPromWarnings fd == [ ]
       && (fdProm { }).services.prometheus.webExternalUrl == null;
+    # S31: behind the door the bundle keeps no token (the door's cookie signs it in)
+    # and links each tool through the door.
+    portalCookieMode =
+      let
+        d = c: c.services.agentSeddon.portal.finalDefines;
+        promFd = fdProm {
+          listenAddress = "127.0.0.1";
+          webExternalUrl = "/prometheus/";
+        };
+      in
+      (d fd).PORTAL_AUTH == "door"
+      # A tool the host doesn't run gets no Launch card.
+      && (d fd).PORTAL_GRAFANA_URL == ""
+      && (d fd).PORTAL_PROMETHEUS_URL == ""
+      && (d fdGraf).PORTAL_GRAFANA_URL == "https://172.16.50.46:8443/grafana/"
+      && (d promFd).PORTAL_PROMETHEUS_URL == "https://172.16.50.46:8443/prometheus/"
+      && (d (fdHdx { })).PORTAL_HYPERDX_URL == "https://172.16.50.46:8444"
+      # Without the door nothing changes: config.dart's defaults.
+      && !((d lan) ? PORTAL_AUTH)
+      && !((d lan) ? PORTAL_GRAFANA_URL)
+      # An operator's own link still wins...
+      &&
+        (d (fdWith { portal.defines.PORTAL_GRAFANA_URL = "https://g.example/"; } { })).PORTAL_GRAFANA_URL
+        == "https://g.example/"
+      # ...but not a mode that would put a token back in JavaScript.
+      && lib.all (m: fdFails { portal.defines.PORTAL_AUTH = m; }) [
+        "on"
+        "auto"
+        "off"
+        ""
+      ]
+      && !(fdFails { portal.defines.PORTAL_AUTH = "door"; });
     # S30 (F9): behind the door only the door listens beyond loopback, and the host's
     # firewall may open nothing it stands in front of.
     frontDoorLockdown =

@@ -8,8 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:grpc/service_api.dart';
 
 /// L0 tests for the sign-in helpers (security-hardening S13b): PKCE, the
-/// capability set, the refresh delay, the `PORTAL_AUTH` parser and the
-/// credentials every call carries.
+/// capability set, the refresh delay, the `PORTAL_AUTH` parser, the front
+/// door's sign-in URL and the credentials every call carries.
 void main() {
   final unreserved = RegExp(r'^[A-Za-z0-9\-._~]+$');
 
@@ -117,8 +117,27 @@ void main() {
       ('corner_whitespace_trimmed', ' off ', AuthMode.off),
       ('negative_unknown_is_auto', 'yes', AuthMode.auto),
       ('negative_upper_case_not_folded', 'OFF', AuthMode.auto),
+      ('positive_door', 'door', AuthMode.door),
+      ('negative_door_prefix_is_auto', 'doors', AuthMode.auto),
     ]) {
       test(name, () => expect(parseAuthMode(raw), want));
+    }
+  });
+
+  // S31: where a signed-out portal behind the front door sends the browser.
+  group('doorLoginUrl', () {
+    for (final (name, page, want) in [
+      ('positive_root', 'https://h:8443/', '/auth/login?rd=%2F'),
+      ('positive_deep_path', 'https://h:8443/app/x', '/auth/login?rd=%2Fapp%2Fx'),
+      ('boundary_no_path', 'https://h:8443', '/auth/login?rd=%2F'),
+      ('corner_query_and_fragment_dropped', 'https://h:8443/a?code=c1&state=s1#f',
+          '/auth/login?rd=%2Fa'),
+      ('adversarial_encoded_slashes_stay_encoded', 'https://h:8443/%2F%2Fevil.example',
+          '/auth/login?rd=%2F%252F%252Fevil.example'),
+      ('adversarial_ampersand_cannot_add_a_param', 'https://h:8443/a&rd=//evil',
+          '/auth/login?rd=%2Fa%26rd%3D%2F%2Fevil'),
+    ]) {
+      test(name, () => expect(doorLoginUrl(Uri.parse(page)), want));
     }
   });
 }

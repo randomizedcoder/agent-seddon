@@ -203,6 +203,66 @@ const loginSpec = PageSpec('login', [
     name: 'native_hostile_cli_output_refused',
     description: 'native: CLI output with a CR/LF in the token is refused before any call',
   ),
+  // ── behind the front door (security-hardening 10, S31) ────────────────────
+  SpecRow(
+    elementId: 'login.account',
+    caseClass: CaseClass.positive,
+    name: 'door_cookie_signs_in',
+    description: "door: WhoAmI with no token signs in; the shell's calls carry "
+        'no bearer and name no session (the door adds both), and nothing is stored',
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
+  SpecRow(
+    elementId: 'login.progress',
+    caseClass: CaseClass.negative,
+    name: 'door_signed_out_goes_to_the_door_login',
+    description: "door: a 401 from WhoAmI sends the browser to /auth/login?rd=<this page's path>",
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
+  SpecRow(
+    elementId: 'login.error',
+    caseClass: CaseClass.negative,
+    name: 'door_unbound_user_explained',
+    description: 'door: a 403 says the user has no access, and does not redirect',
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
+  SpecRow(
+    elementId: 'login.signout',
+    caseClass: CaseClass.positive,
+    name: 'door_signout_posts_to_the_door',
+    description: 'door: signing out POSTs /auth/logout and sends no Logout RPC',
+  ),
+  SpecRow(
+    elementId: 'login.progress',
+    caseClass: CaseClass.corner,
+    name: 'door_session_lost_mid_use',
+    description: "door: a shell call that comes back 401 (the door's session ended) "
+        'goes to the door login',
+    expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
+  ),
+  SpecRow(
+    elementId: 'login.error',
+    caseClass: CaseClass.adversarial,
+    name: 'door_login_loop_stops',
+    description: 'door: a 401 within 30 s of the last trip to the door login shows an '
+        'error instead of bouncing again',
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
+  SpecRow(
+    elementId: 'login.progress',
+    caseClass: CaseClass.boundary,
+    name: 'door_login_trip_30s_ago_redirects',
+    description: 'door: a trip exactly 30 s ago is not a loop, and the browser goes again',
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
+  SpecRow(
+    elementId: 'login.progress',
+    caseClass: CaseClass.adversarial,
+    name: 'door_future_trip_stamp_is_not_a_loop',
+    description: 'door: a stored trip stamp from the future (or not a number) never '
+        'blocks sign-in',
+    expectedRpc: 'agent.v1.AuthService/WhoAmI',
+  ),
   // ── a GitHub App install return (forge-auth F5d1) ────────────────────────
   SpecRow(
     elementId: 'login.account',

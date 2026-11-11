@@ -1,5 +1,5 @@
 {
-  "_doc": "security-hardening 10, F4: what reaches each front-door route's upstream, per identity header. removed: dropped from the request. replaced: the ext_authz check's 200 always carries it, and Envoy overwrites the client's value. kept: passed through. Read by nix/portal/envoy-spec.nix (rendered by test/portal-envoy/portal_envoy.py) and by the gate's Rust tests (Route::replaced), so a header added to the gate is one new row here. x-agent-session-id is kept on rpc: the portal stamps the session id it learned from WhoAmI, and the agent partitions by the token's own sid, so the header only satisfies identity_policy's presence check; S31's cookie mode has the gate replace it.",
+  "_doc": "security-hardening 10, F4: what reaches each front-door route's upstream, per identity header. removed: dropped from the request. replaced: the ext_authz check's 200 always carries it, and Envoy overwrites the client's value. kept: passed through. Read by nix/portal/envoy-spec.nix (rendered by test/portal-envoy/portal_envoy.py) and by the gate's Rust tests (Route::replaced), so a header added to the gate is one new row here. x-agent-session-id is replaced on rpc (S31): the check sets the token's own sid, so the portal in cookie mode names no session and a client's value never reaches the agent.",
   "routes": ["rpc", "portal", "auth", "dex", "grafana", "prometheus", "hyperdx"],
   "headers": {
     "authorization": {
@@ -48,7 +48,7 @@
       "hyperdx": "removed"
     },
     "x-agent-session-id": {
-      "rpc": "kept",
+      "rpc": "replaced",
       "portal": "removed",
       "auth": "removed",
       "dex": "removed",

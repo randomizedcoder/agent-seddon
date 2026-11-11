@@ -15,6 +15,9 @@ abstract class AuthPlatform {
   /// Replace the address bar without reloading (drops `?code&state`).
   void replaceUri(Uri uri);
 
+  /// Leave the page with a form POST to [url] (the front door's sign-out).
+  void post(String url);
+
   String? read(String key);
   void write(String key, String value);
   void remove(String key);
@@ -35,6 +38,9 @@ class MemoryAuthPlatform implements AuthPlatform {
   /// Every URL [navigate] was asked for, in order.
   final List<String> navigated = [];
 
+  /// Every URL [post] was asked for, in order.
+  final List<String> posted = [];
+
   final Map<String, String> storage = {};
 
   @override
@@ -42,6 +48,9 @@ class MemoryAuthPlatform implements AuthPlatform {
 
   @override
   void replaceUri(Uri uri) => currentUri = uri;
+
+  @override
+  void post(String url) => posted.add(url);
 
   @override
   String? read(String key) => storage[key];

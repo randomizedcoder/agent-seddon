@@ -23,6 +23,15 @@ class _WebAuthPlatform implements AuthPlatform {
       web.window.history.replaceState(null, '', uri.toString());
 
   @override
+  void post(String url) {
+    final form = web.HTMLFormElement()
+      ..method = 'POST'
+      ..action = url;
+    web.document.body?.append(form);
+    form.submit();
+  }
+
+  @override
   String? read(String key) => web.window.sessionStorage.getItem(key);
 
   @override

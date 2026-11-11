@@ -288,6 +288,13 @@ reuses the same pieces later; this design is the NixOS module.
 - As built (S30): F9 as written. The portal bundle's RPC URLs become the door's origin, the
   webhook listener has its own bind (`PORTAL_WEBHOOK_HOST`), and the assertions name each
   opened tool port and where. The host's Prometheus must listen on loopback.
+- As built (S31): the portal's `PORTAL_AUTH=door` mode asks `WhoAmI` with no token. On a
+  401 it goes to `/auth/login?rd=<path>`; on a 403 it says the user has no access. It signs
+  out with a POST to `/auth/logout`. The gate also replaces `x-agent-session-id` on RPCs
+  with the token's own sid: the portal names no session, and a tenant-keyed service
+  refuses a call without one. A unary call that comes back 401 mid-use sends the browser
+  to sign in again. A second 401 within 30 s of a trip to the login shows an error instead
+  of a redirect loop.
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches

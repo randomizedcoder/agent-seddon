@@ -366,6 +366,14 @@ The checks read the NixOS firewall options only: rules from `extraCommands`,
 those by hand. The REST transcoder (8094) stays loopback-only, as before: reach it over
 `ssh -L 8094:127.0.0.1:8094 <host>`.
 
+**The portal behind the door** (S31). The bundle is built with `PORTAL_AUTH=door`: the
+door's cookie signs it in, so the page holds no token. It asks `WhoAmI` once. A 401 sends
+the browser to `/auth/login?rd=<the page's path>`, and signing out POSTs `/auth/logout`.
+The door adds the bearer and the session to each call. Its Launch cards link to the door's
+`/grafana/` and `/prometheus/` (when the host runs them) and to HyperDX on `:8444`. A
+`portal.defines` entry still overrides a link, but the build refuses any `PORTAL_AUTH`
+other than `door` while the door is on.
+
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
 

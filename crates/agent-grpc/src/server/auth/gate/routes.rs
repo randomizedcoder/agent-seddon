@@ -267,7 +267,16 @@ impl AuthGate {
                     },
                     Caller::Bearer(t, _, _) => format!("Bearer {t}"),
                 };
-                ok = ok.with("authorization", value);
+                // The token's own sid (S31): the portal in cookie mode names no
+                // session, and a client's header never reaches the agent. A token
+                // with no sid is refused rather than passed on unnamed.
+                let sid = caller.sid();
+                if sid.is_empty() {
+                    return Reply::new(401, "unauthenticated");
+                }
+                ok = ok
+                    .with("authorization", value)
+                    .with("x-agent-session-id", sid.to_string());
             }
             Route::Grafana => {
                 ok = ok

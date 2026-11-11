@@ -46,7 +46,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ✅ | #719 |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | 🟡 | #720 |
-| S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
+| S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | 🟡 | |
 
 ## As-built log
 
@@ -1511,6 +1511,36 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     LAN address, `openFirewall`) probed from a second node; 8443 / 8444 answer, a page with
     no session goes to sign-in, 8090-8094 and 3000 are bound to loopback, and every other
     listening port is closed from outside.
+- **2026-11-11 — S31: the portal's cookie mode, and the tool links through the door.**
+  Stacked on S30 (#720).
+  - Gate: `Route::Rpc` replaces `x-agent-session-id` too, with the token's own sid (the
+    cookie session's, or the client's own bearer's). A token with no sid is a 401. The
+    header table (`front-door-headers.json`) row is now `replaced`, which closes #716's
+    item 1. Without it, a portal that names no session would get UNAUTHENTICATED from
+    every tenant-keyed service (S2's identity policy).
+  - Portal: `AuthMode.door`.
+    - `start()` asks `WhoAmI` with no credentials. A 401 navigates to
+      `/auth/login?rd=<path>`; only the path goes back (`doorLoginUrl`), never the query.
+      A 403 shows "no access", and anything else shows "unavailable".
+    - Nothing is stored but the time of the last trip to the login. A 401 within 30 s of
+      that trip is a loop, and shows an error with Try again.
+    - `signOut()` submits a form POST to `/auth/logout` (`AuthPlatform.post`).
+      `identityHeaders` is empty.
+    - `AuthInterceptor.onUnauthenticated` reports a unary 401 (`AuthState.sessionLost`),
+      which goes back to the login. Streams are not watched; their pages show the error.
+  - Module: with the door, `PORTAL_AUTH=door` and the Launch links are `${origin}/grafana/`
+    and `/prometheus/` (empty when the host doesn't run them; HyperDX was already `:8444`).
+    An assertion refuses any other `PORTAL_AUTH`. The bundle's defines are readable as the
+    internal `portal.finalDefines`.
+  - Tests:
+    - Rust: `check_cases` asserts the sid equals the token's.
+    - Python: the header-table rows.
+    - Dart: `parseAuthMode` and `doorLoginUrl` tables (adversarial: an encoded `//`, an
+      `&rd=` smuggled in the path), and eight login-spec door rows (the loop guard's 30 s
+      boundary, a future or junk stamp).
+    - Eval: `portalCookieMode`.
+    - VM: `PromptService/List` through the door with no session header, and with a forged
+      one.
 
 ## Cross-track note (not an S-increment)
 

@@ -297,7 +297,7 @@ fn unauthenticated_cases(
 /// F4's table: the check replaces only these headers per route, and never a
 /// header outside the closed identity set.
 #[rstest]
-#[case::positive_rpc(Route::Rpc, &["authorization"])]
+#[case::positive_rpc(Route::Rpc, &["authorization", "x-agent-session-id"])]
 #[case::positive_grafana(Route::Grafana, &["x-seddon-user", "x-seddon-role"])]
 #[case::negative_portal(Route::Portal, &[])]
 #[case::negative_prometheus(Route::Prometheus, &[])]

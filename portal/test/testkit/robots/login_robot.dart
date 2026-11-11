@@ -87,7 +87,9 @@ class LoginRobot extends Robot {
   late final AuthState auth;
   late final clients =
       gw.clients(interceptors: [
-        AuthInterceptor(() => auth.token, identity: () => auth.identityHeaders),
+        AuthInterceptor(() => auth.token,
+            identity: () => auth.identityHeaders,
+            onUnauthenticated: () => auth.sessionLost()),
       ]);
 
   RecordingLog get log => gw.log;
