@@ -45,7 +45,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | ✅ | #716 |
 | S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ✅ | #719 |
-| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | 🟡 | |
+| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | 🟡 | #720 |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
 
 ## As-built log
