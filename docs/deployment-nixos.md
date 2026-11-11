@@ -315,8 +315,34 @@ changed, and restarts Envoy to load it. Trust `/var/lib/agent-seddon-front-door/
 in the browser once. A real certificate is the two file options. Envoy (a
 `DynamicUser`) reads either pair as credentials, so the key stays root-only on disk.
 
-With `openFirewall` on a LAN `publicHost`, 8443 and 8444 open too. The old ports stay
-open until S30 moves everything else to loopback.
+`publicHost` is checked the way the certificate tool checks a SAN: an IPv4 address or a
+lowercase host name. `frontDoor.extraOrigins` are `https://host[:port]` with the same host
+rule and a port of 1-65535. So a bad value fails the build, not the certificate unit at
+boot.
+
+**The tools behind the door** (F6):
+
+- **Grafana** (the host's `services.grafana`): the module turns on `auth.proxy`. A signed-in
+  user is signed in to Grafana as their front-door subject (`X-Seddon-User`, created on first
+  visit), with the role the gate maps: operator → Admin, `obs_editor` → Editor, otherwise
+  Viewer (`X-Seddon-Role`, synced on each request). Envoy replaces both headers on `/grafana`,
+  and Grafana takes them only from 127.0.0.1. The login form is off, and Grafana serves from
+  `<origin>/grafana/` (`root_url`, `serve_from_sub_path`). Basic auth stays on, so the `admin`
+  account with `grafana.adminPasswordFile` / `generateAdminPassword` is the break-glass login.
+  Envoy drops `authorization` on `/grafana`, so it works on loopback only, and the build
+  needs Grafana to listen there (`http_addr = "127.0.0.1"`, nixpkgs' default). It also needs
+  `http_port` 3000 over `protocol = "http"`, which is where the door sends it.
+- **HyperDX**: the door is its sign-in, so `hyperdx.auth` defaults to (and must be) `false`,
+  and `hyperdx.frontendUrl` defaults to (and must be) `https://<publicHost>:8444`. The UI's
+  own port (8080) has no login then, so `openFirewall` no longer opens it: 8444 is the way in.
+- **Prometheus** stays the host's. The door sends `/prometheus/` to `127.0.0.1:9090`, and a
+  build warning names what the host sets:
+  `services.prometheus.webExternalUrl = "https://<publicHost>:8443/prometheus/"`. From then on
+  Prometheus serves under `/prometheus/`, so local clients (a Grafana data source,
+  `grafana.prometheusUrl`) use `http://127.0.0.1:9090/prometheus`.
+
+With `openFirewall` on a LAN `publicHost`, 8443 and 8444 open too. The other old ports
+stay open until S30 moves everything else to loopback.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
@@ -337,8 +363,13 @@ in the host flake, then `nixos-rebuild switch`.
   `[auth.gate]` on the gateway only (on Envoy's gate port), Dex's issuer and callback,
   the dev-PKI unit, timer and Envoy credentials (or an operator certificate's), and
   8443 / 8444 in the firewall; it refuses a missing grpc-web or gateway, a lone or
-  unsafe cert/key path, an http or wildcard origin, an unusable `publicHost`, and a
-  gateway `[auth]` without oidc, the callback, or the issuer.
+  unsafe cert/key path, an http or wildcard origin, an unusable `publicHost` (including
+  what pki-dev refuses: an empty label, an over-long label, a numeric TLD, upper case), and
+  a gateway `[auth]` without oidc, the callback, or the issuer. With the host's Grafana it
+  checks `auth.proxy`, the sub-path and the login form off, and refuses Grafana off loopback,
+  off port 3000 or on a socket. HyperDX behind the door needs `auth = false` (the default
+  there) and the door's origin, and its 8080 stays closed while 8444 opens; and
+  the host's Prometheus gets a warning until `webExternalUrl` is the door's `/prometheus/`.
 - **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
   the module in a QEMU VM and checks that each step comes up in order:
   - creds, ClickHouse, then the schema; it also checks that a passwordless
@@ -353,12 +384,13 @@ in the host flake, then `nixos-rebuild switch`.
   - the front door: the dev-PKI leaf (root-only directory, the SAN record) verifies
     against the root and not without it; both listeners send HSTS; `/dex` is unchecked
     and names the public issuer; `/dexfoo`, `/admin` and a malformed RPC path get 403;
-    with no session a page goes to sign-in (HyperDX's too) and an RPC (forged bearer
+    with no session a page goes to sign-in (Grafana's and HyperDX's too) and an RPC (forged bearer
     or none) gets 401;
   - Dex's mock sign-in walked through `:8443`: refused for an unbound user (no
     session cookie; `unbound` and `unmapped_path` audit rows in ClickHouse), and, once
     a specialisation binds the user, a `Secure; HttpOnly; SameSite=Lax` session whose
-    `WhoAmI` succeeds through the door even with a forged `authorization`, until
-    logout sends the next page back to sign-in.
+    `WhoAmI` succeeds through the door even with a forged `authorization`. The same session
+    reaches `/grafana/` as that user with the Admin role (an operator), and a forged
+    `X-Seddon-User` is replaced. Logout then sends the next page back to sign-in.
 
   Run it after touching the module.

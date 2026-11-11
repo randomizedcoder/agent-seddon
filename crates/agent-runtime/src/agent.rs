@@ -8317,6 +8317,16 @@ mod tests {
         facts: agent_core::ReviewFacts,
         requested_by: Vec<String>,
     ) -> Vec<MemoryEvent> {
+        draft_with(facts, requested_by, None).await.0
+    }
+
+    /// One `EngineDrafter::draft`: the recorded events and the `.md` it wrote.
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    async fn draft_with(
+        facts: agent_core::ReviewFacts,
+        requested_by: Vec<String>,
+        elapsed: Option<std::time::Duration>,
+    ) -> (Vec<MemoryEvent>, String) {
         let memory = RecordingMemory::new();
         let agent = Arc::new(Agent::new(
             Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
@@ -8337,12 +8347,13 @@ mod tests {
             workspace: agent_testkit::tempdir(),
             prior: Vec::new(),
             requested_by,
-            elapsed: None,
+            elapsed,
         };
-        agent_core::ReviewDrafter::draft(&drafter, req)
+        let rec = agent_core::ReviewDrafter::draft(&drafter, req)
             .await
             .expect("draft writes the .md and records rows");
-        memory.events()
+        let md = std::fs::read_to_string(&rec.draft_path).expect("the draft .md");
+        (memory.events(), md)
     }
 
     /// desc: S19 — the drafter copies the round's requesters onto the persisted draft
@@ -8364,6 +8375,32 @@ mod tests {
             drafts[0].approved_by.is_empty(),
             "not approved at draft time"
         );
+    }
+
+    /// desc: #718 — the fleet's clock reaches the written `.md` through `EngineDrafter`.
+    /// expect: the header line when timed; none when the caller didn't time it.
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    #[rstest]
+    #[case::positive_timed_review_has_the_line(
+        Some(3723),
+        Some("- Review time: 1h 02m 03s (3723 s)\n")
+    )]
+    #[case::negative_untimed_review_has_none(None, None)]
+    #[tokio::test]
+    async fn fleet_draft_file_shows_review_time(
+        #[case] secs: Option<u64>,
+        #[case] want: Option<&str>,
+    ) {
+        let (_, md) = draft_with(
+            ch6_facts(1, Vec::new()),
+            Vec::new(),
+            secs.map(std::time::Duration::from_secs),
+        )
+        .await;
+        match want {
+            Some(line) => assert!(md.contains(line), "{md:.400}"),
+            None => assert!(!md.contains("Review time"), "{md:.400}"),
+        }
     }
 
     /// desc: the fleet draft path records one `agent_reviews` headline whose collector

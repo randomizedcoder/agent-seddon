@@ -43,8 +43,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
 | S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | ✅ | #716 |
-| S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | 🟡 | #717 |
-| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ⬜ | |
+| S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
+| S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | 🟡 | #719 |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ⬜ | |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
 
@@ -1448,6 +1448,47 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     the pinned toolchain: clippy runs with `-D warnings` and passes.
   - Carried: the browser slot is taken before `MAX_URL`'s screen (momentary); the rest of
     S28a's carry list.
+- **2026-11-10 — S29: the tools behind the door (F6).** S28b merged as #717 (3172ee36).
+  - Grafana (the host's `services.grafana`, when the door is on): `auth.proxy` from
+    `X-Seddon-User` (`header_property = username`, `auto_sign_up`) with
+    `headers = Role:X-Seddon-Role`, `whitelist = 127.0.0.1`, `enable_login_token = false`;
+    the login form off; `root_url = <origin>/grafana/` with `serve_from_sub_path`; secure
+    cookies. Assertions: `http_port` is the spec's 3000, over `protocol = "http"`.
+  - One departure from F6: basic auth stays **on**. It is how F8's `admin` is break-glass at
+    all (the form is off), and Envoy drops `authorization` on `/grafana`, so it can't be used
+    through the door. S25's VM rows keep signing in with it on loopback.
+  - HyperDX: assertions want `hyperdx.auth = false` and `frontendUrl` = the door's `:8444`
+    origin, which becomes the default with the door on (it is also the portal's Launch link).
+  - Prometheus stays the host's (the F6 open item, settled: the module doesn't take it over).
+    A build warning names the `webExternalUrl` the door's `/prometheus/` route needs, and the
+    port if it isn't 9090. The module never sets it, because it moves every local client
+    (Grafana's data source) under `/prometheus`. l2's switch is S30's deploy.
+  - #717's draft (no must-fix), items 1–3: `publicHost` is checked the way `pki-dev`'s
+    `validate_san` checks a SAN, so a bad host fails the build, not the PKI unit (and Envoy)
+    at boot: an IPv4 address with no leading zeros, or a lowercase host name. Upper case is
+    refused, so the origin and the lowercased SAN can't differ. `extraOrigins` use the same
+    host rule plus `portOk`.
+  - #717's item 4 (the oneshot without `RemainAfterExit` that Envoy `requires`): a oneshot
+    that finishes is not an explicit stop, so `Requires=` doesn't stop Envoy. The VM's
+    "units stay up" row checks Envoy after the unit has gone inactive. Item 5 (an unused
+    `token-signer` leaf in the door's PKI directory, 0600 in a 0700 root-only directory) and
+    item 6 (the old ports, S30) stay as they are.
+  - #718's draft (no must-fix): an `EngineDrafter` row that the clock reaches the written
+    `.md`, a bound on the fleet's `elapsed`, and `render_draft`'s doc names the line.
+  - Eval rows: the Grafana settings, off without the door or without the host's Grafana, the
+    port and protocol refusals, the HyperDX rules and default, the Prometheus warnings, and
+    #717's host and origin rows. VM rows: `/grafana/` with no session goes to sign-in, the
+    signed-in user reaches `/grafana/api/user` as themself with the Admin role, and a forged
+    `X-Seddon-User` / `X-Seddon-Role` is replaced.
+  - #719's draft (no must-fix), fixed here: should-fix 1, the door forced HyperDX's login off
+    while `openFirewall` still opened its raw UI port (8080) to the LAN, a login-less way
+    round the door. 8080 now opens only without the door, and the LAN warning about it is
+    gone with it. Should-fix 2: Grafana's `http_addr` is asserted to be `127.0.0.1`, so
+    break-glass basic auth really is loopback-only (l2 sets `0.0.0.0`; it changes with S30's
+    deploy). Minor: `hyperdx.auth` defaults to `!frontDoor.enable`, and a 253/254-char
+    `publicHost` boundary pair. Carried: should-fix 3 (a Prometheus port other than 9090 stays a
+    warning, since a host may not want `/prometheus` at all), and the obs_editor/Viewer role
+    rows, which the gate's Rust tests cover (`grafana_role`), not the VM.
 
 ## Cross-track note (not an S-increment)
 

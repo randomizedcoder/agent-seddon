@@ -359,6 +359,8 @@ pkgs.testers.runNixOSTest {
         # No session: a page goes to sign-in (HyperDX's too, on the main origin); an RPC is 401.
         status, loc, _ = door_get(f"{door}/")
         assert status == 302 and loc == f"{door}/auth/login?rd=/", (status, loc)
+        status, loc, _ = door_get(f"{door}/grafana/")
+        assert status == 302 and loc.startswith(f"{door}/auth/login?rd="), (status, loc)
         status, loc, _ = door_get("https://127.0.0.1:8444/search")
         # HyperDX's own path is not carried across origins: plain sign-in on the main one.
         assert status == 302 and loc == f"{door}/auth/login", (status, loc)
@@ -397,6 +399,23 @@ pkgs.testers.runNixOSTest {
         # The client's own authorization is overwritten by the gate's, not passed on.
         status, body = who_am_i(extra="-H 'authorization: Bearer forged.jwt.value'")
         assert status == 200 and "grpc-status:0" in body, (status, body)
+        # S29 (F6): Grafana signs the user in from the gate's headers, under /grafana/,
+        # as the role the gate maps (an operator is Admin).
+        status, _, _ = door_get(f"{door}/grafana/api/user")
+        assert status == 200, (status, machine.succeed("cat /tmp/body"))
+        login = json.loads(machine.succeed("cat /tmp/body"))["login"]
+        # The gate's subject: the issuer's name and Dex's `sub`.
+        assert login.startswith("user:dex/") and login != "user:dex/", login
+        status, _, _ = door_get(f"{door}/grafana/api/user/orgs")
+        assert status == 200, status
+        orgs = json.loads(machine.succeed("cat /tmp/body"))
+        assert [o["role"] for o in orgs] == ["Admin"], orgs
+        # A forged identity is replaced by the gate's, not passed on.
+        status, _, _ = door_get(
+            f"{door}/grafana/api/user", extra="-H 'X-Seddon-User: mallory' -H 'X-Seddon-Role: Admin'"
+        )
+        assert status == 200, status
+        assert json.loads(machine.succeed("cat /tmp/body"))["login"] == login
         # Signing out ends the session: the next page goes back to sign-in.
         status, loc, _ = door_get(f"{door}/auth/logout", extra="-X POST")
         assert status == 302, status

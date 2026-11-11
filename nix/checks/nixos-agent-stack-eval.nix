@@ -144,6 +144,39 @@ let
     };
   });
   fdFails = extra: failedAssertions (evalWith (fdModule extra)) != [ ];
+  # S29: the door with the host's own tools beside it (`host` is a plain NixOS module).
+  fdWith =
+    extra: host:
+    evalWith {
+      imports = [
+        (fdModule extra)
+        host
+      ];
+    };
+  fdHostGrafana = {
+    services.grafana = {
+      enable = true;
+      settings.security.secret_key = "$__file{/run/secrets/grafana-secret-key}";
+    };
+  };
+  fdGraf = fdWith { grafana.enable = true; } fdHostGrafana;
+  fdHdx =
+    hyperdx:
+    fdWith {
+      hyperdx = {
+        enable = true;
+      }
+      // hyperdx;
+    } { };
+  fdProm =
+    prom:
+    fdWith { } {
+      services.prometheus = {
+        enable = true;
+      }
+      // prom;
+    };
+  fdPromWarnings = c: lib.filter (lib.hasInfix "routes") c.warnings;
   fdCreds = c: (svc c "agent-seddon-grpc-web").serviceConfig.LoadCredential or [ ];
   grafDs =
     c:
@@ -808,18 +841,145 @@ let
         "https://l2:8443/path"
         "https://*.example"
         ""
+        # #717: a port past 65535, an empty label, a mixed-case host.
+        "https://l2:99999"
+        "https://l2:0"
+        "https://.l2"
+        "https://L2.example"
+        "https://l2..example:8443"
       ]
       && lib.all (h: fdFails { publicHost = h; }) [
         "l2 --force"
         "fd00::1"
         "-l2"
         "l2/x"
+        # #717: what pki-dev's validate_san refuses must fail here, not at boot.
+        "l2..test"
+        "999.999.999.999"
+        "172.16.050.46"
+        "1.2.3"
+        "${lib.concatStrings (lib.replicate 64 "a")}.test"
+        (lib.concatStringsSep "." (lib.replicate 64 "abc"))
+        # 254 chars: one past the cap.
+        (lib.concatStringsSep "." (
+          lib.replicate 3 (lib.concatStrings (lib.replicate 63 "a"))
+          ++ [ (lib.concatStrings (lib.replicate 62 "a")) ]
+        ))
+        "L2.Example"
+        "l2-"
+        "l2."
+        ""
+      ]
+      && lib.all (h: !(fdFails { publicHost = h; })) [
+        "l2"
+        "l2.example"
+        "0.0.0.0"
+        "255.255.255.255"
+        "${lib.concatStrings (lib.replicate 63 "a")}.test"
+        # Exactly 253 chars, the cap.
+        (lib.concatStringsSep "." (
+          lib.replicate 3 (lib.concatStrings (lib.replicate 63 "a"))
+          ++ [ (lib.concatStrings (lib.replicate 61 "a")) ]
+        ))
+        "x-1.y2"
       ]
       # The host's `[auth]` is incomplete.
       && fdFails { gateway.settings.auth.mode = "off"; }
       && fdFails { gateway.settings.auth.redirect_uris = [ "https://172.16.50.46:8443/other" ]; }
       && fdFails { frontDoor.issuer = "google"; }
       && !(fdFails { frontDoor.extraOrigins = [ "https://l2.example:8443" ]; });
+    # S29 (F6): Grafana signs in from the gate's headers, under /grafana/.
+    frontDoorGrafana =
+      let
+        g = fdGraf.services.grafana.settings;
+      in
+      failedAssertions fdGraf == [ ]
+      && g.server.root_url == "https://172.16.50.46:8443/grafana/"
+      && g.server.serve_from_sub_path
+      &&
+        g."auth.proxy" == {
+          enabled = true;
+          header_name = "X-Seddon-User";
+          header_property = "username";
+          headers = "Role:X-Seddon-Role";
+          auto_sign_up = true;
+          whitelist = "127.0.0.1";
+          enable_login_token = false;
+        }
+      && g.auth.disable_login_form
+      && g.security.cookie_secure
+      # Break-glass basic auth stays (loopback only: Envoy drops authorization).
+      && (g."auth.basic".enabled or true)
+      # Off without the door, or without the host's Grafana.
+      && !(lo.services.grafana.settings ? "auth.proxy")
+      && !((fdWith { } { }).services.grafana.settings ? "auth.proxy")
+      # The door's route is to :3000 over plain HTTP.
+      &&
+        failedAssertions (
+          fdWith { } {
+            imports = [ fdHostGrafana ];
+            services.grafana.settings.server.http_port = 3001;
+          }
+        ) != [ ]
+      &&
+        failedAssertions (
+          fdWith { } {
+            imports = [ fdHostGrafana ];
+            services.grafana.settings.server.protocol = "socket";
+          }
+        ) != [ ]
+      # #719: basic auth stays on, so Grafana listens on loopback only.
+      &&
+        failedAssertions (
+          fdWith { } {
+            imports = [ fdHostGrafana ];
+            services.grafana.settings.server.http_addr = "0.0.0.0";
+          }
+        ) != [ ];
+    # S29 (F6): HyperDX's sign-in is the door's, at the door's HyperDX origin.
+    frontDoorHyperdx =
+      failedAssertions (fdHdx { }) == [ ]
+      && !(fdHdx { }).services.agentSeddon.hyperdx.auth
+      && (fdHdx { }).services.agentSeddon.hyperdx.frontendUrl == "https://172.16.50.46:8444"
+      &&
+        failedAssertions (fdHdx {
+          auth = true;
+        }) != [ ]
+      # #719: the raw UI port has no login behind the door, so only the door opens.
+      && !(has (fdHdx { }) 8080)
+      && has (fdHdx { }) 8444
+      && !(lib.any (lib.hasInfix "open the HyperDX UI") (fdHdx { }).warnings)
+      # Without the door HyperDX keeps its own login.
+      && (evalWith { services.agentSeddon.hyperdx.enable = true; }).services.agentSeddon.hyperdx.auth
+      &&
+        failedAssertions (fdHdx {
+          auth = false;
+          frontendUrl = "http://l2:8080";
+        }) != [ ]
+      # Without the door the default is unchanged.
+      && hdx.services.agentSeddon.hyperdx.frontendUrl == "http://l2:8080"
+      &&
+        (evalWith { services.agentSeddon.hyperdx.enable = true; }).services.agentSeddon.hyperdx.frontendUrl
+        == "http://127.0.0.1:8080";
+    # S29: the host's Prometheus is told what the door needs, not changed.
+    frontDoorPrometheus =
+      lib.length (fdPromWarnings (fdProm { })) == 1
+      && lib.hasInfix ''webExternalUrl = "https://172.16.50.46:8443/prometheus/"'' (
+        lib.head (fdPromWarnings (fdProm { }))
+      )
+      &&
+        fdPromWarnings (fdProm {
+          webExternalUrl = "https://172.16.50.46:8443/prometheus/";
+        }) == [ ]
+      &&
+        lib.length (
+          fdPromWarnings (fdProm {
+            webExternalUrl = "https://172.16.50.46:8443/prometheus/";
+            port = 9091;
+          })
+        ) == 1
+      && fdPromWarnings fd == [ ]
+      && (fdProm { }).services.prometheus.webExternalUrl == null;
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;
