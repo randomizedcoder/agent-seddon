@@ -195,22 +195,27 @@ let
       a = graf.settings.server.http_addr;
     in
     if a == "" || a == "0.0.0.0" || a == "::" || a == "[::]" then "127.0.0.1" else a;
-  # `agent-seddon-obs-check`: every provisioned panel query through Grafana's API, as
-  # the admin, over loopback (behind the door Grafana serves under /grafana/, and basic
-  # auth answers only there). Without a managed admin password, pass --password-file.
-  # HyperDX's collector creates the otel_* tables, so without it the trace panels are
-  # skipped, not failed.
+  # A URL's host part: an IPv6 literal is bracketed (`http://[::1]:3000`).
+  urlHost = a: if lib.hasInfix ":" a then "[${a}]" else a;
+  # `agent-seddon-obs-check`: what the host's observability stack shows, checked
+  # read-only. Every provisioned panel query through Grafana's API, as the admin over
+  # loopback (behind the door Grafana serves under /grafana/, and basic auth answers
+  # only there; without a managed admin password, pass --password-file). Every scrape
+  # target of the Prometheus the module provisions for Grafana is up (a host's known
+  # gap: --allow-down <job>). With HyperDX, every tile and saved search runs as its
+  # read-only ClickHouse login; without it, its collector's otel_traces doesn't exist,
+  # so the trace panels are skipped, not failed.
   obsCheck = pkgs.writeShellApplication {
     name = "agent-seddon-obs-check";
     text = ''
       exec ${seddon.obsCheck} \
-        --grafana "${graf.settings.server.protocol}://${grafLocalAddr}:${toString graf.settings.server.http_port}${lib.optionalString fd.enable "/grafana"}" \
+        --grafana "${graf.settings.server.protocol}://${urlHost grafLocalAddr}:${toString graf.settings.server.http_port}${lib.optionalString fd.enable "/grafana"}" \
         --dashboards ${seddon.grafanaDashboards} \
+        ${lib.optionalString (!hdxEnabled) "--skip-table default.otel_traces "}\
         ${
-          lib.optionalString (
-            !cfg.hyperdx.enable
-          ) "--skip-table default.otel_traces --skip-table default.otel_logs "
+          lib.optionalString (cfg.grafana.prometheusUrl != null) "--prometheus ${cfg.grafana.prometheusUrl} "
         }\
+        ${lib.optionalString hdxEnabled "--hyperdx-template ${hdx.dashboardsTemplate} --clickhouse http://127.0.0.1:8123 --clickhouse-password-file ${chCredsDir}/viewer.password "}\
         ${lib.optionalString (grafAdminFile != null) "--password-file ${grafAdminFile} "}"$@"
     '';
   };
@@ -814,7 +819,9 @@ in
         example = "http://127.0.0.1:9090";
         description = ''
           Also provision a Prometheus data source (uid `prometheus`) at this URL. Leave
-          null when the host's Grafana already has one.
+          null when the host's Grafana already has one. Grafana and
+          `agent-seddon-obs-check` reach it without signing in, so give Prometheus's own
+          address (loopback, under `/prometheus` behind the door), not the door's.
         '';
       };
       adminPasswordFile = lib.mkOption {

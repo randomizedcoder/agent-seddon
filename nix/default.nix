@@ -684,7 +684,7 @@ let
   # eval-only `nixos-agent-stack-eval` check is). The module is handed the same stub
   # `self` the eval check builds.
   nixos-agent-stack-vm = import ./nixos/agent-stack-vm-test.nix {
-    inherit pkgs;
+    inherit pkgs agentSeddonDeploy;
     module = import ./nixos/agent-stack.nix {
       self = {
         outPath = src;

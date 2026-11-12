@@ -617,24 +617,44 @@ let
         named = c: lib.any (p: (p.name or "") == "agent-seddon-obs-check") c.environment.systemPackages;
       in
       named graf && !(named lo);
-    # Without HyperDX (whose collector creates otel_*) the trace panels are skipped;
-    # with it, every panel runs.
-    grafanaObsCheckSkipsOtelWithoutHyperdx =
+    # Without HyperDX (whose collector creates otel_traces) the trace panels are
+    # skipped; with it, every panel runs and so does every HyperDX tile, as the viewer.
+    # The Prometheus the module provisions for Grafana has its targets checked.
+    grafanaObsCheckSections =
       let
         text =
           c:
           (lib.findFirst (p: (p.name or "") == "agent-seddon-obs-check") {
             text = "";
           } c.environment.systemPackages).text;
-        skips = c: lib.hasInfix "--skip-table default.otel_traces --skip-table default.otel_logs" (text c);
-      in
-      skips graf
-      && !skips (evalWith {
-        services.agentSeddon = {
-          grafana.enable = true;
-          hyperdx.enable = true;
+        has = c: s: lib.hasInfix s (text c);
+        withHdx = evalWith {
+          services.agentSeddon = {
+            grafana.enable = true;
+            hyperdx.enable = true;
+          };
         };
-      });
+        withProm = evalWith {
+          services.agentSeddon.grafana = {
+            enable = true;
+            prometheusUrl = "http://127.0.0.1:9090/prometheus";
+          };
+        };
+        ipv6 = evalWith {
+          services.agentSeddon.grafana.enable = true;
+          services.grafana.settings.server.http_addr = "::1";
+        };
+      in
+      has graf "--skip-table default.otel_traces "
+      && !(has graf "otel_logs")
+      && !(has graf "--hyperdx-template")
+      && !(has graf "--prometheus")
+      && !(has withHdx "--skip-table")
+      && has withHdx "--hyperdx-template /nix/store/"
+      && has withHdx "--clickhouse-password-file /var/lib/agent-seddon/clickhouse/viewer.password "
+      && has withProm "--prometheus http://127.0.0.1:9090/prometheus "
+      && has ipv6 "://[::1]:3000"
+      && has graf "://127.0.0.1:3000";
     # The dashboards go into the host's Grafana; turning that off while asking for them
     # is refused rather than provisioning into nothing.
     # The admin password: a file, through LoadCredential into both units; the reset

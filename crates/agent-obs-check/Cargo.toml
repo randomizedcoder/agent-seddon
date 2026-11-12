@@ -5,12 +5,14 @@ publish.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `obs-check`: runs every panel query of the provisioned Grafana dashboards through
-# Grafana's own query API (`/api/ds/query`) and fails on any query that errors, so a
-# broken query, macro, data source or grant shows up as a red check instead of a red
-# panel. The lib is the pure, testable core (which queries a dashboard holds, its
-# variables filled in as the browser would, the request, the reply's verdict); the
-# binary is a thin HTTP client.
+# `obs-check`: a read-only pass over the observability stack. It runs every panel query
+# of the provisioned Grafana dashboards through Grafana's own query API
+# (`/api/ds/query`), checks that every Prometheus scrape target is up, and runs every
+# HyperDX tile and saved search as HyperDX's read-only ClickHouse login. A broken query,
+# macro, data source, grant or target shows up as a red check instead of a red or empty
+# panel. The lib is the pure, testable core (the queries a dashboard holds, filled in as
+# the browser would; tiles rendered to SQL; each reply's verdict). The binary is a thin
+# HTTP client.
 [lib]
 
 [[bin]]

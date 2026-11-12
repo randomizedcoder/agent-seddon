@@ -2096,6 +2096,7 @@ impl Metrics {
         for status in [
             "reviewing",
             "drafted",
+            "undrafted",
             "superseded",
             "uptodate",
             "failed",
@@ -3693,10 +3694,11 @@ impl FleetMetrics {
             .inc();
     }
 
-    /// A review lifecycle transition (`status` = `reviewing` | `drafted` | `superseded` |
-    /// `uptodate` | `failed`). `failed` marks a review that ran but produced no draft
-    /// (the run errored — a truncation cap or provider fault — even after the core
-    /// loop's forced finalize turn), so the failure is observable rather than silent.
+    /// A review lifecycle transition (`status` = `reviewing` | `drafted` | `undrafted` |
+    /// `superseded` | `uptodate` | `failed`). `failed` marks a review whose run errored
+    /// (a truncation cap or provider fault, even after the core loop's forced finalize
+    /// turn); `undrafted` one that ran but recorded no draft (no drafter or grounded
+    /// facts, or the draft failed to persist), so neither miss is silent.
     pub fn on_review(&self, status: &str) {
         self.inner
             .fleet_reviews

@@ -11,11 +11,14 @@
 
 use serde_json::{json, Map, Value};
 
+pub mod hyperdx;
+pub mod prometheus;
+
 /// Largest reply read from Grafana.
 pub const MAX_BODY_BYTES: usize = 8 << 20;
 /// Largest dashboard file read.
 pub const MAX_DASHBOARD_BYTES: u64 = 4 << 20;
-/// Most queries one run sends.
+/// Most queries one run sends, over every dashboard (and each dashboard alone).
 pub const MAX_QUERIES: usize = 2000;
 /// Deepest panel nesting followed (a collapsed row holds panels; nothing nests deeper).
 const MAX_DEPTH: usize = 4;
@@ -30,7 +33,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn invalid(msg: impl Into<String>) -> Error {
+pub(crate) fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())
 }
 
@@ -347,6 +350,31 @@ fn walk(
     Ok(())
 }
 
+/// Every query of every dashboard (`(name, dashboard)`, in order). At least one query
+/// must be there, and at most [`MAX_QUERIES`] in all: a run that checks nothing (an
+/// empty or mis-built dashboards directory) is a failure, not a pass.
+pub fn all_queries(
+    dashboards: &[(String, Value)],
+    sources: &[DataSource],
+) -> Result<Vec<PanelQuery>> {
+    let mut all = Vec::new();
+    for (name, d) in dashboards {
+        let qs = panel_queries(d, sources)
+            .map_err(|Error::Invalid(e)| invalid(format!("{name}: {e}")))?;
+        if all.len() + qs.len() > MAX_QUERIES {
+            return Err(invalid(format!("more than {MAX_QUERIES} queries in all")));
+        }
+        all.extend(qs);
+    }
+    if all.is_empty() {
+        return Err(invalid(format!(
+            "no panel queries in {} dashboard(s)",
+            dashboards.len()
+        )));
+    }
+    Ok(all)
+}
+
 /// The `/api/ds/query` body for one query over `[from, to]` (Grafana time strings such
 /// as `now-24h`).
 pub fn query_body(q: &PanelQuery, from: &str, to: &str) -> Value {
@@ -397,8 +425,13 @@ pub enum Outcome {
     Failed(String),
 }
 
-fn bounded(s: &str) -> String {
-    s.chars().take(MAX_ERROR_CHARS).collect()
+/// `s` cut to [`MAX_ERROR_CHARS`], control characters as spaces, so a server's text
+/// prints as one bounded line and can't forge another (`\nFAILED …`).
+pub(crate) fn bounded(s: &str) -> String {
+    s.chars()
+        .take(MAX_ERROR_CHARS)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// The verdict for `ref_id` from an `/api/ds/query` reply with HTTP `status`. Anything
@@ -416,7 +449,15 @@ pub fn classify(ref_id: &str, status: u16, body: &Value) -> Outcome {
             return Outcome::Failed(bounded(e));
         }
     }
-    let inner = result.get("status").and_then(Value::as_u64).unwrap_or(200);
+    // An absent status is Grafana's "ok"; one that is there but not a number is not a
+    // well-formed result.
+    let inner = match result.get("status") {
+        None => 200,
+        Some(v) => match v.as_u64() {
+            Some(n) => n,
+            None => return Outcome::Failed(format!("HTTP {status}, a result status of {v}")),
+        },
+    };
     if !(200..300).contains(&status) || !(200..300).contains(&inner) {
         return Outcome::Failed(format!("HTTP {status} (result {inner})"));
     }

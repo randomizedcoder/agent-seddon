@@ -1,23 +1,33 @@
 //! `obs-check` — the thin shell around `agent_obs_check` (the lib).
 //!
 //! ```text
-//! obs-check --grafana <url> --dashboards <dir> --password-file <file> [--user admin]
-//!           [--from now-6h] [--to now] [--skip-table db.table]... [--verbose]
-//!     run every panel query of every dashboard in <dir> through Grafana's
-//!     /api/ds/query; exit 1 when any fails. A query whose SQL names a --skip-table
-//!     (one this host doesn't have, such as HyperDX's otel_* without HyperDX) is
-//!     counted as skipped, not sent
-//! obs-check --check --dashboards <dir>
-//!     offline: every query parses and names a data source, against stand-ins
+//! obs-check [GRAFANA] [PROMETHEUS] [HYPERDX] [--from now-6h] [--to now] [--verbose]
+//!   GRAFANA:    --grafana <url> --dashboards <dir> --password-file <file> [--user admin]
+//!               [--skip-table db.table]...
+//!     every panel query of every dashboard in <dir>, through Grafana's /api/ds/query.
+//!     A query whose SQL names a --skip-table (one this host doesn't have, such as
+//!     HyperDX's otel_traces without HyperDX) is counted as skipped, not sent
+//!   PROMETHEUS: --prometheus <url> [--allow-down <job>]...
+//!     every active scrape target is up; a down target of an --allow-down job is
+//!     reported, not failed (a host's known gap)
+//!   HYPERDX:    --hyperdx-template <file> --clickhouse <url> --clickhouse-password-file <file>
+//!               [--clickhouse-user agent_viewer] [--trace-table default.otel_traces]
+//!     every tile and saved search of the template, rendered to SQL and run as
+//!     HyperDX's read-only ClickHouse login, over --from (which must be now-<n><unit>)
+//!     up to now (any other --to is refused rather than ignored)
+//! obs-check --check [--dashboards <dir>] [--hyperdx-template <file>]
+//!     offline: every panel query resolves a data source against stand-ins, and every
+//!     tile renders
 //! ```
 //!
-//! The password is read from a file and sent only as basic auth; it is never printed.
-//! An empty result is not a failure (a fresh host has no data yet); `--verbose` lists
-//! them so a person can tell "nothing happened" from "wired wrong".
+//! Each section given prints one summary line, `obs-check <section>: …`; the exit is 1
+//! when any section fails. Passwords are read from files and sent only as auth; they
+//! are never printed. An empty result is not a failure (a fresh host has no data yet);
+//! `--verbose` lists them so a person can tell "nothing happened" from "wired wrong".
 
 use agent_obs_check::{
-    classify, names_table, panel_queries, parse_datasources, query_body, valid_table, DataSource,
-    Outcome, PanelQuery, MAX_BODY_BYTES, MAX_DASHBOARD_BYTES,
+    all_queries, classify, hyperdx, names_table, parse_datasources, prometheus, query_body,
+    valid_table, DataSource, Outcome, MAX_BODY_BYTES, MAX_DASHBOARD_BYTES,
 };
 use serde_json::Value;
 use std::io::Read as _;
@@ -27,7 +37,7 @@ use std::time::Duration;
 
 struct Args {
     grafana: Option<String>,
-    dashboards: PathBuf,
+    dashboards: Option<PathBuf>,
     user: String,
     password_file: Option<PathBuf>,
     from: String,
@@ -35,12 +45,19 @@ struct Args {
     check: bool,
     verbose: bool,
     skip_tables: Vec<String>,
+    prometheus: Option<String>,
+    allow_down: Vec<String>,
+    hyperdx_template: Option<PathBuf>,
+    clickhouse: Option<String>,
+    clickhouse_user: String,
+    clickhouse_password_file: Option<PathBuf>,
+    trace_table: String,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         grafana: None,
-        dashboards: PathBuf::new(),
+        dashboards: None,
         user: "admin".into(),
         password_file: None,
         from: "now-6h".into(),
@@ -48,38 +65,104 @@ fn parse_args() -> Result<Args, String> {
         check: false,
         verbose: false,
         skip_tables: Vec::new(),
+        prometheus: None,
+        allow_down: Vec::new(),
+        hyperdx_template: None,
+        clickhouse: None,
+        clickhouse_user: "agent_viewer".into(),
+        clickhouse_password_file: None,
+        trace_table: "default.otel_traces".into(),
     };
-    let mut dashboards = None;
+    // The flags that only a live run reads, so `--check` can refuse them.
+    let mut live = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = |what: &str| it.next().ok_or(format!("{arg} needs {what}"));
         match arg.as_str() {
-            "--grafana" => a.grafana = Some(val("a URL")?),
-            "--dashboards" => dashboards = Some(PathBuf::from(val("a directory")?)),
-            "--user" => a.user = val("a user")?,
-            "--password-file" => a.password_file = Some(PathBuf::from(val("a file")?)),
-            "--from" => a.from = val("a time")?,
-            "--to" => a.to = val("a time")?,
-            "--skip-table" => {
-                let t = val("db.table")?;
-                if !valid_table(&t) {
-                    return Err(format!("--skip-table {t:?} is not db.table"));
-                }
-                a.skip_tables.push(t);
-            }
+            "--dashboards" => a.dashboards = Some(PathBuf::from(val("a directory")?)),
+            "--hyperdx-template" => a.hyperdx_template = Some(PathBuf::from(val("a file")?)),
             "--check" => a.check = true,
             "--verbose" => a.verbose = true,
-            other => return Err(format!("unknown argument {other:?}")),
+            _ => {
+                match arg.as_str() {
+                    "--grafana" => a.grafana = Some(val("a URL")?),
+                    "--user" => a.user = val("a user")?,
+                    "--password-file" => a.password_file = Some(PathBuf::from(val("a file")?)),
+                    "--from" => a.from = val("a time")?,
+                    "--to" => a.to = val("a time")?,
+                    "--skip-table" => {
+                        let t = val("db.table")?;
+                        if !valid_table(&t) {
+                            return Err(format!("--skip-table {t:?} is not db.table"));
+                        }
+                        a.skip_tables.push(t);
+                    }
+                    "--prometheus" => a.prometheus = Some(val("a URL")?),
+                    "--allow-down" => {
+                        let j = val("a job")?;
+                        if !prometheus::valid_job(&j) {
+                            return Err(format!("--allow-down {j:?} is not a job name"));
+                        }
+                        a.allow_down.push(j);
+                    }
+                    "--clickhouse" => a.clickhouse = Some(val("a URL")?),
+                    "--clickhouse-user" => a.clickhouse_user = val("a user")?,
+                    "--clickhouse-password-file" => {
+                        a.clickhouse_password_file = Some(PathBuf::from(val("a file")?));
+                    }
+                    "--trace-table" => {
+                        let t = val("db.table")?;
+                        if !valid_table(&t) {
+                            return Err(format!("--trace-table {t:?} is not db.table"));
+                        }
+                        a.trace_table = t;
+                    }
+                    other => return Err(format!("unknown argument {other:?}")),
+                }
+                live.push(arg);
+            }
         }
     }
-    a.dashboards = dashboards.ok_or("--dashboards is required")?;
-    match (a.check, &a.grafana, &a.password_file) {
-        (true, None, None) | (false, Some(_), Some(_)) => Ok(a),
-        (true, _, _) => {
-            Err("--check never contacts Grafana; drop --grafana/--password-file".into())
+    if a.check {
+        if let Some(f) = live.first() {
+            return Err(format!("--check runs offline; drop {f}"));
         }
-        _ => Err("--grafana and --password-file are required (or --check)".into()),
+        if a.dashboards.is_none() && a.hyperdx_template.is_none() {
+            return Err("--check needs --dashboards or --hyperdx-template".into());
+        }
+        return Ok(a);
     }
+    let grafana = [
+        a.grafana.is_some(),
+        a.dashboards.is_some(),
+        a.password_file.is_some(),
+    ];
+    if grafana.contains(&true) && grafana.contains(&false) {
+        return Err("--grafana, --dashboards and --password-file go together".into());
+    }
+    let hdx = [
+        a.hyperdx_template.is_some(),
+        a.clickhouse.is_some(),
+        a.clickhouse_password_file.is_some(),
+    ];
+    if hdx.contains(&true) && hdx.contains(&false) {
+        return Err(
+            "--hyperdx-template, --clickhouse and --clickhouse-password-file go together".into(),
+        );
+    }
+    if !a.allow_down.is_empty() && a.prometheus.is_none() {
+        return Err("--allow-down needs --prometheus".into());
+    }
+    if !a.skip_tables.is_empty() && a.grafana.is_none() {
+        return Err("--skip-table needs --grafana".into());
+    }
+    if a.grafana.is_none() && a.prometheus.is_none() && a.hyperdx_template.is_none() {
+        return Err(
+            "nothing to check: give --grafana, --prometheus or --hyperdx-template (or --check)"
+                .into(),
+        );
+    }
+    Ok(a)
 }
 
 /// The dashboards in `dir` (`*.json`, sorted), each capped in size.
@@ -106,50 +189,32 @@ fn load(dir: &Path) -> Result<Vec<(String, Value)>, String> {
         .collect()
 }
 
-fn queries(
-    dashboards: &[(String, Value)],
-    sources: &[DataSource],
-) -> Result<Vec<PanelQuery>, String> {
-    let mut all = Vec::new();
-    for (path, d) in dashboards {
-        all.extend(panel_queries(d, sources).map_err(|e| format!("{path}: {e}"))?);
-    }
-    Ok(all)
-}
-
-struct Grafana {
+/// An HTTP(S) client to one base URL: no redirects, a timeout, replies capped.
+struct Http {
     base: String,
-    user: String,
-    password: String,
     client: reqwest::Client,
 }
 
-impl Grafana {
-    fn new(base: &str, user: String, password: String) -> Result<Grafana, String> {
-        let url = reqwest::Url::parse(base).map_err(|e| format!("--grafana: {e}"))?;
+impl Http {
+    fn new(flag: &str, base: &str) -> Result<Http, String> {
+        let url = reqwest::Url::parse(base).map_err(|e| format!("{flag}: {e}"))?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return Err("--grafana must be an http(s) URL".into());
+            return Err(format!("{flag} must be an http(s) URL"));
         }
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Grafana {
+        Ok(Http {
             base: base.trim_end_matches('/').to_string(),
-            user,
-            password,
             client,
         })
     }
 
-    /// `(status, body)`; the body is capped and parsed (an unparsable body is `null`).
-    async fn send(&self, req: reqwest::RequestBuilder) -> Result<(u16, Value), String> {
-        let mut resp = req
-            .basic_auth(&self.user, Some(&self.password))
-            .send()
-            .await
-            .map_err(|e| e.without_url().to_string())?;
+    /// `(status, body)`, the body capped at [`MAX_BODY_BYTES`].
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<(u16, Vec<u8>), String> {
+        let mut resp = req.send().await.map_err(|e| e.without_url().to_string())?;
         let status = resp.status().as_u16();
         let mut body = Vec::new();
         while let Some(chunk) = resp
@@ -162,34 +227,199 @@ impl Grafana {
             }
             body.extend_from_slice(&chunk);
         }
+        Ok((status, body))
+    }
+
+    /// [`Http::send`], the body parsed (an unparsable body is `null`).
+    async fn send_json(&self, req: reqwest::RequestBuilder) -> Result<(u16, Value), String> {
+        let (status, body) = self.send(req).await?;
         Ok((status, serde_json::from_slice(&body).unwrap_or(Value::Null)))
-    }
-
-    async fn datasources(&self) -> Result<Vec<DataSource>, String> {
-        let (status, body) = self
-            .send(self.client.get(format!("{}/api/datasources", self.base)))
-            .await?;
-        if status != 200 {
-            return Err(format!("GET /api/datasources: HTTP {status}"));
-        }
-        parse_datasources(&body).map_err(|e| e.to_string())
-    }
-
-    async fn query(&self, q: &PanelQuery, from: &str, to: &str) -> Outcome {
-        let req = self
-            .client
-            .post(format!("{}/api/ds/query", self.base))
-            .json(&query_body(q, from, to));
-        match self.send(req).await {
-            Ok((status, body)) => classify(&q.ref_id, status, &body),
-            Err(e) => Outcome::Failed(e),
-        }
     }
 }
 
-async fn run(a: Args) -> Result<bool, String> {
-    let dashboards = load(&a.dashboards)?;
-    if a.check {
+/// A password file's one line (an editor's trailing newline dropped).
+fn read_password(file: &Path) -> Result<String, String> {
+    const MAX: u64 = 4096;
+    let mut s = String::new();
+    std::fs::File::open(file)
+        .and_then(|f| f.take(MAX + 1).read_to_string(&mut s))
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    // Longer is not a password file; truncating it would send a wrong one.
+    if s.len() as u64 > MAX {
+        return Err(format!("{} is over {MAX} bytes", file.display()));
+    }
+    Ok(s.trim_end_matches(['\n', '\r']).to_string())
+}
+
+/// Counts of one section's verdicts, and its summary line's tail.
+#[derive(Default)]
+struct Tally {
+    data: usize,
+    empty: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+impl Tally {
+    fn add(&mut self, label: &str, outcome: Outcome, verbose: bool) {
+        match outcome {
+            Outcome::Data(_) => self.data += 1,
+            Outcome::Empty => {
+                self.empty += 1;
+                if verbose {
+                    println!("empty   {label}");
+                }
+            }
+            Outcome::Failed(e) => {
+                self.failed += 1;
+                println!("FAILED  {label}: {e}");
+            }
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "{} with data, {} empty, {} failed, {} skipped",
+            self.data, self.empty, self.failed, self.skipped
+        )
+    }
+}
+
+async fn grafana(a: &Args, url: &str, dir: &Path, pw_file: &Path) -> Result<bool, String> {
+    let dashboards = load(dir)?;
+    let http = Http::new("--grafana", url)?;
+    let password = read_password(pw_file)?;
+    let auth = |req: reqwest::RequestBuilder| req.basic_auth(&a.user, Some(&password));
+    let (status, body) = http
+        .send_json(auth(
+            http.client.get(format!("{}/api/datasources", http.base)),
+        ))
+        .await?;
+    if status != 200 {
+        return Err(format!("GET /api/datasources: HTTP {status}"));
+    }
+    let sources = parse_datasources(&body).map_err(|e| e.to_string())?;
+    let qs = all_queries(&dashboards, &sources).map_err(|e| e.to_string())?;
+    let mut t = Tally::default();
+    for q in &qs {
+        let label = format!("{} / {} [{}]", q.dashboard, q.panel, q.ref_id);
+        if let Some(table) = a.skip_tables.iter().find(|table| names_table(q, table)) {
+            t.skipped += 1;
+            if a.verbose {
+                println!("skipped {label}: names {table}");
+            }
+            continue;
+        }
+        let req = auth(http.client.post(format!("{}/api/ds/query", http.base)))
+            .json(&query_body(q, &a.from, &a.to));
+        let outcome = match http.send_json(req).await {
+            Ok((status, body)) => classify(&q.ref_id, status, &body),
+            Err(e) => Outcome::Failed(e),
+        };
+        t.add(&label, outcome, a.verbose);
+    }
+    println!(
+        "obs-check grafana: {} queries over {}..{}: {}",
+        qs.len(),
+        a.from,
+        a.to,
+        t.summary()
+    );
+    Ok(t.failed == 0)
+}
+
+async fn prometheus_targets(a: &Args, url: &str) -> Result<bool, String> {
+    let http = Http::new("--prometheus", url)?;
+    let (status, body) = http
+        .send_json(
+            http.client
+                .get(format!("{}/api/v1/targets?state=active", http.base)),
+        )
+        .await?;
+    if status != 200 {
+        return Err(format!("GET /api/v1/targets: HTTP {status}"));
+    }
+    let targets = prometheus::parse_targets(&body).map_err(|e| e.to_string())?;
+    let v = prometheus::verdict(&targets, &a.allow_down);
+    for line in &v.failed {
+        println!("FAILED  {line}");
+    }
+    for line in &v.allowed {
+        println!("allowed {line}");
+    }
+    println!(
+        "obs-check prometheus: {} targets: {} up, {} down, {} down but allowed",
+        targets.len(),
+        v.up,
+        v.failed.len(),
+        v.allowed.len()
+    );
+    Ok(v.failed.is_empty())
+}
+
+fn load_template(file: &Path) -> Result<Value, String> {
+    let mut s = String::new();
+    std::fs::File::open(file)
+        .and_then(|f| f.take(MAX_DASHBOARD_BYTES + 1).read_to_string(&mut s))
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if s.len() as u64 > MAX_DASHBOARD_BYTES {
+        return Err(format!("{} is too large", file.display()));
+    }
+    serde_json::from_str(&s).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+fn trace_source(a: &Args) -> hyperdx::Source {
+    hyperdx::Source {
+        table: a.trace_table.clone(),
+        timestamp: "Timestamp".into(),
+    }
+}
+
+async fn hyperdx_tiles(a: &Args, file: &Path, url: &str, pw_file: &Path) -> Result<bool, String> {
+    // The tiles run over "the last <window>", as HyperDX's own range does: they end now.
+    if a.to != "now" {
+        return Err(format!("--to {:?}: the tiles always end now", a.to));
+    }
+    let window = hyperdx::relative_secs(&a.from).ok_or_else(|| {
+        format!(
+            "--from {:?} is not now-<n><unit>, which the tiles need",
+            a.from
+        )
+    })?;
+    let qs = hyperdx::tile_queries(&load_template(file)?, &trace_source(a), window)
+        .map_err(|e| e.to_string())?;
+    let http = Http::new("--clickhouse", url)?;
+    let password = read_password(pw_file)?;
+    let mut t = Tally::default();
+    for q in &qs {
+        let req = http
+            .client
+            .post(format!(
+                "{}/?default_format=JSON&max_execution_time=30&max_result_rows={}&result_overflow_mode=break",
+                http.base,
+                hyperdx::MAX_ROWS
+            ))
+            .header("X-ClickHouse-User", &a.clickhouse_user)
+            .header("X-ClickHouse-Key", &password)
+            .body(q.sql.clone());
+        let outcome = match http.send(req).await {
+            Ok((status, body)) => hyperdx::classify_reply(status, &body),
+            Err(e) => Outcome::Failed(e),
+        };
+        t.add(&format!("{} / {}", q.dashboard, q.name), outcome, a.verbose);
+    }
+    println!(
+        "obs-check hyperdx: {} tiles and searches over {}: {}",
+        qs.len(),
+        a.from,
+        t.summary()
+    );
+    Ok(t.failed == 0)
+}
+
+fn check_offline(a: &Args) -> Result<bool, String> {
+    if let Some(dir) = &a.dashboards {
+        let dashboards = load(dir)?;
         // Stand-ins of every type the dashboards use, under the uids the module provisions.
         let stand_ins = [
             ("prometheus", "prometheus", true),
@@ -200,54 +430,51 @@ async fn run(a: Args) -> Result<bool, String> {
             kind: kind.into(),
             is_default,
         });
-        let qs = queries(&dashboards, &stand_ins)?;
+        let qs = all_queries(&dashboards, &stand_ins).map_err(|e| e.to_string())?;
         println!(
-            "obs-check: {} dashboards, {} queries, every one resolves",
+            "obs-check grafana: {} dashboards, {} queries, every one resolves",
             dashboards.len(),
             qs.len()
         );
-        return Ok(true);
     }
-    let (Some(url), Some(pw_file)) = (&a.grafana, &a.password_file) else {
-        return Err("unreachable: arguments checked".into());
+    if let Some(file) = &a.hyperdx_template {
+        let qs = hyperdx::tile_queries(&load_template(file)?, &trace_source(a), 3600)
+            .map_err(|e| e.to_string())?;
+        println!(
+            "obs-check hyperdx: {} tiles and searches, every one renders",
+            qs.len()
+        );
+    }
+    Ok(true)
+}
+
+/// Every section the arguments name, each to the end even when an earlier one fails.
+async fn run(a: Args) -> Result<bool, String> {
+    if a.check {
+        return check_offline(&a);
+    }
+    let mut ok = true;
+    let mut section = |name: &str, r: Result<bool, String>| match r {
+        Ok(passed) => ok &= passed,
+        Err(e) => {
+            println!("obs-check {name}: FAILED: {e}");
+            ok = false;
+        }
     };
-    let password = std::fs::read_to_string(pw_file)
-        .map_err(|e| format!("{}: {e}", pw_file.display()))?
-        .trim_end_matches(['\n', '\r'])
-        .to_string();
-    let g = Grafana::new(url, a.user.clone(), password)?;
-    let qs = queries(&dashboards, &g.datasources().await?)?;
-    let (mut data, mut empty, mut failed, mut skipped) = (0, 0, 0, 0);
-    for q in &qs {
-        let label = format!("{} / {} [{}]", q.dashboard, q.panel, q.ref_id);
-        if let Some(t) = a.skip_tables.iter().find(|t| names_table(q, t)) {
-            skipped += 1;
-            if a.verbose {
-                println!("skipped {label}: names {t}");
-            }
-            continue;
-        }
-        match g.query(q, &a.from, &a.to).await {
-            Outcome::Data(_) => data += 1,
-            Outcome::Empty => {
-                empty += 1;
-                if a.verbose {
-                    println!("empty   {label}");
-                }
-            }
-            Outcome::Failed(e) => {
-                failed += 1;
-                println!("FAILED  {label}: {e}");
-            }
-        }
+    if let Some(url) = &a.prometheus {
+        section("prometheus", prometheus_targets(&a, url).await);
     }
-    println!(
-        "obs-check: {} queries over {}..{}: {data} with data, {empty} empty, {failed} failed, {skipped} skipped",
-        qs.len(),
-        a.from,
-        a.to
-    );
-    Ok(failed == 0)
+    if let (Some(url), Some(dir), Some(pw)) = (&a.grafana, &a.dashboards, &a.password_file) {
+        section("grafana", grafana(&a, url, dir, pw).await);
+    }
+    if let (Some(file), Some(url), Some(pw)) = (
+        &a.hyperdx_template,
+        &a.clickhouse,
+        &a.clickhouse_password_file,
+    ) {
+        section("hyperdx", hyperdx_tiles(&a, file, url, pw).await);
+    }
+    Ok(ok)
 }
 
 fn main() -> ExitCode {
