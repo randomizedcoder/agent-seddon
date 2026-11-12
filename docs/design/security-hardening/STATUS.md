@@ -45,7 +45,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | ✅ | #716 |
 | S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ✅ | #719 |
-| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | 🟡 | #720 |
+| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ✅ | #720 |
 | S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | 🟡 | #721 |
 
 ## As-built log
@@ -1549,6 +1549,14 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       none and names none (Dart row `positive_door_send_names_no_session`). Every tab
       on one sign-in drives the same session.
     - The sign-in row seeds a login-trip stamp and checks that it is cleared.
+  - #720 (S30) merged as ce3812dc. Its draft's two must-fix items were checked and
+    did not hold: the VM test runs green (in a NixOS test VM eth1 is vlan 1, and the
+    driver does not use ssh), and nixpkgs declares `services.postgresql.settings.port`
+    (default 5432) with Postgres off. Carried to S26b: the stale `openFirewall`
+    description, the half-comment on 8123, an eval row for the door with
+    `postgres.enable = false`, more tool ports in the `frontDoorLockdown` sample, a
+    webhook-host row with the door on, and comments on `PORTAL_WEBHOOK_HOST`'s double
+    fallback.
   - Carried to S26b: warn at eval time when the door is on and an operator's
     `PORTAL_GRAFANA_URL`/`PORTAL_PROMETHEUS_URL` override is a loopback address (a dead
     link from the browser).
