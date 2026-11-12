@@ -59,21 +59,32 @@ pub fn parse_targets(v: &Value) -> Result<Vec<Target>> {
 /// What the targets add up to: how many are up, the down ones that fail the check,
 /// the down ones `allow_down` names (reported, not failed), and the ones not scraped
 /// yet (`unknown`, as every target is for a scrape interval after Prometheus starts:
-/// reported, not failed). Fail closed all the same: no target at all fails, and so
-/// does a list where none is up and some are still pending, since then nothing has
-/// been shown to scrape.
+/// reported, not failed, and ahead of `allow_down`, since such a target isn't down).
+/// A scrape that is tried and fails makes a target `down`, so `unknown` lasts only
+/// until the first try; a target Prometheus never tries stays pending, and is listed
+/// on every run. Fail closed all the same: no target at all is a `problem`, and so is
+/// a list where none is up and some are still pending, since then nothing has been
+/// shown to scrape.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Verdict {
     pub up: usize,
     pub failed: Vec<String>,
     pub allowed: Vec<String>,
     pub pending: Vec<String>,
+    /// What fails the whole list, beside its down targets.
+    pub problem: Option<String>,
+}
+
+impl Verdict {
+    pub fn passed(&self) -> bool {
+        self.failed.is_empty() && self.problem.is_none()
+    }
 }
 
 pub fn verdict(targets: &[Target], allow_down: &[String]) -> Verdict {
     let mut v = Verdict::default();
     if targets.is_empty() {
-        v.failed.push("no active targets".into());
+        v.problem = Some("no active targets".into());
         return v;
     }
     for t in targets {
@@ -95,8 +106,7 @@ pub fn verdict(targets: &[Target], allow_down: &[String]) -> Verdict {
         }
     }
     if v.up == 0 && !v.pending.is_empty() {
-        v.failed
-            .push("no target is up yet (the stack may still be starting)".into());
+        v.problem = Some("no target is up yet (the stack may still be starting)".into());
     }
     v
 }
@@ -148,28 +158,34 @@ mod tests {
     }
 
     #[rstest]
-    #[case::positive_all_up(vec![t("a", "up", ""), t("b", "up", "")], &[], (2, 0, 0, 0))]
-    #[case::negative_one_down(vec![t("a", "up", ""), t("b", "down", "refused")], &[], (1, 1, 0, 0))]
-    #[case::positive_down_but_allowed(vec![t("a", "up", ""), t("node", "down", "refused")], &["node"], (1, 0, 1, 0))]
-    #[case::positive_one_not_scraped_yet(vec![t("a", "up", ""), t("b", "unknown", "")], &[], (1, 0, 0, 1))]
-    #[case::negative_none_scraped_yet(vec![t("a", "unknown", ""), t("b", "unknown", "")], &[], (0, 1, 0, 2))]
+    #[case::positive_all_up(vec![t("a", "up", ""), t("b", "up", "")], &[], (2, 0, 0, 0, true))]
+    #[case::negative_one_down(vec![t("a", "up", ""), t("b", "down", "refused")], &[], (1, 1, 0, 0, false))]
+    #[case::positive_down_but_allowed(vec![t("a", "up", ""), t("node", "down", "refused")], &["node"], (1, 0, 1, 0, true))]
+    #[case::positive_one_not_scraped_yet(vec![t("a", "up", ""), t("b", "unknown", "")], &[], (1, 0, 0, 1, true))]
+    #[case::negative_none_scraped_yet(vec![t("a", "unknown", ""), t("b", "unknown", "")], &[], (0, 0, 0, 2, false))]
     #[case::negative_pending_and_allowed_down_but_none_up(
-        vec![t("a", "unknown", ""), t("node", "down", "")], &["node"], (0, 1, 1, 1))]
-    #[case::boundary_no_targets(vec![], &[], (0, 1, 0, 0))]
-    #[case::corner_allow_is_exact(vec![t("nodes", "down", "")], &["node"], (0, 1, 0, 0))]
-    #[case::negative_down_is_not_pending(
-        vec![t("a", "up", ""), t("b", "down", "")], &[], (1, 1, 0, 0))]
-    #[case::boundary_everything_allowed_still_needs_a_target(vec![], &["a"], (0, 1, 0, 0))]
-    #[case::adversarial_unknown_health_word(vec![t("a", "up", ""), t("b", "UNKNOWN", "")], &[], (1, 1, 0, 0))]
+        vec![t("a", "unknown", ""), t("node", "down", "")], &["node"], (0, 0, 1, 1, false))]
+    #[case::corner_pending_ahead_of_allowed(vec![t("a", "up", ""), t("node", "unknown", "")], &["node"], (1, 0, 0, 1, true))]
+    #[case::boundary_no_targets(vec![], &[], (0, 0, 0, 0, false))]
+    #[case::corner_allow_is_exact(vec![t("nodes", "down", "")], &["node"], (0, 1, 0, 0, false))]
+    #[case::negative_down_is_not_pending(vec![t("a", "up", ""), t("b", "down", "")], &[], (1, 1, 0, 0, false))]
+    #[case::boundary_everything_allowed_still_needs_a_target(vec![], &["a"], (0, 0, 0, 0, false))]
+    #[case::adversarial_unknown_health_word(vec![t("a", "up", ""), t("b", "UNKNOWN", "")], &[], (1, 1, 0, 0, false))]
     fn verdict_cases(
         #[case] targets: Vec<Target>,
         #[case] allow: &[&str],
-        #[case] want: (usize, usize, usize, usize),
+        #[case] want: (usize, usize, usize, usize, bool),
     ) {
         let allow: Vec<String> = allow.iter().map(ToString::to_string).collect();
         let v = verdict(&targets, &allow);
         assert_eq!(
-            (v.up, v.failed.len(), v.allowed.len(), v.pending.len()),
+            (
+                v.up,
+                v.failed.len(),
+                v.allowed.len(),
+                v.pending.len(),
+                v.passed()
+            ),
             want,
             "{v:?}"
         );

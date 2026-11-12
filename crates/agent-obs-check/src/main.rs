@@ -173,6 +173,9 @@ async fn prometheus_targets(a: &Args, url: &str) -> Result<bool, String> {
     }
     let targets = prometheus::parse_targets(&body).map_err(|e| e.to_string())?;
     let v = prometheus::verdict(&targets, &a.allow_down);
+    if let Some(p) = &v.problem {
+        println!("FAILED  {p}");
+    }
     for line in &v.failed {
         println!("FAILED  {line}");
     }
@@ -190,7 +193,7 @@ async fn prometheus_targets(a: &Args, url: &str) -> Result<bool, String> {
         v.allowed.len(),
         v.pending.len()
     );
-    Ok(v.failed.is_empty())
+    Ok(v.passed())
 }
 
 fn trace_source(a: &Args) -> hyperdx::Source {

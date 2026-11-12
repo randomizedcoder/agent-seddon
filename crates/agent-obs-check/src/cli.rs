@@ -72,6 +72,14 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String
             "--hyperdx-template" => a.hyperdx_template = Some(PathBuf::from(val("a file")?)),
             "--check" => a.check = true,
             "--verbose" => a.verbose = true,
+            // The tiles render against it offline too.
+            "--trace-table" => {
+                let t = val("db.table")?;
+                if !valid_table(&t) {
+                    return Err(format!("--trace-table {t:?} is not db.table"));
+                }
+                a.trace_table = t;
+            }
             _ => {
                 match arg.as_str() {
                     "--grafana" => a.grafana = Some(val("a URL")?),
@@ -98,13 +106,6 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String
                     "--clickhouse-user" => a.clickhouse_user = val("a user")?,
                     "--clickhouse-password-file" => {
                         a.clickhouse_password_file = Some(PathBuf::from(val("a file")?));
-                    }
-                    "--trace-table" => {
-                        let t = val("db.table")?;
-                        if !valid_table(&t) {
-                            return Err(format!("--trace-table {t:?} is not db.table"));
-                        }
-                        a.trace_table = t;
                     }
                     other => return Err(format!("unknown argument {:?}", crate::bounded(other))),
                 }
@@ -170,24 +171,32 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String
 
 /// A file's bytes, refused (not truncated) when over `max`.
 pub fn read_capped(file: &Path, max: usize) -> Result<Vec<u8>, String> {
+    read_limited(file, max, max)
+}
+
+/// [`read_capped`], reading up to `max` but naming `shown` as the cap: a password file
+/// may carry a line break past its cap, which the error shouldn't count.
+fn read_limited(file: &Path, max: usize, shown: usize) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     std::fs::File::open(file)
         .and_then(|f| f.take(max as u64 + 1).read_to_end(&mut buf))
         .map_err(|e| format!("{}: {e}", file.display()))?;
     if buf.len() > max {
-        return Err(format!("{} is over {max} bytes", file.display()));
+        return Err(format!("{} is over {shown} bytes", file.display()));
     }
     Ok(buf)
 }
 
-/// A password file's one line: one trailing `\n` or `\r\n` (an editor's) is dropped
-/// and not counted against [`MAX_PASSWORD_BYTES`]. Longer is not a password file, and
-/// truncating it would send a wrong one, so it is refused.
+/// A password file's one line: one trailing `\n`, `\r\n` or `\r` (an editor's) is
+/// dropped and not counted against [`MAX_PASSWORD_BYTES`]. Longer is not a password
+/// file, and truncating it would send a wrong one, so it is refused; so is a line break
+/// left inside, which would be sent as part of the password.
 pub fn read_password(file: &Path) -> Result<String, String> {
-    let buf = read_capped(file, MAX_PASSWORD_BYTES + 2)?;
+    let buf = read_limited(file, MAX_PASSWORD_BYTES + 2, MAX_PASSWORD_BYTES)?;
     let line = buf
         .strip_suffix(b"\r\n")
         .or_else(|| buf.strip_suffix(b"\n"))
+        .or_else(|| buf.strip_suffix(b"\r"))
         .unwrap_or(&buf);
     if line.len() > MAX_PASSWORD_BYTES {
         return Err(format!(
@@ -195,7 +204,7 @@ pub fn read_password(file: &Path) -> Result<String, String> {
             file.display()
         ));
     }
-    if line.contains(&b'\n') {
+    if line.contains(&b'\n') || line.contains(&b'\r') {
         return Err(format!("{} holds more than one line", file.display()));
     }
     String::from_utf8(line.to_vec()).map_err(|_| format!("{} is not UTF-8", file.display()))
@@ -258,6 +267,7 @@ mod tests {
     #[case::negative_unknown("--grafanna http://g".into(), Err("unknown argument \"--grafanna\""))]
     #[case::corner_hyperdx_to_now_is_fine(format!("{HDX} --to now"), Ok(()))]
     #[case::corner_check_skips_the_hyperdx_range("--check --hyperdx-template /t".into(), Ok(()))]
+    #[case::corner_check_takes_the_trace_table("--check --hyperdx-template /t --trace-table default.t".into(), Ok(()))]
     #[case::boundary_allow_down_128(format!("--prometheus http://p --allow-down {}", "a".repeat(128)), Ok(()))]
     #[case::boundary_allow_down_129(format!("--prometheus http://p --allow-down {}", "a".repeat(129)), Err("is not a job name"))]
     #[case::adversarial_skip_table_injection(format!("{GRAFANA} --skip-table x;DROP"), Err("is not db.table"))]
@@ -274,6 +284,33 @@ mod tests {
             }
             _ => panic!("{line:?}: got {got:?}, want {want:?}"),
         }
+    }
+
+    /// Every flag only a live run reads is refused with `--check`: the rule itself, not
+    /// a few instances of it.
+    #[rstest]
+    fn negative_check_refuses_every_live_flag(
+        #[values(
+            "--grafana",
+            "--user",
+            "--password-file",
+            "--from",
+            "--to",
+            "--skip-table",
+            "--prometheus",
+            "--allow-down",
+            "--clickhouse",
+            "--clickhouse-user",
+            "--clickhouse-password-file"
+        )]
+        flag: &str,
+    ) {
+        let value = match flag {
+            "--skip-table" => "default.t",
+            _ => "x",
+        };
+        let e = parse_args(args(&format!("--check --dashboards /d {flag} {value}"))).unwrap_err();
+        assert_eq!(e, format!("--check runs offline; drop {flag}"));
     }
 
     #[test]
@@ -326,6 +363,10 @@ mod tests {
     #[case::boundary_max_plus_two(vec![b'a'; MAX_PASSWORD_BYTES + 2], Err("over 4096 bytes"))]
     #[case::adversarial_huge(vec![b'a'; 1 << 20], Err("over"))]
     #[case::adversarial_two_lines(b"pw\nsecond".to_vec(), Err("more than one line"))]
+    #[case::positive_lone_cr(b"pw\r".to_vec(), Ok("pw".to_string()))]
+    #[case::adversarial_lf_cr(b"pw\n\r".to_vec(), Err("more than one line"))]
+    #[case::adversarial_inner_cr(b"pw\rsecond".to_vec(), Err("more than one line"))]
+    #[case::boundary_huge_names_the_password_cap(vec![b'a'; MAX_PASSWORD_BYTES + 3], Err("over 4096 bytes"))]
     #[case::adversarial_not_utf8(vec![0xff, 0xfe], Err("not UTF-8"))]
     fn read_password_cases(#[case] bytes: Vec<u8>, #[case] want: Result<String, &str>) {
         let got = read_password(&file(&bytes));

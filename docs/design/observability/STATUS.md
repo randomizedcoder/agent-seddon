@@ -213,17 +213,22 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   - **Still open:** carried below under O3.
 - **#725's carries** (O3, PR 🟡): the fleet draft's should-fix items.
   - The argument rules and the file reads moved out of the binary into `cli.rs`, so
-    they are tested: `parse_args_cases` (29 rows: each section's flags go together,
+    they are tested: `parse_args_cases` (30 rows: each section's flags go together,
     `--check` refuses each live flag, `--allow-down` and `--skip-table` need their
     section, HyperDX's relative `--from` and `--to now`, injection and huge values
     bounded), `read_password_cases`, `load_json_cases`. HyperDX's range is now
     refused at parse time, before any section runs.
   - The password cap no longer counts the trailing line break: a 4096-byte password
-    followed by `\n` or `\r\n` is read. A second line or non-UTF-8 is refused. The
+    followed by `\n`, `\r\n` or `\r` is read. A line break left inside, or non-UTF-8,
+    is refused, and an oversized file's error names the 4096-byte cap.
+    `--trace-table` is accepted with `--check`, whose render uses it;
+    `negative_check_refuses_every_live_flag` refuses each of the others. The
     dashboard and template reads share one `read_capped`.
   - A target Prometheus hasn't scraped yet (`unknown`, for a scrape interval after it
     starts) is listed as pending, not failed. If no target is up and some are
-    pending, the check still fails. The summary line gains "N not scraped yet".
+    pending, the check still fails, without counting that as a down target. The
+    summary line gains "N not scraped yet". A target Prometheus never tries stays
+    pending and is listed on every run; a tried scrape that fails makes it `down`.
   - A tile's verdict reads only its aggregates (`s0`, `s1`, …), not its `groupBy`
     keys. Before, a key like "frontend" over a zero count read as data, and a key of
     "0" was judged as a number.
