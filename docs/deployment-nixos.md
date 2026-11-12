@@ -252,7 +252,9 @@ the exit is 1 if any part failed:
 - **Prometheus** (when `grafana.prometheusUrl` is set): every active scrape target is
   `up`. A panel over a target that is down shows "No data", not an error, so this is
   what tells the two apart. A target the host knows is down is named with
-  `--allow-down <job>` (repeatable): it is listed, not failed.
+  `--allow-down <job>` (repeatable): it is listed, not failed. A target Prometheus
+  hasn't scraped yet (for one scrape interval after it starts) is listed as pending,
+  not failed, as long as some other target is up.
 - **HyperDX** (with `hyperdx.enable`): every tile and saved search of the agent-seddon
   HyperDX dashboards, rendered to the SQL HyperDX asks for and run against ClickHouse
   as `agent_viewer`, the read-only login HyperDX itself uses. A tile's parts are checked
@@ -261,6 +263,7 @@ the exit is 1 if any part failed:
 
 An empty result is not a failure (a quiet host has none); `--verbose` lists each one.
 `--from now-24h` widens the window (the default is the last 6 hours), for the tiles too.
+With HyperDX, `--from` must be relative (`now-<n><unit>`) and `--to` must be `now`.
 The trace panels read `default.otel_traces`, which HyperDX's collector creates. Without
 `hyperdx.enable` the wrapper passes `--skip-table default.otel_traces`, so those queries
 are counted as skipped instead of sent (`--verbose` names each one). Only a query whose

@@ -438,6 +438,7 @@ dependencies = [
 name = "agent-obs-check"
 version = "0.1.0"
 dependencies = [
+ "agent-testkit",
  "reqwest",
  "rstest",
  "serde_json",

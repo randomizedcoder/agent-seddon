@@ -644,6 +644,10 @@ let
           services.agentSeddon.grafana.enable = true;
           services.grafana.settings.server.http_addr = "::1";
         };
+        ipv6Bracketed = evalWith {
+          services.agentSeddon.grafana.enable = true;
+          services.grafana.settings.server.http_addr = "[::1]";
+        };
       in
       has graf "--skip-table default.otel_traces "
       && !(has graf "otel_logs")
@@ -654,6 +658,8 @@ let
       && has withHdx "--clickhouse-password-file /var/lib/agent-seddon/clickhouse/viewer.password "
       && has withProm "--prometheus http://127.0.0.1:9090/prometheus "
       && has ipv6 "://[::1]:3000"
+      && has ipv6Bracketed "://[::1]:3000"
+      && !(has ipv6Bracketed "[[")
       && has graf "://127.0.0.1:3000";
     # The dashboards go into the host's Grafana; turning that off while asking for them
     # is refused rather than provisioning into nothing.

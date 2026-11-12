@@ -25,169 +25,15 @@
 //! are never printed. An empty result is not a failure (a fresh host has no data yet);
 //! `--verbose` lists them so a person can tell "nothing happened" from "wired wrong".
 
+use agent_obs_check::cli::{self, load_dashboards, load_json, read_password, Args};
 use agent_obs_check::{
     all_queries, classify, hyperdx, names_table, parse_datasources, prometheus, query_body,
-    valid_table, DataSource, Outcome, MAX_BODY_BYTES, MAX_DASHBOARD_BYTES,
+    DataSource, Outcome, MAX_BODY_BYTES,
 };
 use serde_json::Value;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
-
-struct Args {
-    grafana: Option<String>,
-    dashboards: Option<PathBuf>,
-    user: String,
-    password_file: Option<PathBuf>,
-    from: String,
-    to: String,
-    check: bool,
-    verbose: bool,
-    skip_tables: Vec<String>,
-    prometheus: Option<String>,
-    allow_down: Vec<String>,
-    hyperdx_template: Option<PathBuf>,
-    clickhouse: Option<String>,
-    clickhouse_user: String,
-    clickhouse_password_file: Option<PathBuf>,
-    trace_table: String,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut a = Args {
-        grafana: None,
-        dashboards: None,
-        user: "admin".into(),
-        password_file: None,
-        from: "now-6h".into(),
-        to: "now".into(),
-        check: false,
-        verbose: false,
-        skip_tables: Vec::new(),
-        prometheus: None,
-        allow_down: Vec::new(),
-        hyperdx_template: None,
-        clickhouse: None,
-        clickhouse_user: "agent_viewer".into(),
-        clickhouse_password_file: None,
-        trace_table: "default.otel_traces".into(),
-    };
-    // The flags that only a live run reads, so `--check` can refuse them.
-    let mut live = Vec::new();
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        let mut val = |what: &str| it.next().ok_or(format!("{arg} needs {what}"));
-        match arg.as_str() {
-            "--dashboards" => a.dashboards = Some(PathBuf::from(val("a directory")?)),
-            "--hyperdx-template" => a.hyperdx_template = Some(PathBuf::from(val("a file")?)),
-            "--check" => a.check = true,
-            "--verbose" => a.verbose = true,
-            _ => {
-                match arg.as_str() {
-                    "--grafana" => a.grafana = Some(val("a URL")?),
-                    "--user" => a.user = val("a user")?,
-                    "--password-file" => a.password_file = Some(PathBuf::from(val("a file")?)),
-                    "--from" => a.from = val("a time")?,
-                    "--to" => a.to = val("a time")?,
-                    "--skip-table" => {
-                        let t = val("db.table")?;
-                        if !valid_table(&t) {
-                            return Err(format!("--skip-table {t:?} is not db.table"));
-                        }
-                        a.skip_tables.push(t);
-                    }
-                    "--prometheus" => a.prometheus = Some(val("a URL")?),
-                    "--allow-down" => {
-                        let j = val("a job")?;
-                        if !prometheus::valid_job(&j) {
-                            return Err(format!("--allow-down {j:?} is not a job name"));
-                        }
-                        a.allow_down.push(j);
-                    }
-                    "--clickhouse" => a.clickhouse = Some(val("a URL")?),
-                    "--clickhouse-user" => a.clickhouse_user = val("a user")?,
-                    "--clickhouse-password-file" => {
-                        a.clickhouse_password_file = Some(PathBuf::from(val("a file")?));
-                    }
-                    "--trace-table" => {
-                        let t = val("db.table")?;
-                        if !valid_table(&t) {
-                            return Err(format!("--trace-table {t:?} is not db.table"));
-                        }
-                        a.trace_table = t;
-                    }
-                    other => return Err(format!("unknown argument {other:?}")),
-                }
-                live.push(arg);
-            }
-        }
-    }
-    if a.check {
-        if let Some(f) = live.first() {
-            return Err(format!("--check runs offline; drop {f}"));
-        }
-        if a.dashboards.is_none() && a.hyperdx_template.is_none() {
-            return Err("--check needs --dashboards or --hyperdx-template".into());
-        }
-        return Ok(a);
-    }
-    let grafana = [
-        a.grafana.is_some(),
-        a.dashboards.is_some(),
-        a.password_file.is_some(),
-    ];
-    if grafana.contains(&true) && grafana.contains(&false) {
-        return Err("--grafana, --dashboards and --password-file go together".into());
-    }
-    let hdx = [
-        a.hyperdx_template.is_some(),
-        a.clickhouse.is_some(),
-        a.clickhouse_password_file.is_some(),
-    ];
-    if hdx.contains(&true) && hdx.contains(&false) {
-        return Err(
-            "--hyperdx-template, --clickhouse and --clickhouse-password-file go together".into(),
-        );
-    }
-    if !a.allow_down.is_empty() && a.prometheus.is_none() {
-        return Err("--allow-down needs --prometheus".into());
-    }
-    if !a.skip_tables.is_empty() && a.grafana.is_none() {
-        return Err("--skip-table needs --grafana".into());
-    }
-    if a.grafana.is_none() && a.prometheus.is_none() && a.hyperdx_template.is_none() {
-        return Err(
-            "nothing to check: give --grafana, --prometheus or --hyperdx-template (or --check)"
-                .into(),
-        );
-    }
-    Ok(a)
-}
-
-/// The dashboards in `dir` (`*.json`, sorted), each capped in size.
-fn load(dir: &Path) -> Result<Vec<(String, Value)>, String> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
-    files.sort();
-    files
-        .into_iter()
-        .map(|p| {
-            let mut s = String::new();
-            std::fs::File::open(&p)
-                .and_then(|f| f.take(MAX_DASHBOARD_BYTES + 1).read_to_string(&mut s))
-                .map_err(|e| format!("{}: {e}", p.display()))?;
-            if s.len() as u64 > MAX_DASHBOARD_BYTES {
-                return Err(format!("{} is too large", p.display()));
-            }
-            let v = serde_json::from_str(&s).map_err(|e| format!("{}: {e}", p.display()))?;
-            Ok((p.display().to_string(), v))
-        })
-        .collect()
-}
 
 /// An HTTP(S) client to one base URL: no redirects, a timeout, replies capped.
 struct Http {
@@ -237,20 +83,6 @@ impl Http {
     }
 }
 
-/// A password file's one line (an editor's trailing newline dropped).
-fn read_password(file: &Path) -> Result<String, String> {
-    const MAX: u64 = 4096;
-    let mut s = String::new();
-    std::fs::File::open(file)
-        .and_then(|f| f.take(MAX + 1).read_to_string(&mut s))
-        .map_err(|e| format!("{}: {e}", file.display()))?;
-    // Longer is not a password file; truncating it would send a wrong one.
-    if s.len() as u64 > MAX {
-        return Err(format!("{} is over {MAX} bytes", file.display()));
-    }
-    Ok(s.trim_end_matches(['\n', '\r']).to_string())
-}
-
 /// Counts of one section's verdicts, and its summary line's tail.
 #[derive(Default)]
 struct Tally {
@@ -286,7 +118,7 @@ impl Tally {
 }
 
 async fn grafana(a: &Args, url: &str, dir: &Path, pw_file: &Path) -> Result<bool, String> {
-    let dashboards = load(dir)?;
+    let dashboards = load_dashboards(dir)?;
     let http = Http::new("--grafana", url)?;
     let password = read_password(pw_file)?;
     let auth = |req: reqwest::RequestBuilder| req.basic_auth(&a.user, Some(&password));
@@ -341,31 +173,27 @@ async fn prometheus_targets(a: &Args, url: &str) -> Result<bool, String> {
     }
     let targets = prometheus::parse_targets(&body).map_err(|e| e.to_string())?;
     let v = prometheus::verdict(&targets, &a.allow_down);
+    if let Some(p) = &v.problem {
+        println!("FAILED  {p}");
+    }
     for line in &v.failed {
         println!("FAILED  {line}");
     }
     for line in &v.allowed {
         println!("allowed {line}");
     }
+    for line in &v.pending {
+        println!("pending {line}");
+    }
     println!(
-        "obs-check prometheus: {} targets: {} up, {} down, {} down but allowed",
+        "obs-check prometheus: {} targets: {} up, {} down, {} down but allowed, {} not scraped yet",
         targets.len(),
         v.up,
         v.failed.len(),
-        v.allowed.len()
+        v.allowed.len(),
+        v.pending.len()
     );
-    Ok(v.failed.is_empty())
-}
-
-fn load_template(file: &Path) -> Result<Value, String> {
-    let mut s = String::new();
-    std::fs::File::open(file)
-        .and_then(|f| f.take(MAX_DASHBOARD_BYTES + 1).read_to_string(&mut s))
-        .map_err(|e| format!("{}: {e}", file.display()))?;
-    if s.len() as u64 > MAX_DASHBOARD_BYTES {
-        return Err(format!("{} is too large", file.display()));
-    }
-    serde_json::from_str(&s).map_err(|e| format!("{}: {e}", file.display()))
+    Ok(v.passed())
 }
 
 fn trace_source(a: &Args) -> hyperdx::Source {
@@ -376,17 +204,10 @@ fn trace_source(a: &Args) -> hyperdx::Source {
 }
 
 async fn hyperdx_tiles(a: &Args, file: &Path, url: &str, pw_file: &Path) -> Result<bool, String> {
-    // The tiles run over "the last <window>", as HyperDX's own range does: they end now.
-    if a.to != "now" {
-        return Err(format!("--to {:?}: the tiles always end now", a.to));
-    }
-    let window = hyperdx::relative_secs(&a.from).ok_or_else(|| {
-        format!(
-            "--from {:?} is not now-<n><unit>, which the tiles need",
-            a.from
-        )
-    })?;
-    let qs = hyperdx::tile_queries(&load_template(file)?, &trace_source(a), window)
+    // `parse_args` refused any other range: the tiles end now, over the last <window>.
+    let window = hyperdx::relative_secs(&a.from)
+        .ok_or_else(|| format!("--from {:?} is not now-<n><unit>", a.from))?;
+    let qs = hyperdx::tile_queries(&load_json(file)?, &trace_source(a), window)
         .map_err(|e| e.to_string())?;
     let http = Http::new("--clickhouse", url)?;
     let password = read_password(pw_file)?;
@@ -419,7 +240,7 @@ async fn hyperdx_tiles(a: &Args, file: &Path, url: &str, pw_file: &Path) -> Resu
 
 fn check_offline(a: &Args) -> Result<bool, String> {
     if let Some(dir) = &a.dashboards {
-        let dashboards = load(dir)?;
+        let dashboards = load_dashboards(dir)?;
         // Stand-ins of every type the dashboards use, under the uids the module provisions.
         let stand_ins = [
             ("prometheus", "prometheus", true),
@@ -438,7 +259,7 @@ fn check_offline(a: &Args) -> Result<bool, String> {
         );
     }
     if let Some(file) = &a.hyperdx_template {
-        let qs = hyperdx::tile_queries(&load_template(file)?, &trace_source(a), 3600)
+        let qs = hyperdx::tile_queries(&load_json(file)?, &trace_source(a), 3600)
             .map_err(|e| e.to_string())?;
         println!(
             "obs-check hyperdx: {} tiles and searches, every one renders",
@@ -478,7 +299,7 @@ async fn run(a: Args) -> Result<bool, String> {
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match cli::parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("obs-check: {e}");
