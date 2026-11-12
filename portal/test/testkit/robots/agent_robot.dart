@@ -90,7 +90,11 @@ class AgentRobot extends Robot {
       tester.widget<FilledButton>(byKey('agent.send')).onPressed != null;
 
   // ── page pumps ────────────────────────────────────────────────────────────
-  Future<void> pump() => pumpPage(AgentViewPage(clients: clients));
+  /// Pump the page as it runs behind the front door (S31).
+  bool door = false;
+
+  Future<void> pump() =>
+      pumpPage(AgentViewPage(clients: clients, door: door));
 
   /// Pump and settle to the connected state: the initial `Subscribe` is live and
   /// both pollers have fired once (from initState).

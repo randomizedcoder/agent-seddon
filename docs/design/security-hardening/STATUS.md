@@ -1514,7 +1514,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 - **2026-11-11 — S31: the portal's cookie mode, and the tool links through the door.**
   Stacked on S30 (#720).
   - Gate: `Route::Rpc` replaces `x-agent-session-id` too, with the token's own sid (the
-    cookie session's, or the client's own bearer's). A token with no sid is a 401. The
+    cookie session's, or the client's own bearer's). A token with no sid is a 401 (a
+    backstop: the issuer neither mints nor verifies one). The
     header table (`front-door-headers.json`) row is now `replaced`, which closes #716's
     item 1. Without it, a portal that names no session would get UNAUTHENTICATED from
     every tenant-keyed service (S2's identity policy).
@@ -1540,7 +1541,17 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       boundary, a future or junk stamp).
     - Eval: `portalCookieMode`.
     - VM: `PromptService/List` through the door with no session header, and with a forged
-      one.
+      one that is not a safe segment (kept, it would be refused, so the 200 proves the
+      overwrite).
+  - Fleet draft (no must-fix), fixed here:
+    - The Agent page opened a registry session behind the door that the gate then
+      replaced, leaving it orphaned against `max_per_user`. With `door` it now opens
+      none and names none (Dart row `positive_door_send_names_no_session`). Every tab
+      on one sign-in drives the same session.
+    - The sign-in row seeds a login-trip stamp and checks that it is cleared.
+  - Carried to S26b: warn at eval time when the door is on and an operator's
+    `PORTAL_GRAFANA_URL`/`PORTAL_PROMETHEUS_URL` override is a loopback address (a dead
+    link from the browser).
 
 ## Cross-track note (not an S-increment)
 

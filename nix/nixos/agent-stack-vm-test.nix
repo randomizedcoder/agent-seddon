@@ -425,8 +425,10 @@ pkgs.testers.runNixOSTest {
         assert status == 200 and "grpc-status:0" in body, (status, body)
         # S31: the portal's cookie mode sends no token and names no session. The gate
         # names it from the token, so a tenant-keyed service (which refuses a call
-        # with no session) runs, and a forged session header is overwritten.
-        for extra in ["", "-H 'x-agent-session-id: forged-sid'"]:
+        # with no session) runs, and a forged session header is overwritten. The
+        # forged value is not a safe segment, so if the gate kept it the identity
+        # policy would refuse the call: a 200 here proves the overwrite.
+        for extra in ["", "-H 'x-agent-session-id: ../forged'"]:
             status, body = grpc_web("agent.v1.PromptService/List", extra=extra)
             assert status == 200 and "grpc-status:0" in body, (extra, status, body)
         # S29 (F6): Grafana signs the user in from the gate's headers, under /grafana/,

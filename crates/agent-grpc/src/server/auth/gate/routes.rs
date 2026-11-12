@@ -268,8 +268,10 @@ impl AuthGate {
                     Caller::Bearer(t, _, _) => format!("Bearer {t}"),
                 };
                 // The token's own sid (S31): the portal in cookie mode names no
-                // session, and a client's header never reaches the agent. A token
-                // with no sid is refused rather than passed on unnamed.
+                // session, and a client's header never reaches the agent. The
+                // issuer neither mints nor verifies a token with an empty sid
+                // (token/tests.rs `adversarial_empty_sid`), so this refusal is a
+                // backstop: never pass a call on unnamed.
                 let sid = caller.sid();
                 if sid.is_empty() {
                     return Reply::new(401, "unauthenticated");

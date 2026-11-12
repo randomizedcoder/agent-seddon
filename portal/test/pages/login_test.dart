@@ -440,6 +440,8 @@ void main() {
 
         case 'positive_door_cookie_signs_in':
           final robot = await LoginRobot.create(tester, uri: door);
+          // Back from the door's login: its trip stamp is cleared on success.
+          robot.platform.storage[AuthState.doorLoginKey] = '$now';
           robot.authFake.whoAmIResponse = principal();
           await robot.load(mode: AuthMode.door);
           await robot.pumpUntilFound('login.account');
@@ -452,7 +454,8 @@ void main() {
           }
           expect(robot.log.fired(LoginRobot.issuers), isFalse);
           expect(robot.platform.navigated, isEmpty);
-          expect(robot.platform.storage, isEmpty, reason: 'no token, no session stored');
+          expect(robot.platform.storage, isEmpty,
+              reason: 'no token or session stored, and the trip stamp cleared');
 
         case 'negative_door_signed_out_goes_to_the_door_login':
           final robot = await LoginRobot.create(tester, uri: '${door}app?x=1');
