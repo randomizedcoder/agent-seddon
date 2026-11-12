@@ -527,6 +527,7 @@ let
       "http://l2:8080, http://evil"
       "http://l2:65536"
       "http://l2:0"
+      "http://l2:00000"
     ];
     # ...but any real port, written with leading zeros or not, is fine.
     hyperdxFrontendUrlPorts = lib.all (u: !(hdxFails { hyperdx.frontendUrl = u; })) [
@@ -869,6 +870,11 @@ let
         "-x"
         ""
       ]
+      # A port too long to be one is refused, not a `lib.toInt` error (#727 draft): the
+      # port rule runs even when the shape rule has already failed.
+      && dexFails { issuer = "https://l2.example:123456789012345678901/dex"; }
+      && dexFails { issuer = "https://l2.example:000000065536/dex"; }
+      && !(dexFails { issuer = "https://l2.example:08443/dex"; })
       && !(dexFails { issuer = "http://127.0.0.1:5556/dex"; })
       && !(dexFails { issuer = "http://127.0.0.1:05556/dex"; })
       && !(dexFails { issuer = "https://l2.example:65535/dex"; })

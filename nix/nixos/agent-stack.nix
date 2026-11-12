@@ -244,14 +244,20 @@ let
   };
 
   # A URL's explicit port (leading zeros dropped), or null: the one parser every port check
-  # uses, so a path after the port can't hide it. Callers check the URL's shape first,
-  # which bounds the port to 1-5 digits.
+  # uses, so a path after the port can't hide it. More digits than any port reads as 0,
+  # which every range check refuses (and `lib.toInt` never sees a number it can't hold).
   urlPort =
     u:
     let
       m = builtins.match "[a-z]+://[^/:?#]+(:0*([0-9]+))?([/?#].*)?" u;
+      d = if m == null then null else builtins.elemAt m 1;
     in
-    if m == null || builtins.elemAt m 1 == null then null else lib.toInt (builtins.elemAt m 1);
+    if d == null then
+      null
+    else if builtins.stringLength d > 5 then
+      0
+    else
+      lib.toInt d;
   # A URL's explicit port, if any, is 1-65535 (the URL regexes allow any 1-5 digits).
   portOk =
     u:
