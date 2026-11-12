@@ -136,7 +136,7 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
       a quoted name isn't matched, so that query runs and fails rather than being
       hidden).
   - **Still open:** carried below under O2.
-- **Every target and tile, checked** (O2, PR 🟡 next): `agent-seddon-obs-check` is now the
+- **Every target and tile, checked** (O2, PR 🟡 #725): `agent-seddon-obs-check` is now the
   whole read-only smoke pass. Instead of a separate `obs-smoke` app it grew two sections
   beside Grafana's, each with its own summary line, and the exit fails if any part does:
   - **Prometheus** (`--prometheus`, the module passes `grafana.prometheusUrl`): every
