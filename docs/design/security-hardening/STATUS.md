@@ -39,7 +39,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | ✅ | #722 |
-| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | 🟡 | |
+| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | 🟡 | #723 |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1678,8 +1678,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - The loopback-link warning.
     - Dex's connector with a GitHub App's OAuth client.
 
-- **2026-11-11 — S26b-ii: the module wires the App's files to Dex and `[github_app]`.** S26b-i
-  merged as #722 (d868388a).
+- **2026-11-11 — S26b-ii: the module wires the App's files to Dex and `[github_app]` (#723).**
+  S26b-i merged as #722 (d868388a).
   - **The files' one reader.** `agent-core/src/github_app_dir.rs` owns the names the gate
     writes and their shapes (`valid_app_id`, `valid_app_slug`, `valid_client_id`; the gate's
     `setup.rs` now uses them too). `read(dir)` is `None` while `app-id` is missing, reads only
