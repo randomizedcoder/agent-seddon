@@ -4533,6 +4533,14 @@ impl GithubAppCfg {
                     .into(),
             );
         }
+        // The same shape the gate's `client-id` file must have (it goes into an OAuth URL);
+        // the value is never echoed.
+        if has_client_id && !agent_core::github_app_dir::valid_client_id(&self.client_id) {
+            return Err(
+                "[github_app] client_id must be GitHub's OAuth client id ([A-Za-z0-9.], <= 64)"
+                    .into(),
+            );
+        }
         if has_client_secret {
             match agent_core::ApiKeyRef::parse(&self.client_secret_ref) {
                 Ok(agent_core::ApiKeyRef::Env(_)) | Ok(agent_core::ApiKeyRef::File(_)) => {}
@@ -5902,6 +5910,23 @@ mod tests {
     #[case::adversarial_app_dir_still_refuses_a_bad_slug(
         "app_dir = \"/d\"\nslug = \"../../evil\"",
         Err("slug")
+    )]
+    // #727 draft: a TOML `client_id` has the gate file's shape.
+    #[case::adversarial_client_id_query(
+        "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.x&redirect_uri=https://evil\"\nclient_secret_ref = \"env:S\"",
+        Err("client_id must be")
+    )]
+    #[case::adversarial_client_id_space(
+        "app_dir = \"/d\"\nclient_id = \" Iv1.abc123\"",
+        Err("client_id must be")
+    )]
+    #[case::boundary_client_id_65_bytes(
+        &format!("app_dir = \"/d\"\nclient_id = \"{}\"", "a".repeat(65)),
+        Err("client_id must be")
+    )]
+    #[case::corner_client_id_trailing_dot(
+        "app_dir = \"/d\"\nclient_id = \"Iv1.\"",
+        Err("client_id must be")
     )]
     #[case::adversarial_app_dir_still_refuses_a_ghapp_key(
         "app_dir = \"/d\"\nprivate_key_ref = \"ghapp:1\"",

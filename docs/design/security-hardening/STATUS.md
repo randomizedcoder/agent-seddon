@@ -40,6 +40,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | ✅ | #722 |
 | S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | ✅ | #723 |
+| S26b-iii | #723's draft: half a pair with `app_dir`, a missing `app_dir` fails, one URL port parser, VM restart subtest | [10](10-sso-front-door.md) | ✅ | #727 |
+| S26b-iv | #727's draft: a TOML `client_id` is shape-checked, `urlPort` bounds its own digits | [10](10-sso-front-door.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1745,7 +1747,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       - A mistyped `app_dir` looks the same as "not set up yet". Tell a missing directory
         apart from a directory with no `app-id`.
       - Log `github_app_note` as soon as it is computed.
-- **2026-11-12 — S26b-iii: #723's fleet-draft carries.** #723 merged as fdd13157.
+- **2026-11-12 — S26b-iii: #723's fleet-draft carries.** #723 merged as fdd13157; this
+  merged as #727 (04694ba2).
   - **Half a pair with `app_dir`.** `validate()` ran at parse, before the files fill the
     empty keys, so `app_dir` with only `slug`, only `client_id` or only `client_secret_ref`
     was refused although the files complete it. With `app_dir` the pair rules now wait; the
@@ -1791,6 +1794,21 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     subtest shows the sequence works, not that the callback page always lands first); the
     config service's snapshot after `resolve_github_app`; Dex's connector with a GitHub
     App's OAuth client against real GitHub, at the l2 deploy.
+- **2026-11-12 — S26b-iv: #727's fleet-draft carries.** #727's second draft had no must-fix.
+  - **A TOML `client_id` is shape-checked.** `[github_app] client_id` set by hand went into
+    the OAuth URL unchecked, while the gate's `client-id` file had to pass
+    `valid_client_id`. `check` now applies the same rule to both (the value is never
+    echoed). Rows: `adversarial_client_id_query` (`&redirect_uri=…`), `…_space`,
+    `boundary_client_id_65_bytes`, `corner_client_id_trailing_dot`.
+  - **`urlPort` bounds its own digits.** It relied on each caller's shape check to keep the
+    port to 5 digits. Dex's port rule doesn't wait for its shape rule, so a 21-digit issuer
+    port stopped the build with `toInt: Could not convert …` instead of the assertion's
+    message. More than 5 digits now reads as port 0, which every range check refuses. Rows
+    in `dexRejects`: the 21-digit port and `:000000065536` refused, `:08443` accepted (the
+    first fails against the old `urlPort`); `hyperdxFrontendUrlRejected` adds `:00000`.
+  - **Not changed:** `agent token` doesn't read `app_dir` (it prints a stored login and
+    uses no App), so a mistyped `app_dir` doesn't fail it.
+  - **Still carried:** as S26b-iii.
 
 ## Cross-track note (not an S-increment)
 

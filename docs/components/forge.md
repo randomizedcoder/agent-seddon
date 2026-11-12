@@ -247,7 +247,8 @@ The mint gate is the operator `[github_app] installations` allowlist **OR** the 
 bindings (rebuilt from `github_installs_verified` at startup; an undecodable row fails
 startup closed). A refused `state` and a failed proof both answer one opaque `PERMISSION_DENIED`.
 
-Prerequisites: `[github_app] slug` + `client_id` + `client_secret_ref` (and a
+Prerequisites: `[github_app] slug` + `client_id` (GitHub's OAuth client id: letters, digits
+and inner `.`, at most 64 bytes) + `client_secret_ref` (and a
 `[github_install_registry] store`); on the App, **"Request user authorization (OAuth)
 during installation"** on, the App's **Callback URL** pointing at the portal root (for
 example `http://127.0.0.1:8092/`: with that option on, GitHub returns to the Callback URL
