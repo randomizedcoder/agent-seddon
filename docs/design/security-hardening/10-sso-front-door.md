@@ -354,7 +354,7 @@ Forges tab's Connect GitHub); creating it is the manual step today (l2's App was
 - **Bootstrap, before anyone can sign in.** With no App, Dex has no GitHub client and nobody can
   sign in, so the first creation cannot sit behind the sign-in. `/auth/setup` on the front door
   is open only while no App exists, and only with a single-use setup code the agent writes at
-  start. The code goes to a root-only file in the setup directory, and the journal names the
+  start. The code goes to a file only the agent's user can read, in the setup directory, and the journal names the
   file, not the code: the agent's logs also go to ClickHouse over OTLP. The code expires in an
   hour and dies once used. After it is used, `/auth/setup` answers 404 for good. Rotating or
   recreating the App later is a separate flow that will need the operator role.
@@ -362,7 +362,9 @@ Forges tab's Connect GitHub); creating it is the manual step today (l2's App was
   state directory (mode 0600): the private key and webhook secret for `[github_app]`, the OAuth
   client secret for Dex. None of it is logged, returned to the browser, or put in the store. A
   systemd path unit restarts Dex when its secret file appears or changes, since Dex reads its
-  connector config only at start.
+  connector config only at start. As built (S26b-ii): the path unit watches `app-id`, which
+  the gate writes last; it restarts Dex (skipped until then by `ConditionPathExists`) and the
+  agents, whose `[github_app] app_dir` reads the new App.
 - **Then the existing flows.** The operator signs in through Dex (now working), installs the App on
   repositories from the Forges tab, and adds fleet sessions. Other people sign in with their own
   GitHub accounts and see nothing until bound (F2).
@@ -386,8 +388,11 @@ one l2 deploy (S30), with your go-ahead; `~/nixos/desktop/l2/lan-access.nix` the
 - Settled (S26b-i): `/setup` runs on the gate, as `/auth/setup` and `/auth/setup/callback`, which
   Envoy routes past the check. The agent had no other plain-HTTP server that could host it: the
   fleet's webhook receiver runs only under `--serve-fleet`, and only once a webhook secret
-  exists, which is what the App creates. Still open for S26b-ii: the module has to take the
-  GitHub client id and App id from files, since a manifest-made App's ids aren't known at eval.
+  exists, which is what the App creates.
+- Settled (S26b-ii): the ids a manifest-made App gets aren't known at eval, so the module reads
+  them from files. Dex's `clientID` and `clientSecret` are placeholders that `replace-secret`
+  fills from `client-id` and `client-secret` at start; the agents fill `[github_app]` from
+  `app_dir`.
 - `agent login --device` dials the public issuer and ignores `backchannel_url`
   (`crates/agent-grpc/src/client/login.rs`). Behind the front door the public issuer is
   reachable, so this only matters for a CLI on the host itself; settle it with S27's token rules.

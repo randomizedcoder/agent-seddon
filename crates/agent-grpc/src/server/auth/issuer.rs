@@ -16,7 +16,7 @@
 
 use serde_json::Value;
 
-use super::{IssuerParams, VerifiedIdentity};
+use super::{or_default, IssuerParams, VerifiedIdentity};
 
 /// Google's two documented `iss` spellings for ID tokens.
 pub(super) const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
@@ -407,13 +407,6 @@ fn email_verified(claims: &Value) -> bool {
         Some(Value::Bool(b)) => *b,
         Some(Value::String(s)) => s == "true",
         _ => false,
-    }
-}
-
-fn or_default(value: &str, default: &str) -> String {
-    match value.trim() {
-        "" => default.to_string(),
-        v => v.to_string(),
     }
 }
 

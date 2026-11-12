@@ -145,6 +145,24 @@ let
     };
   });
   fdFails = extra: failedAssertions (evalWith (fdModule extra)) != [ ];
+  # S26b: the door's gate creates the GitHub App, and Dex signs in with its client.
+  ghAppOn = {
+    dex.mockLogin = false;
+    githubApp.fromSetup = true;
+  };
+  ghApp = evalWith (fdModule ghAppOn);
+  ghAppNamed = evalWith (
+    fdModule (
+      lib.recursiveUpdate ghAppOn {
+        githubApp = {
+          org = "acme-co";
+          appName = "seddon l2";
+          webhookUrl = "https://hooks.example/webhooks/github";
+        };
+      }
+    )
+  );
+  ghAppFails = extra: fdFails (lib.recursiveUpdate ghAppOn extra);
   # S29: the door with the host's own tools beside it (`host` is a plain NixOS module).
   fdWith =
     extra: host:
@@ -1077,6 +1095,12 @@ let
         5556
         8097
         50100
+        # The other grpc-web listeners, the agents' gRPC ports, the fleet webhook.
+        8091
+        8093
+        50080
+        50086
+        50110
       ]
       && refused {
         networking.firewall.allowedTCPPortRanges = [
@@ -1149,6 +1173,127 @@ let
           networking.firewall.enable = false;
           networking.firewall.allowedTCPPorts = [ 3000 ];
         }) == [ ];
+    # #720 carries: what binds where with the door, the door without Postgres, and tool
+    # links kept from before the door.
+    frontDoorBindsAndLinks =
+      let
+        binds = c: c.services.agentSeddon.grpcWeb.finalBinds;
+        fdNoPg = fdWith { postgres.enable = false; } { };
+        linkWarns = c: lib.filter (lib.hasInfix "is outside the front door") c.warnings;
+        withLink = v: fdWith { portal.defines.PORTAL_GRAFANA_URL = v; } { };
+        warnsFor = v: linkWarns (withLink v) != [ ];
+      in
+      # Behind the door only the webhook keeps the LAN bind; without it both follow the host.
+      binds fd == {
+        host = "127.0.0.1";
+        webhookHost = "0.0.0.0";
+      }
+      &&
+        binds lan == {
+          host = "0.0.0.0";
+          webhookHost = "0.0.0.0";
+        }
+      &&
+        binds lo == {
+          host = "127.0.0.1";
+          webhookHost = "127.0.0.1";
+        }
+      # The door needs no Postgres: same two ports, nothing refused.
+      && failedAssertions fdNoPg == [ ]
+      &&
+        lib.sort (a: b: a < b) (ports fdNoPg) == [
+          8443
+          8444
+        ]
+      # A link outside the door warns, naming the define; the door's own route doesn't.
+      && warnsFor "http://127.0.0.1:3000"
+      && lib.any (lib.hasInfix "PORTAL_GRAFANA_URL") (linkWarns (withLink "http://127.0.0.1:3000"))
+      && warnsFor "http://172.16.50.46:3000"
+      && linkWarns (fdWith { portal.defines.PORTAL_PROMETHEUS_URL = "http://localhost:9090"; } { }) != [ ]
+      && !(warnsFor "https://172.16.50.46:8443/grafana/")
+      && !(warnsFor "")
+      && linkWarns fd == [ ]
+      # Adversarial: look-alikes of the door's origin are outside it.
+      && warnsFor "https://172.16.50.46:84430/grafana/"
+      && warnsFor "https://172.16.50.46:8443.evil.example/grafana/"
+      && warnsFor "https://172.16.50.46:8443"
+      # Without the door a loopback link is the portal's to rewrite, not a warning.
+      &&
+        linkWarns (evalWith {
+          services.agentSeddon.portal.defines.PORTAL_GRAFANA_URL = "http://127.0.0.1:3000";
+        }) == [ ];
+    githubAppFromSetup =
+      let
+        gw = ghApp.services.agentSeddon.renderedSettings;
+        dir = "/var/lib/agent-seddon/github-app";
+        gh = lib.head ghApp.services.dex.settings.connectors;
+        pre = lib.toList ghApp.systemd.services.dex.serviceConfig.ExecStartPre;
+        restart = ghApp.systemd.services.agent-seddon-github-app.script;
+      in
+      failedAssertions ghApp == [ ]
+      # The gate serves /auth/setup; empty names stay out of the TOML.
+      && gw.gateway.auth.gate.setup == { inherit dir; }
+      && !(gw.sessions.auth ? gate)
+      # Every agent reads the App from the same files.
+      && lib.all (n: gw.${n}.github_app.app_dir == dir) [
+        "gateway"
+        "sessions"
+        "fleet"
+      ]
+      # Dex's connector names the files; both are replaced with their contents at start.
+      && gh.type == "github"
+      && gh.config.clientID == "${dir}/client-id"
+      && gh.config.clientSecret == "${dir}/client-secret"
+      && lib.any (lib.hasInfix "replace-secret ${dir}/client-id ${dir}/client-id /run/dex/config.yaml") pre
+      && lib.any (lib.hasInfix "replace-secret ${dir}/client-secret ${dir}/client-secret /run/dex/config.yaml") pre
+      # No App yet: Dex waits, and the path unit starts it and restarts the agents.
+      && ghApp.systemd.services.dex.unitConfig.ConditionPathExists == "${dir}/app-id"
+      && ghApp.systemd.paths.agent-seddon-github-app.pathConfig.PathChanged == "${dir}/app-id"
+      && lib.elem "multi-user.target" ghApp.systemd.paths.agent-seddon-github-app.wantedBy
+      && lib.hasInfix "systemctl restart dex.service" restart
+      && lib.all (n: lib.hasInfix "agent-seddon-${n}.service" restart) [
+        "gateway"
+        "sessions"
+        "fleet"
+      ]
+      # The names reach the gate as given.
+      &&
+        ghAppNamed.services.agentSeddon.renderedSettings.gateway.auth.gate.setup == {
+          inherit dir;
+          org = "acme-co";
+          app_name = "seddon l2";
+          webhook_url = "https://hooks.example/webhooks/github";
+        };
+    githubAppOffByDefault =
+      let
+        gw = fd.services.agentSeddon.renderedSettings;
+      in
+      !(gw.gateway.auth.gate ? setup)
+      && !(gw.fleet ? github_app)
+      && !(fd.systemd.paths ? agent-seddon-github-app)
+      && !(fd.systemd.services.dex.unitConfig ? ConditionPathExists);
+    githubAppRefusals =
+      # The gate on the door hosts /auth/setup, and Dex signs in with the App.
+      (
+        failedAssertions (evalWith {
+          services.agentSeddon.githubApp.fromSetup = true;
+        }) != [ ]
+      )
+      # One GitHub client for Dex, not two; and not with the mock.
+      && ghAppFails {
+        dex.github = {
+          clientId = "Iv1.abc";
+          clientSecretFile = "/run/secrets/dex-github";
+        };
+      }
+      && ghAppFails { dex.mockLogin = true; }
+      && ghAppFails { githubApp.org = "a--b"; }
+      && ghAppFails { githubApp.org = "../x"; }
+      && ghAppFails { githubApp.appName = "a<b>"; }
+      && ghAppFails { githubApp.appName = lib.strings.replicate 35 "a"; }
+      && ghAppFails { githubApp.webhookUrl = "http://hooks.example/webhooks/github"; }
+      && ghAppFails { githubApp.webhookUrl = "https://hooks.example/x?y=1"; }
+      && !(ghAppFails { githubApp.appName = lib.strings.replicate 34 "a"; });
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;

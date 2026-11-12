@@ -832,3 +832,32 @@ async fn adversarial_refusal_row_ignores_claimed_identity_and_forged_path() {
     assert_eq!(got[0].tenant, "");
     assert_eq!(got[0].rpc, "");
 }
+
+#[rstest::rstest]
+#[case::positive_known_vector(
+    "abc",
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+)]
+#[case::corner_empty("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")]
+fn sha256_hex_cases(#[case] input: &str, #[case] want: &str) {
+    assert_eq!(super::sha256_hex(input), want);
+}
+
+/// A secret is hashed as given: a padded or re-cased one never matches the original.
+#[rstest::rstest]
+#[case::adversarial_leading_space(" abc")]
+#[case::adversarial_trailing_newline("abc\n")]
+#[case::adversarial_upper_case("ABC")]
+fn adversarial_sha256_hex_is_exact(#[case] input: &str) {
+    assert_ne!(super::sha256_hex(input), super::sha256_hex("abc"));
+}
+
+#[rstest::rstest]
+#[case::positive_value("roles", "x", "roles")]
+#[case::negative_empty_takes_default("", "x", "x")]
+#[case::corner_blank_takes_default(" \t\n", "x", "x")]
+#[case::boundary_trimmed(" org ", "x", "org")]
+#[case::adversarial_inner_space_kept("a b", "x", "a b")]
+fn or_default_cases(#[case] value: &str, #[case] default: &str, #[case] want: &str) {
+    assert_eq!(super::or_default(value, default), want);
+}

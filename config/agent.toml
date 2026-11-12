@@ -260,6 +260,13 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists cards onto the shared config store (the [config_store]
 # block supplies the DSN + pool); needs the `transport-registry-postgres` feature (opt-in).
 
+# [github_app] app_dir — the App the front door's `/auth/setup` made (security-hardening
+# S26b): at startup each empty field is filled from the gate's files there (`app-id`,
+# `slug`, `client-id`; the key and secrets as `file:` refs). No `app-id` yet ⇒ the table is
+# dropped with a warning. Absolute path. See docs/components/forge.md.
+# [github_app]
+# app_dir = "/var/lib/agent-seddon/github-app"
+
 # [github_install_registry] — per-tenant GitHub-App install rows (forge-auth F4/F5b).
 # Each row is `{installation_id, selected_repos[], installed_at}`: a decimal
 # installation id plus the `owner__name` repo slugs that install selected (ids, never

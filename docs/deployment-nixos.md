@@ -375,7 +375,35 @@ the browser to `/auth/login?rd=<the page's path>`, and signing out POSTs `/auth/
 The door adds the bearer and the session to each call. Its Launch cards link to the door's
 `/grafana/` and `/prometheus/` (when the host runs them) and to HyperDX on `:8444`. A
 `portal.defines` entry still overrides a link, but the build refuses any `PORTAL_AUTH`
-other than `door` while the door is on.
+other than `door` while the door is on, and warns about a `PORTAL_GRAFANA_URL` or
+`PORTAL_PROMETHEUS_URL` outside the door's origin (a link kept from before the door points
+at a port its firewall closes).
+
+**The GitHub App from the door** (S26b). `githubApp.fromSetup = true` (with the door and
+Dex) lets the operator create the App from the browser instead of by hand: the gate serves
+`/auth/setup`, and the journal names the setup-code file (`/var/lib/agent-seddon/github-app/setup-code`,
+0600 to the agent's user) whose code opens it. The App's files land beside it. Until
+`app-id` appears Dex doesn't start (nobody can sign in yet) and the agents start without an
+App. When it appears, the `agent-seddon-github-app` path unit restarts Dex, whose GitHub
+connector takes its `clientID` and `clientSecret` from the files at start, and the running
+agents, whose `[github_app] app_dir` (set on every agent) fills the App's ids and secret
+references.
+
+```nix
+services.agentSeddon = {
+  frontDoor.enable = true;
+  dex = { enable = true; github.orgs = [ "acme-co" ]; };   # no clientId / secret files
+  githubApp = {
+    fromSetup = true;
+    org = "acme-co";                 # empty: the account that opens the page
+    appName = "seddon l2";           # empty: agent-seddon; unique on GitHub
+    webhookUrl = "";                 # https only; empty: the fleet polls
+  };
+};
+```
+
+The build refuses `fromSetup` without the door and Dex, beside `dex.github.clientId` or
+`dex.mockLogin`, and with a malformed `org`, `appName` or a non-`https` `webhookUrl`.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.

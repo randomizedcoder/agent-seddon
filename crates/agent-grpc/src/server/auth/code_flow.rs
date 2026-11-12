@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use super::issuer::{check_fetch_url, ResolvedIssuer};
 use super::jwt::Clock;
-use super::{ClientSecret, IssuerParams};
+use super::{sha256_hex, ClientSecret, IssuerParams};
 use crate::client::login::fetch_json;
 
 /// How long a `state` from `Begin` stays redeemable.
@@ -699,15 +699,6 @@ pub fn is_challenge(s: &str) -> bool {
     s.len() == 43
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// Lowercase hex SHA-256: how a login cookie is kept beside its `state`.
-fn sha256_hex(s: &str) -> String {
-    ring::digest::digest(&ring::digest::SHA256, s.as_bytes())
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// A PKCE verifier (RFC 7636 §4.1): 43 to 128 unreserved characters.
