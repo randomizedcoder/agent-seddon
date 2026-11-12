@@ -90,7 +90,7 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
 - **Every panel query, checked** (2026-11-12, after a live pass over l2's Prometheus,
   Grafana dashboards and HyperDX): all 175 Grafana panel queries ran without an error
   against l2's data (140 with data; the 35 empty ones name metrics the code registers
-  for events l2 hasn't had: auth, approvals, posts, priced calls, search). PR 🟡 (O1):
+  for events l2 hasn't had: auth, approvals, posts, priced calls, search). PR 🟡 #724 (O1):
   - **`obs-check`** (new crate `agent-obs-check`): fills a dashboard's variables as the
     browser does, sends each query to Grafana's `/api/ds/query` (macros left to Grafana
     and the plugins), and fails closed on the reply (a missing result is a failure).
