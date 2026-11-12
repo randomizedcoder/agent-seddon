@@ -130,8 +130,9 @@ let
   isChat = "SpanName = 'provider.stream' OR SpanName = 'provider.complete'";
   isTool = "SpanName = 'tool.execute'";
   # Every fleet poll opens a `fleet.review` span; `outcome` marks the ones that reviewed
-  # (`drafted`, `failed`) apart from those answered before any work (`uptodate`, `at_capacity`).
-  isReview = "SpanName = 'fleet.review' AND SpanAttributes['outcome'] IN ('drafted', 'failed')";
+  # (`drafted`, `undrafted`, `failed`) apart from those answered before any work
+  # (`uptodate`, `at_capacity`).
+  isReview = "SpanName = 'fleet.review' AND SpanAttributes['outcome'] IN ('drafted', 'undrafted', 'failed')";
   ours = "ServiceName LIKE 'agent-seddon-%'";
 in
 {

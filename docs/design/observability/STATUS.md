@@ -90,7 +90,8 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
 - **Every panel query, checked** (2026-11-12, after a live pass over l2's Prometheus,
   Grafana dashboards and HyperDX): all 175 Grafana panel queries ran without an error
   against l2's data (140 with data; the 35 empty ones name metrics the code registers
-  for events l2 hasn't had: auth, approvals, posts, priced calls, search). PR 🟡 #724 (O1):
+  for events l2 hasn't had: auth, approvals, posts, priced calls, search). PR ✅ #724 (O1,
+  merged 5f67582c):
   - **`obs-check`** (new crate `agent-obs-check`): fills a dashboard's variables as the
     browser does, sends each query to Grafana's `/api/ds/query` (macros left to Grafana
     and the plugins), and fails closed on the reply (a missing result is a failure).
@@ -134,10 +135,71 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
       `names_table_cases` (a longer or prefixed name and a non-text field don't match;
       a quoted name isn't matched, so that query runs and fails rather than being
       hidden).
+  - **Still open:** carried below under O2.
+- **Every target and tile, checked** (O2, PR 🟡 next): `agent-seddon-obs-check` is now the
+  whole read-only smoke pass. Instead of a separate `obs-smoke` app it grew two sections
+  beside Grafana's, each with its own summary line, and the exit fails if any part does:
+  - **Prometheus** (`--prometheus`, the module passes `grafana.prometheusUrl`): every
+    active target is `up`. `--allow-down <job>` lists a host's known gap instead of
+    failing it. No targets at all, or one not scraped yet, fails. Tables:
+    `parse_targets_cases` (fail-closed shape, the list cap, bounded strings),
+    `verdict_cases`, `valid_job_cases`.
+  - **HyperDX** (`--hyperdx-template`, with `hyperdx.enable`): each tile and saved
+    search of `nix/hyperdx/dashboards.nix` is rendered to the SQL HyperDX builds from
+    its parts (aggregates, `where`, `groupBy`, a time bucket for charts). It runs as
+    `agent_viewer`, the login HyperDX uses. Parts are checked before splicing: a `;` or
+    NUL, an unknown aggregate, a level outside (0, 1), a `$log` source, a non-SQL
+    `where` and an oversized part are refused. A one-row aggregate counts as data only
+    when a value in it does, so `count() = 0` is "empty". Tables:
+    `render_tile_cases`, `render_search_cases`, `tile_queries_cases`,
+    `source_refusals`, `classify_reply_cases`, `relative_secs_cases`.
+  - **Live on l2** (2026-11-12, read-only, `--from now-24h`):
+    - Prometheus: 5 targets, 3 up. `node` and `mq-cake` are down, the known host gap
+      below.
+    - HyperDX: 20 tiles and searches, 14 with data, 6 empty, 0 failed. "Reviews by
+      repo" is empty because `outcome` arrived with #724, which l2 doesn't run yet.
+    - Grafana was not re-run: l2's Grafana has no managed admin password.
+    - **Playwright contact sheet** of the four HyperDX dashboards (last hour). Every
+      tile filled in, after 30–60 s each: a 25 s wait shows "No data found within time
+      range" on tiles that do have data, so a check of the UI must wait for that long.
+      l2 still runs the pre-#724 dashboards, which shows two of #724's fixes in the
+      old state: "Slowest operations" prints its span counts as "532 ms", and
+      "Reviews by repo" counts every poll (about 3 a minute). The browser's one
+      console error is the `system.data_skipping_indices` 403 that #724's grant fixes.
+  - **VM test:** a new subtest creates `default.otel_traces` from the collector's
+    schema, captured from l2 (`test/clickhouse/otel_traces.sql`, test-only). It inserts
+    a model call and a drafted review, then runs every tile as the viewer: none fails,
+    some have data, and "Reviews by repo" counts the review. A wrong viewer password
+    fails. It then runs Grafana's 13 trace panels un-skipped. The wrapper's own run also
+    checks the VM's Prometheus: 3 targets, all up. Green on 2026-11-12:
+    - Prometheus: 3 of 3 targets up.
+    - Grafana through the wrapper: 175 queries, 7 with data, 0 failed, 13 skipped.
+    - HyperDX: 20 tiles and searches, 10 with data, 0 failed.
+    - Grafana again, with no skips: 175 queries, 10 with data, 0 failed, 0 skipped.
+  - **Gate:** `grafana-queries` also renders the real HyperDX template and refuses four
+    broken ones (a second statement, a `$log` source, an unknown aggregate, an empty
+    template). Two dashboard fixtures are added: one with no queries and an empty
+    directory. Eval row `grafanaObsCheckSections`: which sections the wrapper passes
+    with and without HyperDX and Prometheus, and an IPv6 `http_addr` bracketed.
+  - **#724's fleet-draft carries, fixed here:**
+    - A run that found no queries passed. `all_queries` now refuses zero and caps the
+      total at `MAX_QUERIES`, which was enforced per dashboard while documented per run.
+    - `classify` read a non-numeric result `status` as 200; it now fails.
+    - A review that ran but recorded no draft (no drafter or facts, or the draft failed
+      to persist) set no `outcome`, so it vanished from the fleet tiles. It now records
+      `undrafted` on the span and the metric, and the tiles count it. Table:
+      `review_outcome_metric_cases`, 6 rows.
+    - The wrapper skipped `default.otel_logs`, which no panel reads; dropped.
+    - An IPv6 Grafana `http_addr` made a malformed URL; bracketed.
+    - `--check` now refuses every live-only flag, not just `--grafana` and
+      `--password-file`.
+    - Server text is printed with control characters as spaces, so a reply can't forge
+      a `FAILED` line.
   - **Still open:**
-    - O2: `obs-smoke`, a live read-only pass (Prometheus targets, Grafana panels,
-      HyperDX tiles through its own connection, and a Playwright contact sheet that
-      waits for tiles to fill).
+    - From #724's draft: the longest-name-first sort in `Vars::from_dashboard` is
+      redundant (its comment describes a case exact matching can't produce). The
+      `system.data_skipping_indices` row-filtering claim in `schema.sql` is unverified
+      against ClickHouse's docs; the RLS-harness rows are the proof that stands.
     - A HyperDX log source for `agent.agent_logs`: the agents' logs are in ClickHouse,
       but HyperDX's only log source is `otel_logs` (Envoy's access log).
     - On l2 itself: the `node` and `mq-cake` scrape targets are down (no node exporter,

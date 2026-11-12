@@ -1016,8 +1016,22 @@ impl FleetOrchestrator {
                                             .await;
                                     }
                                 }
-                                Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
-                                    "fleet: draft render/persist failed (soft)"),
+                                Err(e) => {
+                                    span_task.record("outcome", "undrafted");
+                                    if let Some(fm) = &fm_task {
+                                        fm.on_review("undrafted");
+                                    }
+                                    tracing::warn!(session_id = %sid, pr, error = %e,
+                                        "fleet: draft render/persist failed (soft)");
+                                }
+                            }
+                        } else {
+                            // The review ran, but with no drafter or no grounded facts
+                            // there is nothing to draft: say so, so it still counts as
+                            // a review that ran (the HyperDX fleet tiles filter on it).
+                            span_task.record("outcome", "undrafted");
+                            if let Some(fm) = &fm_task {
+                                fm.on_review("undrafted");
                             }
                         }
                     }
@@ -4256,7 +4270,8 @@ mod tests {
     // `fleet.review` callsite) under a no-op subscriber concurrently, which races the global
     // callsite-interest cache and makes a span capture flaky. The metric test below drives
     // the same `handle` path. The span's `outcome` is recorded beside each terminal
-    // `on_review` (at_capacity, uptodate, drafted, failed), so those rows cover its sites.
+    // `on_review` (at_capacity, uptodate, drafted, undrafted, failed), so those rows cover
+    // its sites.
 
     #[tokio::test]
     async fn positive_review_lifecycle_records_fleet_metrics() {
@@ -4302,6 +4317,72 @@ mod tests {
                 .any(|l| l.starts_with("agent_fleet_") && l.contains("pr=\"")),
             "PR must never be a fleet metric label:\n{text}"
         );
+    }
+
+    /// desc: every review that ran ends in exactly one of `drafted`, `undrafted` or
+    /// `failed` (the HyperDX fleet tiles count those), including the two branches that
+    /// used to record nothing: grounding failed (no facts) and the draft failed to persist.
+    /// Rows: grounder, drafter, whether the run fails, the one status expected.
+    #[rstest::rstest]
+    #[case::positive_drafted(Some(true), Some(true), false, "drafted")]
+    #[case::negative_draft_persist_fails(Some(true), Some(false), false, "undrafted")]
+    #[case::corner_grounding_fails_no_facts(Some(false), Some(true), false, "undrafted")]
+    #[case::corner_no_drafter(Some(true), None, false, "undrafted")]
+    #[case::boundary_no_grounder_no_drafter(None, None, false, "undrafted")]
+    #[case::negative_run_fails(Some(true), Some(true), true, "failed")]
+    #[tokio::test]
+    async fn review_outcome_metric_cases(
+        #[case] grounder: Option<bool>,
+        #[case] drafter: Option<bool>,
+        #[case] run_fails: bool,
+        #[case] want: &str,
+    ) {
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(if run_fails {
+            FakeHost::failing()
+        } else {
+            FakeHost::new(0)
+        });
+        let metrics = Metrics::new();
+        let mut o = orch(roster, repo, host).with_metrics(metrics.clone());
+        if let Some(ok) = grounder {
+            o = o.with_grounder(if ok {
+                FakeGrounder::ok("brief")
+            } else {
+                FakeGrounder::broken()
+            });
+        }
+        if let Some(ok) = drafter {
+            o = o.with_drafter(if ok {
+                FakeDrafter::ok()
+            } else {
+                FakeDrafter::failing()
+            });
+        }
+        o.handle(FleetTrigger {
+            source: agent_core::TriggerSource::Poll,
+            force: false,
+            head_sha: String::new(),
+            session_id: "web".into(),
+            pr_number: 42,
+            requested_by: Vec::new(),
+            tenant: String::new(),
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "review task ran");
+
+        let text = metrics.encode_text();
+        let ended: Vec<&str> = ["drafted", "undrafted", "failed"]
+            .into_iter()
+            .filter(|s| {
+                let needle = format!("status=\"{s}\"");
+                text.lines()
+                    .any(|l| l.starts_with("agent_fleet_reviews_total") && l.contains(&needle))
+            })
+            .collect();
+        assert_eq!(ended, [want], "one terminal status:\n{text}");
     }
 
     /// desc: every trigger that reaches `handle` ticks `agent_fleet_triggers_total`

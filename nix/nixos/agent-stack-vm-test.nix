@@ -22,6 +22,9 @@
 {
   pkgs,
   module,
+  # The built tools and data the module wraps (nix/default.nix `agentSeddonDeploy`),
+  # for checks that call them with other arguments than the module's wrappers do.
+  agentSeddonDeploy,
 }:
 
 pkgs.testers.runNixOSTest {
@@ -257,16 +260,69 @@ pkgs.testers.runNixOSTest {
         )
         out = machine.succeed("agent-seddon-obs-check --from now-1h --verbose")
         print(out)
-        summary = out.strip().splitlines()[-1]
-        assert " 0 failed" in summary, summary
-        assert " 0 with data" not in summary, summary
-        # HyperDX is off here, so its collector's otel_* tables don't exist: the trace
+        def summary(out, section):
+            lines = [l for l in out.splitlines() if l.startswith(f"obs-check {section}: ")]
+            assert len(lines) == 1, out
+            return lines[0]
+        g = summary(out, "grafana")
+        assert " 0 failed" in g, g
+        assert " 0 with data" not in g, g
+        # HyperDX is off here, so its collector's otel_traces doesn't exist: the trace
         # panels are skipped, by name, rather than failed.
-        assert " 0 skipped" not in summary, summary
+        assert " 0 skipped" not in g, g
         assert "names default.otel_traces" in out, out
+        # The Prometheus Grafana reads (prometheusUrl): its three agent targets, all up.
+        p = summary(out, "prometheus")
+        assert "3 targets: 3 up, 0 down" in p, p
         # The admin password is what lets it in: a wrong one fails, before any query.
         machine.succeed("printf wrong > /root/wrong.password")
         machine.fail("agent-seddon-obs-check --password-file /root/wrong.password")
+
+    with subtest("obs-check: with otel_traces, every HyperDX tile and trace panel runs"):
+        import re
+        admin = (
+            "CLICKHOUSE_PASSWORD=$(cat /var/lib/agent-seddon/clickhouse/admin.password) "
+            "clickhouse-client"
+        )
+        # The table HyperDX's collector would create (captured from a real one), and a
+        # model call and a drafted review, so the tiles that filter on them have rows.
+        machine.succeed(f"{admin} --multiquery < ${../../test/clickhouse/otel_traces.sql}")
+        machine.succeed(
+            f"{admin} --query \"INSERT INTO default.otel_traces "
+            "(Timestamp, ServiceName, SpanName, StatusCode, Duration, SpanAttributes) VALUES "
+            "(now64(9), 'agent-seddon-gateway', 'provider.stream', 'Ok', 1200000000, "
+            "map('gen_ai.request.model', 'vm-model', 'gen_ai.usage.input_tokens', '10')), "
+            "(now64(9), 'agent-seddon-fleet', 'fleet.review', 'Ok', 60000000000, "
+            "map('repo', 'acme__web', 'outcome', 'drafted'))\""
+        )
+        tiles = (
+            "${agentSeddonDeploy.obsCheck} --from now-1h --verbose "
+            "--hyperdx-template ${agentSeddonDeploy.hyperdx.dashboardsTemplate} "
+            "--clickhouse http://127.0.0.1:8123 --clickhouse-password-file {}"
+        )
+        out = machine.succeed(tiles.format("/var/lib/agent-seddon/clickhouse/viewer.password"))
+        print(out)
+        h = summary(out, "hyperdx")
+        assert " 0 failed" in h, h
+        assert " 0 with data" not in h, h
+        # The fleet tiles count the drafted review.
+        assert "empty   agent-seddon · Review fleet / Reviews by repo" not in out, out
+        # As the read-only viewer, with its password: a wrong one fails every tile.
+        out = machine.fail(tiles.format("/root/wrong.password") + " 2>&1")
+        assert "Authentication failed" in out or "516" in out, out
+        # Grafana's trace panels, no longer skipped, run too (the wrapper's own URL).
+        wrapper = machine.succeed("cat $(command -v agent-seddon-obs-check)")
+        m = re.search(r'--grafana "([^"]+)"', wrapper)
+        assert m, wrapper
+        url = m.group(1)
+        out = machine.succeed(
+            f"${agentSeddonDeploy.obsCheck} --grafana {url} "
+            "--dashboards ${agentSeddonDeploy.grafanaDashboards} "
+            "--password-file /var/lib/agent-seddon-grafana/admin.password --from now-1h"
+        )
+        print(out)
+        g = summary(out, "grafana")
+        assert " 0 failed" in g and " 0 skipped" in g, g
 
     with subtest("grafana: the admin password is generated, applied and rotated"):
         pw_file = "/var/lib/agent-seddon-grafana/admin.password"

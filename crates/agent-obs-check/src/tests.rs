@@ -165,6 +165,34 @@ fn boundary_query_count_is_capped() {
     assert!(e.to_string().contains("more than"), "{e}");
 }
 
+fn named(d: Value) -> (String, Value) {
+    ("d.json".into(), d)
+}
+
+fn panel_with(n: usize) -> Value {
+    json!({ "panels": [ { "title": "p", "targets": vec![json!({ "expr": "up" }); n] } ] })
+}
+
+/// desc: `all_queries` is what a run sends: never nothing, never more than the cap in
+/// all (each dashboard can be under it while the sum is over).
+#[rstest]
+#[case::positive_two_dashboards(vec![named(dash()), named(dash())], Ok(4))]
+#[case::boundary_at_the_cap_in_all(vec![named(panel_with(MAX_QUERIES / 2)), named(panel_with(MAX_QUERIES / 2))], Ok(MAX_QUERIES))]
+#[case::boundary_over_the_cap_in_all(vec![named(panel_with(MAX_QUERIES / 2)), named(panel_with(MAX_QUERIES / 2 + 1))], Err("in all"))]
+#[case::negative_no_dashboards(vec![], Err("no panel queries in 0 dashboard(s)"))]
+#[case::negative_dashboards_without_queries(vec![named(json!({ "panels": [ { "title": "text" } ] }))], Err("no panel queries in 1"))]
+#[case::corner_error_names_the_file(vec![named(json!({ "panels": [ { "title": "p", "targets": [ 1 ] } ] }))], Err("d.json: "))]
+fn all_queries_cases(
+    #[case] ds: Vec<(String, Value)>,
+    #[case] want: std::result::Result<usize, &str>,
+) {
+    match (all_queries(&ds, &sources()), want) {
+        (Ok(qs), Ok(n)) => assert_eq!(qs.len(), n),
+        (Err(e), Err(frag)) => assert!(e.to_string().contains(frag), "{e}"),
+        (got, want) => panic!("got {:?}, want {want:?}", got.map(|q| q.len())),
+    }
+}
+
 #[test]
 fn positive_query_body_carries_the_ref_and_range() {
     let qs = panel_queries(&dash(), &sources()).unwrap();
@@ -190,6 +218,15 @@ fn positive_query_body_carries_the_ref_and_range() {
     Outcome::Failed("HTTP 200, no result for A".into()))]
 #[case::adversarial_not_an_object(200, json!("ok"), Outcome::Failed("HTTP 200, no result for A".into()))]
 #[case::adversarial_values_not_arrays(200, json!({ "results": { "A": { "frames": [ { "data": { "values": "x" } } ] } } }), Outcome::Empty)]
+// A status that is there but not a number is not Grafana's "ok", whatever the frames say.
+#[case::adversarial_string_status(200, json!({ "results": { "A": { "status": "500", "frames": [ { "data": { "values": [ [1] ] } } ] } } }),
+    Outcome::Failed("HTTP 200, a result status of \"500\"".into()))]
+#[case::adversarial_null_status(200, json!({ "results": { "A": { "status": null, "frames": [ { "data": { "values": [ [1] ] } } ] } } }),
+    Outcome::Failed("HTTP 200, a result status of null".into()))]
+#[case::adversarial_negative_status(200, json!({ "results": { "A": { "status": -1 } } }),
+    Outcome::Failed("HTTP 200, a result status of -1".into()))]
+#[case::adversarial_newline_in_error(400, json!({ "results": { "A": { "error": "x\nFAILED  forged" } } }),
+    Outcome::Failed("x FAILED  forged".into()))]
 fn classify_cases(#[case] status: u16, #[case] body: Value, #[case] want: Outcome) {
     assert_eq!(classify("A", status, &body), want);
 }

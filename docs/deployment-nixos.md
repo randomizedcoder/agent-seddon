@@ -235,23 +235,41 @@ the old password, so check `systemctl status agent-seddon-grafana-admin` after a
 Either one sets `services.grafana.settings.security.admin_password`, so remove any
 value the host sets there.
 
-#### Checking every panel
+#### Checking every panel, target and tile
 
-`sudo agent-seddon-obs-check` (installed with `grafana.enable`) runs every query of the
-agent-seddon dashboards through Grafana's own query API (`/api/ds/query`), as `admin`
-over loopback, with the dashboard variables filled in the way the browser fills them
-and Grafana's macros left to Grafana. It prints each failed query with Grafana's
-message and a summary, and exits 1 if any failed. An empty result is not a failure (a
-quiet host has none); `--verbose` lists them. `--from now-24h` widens the window (the
-default is the last 6 hours). Without `adminPasswordFile` or `generateAdminPassword`,
-pass `--password-file` yourself. The password is read from the file and only ever sent
-as basic auth. The trace panels read `default.otel_traces`, which HyperDX's collector
-creates. Without `hyperdx.enable` the wrapper passes `--skip-table` for the collector's
-tables, so those queries are counted as skipped instead of sent (`--verbose` names each
-one). Only a query whose SQL names the table outright is skipped; any other query is
-still sent. The VM test runs it against Prometheus behind the door, and the
-`grafana-queries` check runs `obs-check --check` in the gate: every query's variables
-fill in and every data source it names is one the module provisions.
+`sudo agent-seddon-obs-check` (installed with `grafana.enable`) checks, read-only, that
+what the dashboards show is wired right. Each part prints its failures and one summary
+line (`obs-check grafana: …`, `obs-check prometheus: …`, `obs-check hyperdx: …`), and
+the exit is 1 if any part failed:
+
+- **Grafana:** every query of the agent-seddon dashboards, through Grafana's own query
+  API (`/api/ds/query`), as `admin` over loopback. The dashboard variables are filled in
+  the way the browser fills them, and Grafana's macros are left to Grafana. Without
+  `adminPasswordFile` or `generateAdminPassword`, pass `--password-file` yourself; the
+  password is read from the file and only ever sent as basic auth. A run that finds no
+  queries at all fails rather than passing.
+- **Prometheus** (when `grafana.prometheusUrl` is set): every active scrape target is
+  `up`. A panel over a target that is down shows "No data", not an error, so this is
+  what tells the two apart. A target the host knows is down is named with
+  `--allow-down <job>` (repeatable): it is listed, not failed.
+- **HyperDX** (with `hyperdx.enable`): every tile and saved search of the agent-seddon
+  HyperDX dashboards, rendered to the SQL HyperDX asks for and run against ClickHouse
+  as `agent_viewer`, the read-only login HyperDX itself uses. A tile's parts are checked
+  before they are spliced (no `;`, a known aggregate, a quantile level in (0, 1)), and
+  the login can't write anyway.
+
+An empty result is not a failure (a quiet host has none); `--verbose` lists each one.
+`--from now-24h` widens the window (the default is the last 6 hours), for the tiles too.
+The trace panels read `default.otel_traces`, which HyperDX's collector creates. Without
+`hyperdx.enable` the wrapper passes `--skip-table default.otel_traces`, so those queries
+are counted as skipped instead of sent (`--verbose` names each one). Only a query whose
+SQL names the table outright is skipped; any other query is still sent.
+
+In the gate, the `grafana-queries` check runs `obs-check --check`: every query's
+variables fill in, every data source it names is one the module provisions, and every
+HyperDX tile renders. The VM test runs the whole check against Prometheus behind the
+door, then creates `otel_traces` from a captured copy of the collector's schema
+(`test/clickhouse/otel_traces.sql`) and runs every tile and every trace panel too.
 
 ### Dex (sign-in with GitHub)
 
