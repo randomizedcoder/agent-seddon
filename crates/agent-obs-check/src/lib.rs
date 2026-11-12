@@ -11,6 +11,7 @@
 
 use serde_json::{json, Map, Value};
 
+pub mod cli;
 pub mod hyperdx;
 pub mod prometheus;
 
@@ -89,7 +90,8 @@ fn source_of_kind<'a>(sources: &'a [DataSource], kind: &str) -> Option<&'a DataS
 /// A dashboard's variables, resolved as the browser would on first load.
 #[derive(Debug, Default)]
 pub struct Vars {
-    /// `(name, value)`, longest name first so `$jobs` never matches `$job`'s prefix.
+    /// `(name, value)`, in the dashboard's order; [`interpolate`] matches a name exactly,
+    /// so `$jobs` never takes `$job`'s value.
     values: Vec<(String, String)>,
     /// Data-source variables: name → (uid, type).
     sources: Vec<(String, DataSource)>,
@@ -122,8 +124,6 @@ impl Vars {
                 vars.values.push((name.to_string(), var_value(v)));
             }
         }
-        vars.values
-            .sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
         Ok(vars)
     }
 

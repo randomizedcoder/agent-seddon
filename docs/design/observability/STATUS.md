@@ -136,12 +136,12 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
       a quoted name isn't matched, so that query runs and fails rather than being
       hidden).
   - **Still open:** carried below under O2.
-- **Every target and tile, checked** (O2, PR 🟡 #725): `agent-seddon-obs-check` is now the
+- **Every target and tile, checked** (O2, PR ✅ #725): `agent-seddon-obs-check` is now the
   whole read-only smoke pass. Instead of a separate `obs-smoke` app it grew two sections
   beside Grafana's, each with its own summary line, and the exit fails if any part does:
   - **Prometheus** (`--prometheus`, the module passes `grafana.prometheusUrl`): every
     active target is `up`. `--allow-down <job>` lists a host's known gap instead of
-    failing it. No targets at all, or one not scraped yet, fails. Tables:
+    failing it. No targets at all fails. Tables:
     `parse_targets_cases` (fail-closed shape, the list cap, bounded strings),
     `verdict_cases`, `valid_job_cases`.
   - **HyperDX** (`--hyperdx-template`, with `hyperdx.enable`): each tile and saved
@@ -210,9 +210,29 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
     - Answered: with no drafter configured, every review counts as `undrafted`. That is
       intended: a review that ran shows on the tiles, and the outcome says that no
       draft came of it.
+  - **Still open:** carried below under O3.
+- **#725's carries** (O3, PR 🟡): the fleet draft's should-fix items.
+  - The argument rules and the file reads moved out of the binary into `cli.rs`, so
+    they are tested: `parse_args_cases` (29 rows: each section's flags go together,
+    `--check` refuses each live flag, `--allow-down` and `--skip-table` need their
+    section, HyperDX's relative `--from` and `--to now`, injection and huge values
+    bounded), `read_password_cases`, `load_json_cases`. HyperDX's range is now
+    refused at parse time, before any section runs.
+  - The password cap no longer counts the trailing line break: a 4096-byte password
+    followed by `\n` or `\r\n` is read. A second line or non-UTF-8 is refused. The
+    dashboard and template reads share one `read_capped`.
+  - A target Prometheus hasn't scraped yet (`unknown`, for a scrape interval after it
+    starts) is listed as pending, not failed. If no target is up and some are
+    pending, the check still fails. The summary line gains "N not scraped yet".
+  - A tile's verdict reads only its aggregates (`s0`, `s1`, …), not its `groupBy`
+    keys. Before, a key like "frontend" over a zero count read as data, and a key of
+    "0" was judged as a number.
+  - `urlHost` no longer double-brackets an `http_addr` written as `[::1]` (eval row in
+    `grafanaObsCheckSections`).
+  - The longest-name-first sort in `Vars::from_dashboard` is gone (from #724's draft):
+    `interpolate` matches names exactly, so the order never mattered.
   - **Still open:**
-    - From #724's draft: the longest-name-first sort in `Vars::from_dashboard` is
-      redundant (its comment describes a case exact matching can't produce). The
+    - From #724's draft: the
       `system.data_skipping_indices` row-filtering claim in `schema.sql` is unverified
       against ClickHouse's docs; the RLS-harness rows are the proof that stands.
     - A HyperDX log source for `agent.agent_logs`: the agents' logs are in ClickHouse,

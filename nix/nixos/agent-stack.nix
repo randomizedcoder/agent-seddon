@@ -195,8 +195,14 @@ let
       a = graf.settings.server.http_addr;
     in
     if a == "" || a == "0.0.0.0" || a == "::" || a == "[::]" then "127.0.0.1" else a;
-  # A URL's host part: an IPv6 literal is bracketed (`http://[::1]:3000`).
-  urlHost = a: if lib.hasInfix ":" a then "[${a}]" else a;
+  # A URL's host part: an IPv6 literal is bracketed (`http://[::1]:3000`), once: an
+  # address already written bracketed (`[::1]`) is not bracketed again.
+  urlHost =
+    a:
+    let
+      bare = lib.removePrefix "[" (lib.removeSuffix "]" a);
+    in
+    if lib.hasInfix ":" bare then "[${bare}]" else bare;
   # `agent-seddon-obs-check`: what the host's observability stack shows, checked
   # read-only. Every provisioned panel query through Grafana's API, as the admin over
   # loopback (behind the door Grafana serves under /grafana/, and basic auth answers

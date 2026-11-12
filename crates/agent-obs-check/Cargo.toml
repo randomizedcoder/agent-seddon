@@ -26,6 +26,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+agent-testkit.workspace = true
 rstest.workspace = true
 
 [lints]

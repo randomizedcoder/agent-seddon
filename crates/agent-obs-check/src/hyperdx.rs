@@ -319,9 +319,21 @@ pub fn classify_reply(status: u16, body: &[u8]) -> Outcome {
     let Some(rows) = v.get("data").and_then(Value::as_array) else {
         return Outcome::Failed(format!("HTTP {status}: a reply with no data list"));
     };
+    // Only the aggregates (`s0`, `s1`, … as [`render_tile`] and [`render_search`] name
+    // them) say whether anything happened: a `groupBy` key is a label, so a key of
+    // "frontend" over a zero count is not data, nor is a key of "0" over a real count
+    // missed. A row with no aggregate column is not one of ours; any non-bucket value
+    // then counts.
+    let is_agg = |k: &str| {
+        k.strip_prefix('s')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
     let with = rows
         .iter()
         .filter(|r| match r {
+            Value::Object(o) if o.keys().any(|k| is_agg(k)) => {
+                o.iter().any(|(k, v)| is_agg(k) && signal(v))
+            }
             Value::Object(o) => o.iter().any(|(k, v)| k != "__bucket" && signal(v)),
             other => signal(other),
         })
@@ -475,6 +487,27 @@ mod tests {
         Outcome::Empty
     )]
     #[case::boundary_no_rows(200, r#"{"data":[],"rows":0}"#, Outcome::Empty)]
+    #[case::negative_group_key_over_a_zero_count(
+        200,
+        r#"{"data":[{"s0":"0","ServiceName":"frontend"}]}"#,
+        Outcome::Empty
+    )]
+    #[case::corner_zero_key_over_a_real_count(
+        200,
+        r#"{"data":[{"s0":"4","StatusCode":"0"}]}"#,
+        Outcome::Data(1)
+    )]
+    #[case::corner_second_aggregate_has_data(
+        200,
+        r#"{"data":[{"s0":"0","s1":"2.5"}]}"#,
+        Outcome::Data(1)
+    )]
+    #[case::corner_not_our_shape_any_value_counts(200, r#"{"data":[{"n":"3"}]}"#, Outcome::Data(1))]
+    #[case::adversarial_lookalike_keys_are_labels(
+        200,
+        r#"{"data":[{"s0":"0","s":"x","sX":"y","s1a":"z"}]}"#,
+        Outcome::Empty
+    )]
     #[case::positive_float(200, r#"{"data":[{"s0":12.5}]}"#, Outcome::Data(1))]
     #[case::negative_unknown_column(404,
         "Code: 47. DB::Exception: Missing columns: 'Nope' while processing query. (UNKNOWN_IDENTIFIER)\n",

@@ -50,7 +50,7 @@ fn vars() -> Vars {
 #[case::positive_braces_with_format("${job:regex}", ".*")]
 #[case::positive_brackets("[[jobs]]", "many")]
 #[case::positive_datasource_var("${clickhouse}", "clickhouse")]
-#[case::corner_longest_name_wins("$jobs/$job", "many/.*")]
+#[case::corner_exact_name_not_a_prefix("$jobs/$job", "many/.*")]
 #[case::corner_grafana_macros_left_alone(
     "[$__rate_interval] $__timeFilter(ts)",
     "[$__rate_interval] $__timeFilter(ts)"
