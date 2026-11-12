@@ -980,6 +980,127 @@ let
         ) == 1
       && fdPromWarnings fd == [ ]
       && (fdProm { }).services.prometheus.webExternalUrl == null;
+    # S30 (F9): behind the door only the door listens beyond loopback, and the host's
+    # firewall may open nothing it stands in front of.
+    frontDoorLockdown =
+      let
+        fdHost = host: fdWith { } host;
+        refused = host: failedAssertions (fdHost host) != [ ];
+        hdxFd = fdHdx { };
+      in
+      lib.sort (a: b: a < b) (ports fd) == [
+        8443
+        8444
+      ]
+      &&
+        lib.sort (a: b: a < b) (ports hdxFd) == [
+          8443
+          8444
+        ]
+      && lib.hasInfix "--host 127.0.0.1" (execOf fd "agent-seddon-portal")
+      # Without the door the LAN binds are unchanged.
+      && lib.hasInfix "--host 0.0.0.0" (execOf lan "agent-seddon-portal")
+      && has lan 8092
+      # The firewall itself, and what bypasses it wholesale.
+      && refused { networking.firewall.enable = false; }
+      && refused { networking.firewall.trustedInterfaces = [ "eth0" ]; }
+      && refused {
+        networking.firewall.trustedInterfaces = [
+          "lo"
+          "tailscale0"
+        ];
+      }
+      # A tool port, globally, in a range, or on one interface.
+      && lib.all (p: refused { networking.firewall.allowedTCPPorts = [ p ]; }) [
+        3000
+        9090
+        8080
+        8090
+        8092
+        8094
+        4317
+        4318
+        8000
+        4320
+        27017
+        8123
+        9000
+        5432
+        5556
+        8097
+        50100
+      ]
+      && refused {
+        networking.firewall.allowedTCPPortRanges = [
+          {
+            from = 8000;
+            to = 8100;
+          }
+        ];
+      }
+      && refused {
+        networking.firewall.allowedTCPPortRanges = [
+          {
+            from = 3000;
+            to = 3000;
+          }
+        ];
+      }
+      && refused { networking.firewall.interfaces.eth0.allowedTCPPorts = [ 8080 ]; }
+      && refused {
+        networking.firewall.interfaces.wg0.allowedTCPPortRanges = [
+          {
+            from = 9090;
+            to = 9091;
+          }
+        ];
+      }
+      # The refusal names what it found.
+      && lib.any (a: lib.hasInfix "3000 (networking.firewall.interfaces.eth0)" a.message) (
+        failedAssertions (fdHost {
+          networking.firewall.interfaces.eth0.allowedTCPPorts = [ 3000 ];
+        })
+      )
+      # Prometheus beside the door listens on loopback.
+      && refused { services.prometheus.enable = true; }
+      && !(refused {
+        services.prometheus = {
+          enable = true;
+          listenAddress = "127.0.0.1";
+        };
+      })
+      # Not tools: ssh, the webhook, the door itself, ranges around them, loopback.
+      && !(refused {
+        networking.firewall.allowedTCPPorts = [
+          22
+          8096
+          8443
+        ];
+      })
+      && !(refused {
+        networking.firewall.allowedTCPPortRanges = [
+          {
+            from = 8443;
+            to = 8444;
+          }
+          {
+            from = 2999;
+            to = 2999;
+          }
+          {
+            from = 3001;
+            to = 3001;
+          }
+        ];
+      })
+      && !(refused { networking.firewall.trustedInterfaces = [ "lo" ]; })
+      && !(refused { networking.firewall.interfaces.lo.allowedTCPPorts = [ 3000 ]; })
+      # Without the door none of this is the module's business.
+      &&
+        failedAssertions (evalWith {
+          networking.firewall.enable = false;
+          networking.firewall.allowedTCPPorts = [ 3000 ];
+        }) == [ ];
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {
         services.agentSeddon.grafana.enable = true;

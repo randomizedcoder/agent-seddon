@@ -335,14 +335,36 @@ boot.
 - **HyperDX**: the door is its sign-in, so `hyperdx.auth` defaults to (and must be) `false`,
   and `hyperdx.frontendUrl` defaults to (and must be) `https://<publicHost>:8444`. The UI's
   own port (8080) has no login then, so `openFirewall` no longer opens it: 8444 is the way in.
-- **Prometheus** stays the host's. The door sends `/prometheus/` to `127.0.0.1:9090`, and a
+- **Prometheus** stays the host's, on loopback (`listenAddress = "127.0.0.1"`; the build
+  refuses another address with the door on). The door sends `/prometheus/` to `127.0.0.1:9090`, and a
   build warning names what the host sets:
   `services.prometheus.webExternalUrl = "https://<publicHost>:8443/prometheus/"`. From then on
   Prometheus serves under `/prometheus/`, so local clients (a Grafana data source,
   `grafana.prometheusUrl`) use `http://127.0.0.1:9090/prometheus`.
 
-With `openFirewall` on a LAN `publicHost`, 8443 and 8444 open too. The other old ports
-stay open until S30 moves everything else to loopback.
+**Everything else on loopback** (F9). With the door on, only the door (8443, 8444) and
+the GitHub webhook listener (8096) bind `publicHost`'s address; the portal server and the
+grpc-web listeners (8090-8093) move to 127.0.0.1, and the portal calls its RPCs at the
+door's own origin. `openFirewall` on a LAN `publicHost` opens 8443 and 8444 and nothing
+else (the webhook is still the host's to open, if it takes deliveries).
+
+HyperDX runs with `--network=host` and binds every address, so the firewall is what keeps
+it (and anything else) behind the door. The build refuses the door when:
+
+- `networking.firewall.enable = false`;
+- `networking.firewall.trustedInterfaces` has anything but `lo` (it opens every port on
+  that interface; open what the interface needs with
+  `networking.firewall.interfaces.<name>.allowedTCPPorts` instead);
+- the firewall opens a tool port, in `allowedTCPPorts` or inside an `allowedTCPPortRanges`
+  range, globally or on any interface but `lo`. The tool ports are the portal's, grpc-web's
+  and REST's, the agents', the gate's, Dex's, Grafana's, Prometheus's, HyperDX's (UI, API,
+  OpAMP, OTLP, Mongo), ClickHouse's and Postgres's. The message lists each one it found and
+  where.
+
+The checks read the NixOS firewall options only: rules from `extraCommands`,
+`extraInputRules` or a hand-written nftables ruleset are invisible to them, so review
+those by hand. The REST transcoder (8094) stays loopback-only, as before: reach it over
+`ssh -L 8094:127.0.0.1:8094 <host>`.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.
@@ -370,7 +392,14 @@ in the host flake, then `nixos-rebuild switch`.
   off port 3000 or on a socket. HyperDX behind the door needs `auth = false` (the default
   there) and the door's origin, and its 8080 stays closed while 8444 opens; and
   the host's Prometheus gets a warning until `webExternalUrl` is the door's `/prometheus/`.
-- **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. It boots
+  The lockdown rows: with the door only 8443 / 8444 open and the portal binds loopback, and
+  the build refuses the firewall off, a trusted interface other than `lo`, Prometheus off
+  loopback, and each tool port opened globally, in a range or on an interface; ssh, the
+  webhook, the door's own ports, ranges next to a tool port and `lo` are accepted.
+- **`nix build .#nixos-agent-stack-vm`** is opt-in because it needs KVM. Its last row (S30)
+  switches to a LAN specialisation and probes it from a second VM: the door answers (a page
+  with no session goes to sign-in), the portal and grpc-web are bound to loopback, and every
+  other port anything listens on is closed from outside. It boots
   the module in a QEMU VM and checks that each step comes up in order:
   - creds, ClickHouse, then the schema; it also checks that a passwordless
     connection is refused;

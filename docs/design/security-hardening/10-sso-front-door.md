@@ -285,6 +285,9 @@ reuses the same pieces later; this design is the NixOS module.
   `authorization` on `/grafana`). HyperDX needs `auth = false`, and its `frontendUrl` is the
   door's `:8444`. Prometheus stays the host's, with a build warning naming its
   `webExternalUrl`.
+- As built (S30): F9 as written. The portal bundle's RPC URLs become the door's origin, the
+  webhook listener has its own bind (`PORTAL_WEBHOOK_HOST`), and the assertions name each
+  opened tool port and where. The host's Prometheus must listen on loopback.
 - Tests: rstest tables for `Check` (no cookie, unknown handle, revoked session, expired session,
   lacking permission, each route's header set, header-injection attempts in the path, a forged
   `authorization` replaced by the session's, asserting exactly one `authorization` header reaches

@@ -10,7 +10,8 @@
 # (a specialisation) the GitHub connector starting with the operator's secret spliced in,
 # and the SSO front door (security-hardening 10, S28b): its dev-PKI certificate, the
 # gate's check on each route, and a Dex sign-in walked through :8443 (refused for an
-# unbound user; a bound one gets a session its RPCs carry).
+# unbound user; a bound one gets a session its RPCs carry). Last (S30), a LAN specialisation
+# probed from a second node: the door answers, and every other listening port is closed.
 #
 # Not in `nix flake check`: it needs KVM and minutes of VM time (the same reason
 # the postgres module only has an eval gate). Run it after touching the module.
@@ -126,10 +127,29 @@ pkgs.testers.runNixOSTest {
           clientSecretFile = "/run/secrets/dex-github";
         };
       };
-      environment.systemPackages = [ pkgs.curl ];
+      # S30: the door on the LAN address with the firewall opened, probed from `client`.
+      specialisation.lan.configuration.services.agentSeddon = {
+        publicHost = lib.mkForce config.networking.primaryIPAddress;
+        openFirewall = true;
+      };
+      environment.systemPackages = [
+        pkgs.curl
+        pkgs.iproute2
+      ];
+    };
+
+  # Outside the machine: what the LAN sees.
+  nodes.client =
+    { pkgs, ... }:
+    {
+      environment.systemPackages = [
+        pkgs.curl
+        pkgs.netcat
+      ];
     };
 
   testScript = ''
+    client.start()
     machine.start()
     # The base system, whose specialisations the subtests switch to.
     base = machine.succeed("readlink -f /run/current-system").strip()
@@ -461,5 +481,35 @@ pkgs.testers.runNixOSTest {
         q = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
         assert q["client_id"] == ["Iv1.vmtest"], loc
         assert q["redirect_uri"] == [f"{public}/callback"], loc
+
+    with subtest("lockdown: from the LAN only the door answers (S30)"):
+        machine.succeed(f"{base}/specialisation/lan/bin/switch-to-configuration test")
+        machine.wait_for_unit("agent-seddon-grpc-web.service")
+        machine.wait_for_unit("agent-seddon-portal.service")
+        ip = machine.succeed("ip -4 -o addr show dev eth1 | awk '{print $4}' | cut -d/ -f1").strip()
+        machine.wait_for_open_port(8443, ip)
+        # Grafana restarts on the switch (its root_url names the new origin).
+        machine.wait_for_open_port(3000)
+        machine.wait_for_open_port(50100)
+        # The binds: only the door (and the webhook, which the firewall still closes) is
+        # on every address; the portal and grpc-web moved to loopback.
+        listen = machine.succeed("ss -ltnH | awk '{print $4}'").split()
+        def bound(port):
+            return {a.rsplit(":", 1)[0] for a in listen if a.rsplit(":", 1)[1] == str(port)}
+        for port in [8090, 8091, 8092, 8093, 8094, 3000]:
+            assert bound(port) <= {"127.0.0.1", "[::1]"}, (port, bound(port))
+        assert bound(8443) & {"0.0.0.0", "*", "[::]"}, bound(8443)
+        # From outside: the door is up, with no session it sends a page to sign-in.
+        client.wait_until_succeeds(f"nc -z -w 2 {ip} 8443")
+        client.succeed(f"nc -z -w 2 {ip} 8444")
+        code = client.succeed(
+            f"curl -ks -o /dev/null -w '%{{http_code}} %{{redirect_url}}' https://{ip}:8443/"
+        ).split()
+        assert code[0] == "302" and code[1].startswith(f"https://{ip}:8443/auth/login"), code
+        # Every other port anything listens on, on any address, is closed from outside.
+        ports = sorted({int(a.rsplit(":", 1)[1]) for a in listen} - {8443, 8444})
+        assert 3000 in ports and 8092 in ports and 50100 in ports, ports
+        for port in ports:
+            client.fail(f"nc -z -w 2 {ip} {port}")
   '';
 }

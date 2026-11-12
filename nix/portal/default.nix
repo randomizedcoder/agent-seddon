@@ -883,6 +883,8 @@ let
   mkEnvoyConfig =
     {
       host ? "127.0.0.1",
+      # The GitHub webhook listener's bind (S30: it stays reachable when `host` is loopback).
+      webhookHost ? host,
       origins ? [
         "http://127.0.0.1:${toString portalWebPort}"
         "http://localhost:${toString portalWebPort}"
@@ -898,6 +900,7 @@ let
           nativeBuildInputs = [ pkgs.python3 ];
           PORTAL_AUTH = "off";
           PORTAL_GRPC_WEB_HOST = host;
+          PORTAL_WEBHOOK_HOST = webhookHost;
           PORTAL_WEB_ORIGIN = lib.concatStringsSep "," origins;
         }
         // lib.optionalAttrs (frontDoor != null) {
