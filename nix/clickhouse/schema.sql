@@ -400,6 +400,9 @@ CREATE USER IF NOT EXISTS agent_viewer
     SETTINGS readonly = 2;
 GRANT SELECT ON agent.* TO agent_viewer;
 GRANT SELECT ON default.* TO agent_viewer;
+-- HyperDX reads a table's skip indexes before a search, to use them. The table lists only
+-- tables the user can already see, so this shows index names and expressions, no rows.
+GRANT SELECT ON system.data_skipping_indices TO agent_viewer;
 
 -- One permissive tenant policy per tenant-bearing table, keyed on the verified `user`
 -- column (the digest table's tenant column is `user_id`). `getSetting('SQL_tenant_id')` is

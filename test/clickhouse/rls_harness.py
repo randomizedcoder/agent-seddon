@@ -118,6 +118,8 @@ MATRIX = (
          distinct_users(), (TENANT_A, TENANT_B)),
     Case("positive_reader_sees_own_tenant_auth_events", "agent_reader", "reader",
          auth_users(f" SETTINGS SQL_tenant_id = '{TENANT_A}'"), (TENANT_A,)),
+    Case("positive_viewer_reads_skip_index_metadata", "agent_viewer", "viewer",
+         "SELECT count() >= 0 FROM system.data_skipping_indices", ("1",)),
     Case("positive_viewer_reads_every_auth_event", "agent_viewer", "viewer",
          "SELECT count() FROM agent.agent_auth_events", ("3",)),
     Case("positive_writer_inserts", "agent_writer", "writer",
@@ -137,6 +139,8 @@ MATRIX = (
     Case("negative_writer_cannot_manage_access", "agent_writer", "writer",
          "CREATE USER rls_escalate", None),
     # adversarial
+    Case("adversarial_reader_cannot_read_skip_index_metadata", "agent_reader", "reader",
+         "SELECT count() FROM system.data_skipping_indices", None),
     Case("adversarial_reader_cannot_read_default_db", "agent_reader", "reader",
          "SELECT x FROM default.rls_probe", None),
     Case("adversarial_reader_injection_in_setting_matches_nothing", "agent_reader", "reader",

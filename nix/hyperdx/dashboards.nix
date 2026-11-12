@@ -117,6 +117,9 @@ let
   };
   attr = k: "SpanAttributes['${k}']";
   attrNum = k: "toFloat64OrZero(${attr k})";
+  # Only for tiles whose every series is a duration: HyperDX applies a tile's format to
+  # all its columns, so a table with a count beside a duration leaves it off and lets the
+  # `p95 ms` alias carry the unit.
   ms = {
     output = "number";
     mantissa = 0;
@@ -126,6 +129,9 @@ let
   isErr = "StatusCode = 'Error'";
   isChat = "SpanName = 'provider.stream' OR SpanName = 'provider.complete'";
   isTool = "SpanName = 'tool.execute'";
+  # Every fleet poll opens a `fleet.review` span; `outcome` marks the ones that reviewed
+  # (`drafted`, `failed`) apart from those answered before any work (`uptodate`, `at_capacity`).
+  isReview = "SpanName = 'fleet.review' AND SpanAttributes['outcome'] IN ('drafted', 'failed')";
   ours = "ServiceName LIKE 'agent-seddon-%'";
 in
 {
@@ -156,7 +162,6 @@ in
           ];
           where = ours;
           groupBy = "ServiceName, SpanName";
-          numberFormat = ms;
         })
         (tile {
           name = "gRPC calls by method";
@@ -231,7 +236,6 @@ in
           ];
           where = isTool;
           groupBy = attr "gen_ai.tool.name";
-          numberFormat = ms;
         })
         (tile {
           name = "Tool errors";
@@ -258,8 +262,8 @@ in
           name = "Reviews by repo";
           display = "stacked_bar";
           select = [ (count "reviews") ];
-          where = "SpanName = 'fleet.review'";
-          groupBy = attr "repo";
+          where = isReview;
+          groupBy = "${attr "repo"}, ${attr "outcome"}";
         })
         (tile {
           name = "Review duration";
@@ -267,7 +271,7 @@ in
             (durMs 0.5)
             (durMs 0.95)
           ];
-          where = "SpanName = 'fleet.review'";
+          where = isReview;
           numberFormat = ms;
         })
         (tile {
@@ -279,7 +283,6 @@ in
           ];
           where = "SpanName = 'review.collector'";
           groupBy = attr "collector";
-          numberFormat = ms;
         })
         (tile {
           name = "Sandboxed commands (p95)";
@@ -307,7 +310,7 @@ in
     };
     reviews = {
       name = "agent-seddon · Fleet reviews";
-      where = "SpanName = 'fleet.review'";
+      where = isReview;
     };
   };
 

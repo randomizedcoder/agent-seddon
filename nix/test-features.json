@@ -65,6 +65,7 @@
     "http"
   ],
   "agent-mode": [],
+  "agent-obs-check": [],
   "agent-prompt": [
     "prompt-store",
     "prompt-store-postgres"

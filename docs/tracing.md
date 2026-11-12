@@ -69,7 +69,10 @@ HyperDX — stamped on `agent.turn` in the loop and on the shared `grpc.server` 
 served seams (`crates/agent-grpc/src/server/mod.rs`, validated with `safe_segment`).
 Fleet traces additionally carry `repo` and `pr` on the `fleet.*` spans (trigger →
 review → draft → post), so a specific PR's whole lifecycle is one query —
-`SELECT ... FROM otel_traces WHERE SpanAttributes['pr'] = '42'`. These are **span
+`SELECT ... FROM otel_traces WHERE SpanAttributes['pr'] = '42'`. Every trigger opens a
+`fleet.review` span, polls included, so it also carries `outcome`: `drafted` or `failed`
+for a review that ran, `uptodate` or `at_capacity` for one answered before any work
+(empty when it stopped elsewhere). These are **span
 attributes, not metric labels**: `pr` in particular is deliberately never a Prometheus
 label (unbounded), and lives only here and in ClickHouse. OTEL does **not** copy a
 parent's attributes onto its children, so per-child filtering is made to work by
