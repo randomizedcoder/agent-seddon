@@ -1718,16 +1718,33 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - The setup code's file is described as readable only by the agent's user, not
       "root-only".
     - Checked: there is no schema snapshot to update.
-  - **Tests.** `github_app_dir::read_cases` (15 rows: a missing file, a malformed or injected
+  - **Tests.** `github_app_dir::read_cases` (16 rows: a missing file, a malformed or injected
     id, traversal, a file at and over the cap, a key that is a directory; no error shows
     contents) and `valid_app_id_cases`. Config rows cover `app_dir` (relative, traversal,
     an inline key) and `fill_from_app_dir` (7 rows), plus the no-App drop. Eval rows:
     `githubAppFromSetup`, `githubAppOffByDefault`, `githubAppRefusals`,
     `frontDoorBindsAndLinks`.
+  - **Fleet draft (must-fix, fixed here).** The gate's `valid_app_slug` allowed 100 bytes,
+    but `[github_app] slug` is checked by `valid_github_login` (39 bytes, no trailing `-`).
+    A slug the gate wrote could therefore stop every agent at start, and the gate refuses
+    to run setup again once `app-id` exists. `valid_app_slug` is now `valid_github_login`
+    in lowercase, so the gate refuses such a slug at conversion. Rows:
+    `valid_app_slug_cases` (39/40 bytes, dashes, case, traversal), `read_cases`'
+    `adversarial_long_slug`, and the gate's `boundary_slug_over_login_len`.
   - **Still carried:**
     - Dex's connector with a GitHub App's OAuth client, unverified until the l2 deploy.
     - Behind the door, the other portal pages' streams (beyond the Agent page) should send a
       401 to the door's login (#722's draft).
+    - From #723's draft:
+      - The config service's snapshot is taken after `resolve_github_app`. It shows the
+        filled fields, or no `[github_app]` table before setup, rather than the
+        operator's file.
+      - The restart sequence (the path unit, Dex on `app-id`, the `sleep 3` before the
+        gateway restarts) is checked only by string in the eval check. A VM subtest
+        should run it, or the gate should signal instead of the sleep.
+      - A mistyped `app_dir` looks the same as "not set up yet". Tell a missing directory
+        apart from a directory with no `app-id`.
+      - Log `github_app_note` as soon as it is computed.
 
 ## Cross-track note (not an S-increment)
 

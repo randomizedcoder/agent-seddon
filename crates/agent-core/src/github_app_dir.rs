@@ -21,14 +21,13 @@ pub const WEBHOOK_SECRET_FILE: &str = "webhook-secret";
 /// Longest id file read; the values are at most 100 bytes.
 const MAX_ID_FILE: u64 = 256;
 
-/// A GitHub App slug as GitHub issues one: lowercase letters, digits and `-`, not
-/// starting with `-`, at most 100 bytes.
+/// A GitHub App slug as GitHub issues one: [`valid_github_login`]'s shape (which
+/// `[github_app] slug` is validated by, so the gate never writes a slug the agents
+/// would refuse at start), in lowercase.
+///
+/// [`valid_github_login`]: crate::valid_github_login
 pub fn valid_app_slug(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 100
-        && !s.starts_with('-')
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    crate::valid_github_login(s) && !s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 /// An OAuth client id as GitHub issues one (`Iv23li…`): letters, digits and `.`,
@@ -158,6 +157,8 @@ mod tests {
     #[case::negative_missing_client_secret(|d: &Path| std::fs::remove_file(d.join(CLIENT_SECRET_FILE)).unwrap(), Err("client-secret` is missing"))]
     #[case::negative_app_id_zero(|d: &Path| std::fs::write(d.join(APP_ID_FILE), "0").unwrap(), Err("app-id` is malformed"))]
     #[case::adversarial_app_id_injection(|d: &Path| std::fs::write(d.join(APP_ID_FILE), "1\"\nx = \"y").unwrap(), Err("app-id` is malformed"))]
+    // 40 bytes: `[github_app] slug` refuses it, so `read` must too, naming the file.
+    #[case::adversarial_long_slug(|d: &Path| std::fs::write(d.join(SLUG_FILE), "a".repeat(40)).unwrap(), Err("slug` is malformed"))]
     #[case::adversarial_slug_traversal(|d: &Path| std::fs::write(d.join(SLUG_FILE), "../../x").unwrap(), Err("slug` is malformed"))]
     #[case::adversarial_client_id_space(|d: &Path| std::fs::write(d.join(CLIENT_ID_FILE), "Iv1 x").unwrap(), Err("client-id` is malformed"))]
     #[case::boundary_id_file_at_cap(|d: &Path| std::fs::write(d.join(SLUG_FILE), "a".repeat(MAX_ID_FILE as usize)).unwrap(), Err("slug` is malformed"))]
@@ -176,6 +177,25 @@ mod tests {
                 }
             }
             (got, want) => panic!("got {got:?}, want {want:?}"),
+        }
+    }
+
+    #[rstest]
+    #[case::positive("agent-seddon-l2", true)]
+    #[case::boundary_39_bytes(&"a".repeat(39), true)]
+    #[case::boundary_40_bytes(&"a".repeat(40), false)]
+    #[case::negative_empty("", false)]
+    #[case::negative_uppercase("Agent", false)]
+    #[case::corner_leading_dash("-a", false)]
+    #[case::corner_trailing_dash("a-", false)]
+    #[case::adversarial_traversal("../x", false)]
+    #[case::adversarial_newline("a\nb", false)]
+    #[case::adversarial_non_ascii("é", false)]
+    fn valid_app_slug_cases(#[case] s: &str, #[case] want: bool) {
+        assert_eq!(valid_app_slug(s), want);
+        // Whatever the gate writes, `[github_app] slug` accepts.
+        if want {
+            assert!(crate::valid_github_login(s));
         }
     }
 
