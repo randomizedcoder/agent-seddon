@@ -430,7 +430,9 @@ Dex) lets the operator create the App from the browser instead of by hand: the g
 `/auth/setup`, and the journal names the setup-code file (`/var/lib/agent-seddon/github-app/setup-code`,
 0600 to the agent's user) whose code opens it. The App's files land beside it. Until
 `app-id` appears Dex doesn't start (nobody can sign in yet) and the agents start without an
-App. When it appears, the `agent-seddon-github-app` path unit restarts Dex, whose GitHub
+App. The directory itself must exist (the module creates it, 0700 to the agent's user, at
+boot): an agent whose `app_dir` names a missing directory fails to start, since that is a
+mistyped path, not "no App yet". When `app-id` appears, the `agent-seddon-github-app` path unit restarts Dex, whose GitHub
 connector takes its `clientID` and `clientSecret` from the files at start, and the running
 agents, whose `[github_app] app_dir` (set on every agent) fills the App's ids and secret
 references.
@@ -449,7 +451,8 @@ services.agentSeddon = {
 ```
 
 The build refuses `fromSetup` without the door and Dex, beside `dex.github.clientId` or
-`dex.mockLogin`, and with a malformed `org`, `appName` or a non-`https` `webhookUrl`.
+`dex.mockLogin`, and with a malformed `org`, `appName` or `webhookUrl` (not `https`, or a
+port outside 1-65535).
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.

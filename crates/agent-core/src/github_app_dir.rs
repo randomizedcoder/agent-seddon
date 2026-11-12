@@ -30,10 +30,14 @@ pub fn valid_app_slug(s: &str) -> bool {
     crate::valid_github_login(s) && !s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
-/// An OAuth client id as GitHub issues one (`Iv23li…`): letters, digits and `.`,
-/// at most 64 bytes.
+/// An OAuth client id as GitHub issues one (`Iv23li…`, or a legacy `Iv1.…`): letters,
+/// digits and `.`, at most 64 bytes, starting and ending with a letter or digit.
 pub fn valid_client_id(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    let edge = |b: Option<&u8>| b.is_some_and(u8::is_ascii_alphanumeric);
+    s.len() <= 64
+        && edge(s.as_bytes().first())
+        && edge(s.as_bytes().last())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
 }
 
 /// A GitHub App id: a positive decimal number.
@@ -53,10 +57,25 @@ pub struct AppIds {
     pub has_webhook_secret: bool,
 }
 
-/// The App in `dir`: `Ok(None)` while no App exists ([`APP_ID_FILE`] missing), an
-/// error when one exists but a file is missing, too large or of the wrong shape.
+/// The App in `dir`: `Ok(None)` while no App exists (the directory, but no
+/// [`APP_ID_FILE`] in it), an error when one exists but a file is missing, too large
+/// or of the wrong shape. No directory at all is an error too: whoever runs the gate
+/// makes it before the agents start (the NixOS module does, at boot), so its absence
+/// is a mistyped path, which would otherwise look like "no App yet" for good. `dir`
+/// only has to resolve to a directory: a symlink to one is fine.
 /// Errors name the file, never its contents.
 pub fn read(dir: &Path) -> Result<Option<AppIds>, String> {
+    match std::fs::metadata(dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(format!("`{}` is not a directory", dir.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "`{}` does not exist (create it, 0700 to the agent's user, or fix the path)",
+                dir.display()
+            ))
+        }
+        Err(e) => return Err(format!("`{}`: {e}", dir.display())),
+    }
     let small = |name: &str| -> Result<Option<String>, String> {
         let path = dir.join(name);
         let file = match std::fs::File::open(&path) {
@@ -150,7 +169,9 @@ mod tests {
     #[case::positive_whole_app(|_d: &Path| {}, Ok(Some(ids(false))))]
     #[case::positive_with_webhook(|d: &Path| std::fs::write(d.join(WEBHOOK_SECRET_FILE), "w").unwrap(), Ok(Some(ids(true))))]
     #[case::corner_no_app_yet(|d: &Path| std::fs::remove_file(d.join(APP_ID_FILE)).unwrap(), Ok(None))]
-    #[case::corner_no_dir(|d: &Path| std::fs::remove_dir_all(d).unwrap(), Ok(None))]
+    #[case::negative_no_dir(|d: &Path| std::fs::remove_dir_all(d).unwrap(), Err("does not exist"))]
+    #[case::adversarial_dir_is_a_file(|d: &Path| { std::fs::remove_dir_all(d).unwrap(); std::fs::write(d, "x").unwrap(); }, Err("is not a directory"))]
+    #[case::corner_empty_dir_is_no_app_yet(|d: &Path| { std::fs::remove_dir_all(d).unwrap(); std::fs::create_dir(d).unwrap(); }, Ok(None))]
     #[case::corner_trailing_newline(|d: &Path| std::fs::write(d.join(APP_ID_FILE), "4242\n").unwrap(), Ok(Some(ids(false))))]
     #[case::negative_missing_slug(|d: &Path| std::fs::remove_file(d.join(SLUG_FILE)).unwrap(), Err("slug` is missing"))]
     #[case::negative_missing_key(|d: &Path| std::fs::remove_file(d.join(PRIVATE_KEY_FILE)).unwrap(), Err("private-key.pem` is missing"))]
@@ -197,6 +218,25 @@ mod tests {
         if want {
             assert!(crate::valid_github_login(s));
         }
+    }
+
+    #[rstest]
+    #[case::positive("Iv23liAbC123", true)]
+    #[case::positive_legacy_dotted("Iv1.abc123", true)]
+    #[case::boundary_64_bytes(&"a".repeat(64), true)]
+    #[case::boundary_65_bytes(&"a".repeat(65), false)]
+    #[case::boundary_one_char("a", true)]
+    #[case::negative_empty("", false)]
+    #[case::corner_dot_only(".", false)]
+    #[case::corner_leading_dot(".Iv1", false)]
+    #[case::corner_trailing_dot("Iv1.", false)]
+    #[case::adversarial_space("Iv1 x", false)]
+    #[case::adversarial_slash("Iv1/../x", false)]
+    #[case::adversarial_newline("Iv1\nx", false)]
+    #[case::adversarial_quote("Iv1\"x", false)]
+    #[case::adversarial_non_ascii("Ivé", false)]
+    fn valid_client_id_cases(#[case] s: &str, #[case] want: bool) {
+        assert_eq!(valid_client_id(s), want);
     }
 
     #[rstest]

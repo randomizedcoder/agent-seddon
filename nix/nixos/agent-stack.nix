@@ -110,13 +110,8 @@ let
       m = builtins.match "https?://[^/]+(/.*)?" dexCfg.issuer;
     in
     if m == null || builtins.head m == null then "" else builtins.head m;
-  # The issuer's explicit port, or null. `portOk` can't be reused: it reads a port only at
-  # the end of a URL, and the issuer usually has a path after it.
-  dexIssuerPort =
-    let
-      m = builtins.match "https?://[^/:]+(:0*([0-9]+))?(/.*)?" dexCfg.issuer;
-    in
-    if m == null || builtins.elemAt m 1 == null then null else lib.toInt (builtins.elemAt m 1);
+  # The issuer's explicit port, or null.
+  dexIssuerPort = urlPort dexCfg.issuer;
   # The agent's OAuth client secret at Dex: generated once (root, 0700 dir); Dex gets it
   # through the nixpkgs module's `secretFile`, the agents through `credentials`.
   dexGenDir = "/var/lib/agent-seddon-dex";
@@ -248,19 +243,22 @@ let
     themes.store = "postgres";
   };
 
+  # A URL's explicit port (leading zeros dropped), or null: the one parser every port check
+  # uses, so a path after the port can't hide it. Callers check the URL's shape first,
+  # which bounds the port to 1-5 digits.
+  urlPort =
+    u:
+    let
+      m = builtins.match "[a-z]+://[^/:?#]+(:0*([0-9]+))?([/?#].*)?" u;
+    in
+    if m == null || builtins.elemAt m 1 == null then null else lib.toInt (builtins.elemAt m 1);
   # A URL's explicit port, if any, is 1-65535 (the URL regexes allow any 1-5 digits).
   portOk =
     u:
     let
-      m = builtins.match ".*:0*([0-9]+)/?" u;
+      p = urlPort u;
     in
-    m == null
-    || (
-      let
-        p = lib.toInt (lib.head m);
-      in
-      p >= 1 && p <= 65535
-    );
+    p == null || (p >= 1 && p <= 65535);
   isLoopback = h: h == "127.0.0.1" || h == "localhost" || h == "::1";
   lan = !(isLoopback cfg.publicHost);
   bindHost = if lan then "0.0.0.0" else "127.0.0.1";
@@ -1758,11 +1756,18 @@ in
           {
             assertion =
               ghApp.webhookUrl == ""
-              ||
-                builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" ghApp.webhookUrl != null;
-            message = "services.agentSeddon.githubApp.webhookUrl: https://host[:port][/path], no query or fragment.";
+              || (
+                builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" ghApp.webhookUrl != null
+                && portOk ghApp.webhookUrl
+              );
+            message = "services.agentSeddon.githubApp.webhookUrl: https://host[:port][/path], a port of 1-65535, no query or fragment.";
           }
         ];
+
+        # The App's directory exists before any unit starts, so an agent's
+        # `[github_app] app_dir` can tell "no App yet" (the directory, no `app-id`) from
+        # a mistyped path (no directory), which fails its start.
+        systemd.tmpfiles.rules = [ "d ${ghAppDir} 0700 ${cfg.user} ${cfg.group} - -" ];
 
         # Once the gate writes the App's `app-id` (its last file), Dex starts with the App's
         # client and the agents restart to read `[github_app] app_dir`. The short wait lets
