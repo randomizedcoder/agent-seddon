@@ -482,6 +482,8 @@ def knobs_from_env(env: Mapping[str, str], spec: Spec) -> Knobs:
     k = Knobs()
     if g("PORTAL_GRPC_WEB_HOST"):
         k.host = validate_host(g("PORTAL_GRPC_WEB_HOST"))
+    # Unset: the webhook follows PORTAL_GRPC_WEB_HOST. mkEnvoyConfig always sets it (its
+    # `webhookHost ? host` default is the same rule); this fallback serves direct runs.
     k.webhook_host = (
         validate_host(g("PORTAL_WEBHOOK_HOST"), "PORTAL_WEBHOOK_HOST") if g("PORTAL_WEBHOOK_HOST") else k.host
     )

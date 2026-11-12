@@ -634,6 +634,8 @@ main_origin = "https://172.16.50.46:8443" # the front door; <origin>/auth/callba
   (`POST /app-manifests/{code}/conversions`, a 64 KiB cap) and writes `app-id`, `slug`,
   `client-id`, `client-secret`, `private-key.pem` and `webhook-secret` to `dir` (0600,
   `app-id` last). None of it is logged or shown. After that both routes are 404.
+  `[github_app] app_dir` pointed at the same directory fills the App's fields from those
+  files at the next start (S26b-ii, [forge.md](components/forge.md)).
 
 **Audit trail** (S11, [`server/audit.rs`](../crates/agent-grpc/src/server/audit.rs)). Every
 auth event is a row in ClickHouse `agent.agent_auth_events` when `[telemetry]` is on.

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use super::jwt::Clock;
 use super::token::{random_hex, Grant};
-use super::VerifiedIdentity;
+use super::{sha256_hex, VerifiedIdentity};
 
 /// The config-store collection sessions live in.
 pub const COLLECTION: &str = "auth_sessions";
@@ -334,14 +334,6 @@ impl Handle {
     }
 }
 
-fn hash(secret: &str) -> String {
-    ring::digest::digest(&ring::digest::SHA256, secret.as_bytes())
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 fn new_secret() -> Result<String, String> {
     let mut bytes = [0u8; SECRET_BYTES];
     SystemRandom::new()
@@ -457,7 +449,7 @@ impl SessionStore {
         };
         (session.client_kind == BROWSER
             && session.is_live(self.now())
-            && hash(&handle.secret) == session.handle_hash)
+            && sha256_hex(&handle.secret) == session.handle_hash)
             .then_some(session)
     }
 
@@ -520,7 +512,7 @@ impl SessionStore {
             created_at: now,
             last_seen_at: now,
             expires_at: now.saturating_add(o.lifetime_secs),
-            handle_hash: hash(&handle.secret),
+            handle_hash: sha256_hex(&handle.secret),
             retired: Vec::new(),
             revoked_at: 0,
             revoke_reason: String::new(),
@@ -557,7 +549,7 @@ impl SessionStore {
         if session.client_kind == BROWSER {
             return Err(RefreshError::Invalid);
         }
-        let presented = hash(&handle.secret);
+        let presented = sha256_hex(&handle.secret);
         if presented != session.handle_hash {
             if session.retired.contains(&presented) {
                 tracing::warn!(
@@ -578,7 +570,7 @@ impl SessionStore {
         };
         let mut rotated = session.clone();
         rotated.retired.push(presented);
-        rotated.handle_hash = hash(&next.secret);
+        rotated.handle_hash = sha256_hex(&next.secret);
         rotated.last_seen_at = now;
         rotated.sanitize();
         rotated

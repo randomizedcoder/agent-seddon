@@ -1059,6 +1059,10 @@ pub mod repo_graph;
 // onboarding. Namespaced: `STATE_BYTES` / `PendingFull` are flow-specific names.
 pub mod pending;
 
+// The GitHub App's files that the gate's `/auth/setup` writes and `[github_app] app_dir`
+// reads (S26b). Namespaced: `read` and the file names are only meaningful together.
+pub mod github_app_dir;
+
 mod message_transport;
 pub use message_transport::*;
 // ---------------------------------------------------------------------------

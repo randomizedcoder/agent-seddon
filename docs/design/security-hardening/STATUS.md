@@ -38,8 +38,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
-| S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | 🟡 | #722 |
-| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | ⬜ | |
+| S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | ✅ | #722 |
+| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | 🟡 | #723 |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1677,6 +1677,74 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       webhook-host row with the door on, `PORTAL_WEBHOOK_HOST`'s fallback comments).
     - The loopback-link warning.
     - Dex's connector with a GitHub App's OAuth client.
+
+- **2026-11-11 — S26b-ii: the module wires the App's files to Dex and `[github_app]` (#723).**
+  S26b-i merged as #722 (d868388a).
+  - **The files' one reader.** `agent-core/src/github_app_dir.rs` owns the names the gate
+    writes and their shapes (`valid_app_id`, `valid_app_slug`, `valid_client_id`; the gate's
+    `setup.rs` now uses them too). `read(dir)` is `None` while `app-id` is missing, reads only
+    the ids (each capped at 256 bytes), and requires `client-secret` and `private-key.pem` to
+    be files. Its errors name the file, never its contents.
+  - **`[github_app] app_dir`.** An absolute path. At startup `resolve_github_app` fills each
+    empty field: `app_id`, `slug` and `client_id` from the files, and `private_key_ref`,
+    `client_secret_ref` and (when present) `webhook_secret_ref` as `file:` refs. Fields set in
+    the table win. With no App yet the table is dropped and `agent` logs a warning.
+  - **Module.** Every agent gets `github_app.app_dir = /var/lib/agent-seddon/github-app`.
+    `githubApp.fromSetup` (with optional `org`, `appName`, `webhookUrl`) needs the door and
+    Dex, and replaces `dex.github.clientId` and `dex.mockLogin`. It gives the gateway's gate
+    `[auth.gate.setup]` with that dir. Dex's connector takes `clientID` and `clientSecret`
+    from `client-id` and `client-secret` through `replace-secret` at start, and
+    `ConditionPathExists` skips Dex until `app-id` exists. The `agent-seddon-github-app` path
+    unit (`PathChanged` on `app-id`, which the gate writes last) runs a oneshot. It restarts
+    Dex and `try-restart`s the agents.
+  - **#720 carries done here:**
+    - The `openFirewall` description says what the door changes.
+    - 8123 is named as ClickHouse's HTTP port.
+    - `webhookHost` and `PORTAL_WEBHOOK_HOST`'s fallback have comments in all three places.
+    - The `frontDoorLockdown` sample adds 8091, 8093, 50080, 50086 and 50110.
+    - A new `frontDoorBindsAndLinks` row covers several cases:
+      - the binds with the door (webhook `0.0.0.0`, the rest loopback), on the LAN and on
+        loopback, read from the internal `grpcWeb.finalBinds`;
+      - the door with `postgres.enable = false`;
+      - the loopback-link warning.
+    - The warning fires for any `PORTAL_GRAFANA_URL` or `PORTAL_PROMETHEUS_URL` override
+      outside the door's origin, not only loopback ones. Its rows include look-alike origins
+      (`:84430`, `:8443.evil.example`, the bare origin) and a no-door row that stays quiet.
+  - **#722 carries done here:**
+    - The three hex-SHA-256 helpers (session, code flow, setup) are one `sha256_hex` in
+      `server/auth.rs`, and the two `or_default`s are one helper there too, with table rows
+      (known vectors; a padded or re-cased secret never matches). They stay in agent-grpc,
+      beside the only callers, rather than agent-core.
+    - The setup code's file is described as readable only by the agent's user, not
+      "root-only".
+    - Checked: there is no schema snapshot to update.
+  - **Tests.** `github_app_dir::read_cases` (16 rows: a missing file, a malformed or injected
+    id, traversal, a file at and over the cap, a key that is a directory; no error shows
+    contents) and `valid_app_id_cases`. Config rows cover `app_dir` (relative, traversal,
+    an inline key) and `fill_from_app_dir` (7 rows), plus the no-App drop. Eval rows:
+    `githubAppFromSetup`, `githubAppOffByDefault`, `githubAppRefusals`,
+    `frontDoorBindsAndLinks`.
+  - **Fleet draft (must-fix, fixed here).** The gate's `valid_app_slug` allowed 100 bytes,
+    but `[github_app] slug` is checked by `valid_github_login` (39 bytes, no trailing `-`).
+    A slug the gate wrote could therefore stop every agent at start, and the gate refuses
+    to run setup again once `app-id` exists. `valid_app_slug` is now `valid_github_login`
+    in lowercase, so the gate refuses such a slug at conversion. Rows:
+    `valid_app_slug_cases` (39/40 bytes, dashes, case, traversal), `read_cases`'
+    `adversarial_long_slug`, and the gate's `boundary_slug_over_login_len`.
+  - **Still carried:**
+    - Dex's connector with a GitHub App's OAuth client, unverified until the l2 deploy.
+    - Behind the door, the other portal pages' streams (beyond the Agent page) should send a
+      401 to the door's login (#722's draft).
+    - From #723's draft:
+      - The config service's snapshot is taken after `resolve_github_app`. It shows the
+        filled fields, or no `[github_app]` table before setup, rather than the
+        operator's file.
+      - The restart sequence (the path unit, Dex on `app-id`, the `sleep 3` before the
+        gateway restarts) is checked only by string in the eval check. A VM subtest
+        should run it, or the gate should signal instead of the sleep.
+      - A mistyped `app_dir` looks the same as "not set up yet". Tell a missing directory
+        apart from a directory with no `app-id`.
+      - Log `github_app_note` as soon as it is computed.
 
 ## Cross-track note (not an S-increment)
 

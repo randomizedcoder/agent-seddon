@@ -42,6 +42,8 @@ fn with(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
 #[case::adversarial_slug_traversal(with(|v| v["slug"] = json!("../../etc")), Err("conversion_bad_slug"))]
 #[case::adversarial_slug_markup(with(|v| v["slug"] = json!("a\"><script>")), Err("conversion_bad_slug"))]
 #[case::negative_slug_leading_dash(with(|v| v["slug"] = json!("-x")), Err("conversion_bad_slug"))]
+// Over `[github_app] slug`'s 39: written, it would stop every agent at start.
+#[case::boundary_slug_over_login_len(with(|v| v["slug"] = json!("a".repeat(40))), Err("conversion_bad_slug"))]
 #[case::adversarial_client_id_newline(with(|v| v["client_id"] = json!("Iv1.a\nb")), Err("conversion_bad_client_id"))]
 #[case::boundary_client_id_too_long(with(|v| v["client_id"] = json!("a".repeat(65))), Err("conversion_bad_client_id"))]
 #[case::adversarial_client_secret_space(with(|v| v["client_secret"] = json!("a b")), Err("conversion_bad_client_secret"))]

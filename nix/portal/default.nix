@@ -884,6 +884,8 @@ let
     {
       host ? "127.0.0.1",
       # The GitHub webhook listener's bind (S30: it stays reachable when `host` is loopback).
+      # Defaults to `host`; portal_envoy.py makes the same fallback for an unset
+      # PORTAL_WEBHOOK_HOST, so a direct `python3 portal_envoy.py` run agrees with this.
       webhookHost ? host,
       origins ? [
         "http://127.0.0.1:${toString portalWebPort}"

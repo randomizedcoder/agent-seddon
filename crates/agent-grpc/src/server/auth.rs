@@ -1017,6 +1017,26 @@ pub use token::{
     DEFAULT_TTL_SECS, MAX_PERMS_IN_TOKEN, MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
 };
 
+/// Lowercase hex SHA-256: how a secret is kept beside what it opens (a session's
+/// refresh handle, a login cookie, the gate's setup code), never the secret itself.
+#[cfg(feature = "auth")]
+fn sha256_hex(s: &str) -> String {
+    ring::digest::digest(&ring::digest::SHA256, s.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `value` trimmed, or `default` when nothing is left.
+#[cfg(feature = "auth")]
+fn or_default(value: &str, default: &str) -> String {
+    match value.trim() {
+        "" => default.to_string(),
+        v => v.to_string(),
+    }
+}
+
 #[cfg(all(test, feature = "auth"))]
 mod tests;
 

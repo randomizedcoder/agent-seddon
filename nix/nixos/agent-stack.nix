@@ -123,6 +123,17 @@ let
   dexClientSecret = "${dexGenDir}/agent-client.secret";
   dexClientId = "agent-seddon";
 
+  # The GitHub App the gate's /auth/setup creates (S26b). The gate writes its files here
+  # (0600 to cfg.user, the directory 0700); `[github_app] app_dir` and Dex read them.
+  # Fixed under stateDir: the agents' StateDirectory is what makes it writable.
+  ghApp = cfg.githubApp;
+  ghAppDir = "${stateDir}/github-app";
+  # Dex's GitHub OAuth client: the App's, from its files, or the operator's.
+  dexGhIdFile = if ghApp.fromSetup then "${ghAppDir}/client-id" else null;
+  dexGhSecretFile =
+    if ghApp.fromSetup then "${ghAppDir}/client-secret" else dexCfg.github.clientSecretFile;
+  dexGithub = dexCfg.github.clientId != null || ghApp.fromSetup;
+
   # The SSO front door (security-hardening 10, S28b): Envoy's :8443 / :8444, each
   # request checked by the gateway's `[auth.gate]`.
   fd = cfg.frontDoor;
@@ -240,7 +251,7 @@ let
     ++ lib.attrValues hdx.ports
     ++ [
       cfg.clickhouse.nativePort
-      8123
+      8123 # ClickHouse's HTTP port (fixed: the module doesn't make it an option)
       config.services.postgresql.settings.port
     ]
   );
@@ -315,6 +326,7 @@ let
       digest.store = "clickhouse";
     })
     (lib.optionalAttrs pgEnabled pgSettings)
+    (lib.optionalAttrs ghApp.fromSetup { github_app.app_dir = ghAppDir; })
     (lib.optionalAttrs hdxEnabled {
       telemetry = {
         otlp_endpoint = "http://127.0.0.1:${toString hdx.ports.otlpGrpc}";
@@ -335,6 +347,16 @@ let
           listen = "127.0.0.1:${toString ports.gate}";
           inherit (fd) issuer;
           main_origin = fdOrigin;
+        }
+        // lib.optionalAttrs ghApp.fromSetup {
+          setup = {
+            dir = ghAppDir;
+          }
+          // lib.filterAttrs (_: v: v != "") {
+            inherit (ghApp) org;
+            app_name = ghApp.appName;
+            webhook_url = ghApp.webhookUrl;
+          };
         };
       };
     };
@@ -394,9 +416,14 @@ let
 
   rosterFile = pkgs.writeText "agent-seddon-roster.json" (builtins.toJSON cfg.fleet.roster);
 
-  envoyConfig = seddon.mkEnvoyConfig {
+  envoyBinds = {
     host = innerHost;
+    # The webhook keeps the LAN bind: with the door on, `host` is loopback (S30), and
+    # GitHub must still reach it. Its requests are HMAC-checked, not door-gated.
     webhookHost = bindHost;
+  };
+  envoyConfig = seddon.mkEnvoyConfig {
+    inherit (envoyBinds) host webhookHost;
     origins = [
       (urlFor ports.portalWeb)
     ]
@@ -414,6 +441,11 @@ let
         null;
   };
 
+  # The portal's links to the tools; behind the door they must be the door's routes.
+  toolLinkDefines = [
+    "PORTAL_GRAFANA_URL"
+    "PORTAL_PROMETHEUS_URL"
+  ];
   # Behind the door the portal's RPCs go to its own origin, which routes each service.
   portalDefines = {
     PORTAL_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWeb;
@@ -580,8 +612,11 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Open the portal and enabled grpc-web ports. Only meaningful with a LAN
-        `publicHost`; the agents' gRPC ports, ClickHouse and the REST listener stay loopback.
+        Open the LAN-facing ports. Only meaningful with a LAN `publicHost`. Without the
+        front door: the portal, the enabled grpc-web listeners and the HyperDX UI. With
+        `frontDoor.enable`: only the door's two listeners (8443 and 8444); the tools behind
+        it stay on loopback. The agents' gRPC ports, ClickHouse and the REST listener never
+        open.
       '';
     };
 
@@ -852,6 +887,33 @@ in
       };
     };
 
+    githubApp = {
+      fromSetup = lib.mkEnableOption ''
+        creating the GitHub App in the browser (security-hardening S26b): the gate serves
+        `/auth/setup` on the front door until an App exists, writes its files to
+        `/var/lib/agent-seddon/github-app`, and every agent's `[github_app] app_dir` and
+        Dex's GitHub connector read them. Dex and the agents restart once the App exists.
+        The setup code is in `/var/lib/agent-seddon/github-app/setup-code` (root or the
+        agent user can read it). Needs `frontDoor` and `dex`
+      '';
+      org = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "The GitHub organization that owns the App; empty: the account that opens the setup page.";
+      };
+      appName = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "The App's name on GitHub; empty: `agent-seddon`. Names are unique on GitHub.";
+      };
+      webhookUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "https://hooks.example.com/webhooks/github";
+        description = "Where GitHub delivers the App's webhooks; empty: none (the fleet polls).";
+      };
+    };
+
     frontDoor = {
       enable = lib.mkEnableOption ''
         the SSO front door (security-hardening 10): Envoy serves `https://<publicHost>:${toString ports.frontDoor}`
@@ -929,12 +991,20 @@ in
         description = "The web bundle's defines as built: the module's own plus `defines` (for the eval check).";
       };
     };
+
+    grpcWeb.finalBinds = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      internal = true;
+      readOnly = true;
+      description = "Envoy's listener binds as built: `host` and `webhookHost` (for the eval check).";
+    };
   };
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       {
         services.agentSeddon.portal.finalDefines = portalDefines;
+        services.agentSeddon.grpcWeb.finalBinds = envoyBinds;
         assertions = [
           {
             # S31: behind the door the portal keeps no token in JavaScript.
@@ -1205,7 +1275,23 @@ in
           ''
           ++ lib.optional (prom.enable && prom.port != ports.prometheus) ''
             services.agentSeddon.frontDoor routes /prometheus to port ${toString ports.prometheus}, but services.prometheus.port is ${toString prom.port}.
-          '';
+          ''
+          # A tool link kept from before the door (often a loopback URL, which the portal
+          # rewrites to the page's host) points at a port the door's firewall closes.
+          ++
+            map
+              (name: ''
+                services.agentSeddon.portal.defines.${name} = "${cfg.portal.defines.${name}}" is outside the front door (${fdOrigin}/), whose firewall closes the tools' own ports; drop it to use the door's route.
+              '')
+              (
+                lib.filter (
+                  name:
+                  let
+                    v = cfg.portal.defines.${name} or "";
+                  in
+                  v != "" && !lib.hasPrefix "${fdOrigin}/" v
+                ) toolLinkDefines
+              );
 
         # F6: Grafana signs users in from the gate's headers. Envoy replaces
         # X-Seddon-User / X-Seddon-Role on /grafana (front-door-headers.json), and
@@ -1479,8 +1565,12 @@ in
             message = "services.agentSeddon.dex.issuer: a loopback (http://127.0.0.1) issuer must use dex.port (${toString dexCfg.port}).";
           }
           {
-            assertion = dexCfg.mockLogin != (dexCfg.github.clientId != null);
-            message = "services.agentSeddon.dex: set github.clientId (with github.clientSecretFile), or mockLogin for a test, not both.";
+            assertion = dexCfg.mockLogin != dexGithub;
+            message = "services.agentSeddon.dex: set github.clientId (with github.clientSecretFile), githubApp.fromSetup, or mockLogin for a test; exactly one.";
+          }
+          {
+            assertion = !(ghApp.fromSetup && dexCfg.github.clientId != null);
+            message = "services.agentSeddon.dex.github.clientId: githubApp.fromSetup gives Dex the App's client; set one or the other.";
           }
           {
             assertion = (dexCfg.github.clientId == null) == (dexCfg.github.clientSecretFile == null);
@@ -1544,9 +1634,9 @@ in
                     id = "github";
                     name = "GitHub";
                     config = {
-                      clientID = dexCfg.github.clientId;
-                      # Replaced with the file's contents at start (below), like secretFile.
-                      clientSecret = dexCfg.github.clientSecretFile;
+                      # A file's path is replaced with its contents at start (below), like secretFile.
+                      clientID = if dexGhIdFile != null then dexGhIdFile else dexCfg.github.clientId;
+                      clientSecret = dexGhSecretFile;
                       redirectURI = "${dexCfg.issuer}/callback";
                     }
                     // lib.optionalAttrs (dexCfg.github.orgs != [ ]) {
@@ -1567,11 +1657,18 @@ in
               # `replace-secret <string> <file> <target>` replaces the string (here the
               # path, which the connector's clientSecret renders as) with the file's
               # contents. The VM test proves that step for the static client.
-              ExecStartPre = lib.mkIf (dexCfg.github.clientSecretFile != null) (
-                lib.mkAfter [
-                  "+${pkgs.replace-secret}/bin/replace-secret ${dexCfg.github.clientSecretFile} ${dexCfg.github.clientSecretFile} /run/dex/config.yaml"
-                ]
+              ExecStartPre = lib.mkIf (dexGhSecretFile != null) (
+                lib.mkAfter (
+                  map (f: "+${pkgs.replace-secret}/bin/replace-secret ${f} ${f} /run/dex/config.yaml") (
+                    lib.optional (dexGhIdFile != null) dexGhIdFile ++ [ dexGhSecretFile ]
+                  )
+                )
               );
+            };
+            # Until /auth/setup creates the App there is no client to sign in with; the
+            # path unit below starts Dex once there is.
+            unitConfig = lib.mkIf ghApp.fromSetup {
+              ConditionPathExists = "${ghAppDir}/app-id";
             };
           };
           # Once: an existing secret is never replaced. Hex, so it is safe inside YAML.
@@ -1601,6 +1698,55 @@ in
             requires = [ "agent-seddon-dex-secret.service" ];
           }
         ) enabledAgents;
+      })
+
+      (lib.mkIf ghApp.fromSetup {
+        assertions = [
+          {
+            assertion = fd.enable && dexCfg.enable;
+            message = "services.agentSeddon.githubApp.fromSetup needs frontDoor.enable (the gate serves /auth/setup) and dex.enable (signing in with the App).";
+          }
+          {
+            assertion =
+              ghApp.org == "" || builtins.match "[A-Za-z0-9]([A-Za-z0-9]|-[A-Za-z0-9]){0,38}" ghApp.org != null;
+            message = "services.agentSeddon.githubApp.org: a GitHub organization name.";
+          }
+          {
+            assertion = builtins.match "[A-Za-z0-9 ._-]{0,34}" ghApp.appName != null;
+            message = "services.agentSeddon.githubApp.appName: at most 34 letters, digits, spaces, `.`, `_` or `-`.";
+          }
+          {
+            assertion =
+              ghApp.webhookUrl == ""
+              ||
+                builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" ghApp.webhookUrl != null;
+            message = "services.agentSeddon.githubApp.webhookUrl: https://host[:port][/path], no query or fragment.";
+          }
+        ];
+
+        # Once the gate writes the App's `app-id` (its last file), Dex starts with the App's
+        # client and the agents restart to read `[github_app] app_dir`. The short wait lets
+        # the gate's callback page reach the browser before the gateway restarts.
+        systemd.paths.agent-seddon-github-app = {
+          description = "agent-seddon: watch for the GitHub App /auth/setup creates";
+          wantedBy = [ "multi-user.target" ];
+          pathConfig.PathChanged = "${ghAppDir}/app-id";
+        };
+        systemd.services.agent-seddon-github-app = {
+          description = "agent-seddon: start Dex and restart the agents with the new GitHub App";
+          path = [
+            pkgs.coreutils
+            config.systemd.package
+          ];
+          script = ''
+            sleep 3
+            systemctl restart dex.service
+            systemctl try-restart ${
+              lib.concatMapStringsSep " " (n: "${unitName n}.service") (lib.attrNames enabledAgents)
+            }
+          '';
+          serviceConfig.Type = "oneshot";
+        };
       })
 
       (lib.mkIf pgEnabled {

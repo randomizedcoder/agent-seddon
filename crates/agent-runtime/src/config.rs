@@ -4386,6 +4386,14 @@ impl SecretsCfg {
     derive(serde::Serialize, schemars::JsonSchema)
 )]
 pub struct GithubAppCfg {
+    /// The directory the gate's `/auth/setup` writes the App's files to
+    /// (`[auth.gate.setup] dir`, security-hardening S26b). Set, it fills every empty
+    /// key below from those files at start: `app_id`, `slug` and `client_id` from
+    /// their files, and the `*_ref`s as `file:` references to the secrets. A key set
+    /// here wins over its file. Until the App exists the agent runs with no App,
+    /// as if `[github_app]` were absent. Absolute; empty ⇒ unused.
+    #[serde(default)]
+    pub app_dir: String,
     /// The App's numeric id — becomes the App-JWT `iss`.
     #[serde(default)]
     pub app_id: String,
@@ -4449,7 +4457,16 @@ impl GithubAppCfg {
     /// fails closed later at mint time). The `private_key_ref` must be an `env:`/`file:`
     /// reference, never an inline key or a `ghapp:` mint.
     pub fn validate(&self) -> Result<(), String> {
-        if self.app_id.is_empty() {
+        let from_dir = !self.app_dir.is_empty();
+        if from_dir && !std::path::Path::new(&self.app_dir).is_absolute() {
+            return Err(format!(
+                "[github_app] app_dir `{}` must be absolute",
+                self.app_dir
+            ));
+        }
+        // With `app_dir`, an empty id and key are filled from its files at start
+        // ([`Self::fill_from_app_dir`]); they are checked again once filled.
+        if self.app_id.is_empty() && !from_dir {
             return Err("[github_app] app_id is required".into());
         }
         if !self.app_id.bytes().all(|b| b.is_ascii_digit()) {
@@ -4457,6 +4474,7 @@ impl GithubAppCfg {
         }
         match agent_core::ApiKeyRef::parse(&self.private_key_ref) {
             Ok(agent_core::ApiKeyRef::Env(_)) | Ok(agent_core::ApiKeyRef::File(_)) => {}
+            Ok(agent_core::ApiKeyRef::None) if from_dir => {}
             Ok(agent_core::ApiKeyRef::None) => {
                 return Err("[github_app] private_key_ref is required (env: or file:)".into())
             }
@@ -4555,6 +4573,48 @@ impl GithubAppCfg {
             }
         }
         Ok(())
+    }
+
+    /// Fill the empty keys from [`Self::app_dir`]'s files (see there). `Ok(false)`
+    /// when `app_dir` is set and no App exists there yet; `Ok(true)` otherwise. An
+    /// App whose files are incomplete or malformed is an error naming the file.
+    pub fn fill_from_app_dir(&mut self) -> Result<bool, String> {
+        if self.app_dir.is_empty() {
+            return Ok(true);
+        }
+        let dir = std::path::Path::new(&self.app_dir);
+        if !dir.is_absolute() {
+            return Err(format!(
+                "[github_app] app_dir `{}` must be absolute",
+                self.app_dir
+            ));
+        }
+        let Some(ids) = agent_core::github_app_dir::read(dir)
+            .map_err(|e| format!("[github_app] app_dir: {e}"))?
+        else {
+            return Ok(false);
+        };
+        let file_ref = |name: &str| format!("file:{}", dir.join(name).display());
+        use agent_core::github_app_dir as files;
+        for (key, value) in [
+            (&mut self.app_id, ids.app_id),
+            (&mut self.slug, ids.slug),
+            (&mut self.client_id, ids.client_id),
+            (&mut self.private_key_ref, file_ref(files::PRIVATE_KEY_FILE)),
+            (
+                &mut self.client_secret_ref,
+                file_ref(files::CLIENT_SECRET_FILE),
+            ),
+        ] {
+            if key.is_empty() {
+                *key = value;
+            }
+        }
+        if self.webhook_secret_ref.is_empty() && ids.has_webhook_secret {
+            self.webhook_secret_ref = file_ref(files::WEBHOOK_SECRET_FILE);
+        }
+        self.validate()?;
+        Ok(true)
     }
 
     /// The effective API base, defaulting to github.com.
@@ -5362,6 +5422,27 @@ impl RepoGraphCfg {
     }
 }
 
+impl Config {
+    /// Fill `[github_app]` from its `app_dir` (S26b), once at start. While no App
+    /// exists there, `[github_app]` is dropped, so a `ghapp:` reference fails closed
+    /// as with no App configured, and the returned note says so (the caller logs it).
+    pub fn resolve_github_app(&mut self) -> Result<Option<String>, String> {
+        let Some(ga) = self.github_app.as_mut() else {
+            return Ok(None);
+        };
+        if ga.fill_from_app_dir()? {
+            return Ok(None);
+        }
+        let note = format!(
+            "[github_app] app_dir `{}` holds no GitHub App yet: running without one until \
+             /auth/setup creates it and the agent restarts",
+            ga.app_dir
+        );
+        self.github_app = None;
+        Ok(Some(note))
+    }
+}
+
 #[cfg(test)]
 impl Config {
     /// A minimal, valid config for unit tests (no network use).
@@ -5782,6 +5863,18 @@ mod tests {
         "app_id = \"1\"\nprivate_key_ref = \"env:K\"\nclient_id = \"Iv1.abc123\"\nclient_secret_ref = \"env:S\"\nslug = \"app?state=x\"",
         Err("slug")
     )]
+    // S26b: `app_dir` stands in for the id and key until they are filled from it.
+    #[case::positive_app_dir_alone("app_dir = \"/var/lib/agent-seddon/github-app\"", Ok(()))]
+    #[case::negative_app_dir_relative("app_dir = \"github-app\"", Err("must be absolute"))]
+    #[case::adversarial_app_dir_traversal_relative(
+        "app_dir = \"../../etc\"",
+        Err("must be absolute")
+    )]
+    #[case::negative_app_dir_with_inline_key(
+        "app_dir = \"/d\"\nprivate_key_ref = \"-----BEGIN\"",
+        Err("private_key_ref")
+    )]
+    #[case::negative_no_app_dir_no_id("private_key_ref = \"env:K\"", Err("app_id is required"))]
     fn github_app_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
         let cfg: GithubAppCfg = toml::from_str(toml_src).expect("parses");
         let got = cfg.validate();
@@ -5793,6 +5886,115 @@ mod tests {
                 assert!(err.len() < 200, "error echoes too much: {err:?}");
             }
         }
+    }
+
+    /// `[github_app] app_dir` (S26b): the gate's App files fill the empty keys.
+    #[derive(Clone, Copy, Debug)]
+    enum AppDirCase {
+        Whole,
+        WithWebhook,
+        NoAppYet,
+        ExplicitIdWins,
+        MissingKey,
+        HostileSlug,
+        NoAppDir,
+    }
+
+    #[rstest::rstest]
+    #[case::positive_whole_app(AppDirCase::Whole, Ok(true))]
+    #[case::positive_webhook_secret_ref(AppDirCase::WithWebhook, Ok(true))]
+    #[case::corner_no_app_yet(AppDirCase::NoAppYet, Ok(false))]
+    #[case::corner_explicit_id_wins(AppDirCase::ExplicitIdWins, Ok(true))]
+    #[case::corner_no_app_dir_is_untouched(AppDirCase::NoAppDir, Ok(true))]
+    #[case::negative_missing_key(AppDirCase::MissingKey, Err("private-key.pem` is missing"))]
+    #[case::adversarial_hostile_slug(AppDirCase::HostileSlug, Err("slug` is malformed"))]
+    fn github_app_fill_from_app_dir_cases(
+        #[case] case: AppDirCase,
+        #[case] want: Result<bool, &str>,
+    ) {
+        use agent_core::github_app_dir as f;
+        let dir = agent_testkit::tempdir().join("github-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, value) in [
+            (f::SLUG_FILE, "agent-seddon-l2"),
+            (f::CLIENT_ID_FILE, "Iv23li.abc123"),
+            (f::CLIENT_SECRET_FILE, "s3cr3t"),
+            (f::PRIVATE_KEY_FILE, "pem"),
+            (f::APP_ID_FILE, "4242"),
+        ] {
+            std::fs::write(dir.join(name), value).unwrap();
+        }
+        let mut ga = GithubAppCfg {
+            app_dir: dir.display().to_string(),
+            ..Default::default()
+        };
+        match case {
+            AppDirCase::Whole => {}
+            AppDirCase::WithWebhook => {
+                std::fs::write(dir.join(f::WEBHOOK_SECRET_FILE), "w").unwrap();
+            }
+            AppDirCase::NoAppYet => std::fs::remove_file(dir.join(f::APP_ID_FILE)).unwrap(),
+            AppDirCase::ExplicitIdWins => ga.app_id = "77".into(),
+            AppDirCase::MissingKey => std::fs::remove_file(dir.join(f::PRIVATE_KEY_FILE)).unwrap(),
+            AppDirCase::HostileSlug => std::fs::write(dir.join(f::SLUG_FILE), "a\"\nx").unwrap(),
+            AppDirCase::NoAppDir => ga.app_dir.clear(),
+        }
+        let got = ga.fill_from_app_dir();
+        match want {
+            Ok(present) => assert_eq!(got, Ok(present)),
+            Err(frag) => {
+                let e = got.expect_err("refused");
+                assert!(e.contains(frag), "{e}");
+                assert!(!e.contains("s3cr3t"), "no contents in {e}");
+                return;
+            }
+        }
+        let file = |name: &str| format!("file:{}", dir.join(name).display());
+        match case {
+            AppDirCase::Whole | AppDirCase::WithWebhook | AppDirCase::ExplicitIdWins => {
+                let id = if matches!(case, AppDirCase::ExplicitIdWins) {
+                    "77"
+                } else {
+                    "4242"
+                };
+                assert_eq!(ga.app_id, id);
+                assert_eq!(ga.slug, "agent-seddon-l2");
+                assert_eq!(ga.client_id, "Iv23li.abc123");
+                assert_eq!(ga.private_key_ref, file(f::PRIVATE_KEY_FILE));
+                assert_eq!(ga.client_secret_ref, file(f::CLIENT_SECRET_FILE));
+                let webhook = matches!(case, AppDirCase::WithWebhook);
+                assert_eq!(
+                    ga.webhook_secret_ref,
+                    if webhook {
+                        file(f::WEBHOOK_SECRET_FILE)
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            AppDirCase::NoAppYet | AppDirCase::NoAppDir => {
+                assert!(ga.app_id.is_empty() && ga.private_key_ref.is_empty());
+            }
+            AppDirCase::MissingKey | AppDirCase::HostileSlug => unreachable!(),
+        }
+    }
+
+    /// With no App yet, `[github_app]` is dropped (a `ghapp:` ref fails closed) and
+    /// a note says why; a config without `app_dir` is untouched.
+    #[test]
+    fn resolve_github_app_without_an_app_drops_the_table() {
+        let dir = agent_testkit::tempdir().join("none-yet");
+        let mut cfg = Config::minimal_for_test();
+        cfg.github_app = Some(GithubAppCfg {
+            app_dir: dir.display().to_string(),
+            ..Default::default()
+        });
+        let note = cfg.resolve_github_app().expect("not an error");
+        assert!(note.is_some_and(|n| n.contains("no GitHub App yet")));
+        assert!(cfg.github_app.is_none());
+        let mut plain = Config::minimal_for_test();
+        assert_eq!(plain.resolve_github_app(), Ok(None));
+        assert!(plain.github_app.is_none());
     }
 
     /// The web host the install page + user OAuth live on, derived from the API base.

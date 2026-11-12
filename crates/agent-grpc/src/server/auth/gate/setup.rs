@@ -32,6 +32,7 @@ use async_trait::async_trait;
 
 use super::percent_decode;
 use super::routes::{cookie_value, raw_param, Reply};
+use crate::server::auth::{or_default, sha256_hex};
 
 /// The page that posts the manifest.
 pub const SETUP_PATH: &str = "/auth/setup";
@@ -58,14 +59,12 @@ pub const MAX_APP_NAME: usize = 34;
 
 /// The single-use setup code, while no App exists.
 pub const SETUP_CODE_FILE: &str = "setup-code";
-/// Written last: its presence is what "an App exists" means.
-pub const APP_ID_FILE: &str = "app-id";
-pub const SLUG_FILE: &str = "slug";
-pub const CLIENT_ID_FILE: &str = "client-id";
-pub const CLIENT_SECRET_FILE: &str = "client-secret";
-pub const PRIVATE_KEY_FILE: &str = "private-key.pem";
-/// Absent when the manifest asked for no webhook.
-pub const WEBHOOK_SECRET_FILE: &str = "webhook-secret";
+// The App's file names and shapes, shared with `[github_app] app_dir`'s read.
+use agent_core::github_app_dir::{valid_app_slug, valid_client_id};
+pub use agent_core::github_app_dir::{
+    APP_ID_FILE, CLIENT_ID_FILE, CLIENT_SECRET_FILE, PRIVATE_KEY_FILE, SLUG_FILE,
+    WEBHOOK_SECRET_FILE,
+};
 
 /// `[auth.gate.setup]`.
 #[derive(Clone, Debug, Default)]
@@ -206,16 +205,10 @@ pub fn parse_conversion(body: &[u8]) -> Result<CreatedApp, &'static str> {
     if raw.id == 0 {
         return Err("conversion_bad_id");
     }
-    if !slug(&raw.slug) {
+    if !valid_app_slug(&raw.slug) {
         return Err("conversion_bad_slug");
     }
-    if raw.client_id.is_empty()
-        || raw.client_id.len() > 64
-        || !raw
-            .client_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.')
-    {
+    if !valid_client_id(&raw.client_id) {
         return Err("conversion_bad_client_id");
     }
     if !secret(&raw.client_secret, 256) {
@@ -236,15 +229,6 @@ pub fn parse_conversion(body: &[u8]) -> Result<CreatedApp, &'static str> {
         webhook_secret,
         pem: raw.pem,
     })
-}
-
-/// A GitHub App slug: lowercase letters, digits and `-`, not leading with `-`.
-fn slug(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 100
-        && !s.starts_with('-')
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// One PEM private key block (PKCS#1 as GitHub issues it, or PKCS#8), ASCII,
@@ -372,7 +356,7 @@ impl AppSetup {
             .and_then(|()| write_private(&setup.dir, SETUP_CODE_FILE, &code))
             .map_err(|e| bad("dir", format!("`{}`: {e}", setup.dir.display())))?;
         *setup.code.lock().unwrap_or_else(PoisonError::into_inner) = Some(SetupCode {
-            hash: hash(&code),
+            hash: sha256_hex(&code),
             expires_at: now.saturating_add(SETUP_CODE_TTL_SECS),
         });
         tracing::warn!(
@@ -414,7 +398,7 @@ impl AppSetup {
             .ok()
             .flatten()
             .and_then(percent_decode)
-            .map(|c| hash(&c));
+            .map(|c| sha256_hex(&c));
         // The code is spent by its first use and the file gets a new one, under one
         // lock: a URL that a proxy or browser history kept opens nothing again.
         let rotated = {
@@ -424,7 +408,7 @@ impl AppSetup {
                     *code = random_token(32)
                         .filter(|next| write_private(&self.dir, SETUP_CODE_FILE, next).is_ok())
                         .map(|next| SetupCode {
-                            hash: hash(&next),
+                            hash: sha256_hex(&next),
                             expires_at: c.expires_at,
                         });
                     Some(code.is_some())
@@ -455,7 +439,7 @@ impl AppSetup {
         let Some(cookie) = random_token(32) else {
             return Reply::new(503, "setup is unavailable");
         };
-        let Ok((state, _)) = self.pending.insert(now, hash(&cookie)) else {
+        let Ok((state, _)) = self.pending.insert(now, sha256_hex(&cookie)) else {
             return Reply::new(503, "too many setup pages are open; try again later");
         };
         let action = if self.org.is_empty() {
@@ -514,7 +498,8 @@ impl AppSetup {
         let Some(cookie_hash) = self.pending.take(now, &state) else {
             return refused(403, "setup_state_refused", "setup refused");
         };
-        if !matches!(cookie_value(cookie, SETUP_COOKIE), Ok(Some(v)) if hash(v) == cookie_hash) {
+        if !matches!(cookie_value(cookie, SETUP_COOKIE), Ok(Some(v)) if sha256_hex(v) == cookie_hash)
+        {
             return refused(403, "setup_cookie_mismatch", "setup refused");
         }
         if !manifest_code(&code) {
@@ -600,13 +585,6 @@ fn manifest(main_origin: &str, name: &str, webhook_url: &str) -> String {
     m.to_string()
 }
 
-fn or_default(value: &str, default: &str) -> String {
-    match value.trim() {
-        "" => default.to_string(),
-        v => v.to_string(),
-    }
-}
-
 /// A base URL the gate posts to or names: `https` (or `http` to a loopback IP),
 /// no credentials, query or fragment.
 fn check_base(raw: &str) -> Result<(), String> {
@@ -647,14 +625,6 @@ fn escape(s: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(out)
-}
-
-fn hash(secret: &str) -> String {
-    ring::digest::digest(&ring::digest::SHA256, secret.as_bytes())
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// `dir`, made 0700 when it is missing.

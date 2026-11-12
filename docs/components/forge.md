@@ -329,6 +329,25 @@ pull request reaches a tenant only through the installation's verified claim (se
 onboarding, F5c2); installs assigned by the operator's `[github_app] installations` table have no
 claim, so their pull requests are covered by the forge poll only.
 
+## The App's files (`app_dir`, security-hardening S26b)
+
+An App made from a manifest by the front door's `/auth/setup` is known only at run time, so
+`[github_app]` can read it from the directory the gate wrote
+([`agent-core/src/github_app_dir.rs`](../../crates/agent-core/src/github_app_dir.rs)):
+
+```toml
+[github_app]
+app_dir = "/var/lib/agent-seddon/github-app"   # absolute
+```
+
+At startup the agent fills each field left empty: `app_id`, `slug` and `client_id` from their
+files (shape-checked; an error names the file, never its contents), and `private_key_ref`,
+`client_secret_ref` and, when the file exists, `webhook_secret_ref` as `file:` references, so
+the secrets are read where they are used. Fields set in the table win. While `app-id` is
+missing (no App yet) the agent drops the table, logs a warning and starts without the App. The
+NixOS module sets `app_dir` on every agent and, with `githubApp.fromSetup`, gives Dex the App's
+OAuth client from the same files ([deployment-nixos.md](../deployment-nixos.md)).
+
 ## Deferred
 
 - **Line comments on reviews.** The most platform-divergent surface: GitHub
