@@ -39,7 +39,8 @@ class PortalConfig {
 
   /// Browser sign-in (security-hardening S13b): `auto` (default) signs in when
   /// the agent offers it (`AuthService.Issuers` lists an issuer) and runs
-  /// anonymously otherwise; `on` insists; `off` never asks (loopback dev).
+  /// anonymously otherwise; `on` insists; `off` never asks (loopback dev);
+  /// `door` is the portal behind the front door, signed in by its cookie (S31).
   final String authMode;
 
   /// Offer only this login issuer (its `[[auth.issuers]]` name) when listed.

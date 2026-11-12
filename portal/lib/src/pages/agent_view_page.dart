@@ -17,7 +17,8 @@ import '../theme/seddon_colors.dart';
 /// Everything fails soft: a disconnected gateway greys the affected cell rather than
 /// blanking the view.
 class AgentViewPage extends StatefulWidget {
-  const AgentViewPage({super.key, required this.clients, this.tenant});
+  const AgentViewPage(
+      {super.key, required this.clients, this.tenant, this.door = false});
 
   final PortalClients clients;
 
@@ -25,6 +26,11 @@ class AgentViewPage extends StatefulWidget {
   /// `x-agent-user-id`; the agent takes the tenant from the token regardless.
   /// `null` (or returning null) ⇒ the pre-sign-in `portal` identity.
   final String? Function()? tenant;
+
+  /// Behind the front door (S31) the gate names the session from the token, so
+  /// the page opens no registry session and sends no identity metadata. Every
+  /// tab on one sign-in therefore drives the same session.
+  final bool door;
 
   @override
   State<AgentViewPage> createState() => _AgentViewPageState();
@@ -100,6 +106,10 @@ class _AgentViewPageState extends State<AgentViewPage> {
     final g = goal.trim();
     if (g.isEmpty || _sending) return;
     setState(() => _sending = true);
+    if (widget.door) {
+      _drive(g, grpc.CallOptions());
+      return;
+    }
     try {
       _sessionId ??=
           (await widget.clients.registry.open(OpenRequest(user: _user)))
@@ -115,6 +125,10 @@ class _AgentViewPageState extends State<AgentViewPage> {
       'x-agent-user-id': _user,
       'x-agent-session-id': _sessionId!,
     });
+    _drive(g, opts);
+  }
+
+  void _drive(String g, grpc.CallOptions opts) {
     _sub?.cancel();
     _goalInput.clear();
     setState(() {

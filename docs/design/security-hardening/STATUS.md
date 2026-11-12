@@ -45,8 +45,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S28a | Envoy front door rendered: TLS, `ext_authz`, routes, the header table, CORS (`portal_envoy.py`, `envoy --mode validate`) | [10](10-sso-front-door.md) F4, F7, F10 | ✅ | #716 |
 | S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ✅ | #719 |
-| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | 🟡 | #720 |
-| S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ⬜ | |
+| S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ✅ | #720 |
+| S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | 🟡 | #721 |
 
 ## As-built log
 
@@ -1511,6 +1511,73 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     LAN address, `openFirewall`) probed from a second node; 8443 / 8444 answer, a page with
     no session goes to sign-in, 8090-8094 and 3000 are bound to loopback, and every other
     listening port is closed from outside.
+- **2026-11-11 — S31: the portal's cookie mode, and the tool links through the door.**
+  Stacked on S30 (#720).
+  - Gate: `Route::Rpc` replaces `x-agent-session-id` too, with the token's own sid (the
+    cookie session's, or the client's own bearer's). A token with no sid is a 401 (a
+    backstop: the issuer neither mints nor verifies one). The
+    header table (`front-door-headers.json`) row is now `replaced`, which closes #716's
+    item 1. Without it, a portal that names no session would get UNAUTHENTICATED from
+    every tenant-keyed service (S2's identity policy).
+  - Portal: `AuthMode.door`.
+    - `start()` asks `WhoAmI` with no credentials. A 401 navigates to
+      `/auth/login?rd=<path>`; only the path goes back (`doorLoginUrl`), never the query.
+      A 403 shows "no access", and anything else shows "unavailable".
+    - Nothing is stored but the time of the last trip to the login. A 401 within 30 s of
+      that trip is a loop, and shows an error with Try again.
+    - `signOut()` submits a form POST to `/auth/logout` (`AuthPlatform.post`).
+      `identityHeaders` is empty.
+    - `AuthInterceptor.onUnauthenticated` reports a unary 401 (`AuthState.sessionLost`),
+      which goes back to the login. Streams are not watched; their pages show the error.
+  - Module: with the door, `PORTAL_AUTH=door` and the Launch links are `${origin}/grafana/`
+    and `/prometheus/` (empty when the host doesn't run them; HyperDX was already `:8444`).
+    An assertion refuses any other `PORTAL_AUTH`. The bundle's defines are readable as the
+    internal `portal.finalDefines`.
+  - Tests:
+    - Rust: `check_cases` asserts the sid equals the token's.
+    - Python: the header-table rows.
+    - Dart: `parseAuthMode` and `doorLoginUrl` tables (adversarial: an encoded `//`, an
+      `&rd=` smuggled in the path), and eight login-spec door rows (the loop guard's 30 s
+      boundary, a future or junk stamp).
+    - Eval: `portalCookieMode`.
+    - VM: `PromptService/List` through the door with no session header, and with a forged
+      one that is not a safe segment (kept, it would be refused, so the 200 proves the
+      overwrite).
+  - Fleet draft (no must-fix), fixed here:
+    - The Agent page opened a registry session behind the door that the gate then
+      replaced, leaving it orphaned against `max_per_user`. With `door` it now opens
+      none and names none (Dart row `positive_door_send_names_no_session`). Every tab
+      on one sign-in drives the same session.
+    - The sign-in row seeds a login-trip stamp and checks that it is cleared.
+  - Second draft (no must-fix), fixed here:
+    - The empty-sid backstop records an audit refusal (`no_session_id`), like every
+      other refusal in `check()`.
+    - `PORTAL_AUTH = "door"` without the door is refused at eval time (there is no
+      `/auth/login` to go to); `portalCookieMode` has the row.
+    - VM: `AgentSessionService/Send` through the door, with and without a forged
+      session header. Its empty goal's INVALID_ARGUMENT (identity is checked first)
+      proves the AuthLayer's user and the gate's session both arrived.
+    - That `Send` row found a real gap: with `[auth]` on the gateway alone, sessions
+      and the fleet had no AuthLayer. The door removes the client's `x-agent-user-id`,
+      so `Send` was UNAUTHENTICATED ("requires (user, session) identity"), and the
+      fleet would have answered as the `local` tenant. The module now refuses the door
+      unless every agent behind it has `[auth] mode = "oidc"` (so it verifies the
+      token, D7). The VM, the eval fixture and `deployment-nixos.md` put `[auth]` in the
+      host-wide `settings.auth`. Eval rows: sessions or the fleet with `mode = "off"`.
+      Operator note: behind the door, a plaintext grpcurl to the fleet needs a token.
+    - The logout POST's cross-site question does not arise: the session cookie is
+      `SameSite=Lax` (already tested), so a cross-site form carries no cookie.
+  - #720 (S30) merged as ce3812dc. Its draft's two must-fix items were checked and
+    did not hold: the VM test runs green (in a NixOS test VM eth1 is vlan 1, and the
+    driver does not use ssh), and nixpkgs declares `services.postgresql.settings.port`
+    (default 5432) with Postgres off. Carried to S26b: the stale `openFirewall`
+    description, the half-comment on 8123, an eval row for the door with
+    `postgres.enable = false`, more tool ports in the `frontDoorLockdown` sample, a
+    webhook-host row with the door on, and comments on `PORTAL_WEBHOOK_HOST`'s double
+    fallback.
+  - Carried to S26b: warn at eval time when the door is on and an operator's
+    `PORTAL_GRAFANA_URL`/`PORTAL_PROMETHEUS_URL` override is a loopback address (a dead
+    link from the browser).
 
 ## Cross-track note (not an S-increment)
 

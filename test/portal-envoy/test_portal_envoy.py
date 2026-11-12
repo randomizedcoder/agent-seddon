@@ -1033,7 +1033,7 @@ def edited_table(header: str, column: str, action: str) -> dict:
 class LoadFrontDoor(unittest.TestCase):
     def test_positive_the_real_table_loads(self):
         fd = front_spec().front_door
-        self.assertEqual(fd.replaced("rpc"), ["authorization"])
+        self.assertEqual(fd.replaced("rpc"), ["authorization", "x-agent-session-id"])
         self.assertEqual(fd.replaced("grafana"), ["x-seddon-role", "x-seddon-user"])
         self.assertIn("cookie", fd.removed("rpc"))
         self.assertNotIn("cookie", fd.removed("auth"))
@@ -1138,7 +1138,7 @@ class FrontDoorRender(unittest.TestCase):
         cfg = front_rendered()
         main = authz_of(cfg)["http_service"]["authorization_response"]
         self.assertEqual([p["exact"] for p in main["allowed_upstream_headers"]["patterns"]],
-                         ["authorization", "x-seddon-role", "x-seddon-user"])
+                         ["authorization", "x-agent-session-id", "x-seddon-role", "x-seddon-user"])
         hdx = authz_of(cfg, "front_door_hyperdx")["http_service"]["authorization_response"]
         self.assertNotIn("allowed_upstream_headers", hdx)
 

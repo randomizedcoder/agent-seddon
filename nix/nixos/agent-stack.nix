@@ -414,17 +414,23 @@ let
         null;
   };
 
-  webBundle = seddon.mkWebBundle {
-    # Behind the door the portal's RPCs go to its own origin, which routes each service.
-    defines = {
-      PORTAL_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWeb;
-      PORTAL_SESSIONS_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWebSessions;
-      PORTAL_FLEET_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWebFleet;
-      # Empty hides the Launch card; a loopback URL is rewritten to the page's host.
-      PORTAL_HYPERDX_URL = if hdxEnabled then cfg.hyperdx.frontendUrl else "";
-    }
-    // cfg.portal.defines;
-  };
+  # Behind the door the portal's RPCs go to its own origin, which routes each service.
+  portalDefines = {
+    PORTAL_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWeb;
+    PORTAL_SESSIONS_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWebSessions;
+    PORTAL_FLEET_GRPC_WEB_URL = if fd.enable then fdOrigin else urlFor ports.grpcWebFleet;
+    # Empty hides the Launch card; a loopback URL is rewritten to the page's host.
+    PORTAL_HYPERDX_URL = if hdxEnabled then cfg.hyperdx.frontendUrl else "";
+  }
+  # S31: behind the door the portal keeps no token (the door's cookie signs it in),
+  # and the tool links are the door's routes, since the tools' own ports are closed.
+  // lib.optionalAttrs fd.enable {
+    PORTAL_AUTH = "door";
+    PORTAL_GRAFANA_URL = if config.services.grafana.enable then "${fdOrigin}/grafana/" else "";
+    PORTAL_PROMETHEUS_URL = if config.services.prometheus.enable then fdPromUrl else "";
+  }
+  // cfg.portal.defines;
+  webBundle = seddon.mkWebBundle { defines = portalDefines; };
 
   # Hardening shared by the agent units. Not `ProtectHome`-strict on /nix: the agent
   # shells out to the store's git/rg/go tools and (opt-in) `nix run`. Namespaces stay
@@ -916,13 +922,30 @@ in
         };
         description = "Extra `PORTAL_*` compile-time defines for the web bundle.";
       };
+      finalDefines = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        internal = true;
+        readOnly = true;
+        description = "The web bundle's defines as built: the module's own plus `defines` (for the eval check).";
+      };
     };
   };
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       {
+        services.agentSeddon.portal.finalDefines = portalDefines;
         assertions = [
+          {
+            # S31: behind the door the portal keeps no token in JavaScript.
+            assertion = !fd.enable || (portalDefines.PORTAL_AUTH or "") == "door";
+            message = "services.agentSeddon.portal.defines: PORTAL_AUTH must be \"door\" with frontDoor.enable (the door's cookie signs the portal in).";
+          }
+          {
+            # ...and without it there is no door to sign in at (/auth/login is the gate's).
+            assertion = fd.enable || (portalDefines.PORTAL_AUTH or "") != "door";
+            message = "services.agentSeddon.portal.defines: PORTAL_AUTH = \"door\" needs frontDoor.enable (there is no /auth/login without the door).";
+          }
           {
             assertion = builtins.all (n: builtins.match "[A-Za-z0-9_.-]+" n != null) (
               builtins.attrNames cfg.credentials
@@ -1095,6 +1118,19 @@ in
             # the build, not the gateway at start.
             assertion = (gwAuth.mode or "") == "oidc";
             message = "services.agentSeddon.frontDoor: the gateway needs `[auth] mode = \"oidc\"` (settings.auth or gateway.settings.auth).";
+          }
+          {
+            # The door forwards the token to sessions and fleet too, and removes the
+            # client's x-agent-user-id: only their own AuthLayer, verifying it, names
+            # the tenant (04-service-integration, D7). Without it, Send has no user and
+            # the fleet answers as the `local` tenant.
+            assertion =
+              builtins.all
+                (n: ((config.services.agentSeddon.renderedSettings.${n} or { }).auth.mode or "") == "oidc")
+                (
+                  builtins.attrNames (builtins.removeAttrs config.services.agentSeddon.renderedSettings [ "gateway" ])
+                );
+            message = "services.agentSeddon.frontDoor: every agent behind the door needs `[auth] mode = \"oidc\"` to verify the door's token; set it in settings.auth (host-wide), not gateway.settings.auth alone.";
           }
           {
             assertion = builtins.elem fdCallback (gwAuth.redirect_uris or [ ]);

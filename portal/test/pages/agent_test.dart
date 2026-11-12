@@ -108,6 +108,19 @@ void main() {
               .request as GoalRequest;
           expect(sent.goal, 'refactor the parser');
 
+        case 'positive_door_send_names_no_session':
+          robot.door = true;
+          await robot.load();
+          await robot.enterGoal('behind the door');
+          await robot.send();
+          // The gate names the session (S31): no Open, no identity metadata.
+          expect(robot.log.fired('agent.v1.SessionRegistryService/Open'),
+              isFalse);
+          final sent = robot.log.headers.lastWhere(
+              (h) => h.path == '/agent.v1.AgentSessionService/Send');
+          expect(sent.metadata.containsKey('x-agent-session-id'), isFalse);
+          expect(sent.metadata.containsKey('x-agent-user-id'), isFalse);
+
         case 'boundary_slow_send_no_double_submit':
           await robot.load();
           await robot.enterGoal('slow goal');

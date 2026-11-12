@@ -390,11 +390,11 @@ enum Cred {
 #[rstest]
 #[case::positive_portal(Cred::Session, Listener::Main, "/", 200, &[])]
 #[case::positive_portal_asset(Cred::Session, Listener::Main, "/assets/x.js?v=1", 200, &[])]
-#[case::positive_rpc_gets_the_sessions_token(Cred::Session, Listener::Main, RPC, 200, &["authorization"])]
+#[case::positive_rpc_gets_the_sessions_token(Cred::Session, Listener::Main, RPC, 200, &["authorization", "x-agent-session-id"])]
 #[case::positive_grafana_identity(Cred::Session, Listener::Main, "/grafana/d/x", 200, &["x-seddon-user", "x-seddon-role"])]
 #[case::positive_prometheus(Cred::Session, Listener::Main, "/prometheus/graph", 200, &[])]
 #[case::positive_hyperdx(Cred::Session, Listener::Hyperdx, "/search", 200, &[])]
-#[case::positive_own_bearer_echoed(Cred::OwnBearer, Listener::Main, RPC, 200, &["authorization"])]
+#[case::positive_own_bearer_echoed(Cred::OwnBearer, Listener::Main, RPC, 200, &["authorization", "x-agent-session-id"])]
 #[case::negative_page_to_login(Cred::None, Listener::Main, "/grafana/d/x?orgId=1", 302, &["location"])]
 #[case::negative_rpc_is_401(Cred::None, Listener::Main, RPC, 401, &[])]
 #[case::negative_hyperdx_to_main_login(Cred::None, Listener::Hyperdx, "/search", 302, &["location"])]
@@ -405,10 +405,10 @@ enum Cred {
 #[case::adversarial_forged_bearer_rpc(Cred::ForgedBearer, Listener::Main, RPC, 401, &[])]
 #[case::adversarial_cert_bound_bearer_rpc(Cred::BoundBearer, Listener::Main, RPC, 401, &[])]
 #[case::adversarial_cert_bound_bearer_grafana(Cred::BoundBearer, Listener::Main, "/grafana/d/x", 302, &["location"])]
-#[case::corner_lowercase_padded_bearer_echoed(Cred::OwnBearerLowercasePadded, Listener::Main, RPC, 200, &["authorization"])]
+#[case::corner_lowercase_padded_bearer_echoed(Cred::OwnBearerLowercasePadded, Listener::Main, RPC, 200, &["authorization", "x-agent-session-id"])]
 #[case::negative_bare_scheme(Cred::BareScheme, Listener::Main, RPC, 401, &[])]
 #[case::adversarial_oversized_bearer(Cred::OversizedBearer, Listener::Main, RPC, 401, &[])]
-#[case::adversarial_cookie_wins_over_forged_bearer(Cred::SessionAndForgedBearer, Listener::Main, RPC, 200, &["authorization"])]
+#[case::adversarial_cookie_wins_over_forged_bearer(Cred::SessionAndForgedBearer, Listener::Main, RPC, 200, &["authorization", "x-agent-session-id"])]
 #[tokio::test]
 async fn check_cases(
     #[case] cred: Cred,
@@ -488,6 +488,12 @@ async fn check_cases(
             (claims.subject.as_str(), claims.tenant.as_str()),
             (ALICE, TENANT)
         );
+        // S31: the session header is the token's own sid, never the client's.
+        assert_eq!(
+            reply.header("x-agent-session-id"),
+            Some(claims.sid.as_str())
+        );
+        assert!(!claims.sid.is_empty());
     }
     if let Some(u) = reply.header("x-seddon-user") {
         assert_eq!(u, ALICE);

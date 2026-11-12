@@ -159,7 +159,7 @@ impl Route {
     /// client's (F4's table). Every other identity header is removed by the route.
     pub fn replaced(self) -> &'static [&'static str] {
         match self {
-            Route::Rpc => &["authorization"],
+            Route::Rpc => &["authorization", "x-agent-session-id"],
             Route::Grafana => &["x-seddon-user", "x-seddon-role"],
             Route::Portal | Route::Prometheus | Route::Hyperdx => &[],
         }

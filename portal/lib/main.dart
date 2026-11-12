@@ -51,7 +51,9 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
   late final PortalClients _clients = PortalClients(
     _config,
     interceptors: [
-      AuthInterceptor(() => _auth.token, identity: () => _auth.identityHeaders),
+      AuthInterceptor(() => _auth.token,
+          identity: () => _auth.identityHeaders,
+          onUnauthenticated: () => _auth.sessionLost()),
     ],
   );
   late final AuthState _auth = AuthState(
@@ -186,7 +188,10 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       const LauncherPage(config: _config),
       PromptsPage(clients: _clients),
       GraphPage(clients: _clients),
-      AgentViewPage(clients: _clients, tenant: () => _auth.tenant),
+      AgentViewPage(
+          clients: _clients,
+          tenant: () => _auth.tenant,
+          door: _auth.mode == AuthMode.door),
       RouterPage(clients: _clients),
       FleetPage(clients: _clients, tenant: () => _auth.tenant),
       ForgesPage(clients: _clients, platform: _auth.platform, now: _auth.nowSecs),

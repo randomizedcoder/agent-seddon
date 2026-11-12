@@ -286,13 +286,16 @@ its agent token (the client's own `authorization` is overwritten).
 The module sets `[auth.gate]` on the gateway (listen `127.0.0.1:8097`, `frontDoor.issuer`,
 main origin `frontDoor.origin`), Dex's issuer to `<origin>/dex`, and adds the gate's
 callback to Dex's redirect URIs. Turning `[auth]` on stays the host's step, and the
-build refuses a front door until it is done:
+build refuses a front door until it is done. It goes in the host-wide `settings.auth`,
+not `gateway.settings.auth`: the door forwards the token to sessions and the fleet too,
+and removes the client's `x-agent-user-id`, so each one names the tenant by verifying
+the token itself. The build refuses an agent behind the door without `mode = "oidc"`.
 
 ```nix
 services.agentSeddon = {
   frontDoor.enable = true;
   dex = { enable = true; github = { … }; };
-  gateway.settings.auth = {
+  settings.auth = {
     mode = "oidc";
     redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
     issuers = [ config.services.agentSeddon.dex.issuerSettings ];
@@ -365,6 +368,14 @@ The checks read the NixOS firewall options only: rules from `extraCommands`,
 `extraInputRules` or a hand-written nftables ruleset are invisible to them, so review
 those by hand. The REST transcoder (8094) stays loopback-only, as before: reach it over
 `ssh -L 8094:127.0.0.1:8094 <host>`.
+
+**The portal behind the door** (S31). The bundle is built with `PORTAL_AUTH=door`: the
+door's cookie signs it in, so the page holds no token. It asks `WhoAmI` once. A 401 sends
+the browser to `/auth/login?rd=<the page's path>`, and signing out POSTs `/auth/logout`.
+The door adds the bearer and the session to each call. Its Launch cards link to the door's
+`/grafana/` and `/prometheus/` (when the host runs them) and to HyperDX on `:8444`. A
+`portal.defines` entry still overrides a link, but the build refuses any `PORTAL_AUTH`
+other than `door` while the door is on.
 
 Deploying a change means merging to `main`, running `nix flake update agent-seddon`
 in the host flake, then `nixos-rebuild switch`.

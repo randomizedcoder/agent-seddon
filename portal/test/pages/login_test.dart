@@ -18,6 +18,7 @@ import 'login_spec.dart';
 void main() {
   const now = LoginRobot.now;
   const callback = 'http://127.0.0.1:8092/?code=c1&state=s1';
+  const door = 'https://agent.example:8443/';
 
   IssuersResponse issuers(List<String> names) => IssuersResponse(issuers: [
         for (final n in names) LoginIssuer(name: n, profile: n),
@@ -436,6 +437,93 @@ void main() {
           expect(robot.shellShown, isFalse);
           expect(robot.platform.currentUri.hasQuery, isFalse);
           expect(robot.auth.hasInstallCallback, isTrue);
+
+        case 'positive_door_cookie_signs_in':
+          final robot = await LoginRobot.create(tester, uri: door);
+          // Back from the door's login: its trip stamp is cleared on success.
+          robot.platform.storage[AuthState.doorLoginKey] = '$now';
+          robot.authFake.whoAmIResponse = principal();
+          await robot.load(mode: AuthMode.door);
+          await robot.pumpUntilFound('login.account');
+          await robot.pumpUntil(() => robot.log.fired(LoginRobot.listReviews),
+              reason: 'the shell to call ListReviews');
+          for (final h in robot.log.headers) {
+            expect(h.authorization, isNull, reason: '$h: the door adds the bearer');
+            expect(h.metadata.containsKey('x-agent-session-id'), isFalse,
+                reason: '$h: the door names the session');
+          }
+          expect(robot.log.fired(LoginRobot.issuers), isFalse);
+          expect(robot.platform.navigated, isEmpty);
+          expect(robot.platform.storage, isEmpty,
+              reason: 'no token or session stored, and the trip stamp cleared');
+
+        case 'negative_door_signed_out_goes_to_the_door_login':
+          final robot = await LoginRobot.create(tester, uri: '${door}app?x=1');
+          robot.authFake.whoAmIError = const GrpcError.unauthenticated('no session');
+          await robot.load(mode: AuthMode.door);
+          expect(robot.platform.navigated, ['/auth/login?rd=%2Fapp']);
+          expect(robot.auth.phase, AuthPhase.redirecting);
+          expect(robot.exists('login.progress'), isTrue);
+          expect(robot.platform.storage[AuthState.doorLoginKey], '$now');
+          expect(robot.shellShown, isFalse);
+
+        case 'negative_door_unbound_user_explained':
+          final robot = await LoginRobot.create(tester, uri: door);
+          robot.authFake.whoAmIError = const GrpcError.permissionDenied('forbidden');
+          await robot.load(mode: AuthMode.door);
+          expect(robot.errorText, contains('no access'));
+          expect(robot.platform.navigated, isEmpty);
+          expect(robot.shellShown, isFalse);
+
+        case 'positive_door_signout_posts_to_the_door':
+          final robot = await LoginRobot.create(tester, uri: door);
+          robot.authFake.whoAmIResponse = principal();
+          await robot.load(mode: AuthMode.door);
+          await robot.pumpUntilFound('login.signout');
+          await robot.tap('login.signout',
+              until: () => robot.platform.posted.isNotEmpty);
+          expect(robot.platform.posted, ['/auth/logout']);
+          expect(robot.log.fired(LoginRobot.logout), isFalse);
+          expect(robot.auth.session, isNull);
+
+        case 'corner_door_session_lost_mid_use':
+          final robot = await LoginRobot.create(tester, uri: door);
+          robot.authFake.whoAmIResponse = principal();
+          robot.fleet.failNext('ListReviews', const GrpcError.unauthenticated('ended'));
+          await robot.load(mode: AuthMode.door);
+          await robot.pumpUntil(() => robot.platform.navigated.isNotEmpty,
+              reason: "the shell's 401 to send the browser to the door");
+          expect(robot.platform.navigated, ['/auth/login?rd=%2F']);
+          expect(robot.auth.expired, isTrue);
+          expect(robot.auth.session, isNull);
+
+        case 'adversarial_door_login_loop_stops':
+          final robot = await LoginRobot.create(tester, uri: door);
+          robot.platform.storage[AuthState.doorLoginKey] = '${now - 5}';
+          robot.authFake.whoAmIError = const GrpcError.unauthenticated('no session');
+          await robot.load(mode: AuthMode.door);
+          expect(robot.platform.navigated, isEmpty);
+          expect(robot.errorText, contains('did not accept the session'));
+          expect(robot.exists('login.retry'), isTrue);
+          expect(robot.platform.storage.containsKey(AuthState.doorLoginKey), isFalse,
+              reason: 'Try again may go to the door once more');
+
+        case 'boundary_door_login_trip_30s_ago_redirects':
+          final robot = await LoginRobot.create(tester, uri: door);
+          robot.platform.storage[AuthState.doorLoginKey] =
+              '${now - AuthState.doorLoopSecs}';
+          robot.authFake.whoAmIError = const GrpcError.unauthenticated('no session');
+          await robot.load(mode: AuthMode.door);
+          expect(robot.platform.navigated, ['/auth/login?rd=%2F']);
+
+        case 'adversarial_door_future_trip_stamp_is_not_a_loop':
+          for (final stamp in ['${now + 5}', 'soon', '']) {
+            final robot = await LoginRobot.create(tester, uri: door);
+            robot.platform.storage[AuthState.doorLoginKey] = stamp;
+            robot.authFake.whoAmIError = const GrpcError.unauthenticated('no session');
+            await robot.load(mode: AuthMode.door);
+            expect(robot.platform.navigated, ['/auth/login?rd=%2F'], reason: stamp);
+          }
 
         default:
           fail('no test body for row ${row.label}');

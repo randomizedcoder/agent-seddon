@@ -61,6 +61,13 @@ const agentSpec = PageSpec('agent', [
   ),
   SpecRow(
     elementId: 'agent.send',
+    caseClass: CaseClass.positive,
+    name: 'door_send_names_no_session',
+    description: 'behind the front door Send opens no session and names none',
+    expectedRpc: 'agent.v1.AgentSessionService/Send',
+  ),
+  SpecRow(
+    elementId: 'agent.send',
     caseClass: CaseClass.boundary,
     name: 'slow_send_no_double_submit',
     description: 'while a Send is in flight the button is disabled — one Open',

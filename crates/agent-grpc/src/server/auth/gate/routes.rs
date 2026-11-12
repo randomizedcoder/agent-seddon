@@ -267,7 +267,27 @@ impl AuthGate {
                     },
                     Caller::Bearer(t, _, _) => format!("Bearer {t}"),
                 };
-                ok = ok.with("authorization", value);
+                // The token's own sid (S31): the portal in cookie mode names no
+                // session, and a client's header never reaches the agent. The
+                // issuer neither mints nor verifies a token with an empty sid
+                // (token/tests.rs `adversarial_empty_sid`), so this refusal is a
+                // backstop: never pass a call on unnamed, and say so if it fires.
+                let sid = caller.sid();
+                if sid.is_empty() {
+                    crate::server::audit::refused(
+                        GATE_CHECK,
+                        "no_session_id",
+                        crate::server::audit::Refused {
+                            tenant: &principal.tenant,
+                            subject: &principal.subject,
+                            sid: "",
+                        },
+                    );
+                    return Reply::new(401, "unauthenticated");
+                }
+                ok = ok
+                    .with("authorization", value)
+                    .with("x-agent-session-id", sid.to_string());
             }
             Route::Grafana => {
                 ok = ok

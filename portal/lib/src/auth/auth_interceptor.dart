@@ -1,22 +1,39 @@
+import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError, StatusCode;
 import 'package:grpc/service_api.dart';
 
 /// Adds the signed-in user's credentials to every call, unary and streaming, on
 /// every channel (security-hardening S13b, S15c): `authorization: Bearer <agent
 /// token>`, and the identity the agent scopes the call by (see
 /// [AuthState.identityHeaders]). Both are read per call, so a refreshed token is
-/// used from the next call on; signed out, or sign-in off, adds nothing.
+/// used from the next call on; signed out, or sign-in off, adds nothing. A
+/// unary call that comes back unauthenticated is reported to
+/// [onUnauthenticated] (S31: the front door's session ended); the caller still
+/// sees the error.
 class AuthInterceptor extends ClientInterceptor {
-  AuthInterceptor(this.token, {this.identity});
+  AuthInterceptor(this.token, {this.identity, this.onUnauthenticated});
 
   final String? Function() token;
 
   /// `x-agent-user-id` / `x-agent-session-id` for a signed-in portal.
   final Map<String, String> Function()? identity;
 
+  final void Function()? onUnauthenticated;
+
   @override
   ResponseFuture<R> interceptUnary<Q, R>(ClientMethod<Q, R> method, Q request,
-          CallOptions options, ClientUnaryInvoker<Q, R> invoker) =>
-      invoker(method, request, withCredentials(options, token(), identity?.call()));
+      CallOptions options, ClientUnaryInvoker<Q, R> invoker) {
+    final call =
+        invoker(method, request, withCredentials(options, token(), identity?.call()));
+    final hook = onUnauthenticated;
+    if (hook != null) {
+      // A side listener: it handles its own copy of the error, so it is never
+      // reported as unhandled, and the caller's future is returned untouched.
+      call.then<void>((_) {}, onError: (Object e) {
+        if (e is GrpcError && e.code == StatusCode.unauthenticated) hook();
+      });
+    }
+    return call;
+  }
 
   @override
   ResponseStream<R> interceptStreaming<Q, R>(
