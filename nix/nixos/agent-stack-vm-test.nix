@@ -651,9 +651,13 @@ pkgs.testers.runNixOSTest {
         for u, inv in before.items():
             machine.wait_until_succeeds(f"test \"$(systemctl show -p InvocationID --value agent-seddon-{u}.service)\" != {inv}")
             machine.wait_for_unit(f"agent-seddon-{u}.service")
-            machine.sleep(2)
-            machine.require_unit_state(f"agent-seddon-{u}.service", "active")
             now = invocation(u)
+            # A log line means tracing is up, so `[github_app]` was filled from the
+            # files without an error (a bad fill exits before tracing starts).
+            machine.wait_until_succeeds(
+                f"journalctl --no-pager -o cat _SYSTEMD_INVOCATION_ID={now} | grep -q INFO"
+            )
+            machine.require_unit_state(f"agent-seddon-{u}.service", "active")
             machine.fail(
                 f"journalctl --no-pager _SYSTEMD_INVOCATION_ID={now} | grep -q 'no GitHub App yet'"
             )

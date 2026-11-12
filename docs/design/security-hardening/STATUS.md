@@ -1762,20 +1762,31 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - **The note is logged first thing.** `agent` logs `github_app_note` right after tracing
     starts, so no early return before the old spot loses it. The one-shot `fleet` and `repo`
     commands, which return before tracing, print it on stderr.
-  - **`webhookUrl`'s port** is checked to be 1–65535 (`portOk` reads only a port at the
-    URL's end, and this URL may have a path). Rows in `githubAppRefusals`: `:99999/x`,
-    `:0/x`, `:00000` refused; `:65535/x` and `:8443` accepted.
+  - **`webhookUrl`'s port** is checked to be 1–65535. Rows in `githubAppRefusals`:
+    `:99999/x`, `:0/x`, `:00000` refused; `:65535/x` and `:8443` accepted.
+  - **One port parser.** `urlPort` replaces the three copies (`portOk`, `dexIssuerPort`,
+    the webhook's inline one). The old `portOk` read a port only at the URL's end, so
+    `grafana.prometheusUrl = "http://127.0.0.1:99999/prometheus"` passed. Rows:
+    `grafanaPrometheusUrlRejected` refuses `:99999/prometheus` and `:0/prometheus`, accepts
+    `:09090/prometheus`.
   - **VM subtest of the restart sequence.** The `ghapp` specialisation turns on
     `githubApp.fromSetup`. Before any App, the directory is `0700 agent-seddon`, the gate
     has written its setup code, Dex is skipped, and each agent's invocation logs "holds no
     GitHub App yet". The test then writes the App's files as the gate's callback would
     (`app-id` last, a real RSA key). The path unit starts Dex with the App's client id and
     secret spliced in, not their paths. Each agent restarts (a new invocation id), stays up
-    and logs no note. The gate removes the setup code.
-  - **Tests and nits.** `valid_client_id_cases` (10 rows). The `use` in `fill_from_app_dir`
+    and logs no note. The gate removes the setup code. "Stays up" waits for the new
+    invocation's first log line (tracing is up, so the fill passed), not a fixed sleep.
+  - **Tests and nits.** `valid_client_id` now needs a letter or digit at both ends;
+    `valid_client_id_cases` (14 rows, `.`, `.Iv1` and `Iv1.` refused). `read`'s doc says a
+    symlink to a directory is fine. The `use` in `fill_from_app_dir`
     moved to the top of the function. `forge.md`: names ending in `-`, and the half-a-pair
-    rule. `10-sso-front-door.md`: before setup, the setup code can be read by the tools
+    rule. `deployment-nixos.md`: a missing directory fails the start; the webhook port.
+    `10-sso-front-door.md`: before setup, the setup code can be read by the tools
     that run as the agent's user.
+  - **Not changed:** the draft's "`agent doctor` loses the note" — `doctor` and
+    `--check-config` run after tracing starts, which logs it on stderr; only `login`,
+    `logout` and `whoami` (a user's client, no App) return earlier.
   - **Still carried:** the `sleep 3` before the gateway restarts stays a heuristic (the VM
     subtest shows the sequence works, not that the callback page always lands first); the
     config service's snapshot after `resolve_github_app`; Dex's connector with a GitHub

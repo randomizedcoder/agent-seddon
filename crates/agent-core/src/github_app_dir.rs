@@ -30,10 +30,14 @@ pub fn valid_app_slug(s: &str) -> bool {
     crate::valid_github_login(s) && !s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
-/// An OAuth client id as GitHub issues one (`Iv23li…`): letters, digits and `.`,
-/// at most 64 bytes.
+/// An OAuth client id as GitHub issues one (`Iv23li…`, or a legacy `Iv1.…`): letters,
+/// digits and `.`, at most 64 bytes, starting and ending with a letter or digit.
 pub fn valid_client_id(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    let edge = |b: Option<&u8>| b.is_some_and(u8::is_ascii_alphanumeric);
+    s.len() <= 64
+        && edge(s.as_bytes().first())
+        && edge(s.as_bytes().last())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
 }
 
 /// A GitHub App id: a positive decimal number.
@@ -57,7 +61,8 @@ pub struct AppIds {
 /// [`APP_ID_FILE`] in it), an error when one exists but a file is missing, too large
 /// or of the wrong shape. No directory at all is an error too: whoever runs the gate
 /// makes it before the agents start (the NixOS module does, at boot), so its absence
-/// is a mistyped path, which would otherwise look like "no App yet" for good.
+/// is a mistyped path, which would otherwise look like "no App yet" for good. `dir`
+/// only has to resolve to a directory: a symlink to one is fine.
 /// Errors name the file, never its contents.
 pub fn read(dir: &Path) -> Result<Option<AppIds>, String> {
     match std::fs::metadata(dir) {
@@ -220,7 +225,11 @@ mod tests {
     #[case::positive_legacy_dotted("Iv1.abc123", true)]
     #[case::boundary_64_bytes(&"a".repeat(64), true)]
     #[case::boundary_65_bytes(&"a".repeat(65), false)]
+    #[case::boundary_one_char("a", true)]
     #[case::negative_empty("", false)]
+    #[case::corner_dot_only(".", false)]
+    #[case::corner_leading_dot(".Iv1", false)]
+    #[case::corner_trailing_dot("Iv1.", false)]
     #[case::adversarial_space("Iv1 x", false)]
     #[case::adversarial_slash("Iv1/../x", false)]
     #[case::adversarial_newline("Iv1\nx", false)]

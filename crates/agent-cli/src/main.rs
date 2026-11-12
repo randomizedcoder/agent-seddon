@@ -113,6 +113,8 @@ async fn main() -> Result<()> {
     // `[github_app] app_dir` (S26b): the App `/auth/setup` made, read once here.
     let github_app_note = config.resolve_github_app().map_err(anyhow::Error::msg)?;
     // The one-shot commands below return before tracing starts: say it on stderr.
+    // (`login` / `logout` / `whoami` skip it: they are a user's client and use no App.
+    // `doctor` and `--check-config` run after tracing starts, which logs it.)
     if fleet_cmd.is_some() || matches!(mode, Mode::Repo(_)) {
         if let Some(note) = &github_app_note {
             eprintln!("note: {note}");

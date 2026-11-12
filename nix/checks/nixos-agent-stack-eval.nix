@@ -597,6 +597,9 @@ let
         "file:///etc/passwd"
         "http://x:9090/api, http://evil"
         "http://127.0.0.1:99999"
+        # A path after the port doesn't hide it.
+        "http://127.0.0.1:99999/prometheus"
+        "http://127.0.0.1:0/prometheus"
         # A path is allowed (the door's /prometheus); traversal, a query, a fragment,
         # an empty or spaced segment are not.
         "http://127.0.0.1:9090/../etc"
@@ -610,6 +613,7 @@ let
         "http://127.0.0.1:9090"
         "http://127.0.0.1:9090/prometheus"
         "http://127.0.0.1:9090/prometheus/"
+        "http://127.0.0.1:09090/prometheus"
       ];
     # The panel-query check ships with the dashboards (and only with them).
     grafanaObsCheckInstalled =
