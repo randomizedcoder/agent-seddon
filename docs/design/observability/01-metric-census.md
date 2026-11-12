@@ -28,7 +28,7 @@ The C19 families. Repo is the operator-roster `FleetSession.repo` (bounded, LRU-
 | Family | Labels | Phase 2 |
 |---|---|---|
 | `agent_fleet_triggers_total` | `source` (poll\|webhook\|slack\|review_now), `user`, `repo` | ✅ recorded (orchestrator, every trigger for a known row, duplicates included; a trigger folded into a pending one counts under the pending one's source, so `webhook`/`slack` are lower bounds while the poller runs) |
-| `agent_fleet_reviews_total` | `status` (reviewing\|drafted\|superseded\|uptodate), `user`, `repo` | ✅ recorded (orchestrator) |
+| `agent_fleet_reviews_total` | `status` (reviewing\|drafted\|undrafted\|failed\|superseded\|uptodate\|at_capacity), `user`, `repo` | ✅ recorded (orchestrator) |
 | `agent_fleet_progress_total` | `beat` (found\|drafted\|posted), `outcome` (posted\|softfailed\|skipped), `user`, `repo` | ✅ recorded (progress feed) |
 | `agent_fleet_approvals_total` | `outcome` (posted\|already\|notfound\|post_failed), `user`, `repo` | ✅ recorded (approver) |
 | `agent_fleet_approval_latency_seconds` | `user`, `repo` (drafted→posted; clamp) | **deferred** — see note |

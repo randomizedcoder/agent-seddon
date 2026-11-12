@@ -819,7 +819,9 @@ in
         example = "http://127.0.0.1:9090";
         description = ''
           Also provision a Prometheus data source (uid `prometheus`) at this URL. Leave
-          null when the host's Grafana already has one.
+          null when the host's Grafana already has one. Grafana and
+          `agent-seddon-obs-check` reach it without signing in, so give Prometheus's own
+          address (loopback, under `/prometheus` behind the door), not the door's.
         '';
       };
       adminPasswordFile = lib.mkOption {

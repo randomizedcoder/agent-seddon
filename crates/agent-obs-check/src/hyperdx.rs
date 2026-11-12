@@ -117,10 +117,18 @@ fn aggregate(a: &Value) -> Result<String> {
                 .and_then(Value::as_f64)
                 .filter(|l| l.is_finite() && *l > 0.0 && *l < 1.0)
                 .ok_or_else(|| invalid("a quantile's level is not in (0, 1)"))?;
-            let inner = call("quantile", expr);
-            // `quantile(expr)` → `quantile(0.95)(expr)`.
-            let (name, args) = inner.split_once('(').unwrap_or((&inner, ")"));
-            format!("{name}({level})({args}")
+            // `quantile[If]` takes its level as a parameter: `quantile(0.95)(expr)`.
+            let name = if cond.is_empty() {
+                "quantile"
+            } else {
+                "quantileIf"
+            };
+            let args = if cond.is_empty() {
+                expr.to_string()
+            } else {
+                format!("{expr}, {cond}")
+            };
+            format!("{name}({level})({args})")
         }
         other => {
             return Err(invalid(format!(
@@ -169,39 +177,37 @@ pub fn render_tile(cfg: &Value, trace: &Source, window: u64) -> Result<String> {
         cols.push(format!("{} AS `s{i}`", aggregate(a)?));
     }
     let group = part(cfg.get("groupBy"), "groupBy")?;
-    let mut keys = Vec::new();
     let charted = matches!(
         cfg.get("displayType").and_then(Value::as_str),
         Some("line" | "stacked_bar")
     );
+    // The keys as selected and as grouped by: a chart's bucket is selected under an
+    // alias and grouped by that alias; a `groupBy` is both, as written.
+    let mut selected = Vec::new();
+    let mut grouped = Vec::new();
     if charted {
-        keys.push(format!(
+        selected.push(format!(
             "toStartOfInterval({}, INTERVAL 1 MINUTE) AS `__bucket`",
             src.timestamp
         ));
+        grouped.push("`__bucket`".to_string());
     }
     if !group.is_empty() {
-        keys.push(group.to_string());
+        selected.push(group.to_string());
+        grouped.push(group.to_string());
     }
     let where_ = part(cfg.get("where"), "where")?;
     let mut sql = format!(
         "SELECT {} FROM {} WHERE {}",
         cols.into_iter()
-            .chain(keys.iter().cloned())
+            .chain(selected)
             .collect::<Vec<_>>()
             .join(", "),
         src.table,
         filter(src, window, where_)
     );
-    if !keys.is_empty() {
-        let by: Vec<&str> = keys
-            .iter()
-            .map(|k| {
-                k.strip_suffix(" AS `__bucket`")
-                    .map_or(k.as_str(), |_| "`__bucket`")
-            })
-            .collect();
-        sql.push_str(&format!(" GROUP BY {}", by.join(", ")));
+    if !grouped.is_empty() {
+        sql.push_str(&format!(" GROUP BY {}", grouped.join(", ")));
     }
     sql.push_str(&format!(" LIMIT {MAX_ROWS}"));
     Ok(sql)
@@ -374,6 +380,11 @@ mod tests {
             { "aggFn": "quantile", "level": 0.5, "valueExpression": "Duration", "aggCondition": "SpanKind = 'x'" } ] })),
         Ok(format!("SELECT countIf(StatusCode = 'Error') AS `s0`, quantileIf(0.5)(Duration, SpanKind = 'x') AS `s1` \
                     FROM default.otel_traces WHERE {W} LIMIT 1000")))]
+    // A `groupBy` that happens to end like the bucket's alias is grouped as written.
+    #[case::corner_group_by_like_the_bucket_alias(
+        tile(json!({ "displayType": "line", "groupBy": "x AS `__bucket`" })),
+        Ok(format!("SELECT count() AS `s0`, toStartOfInterval(Timestamp, INTERVAL 1 MINUTE) AS `__bucket`, x AS `__bucket` \
+                    FROM default.otel_traces WHERE {W} GROUP BY `__bucket`, x AS `__bucket` LIMIT 1000")))]
     #[case::negative_unknown_agg(tile(json!({ "select": [ { "aggFn": "last_value", "valueExpression": "x" } ] })), Err("not one this check renders"))]
     #[case::negative_sum_without_expr(tile(json!({ "select": [ { "aggFn": "sum" } ] })), Err("needs a valueExpression"))]
     #[case::negative_empty_select(tile(json!({ "select": [] })), Err("select is not a list"))]

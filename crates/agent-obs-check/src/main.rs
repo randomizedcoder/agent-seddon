@@ -14,6 +14,7 @@
 //!               [--clickhouse-user agent_viewer] [--trace-table default.otel_traces]
 //!     every tile and saved search of the template, rendered to SQL and run as
 //!     HyperDX's read-only ClickHouse login, over --from (which must be now-<n><unit>)
+//!     up to now (any other --to is refused rather than ignored)
 //! obs-check --check [--dashboards <dir>] [--hyperdx-template <file>]
 //!     offline: every panel query resolves a data source against stand-ins, and every
 //!     tile renders
@@ -238,10 +239,15 @@ impl Http {
 
 /// A password file's one line (an editor's trailing newline dropped).
 fn read_password(file: &Path) -> Result<String, String> {
+    const MAX: u64 = 4096;
     let mut s = String::new();
     std::fs::File::open(file)
-        .and_then(|f| f.take(4096).read_to_string(&mut s))
+        .and_then(|f| f.take(MAX + 1).read_to_string(&mut s))
         .map_err(|e| format!("{}: {e}", file.display()))?;
+    // Longer is not a password file; truncating it would send a wrong one.
+    if s.len() as u64 > MAX {
+        return Err(format!("{} is over {MAX} bytes", file.display()));
+    }
     Ok(s.trim_end_matches(['\n', '\r']).to_string())
 }
 
@@ -370,6 +376,10 @@ fn trace_source(a: &Args) -> hyperdx::Source {
 }
 
 async fn hyperdx_tiles(a: &Args, file: &Path, url: &str, pw_file: &Path) -> Result<bool, String> {
+    // The tiles run over "the last <window>", as HyperDX's own range does: they end now.
+    if a.to != "now" {
+        return Err(format!("--to {:?}: the tiles always end now", a.to));
+    }
     let window = hyperdx::relative_secs(&a.from).ok_or_else(|| {
         format!(
             "--from {:?} is not now-<n><unit>, which the tiles need",

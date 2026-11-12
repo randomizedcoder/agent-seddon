@@ -195,6 +195,21 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
       `--password-file`.
     - Server text is printed with control characters as spaces, so a reply can't forge
       a `FAILED` line.
+  - **#725's fleet draft** (two must-fix doc lines, fixed here, with the cheap
+    should-fix items):
+    - `deployment-nixos.md` and the metric census now list `undrafted` (and the census
+      `failed` and `at_capacity`).
+    - A `--to` other than `now` is refused with the tiles, not ignored.
+    - A password file over 4096 bytes is an error, not truncated to a wrong password.
+    - `render_tile` keeps the bucket and the `groupBy` as separate lists instead of
+      recovering the bucket from its rendered alias (row
+      `corner_group_by_like_the_bucket_alias`).
+    - `quantile` is built directly, with no unreachable fallback.
+    - `grafana.prometheusUrl`'s description says to give Prometheus's own address,
+      not the door's, which needs a sign-in neither Grafana nor obs-check has.
+    - Answered: with no drafter configured, every review counts as `undrafted`. That is
+      intended: a review that ran shows on the tiles, and the outcome says that no
+      draft came of it.
   - **Still open:**
     - From #724's draft: the longest-name-first sort in `Vars::from_dashboard` is
       redundant (its comment describes a case exact matching can't produce). The

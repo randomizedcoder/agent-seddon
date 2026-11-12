@@ -147,7 +147,8 @@ dashboards in HyperDX — *agent-seddon · Overview* (spans by service, error sp
 slowest operations, gRPC methods), *Model calls* (calls by model, latency, tokens,
 finish reasons), *Tools* (calls, p95 latency and errors by tool, policy decisions) and
 *Review fleet* (reviews by repo and outcome, review duration, collectors, sandboxed
-commands; the first two count only reviews that ran, `outcome` `drafted` or `failed`) — and
+commands; the first two count only reviews that ran, `outcome` `drafted`, `undrafted` or
+`failed`) — and
 four saved searches (error spans, model calls, tool calls over 10 s, fleet reviews). They
 are data in `nix/hyperdx/dashboards.nix`; each names its source by kind (`"$trace"`),
 because HyperDX gives the seeded sources random ids. `hyperdx-provision`
