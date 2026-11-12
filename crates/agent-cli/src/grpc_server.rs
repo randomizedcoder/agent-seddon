@@ -1115,6 +1115,14 @@ fn start_auth_gate(agent: &Agent, auth: &agent_grpc::server::AuthLayer) -> anyho
             .auth_gate(gate::GateConfig {
                 issuer: g.issuer.trim().to_string(),
                 main_origin: g.main_origin.trim().to_string(),
+                setup: g.setup.as_ref().map(|s| gate::setup::SetupConfig {
+                    dir: s.dir.trim().into(),
+                    github_url: s.github_url.clone(),
+                    api_url: s.api_url.clone(),
+                    org: s.org.clone(),
+                    app_name: s.app_name.clone(),
+                    webhook_url: s.webhook_url.clone(),
+                }),
             })
             .map_err(|e| anyhow::anyhow!("[auth.gate]: {e}"))?;
         let listen = g.listen.trim();

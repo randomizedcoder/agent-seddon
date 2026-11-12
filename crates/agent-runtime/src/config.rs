@@ -3639,6 +3639,42 @@ pub struct AuthGateCfg {
     /// The front door's main origin, `https://<host>:<port>`. Browsers come back
     /// to `<main_origin>/auth/callback`, which must be one of `redirect_uris`.
     pub main_origin: String,
+    /// `[auth.gate.setup]`: create the GitHub App from a manifest at
+    /// `/auth/setup` (S26b). Absent: `/auth/setup` is a 404.
+    #[serde(default)]
+    pub setup: Option<AuthGateSetupCfg>,
+}
+
+/// `[auth.gate.setup]`: where the created GitHub App's files go and what the
+/// manifest asks GitHub for. The URLs, names and directory are checked again
+/// when the gate is built. Unknown keys are an error.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthGateSetupCfg {
+    /// The directory the App's id, slug, client id and secrets are written to
+    /// (0600 files; made 0700). Absolute.
+    pub dir: String,
+    /// GitHub's web origin; empty is `https://github.com` (a GHES host sets its own).
+    #[serde(default)]
+    pub github_url: String,
+    /// GitHub's API base; empty is `https://api.github.com` (GHES: `…/api/v3`).
+    #[serde(default)]
+    pub api_url: String,
+    /// The organization that owns the App; empty is the operator's own account.
+    #[serde(default)]
+    pub org: String,
+    /// The App's name, editable on GitHub's page; empty is `agent-seddon`. GitHub
+    /// App names are unique across GitHub.
+    #[serde(default)]
+    pub app_name: String,
+    /// Where GitHub delivers webhooks (`https://…/webhooks/github`); empty asks
+    /// for none, and the fleet polls.
+    #[serde(default)]
+    pub webhook_url: String,
 }
 
 impl AuthGateCfg {
@@ -3686,6 +3722,14 @@ impl AuthGateCfg {
             return Err(format!(
                 "`[auth.gate]`: the callback `{callback}` must be one of `[auth] redirect_uris`"
             ));
+        }
+        if let Some(setup) = &self.setup {
+            if !std::path::Path::new(setup.dir.trim()).is_absolute() {
+                return Err(format!(
+                    "`[auth.gate.setup] dir` `{}` must be an absolute path",
+                    setup.dir
+                ));
+            }
         }
         Ok(())
     }
@@ -6665,6 +6709,7 @@ mod tests {
             listen: "127.0.0.1:8097".into(),
             issuer: "dex".into(),
             main_origin: "https://l2.example:8443".into(),
+            setup: None,
         };
         edit(&mut gate, &mut cfg);
         cfg.gate = Some(gate);
@@ -6804,6 +6849,11 @@ mod tests {
     #[case::negative_gate_unknown_issuer(gated(|g, _| g.issuer = "okta".into()), true, Some("names no `[[auth.issuers]]`"))]
     #[case::negative_gate_default_without_legacy_issuer(gated(|g, _| g.issuer = "default".into()), true, Some("names no `[[auth.issuers]]`"))]
     #[case::negative_gate_callback_not_registered(gated(|g, _| g.main_origin = "https://other.example".into()), true, Some("must be one of `[auth] redirect_uris`"))]
+    // --- `[auth.gate.setup]` (security-hardening S26b) ---
+    #[case::positive_gate_setup(gated(|g, _| g.setup = Some(AuthGateSetupCfg { dir: "/var/lib/agent-seddon/github-app".into(), ..Default::default() })), true, None)]
+    #[case::negative_gate_setup_relative_dir(gated(|g, _| g.setup = Some(AuthGateSetupCfg { dir: "github-app".into(), ..Default::default() })), true, Some("must be an absolute path"))]
+    #[case::boundary_gate_setup_empty_dir(gated(|g, _| g.setup = Some(AuthGateSetupCfg::default())), true, Some("must be an absolute path"))]
+    #[case::adversarial_gate_setup_traversal_dir(gated(|g, _| g.setup = Some(AuthGateSetupCfg { dir: "../../etc".into(), ..Default::default() })), true, Some("must be an absolute path"))]
     #[case::negative_gate_plain_http_origin(gated(|g, c| { g.main_origin = "http://127.0.0.1:8443".into(); c.redirect_uris = vec!["http://127.0.0.1:8443/auth/callback".into()]; }), true, Some("https origin"))]
     #[case::negative_gate_listen_not_an_address(gated(|g, _| g.listen = "localhost:8097".into()), true, Some("not an `ip:port`"))]
     #[case::boundary_gate_listen_port_zero(gated(|g, _| g.listen = "127.0.0.1:0".into()), true, Some("loopback address with a port"))]

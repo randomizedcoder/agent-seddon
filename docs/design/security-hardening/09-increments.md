@@ -46,7 +46,8 @@ and Prometheus.
 |---|---|---|---|
 | S25 | Grafana's admin password from a file (or generated), reset after every Grafana start | 10 F8 | — |
 | S26 | Dex in the module (GitHub connector, secrets as files); the agent's Dex issuer with `backchannel_url` | 10 F1, F12 | S13a |
-| S26b | GitHub App from a manifest: `/setup` bootstrap code, secrets to files, Dex restart | 10 | S27 |
+| S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, secrets to files | 10 | S27b-ii |
+| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files; Dex restart | 10 | S26b-i, S30 |
 | S27a | `AuthGate` core, pure: `read:` / `write:observability`, the path map, `rd`, browser cookie sessions | 10 F3, F5, F11 | S26 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, the `ext_authz` check (cookie or the client's own agent token), the token cache; no socket | 10 F3, F4, F10 | S27a |
 | S27b-ii | The gate's loopback HTTP listener (`tiny_http`), its config and gateway wiring, `authz.toml` rows, the `auth-e2e` row | 10 F3, F4, F10 | S27b-i |
@@ -71,7 +72,7 @@ S16, S17 independent
 
 S25 independent (useful without the front door)
 S13a → S26 → S27a → S27b-i → S27b-ii → S28 → S29, S30, S31
-              S27b-ii → S26b   (/setup is an AuthGate route; see 10's open items)
+              S27b-ii → S26b-i → S26b-ii   (/auth/setup is an AuthGate route)
 ```
 
 Four lanes can run in parallel after S1: correctness (S2, S7), login / token / sessions (S3 → S8),

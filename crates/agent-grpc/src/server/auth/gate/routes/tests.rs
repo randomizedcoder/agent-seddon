@@ -87,6 +87,7 @@ fn harness(sub: &str, operator: bool) -> Harness {
             GateConfig {
                 issuer: "fake".into(),
                 main_origin: MAIN.into(),
+                setup: None,
             },
             clock.clone(),
         )
@@ -668,6 +669,7 @@ fn gate_construction_cases(
     let got = h.layer.auth_gate(GateConfig {
         issuer: issuer.into(),
         main_origin: main_origin.into(),
+        setup: None,
     });
     match (got, want_err) {
         (Ok(_), None) => {}
@@ -711,6 +713,7 @@ async fn corner_legacy_default_issuer_serves_sign_in() {
         .auth_gate(GateConfig {
             issuer: "default".into(),
             main_origin: MAIN.into(),
+            setup: None,
         })
         .expect("the legacy issuer is a browser issuer");
     let login = gate.login("rd=%2F").await;
@@ -727,6 +730,7 @@ async fn corner_trailing_slash_origin_sends_hyperdx_logins_without_a_double_slas
         .auth_gate(GateConfig {
             issuer: "fake".into(),
             main_origin: format!("{MAIN}/"),
+            setup: None,
         })
         .expect("gate builds");
     let reply = h
@@ -795,4 +799,75 @@ fn token_cache_cap_cases(#[case] fill: Fill, #[case] cached_new: bool, #[case] l
         "{fill:?}"
     );
     assert_eq!(cache.len(), len, "{fill:?}");
+}
+
+// --- the RPC identity backstop (S31) -------------------------------------------------
+
+/// A verified token always names its session, so the empty-sid branch is only
+/// reached directly: it refuses, sets no header, and audits the refusal.
+#[rstest]
+#[case::positive_sid_set("s-1", Some("s-1"))]
+#[case::negative_empty_sid("", None)]
+fn rpc_identity_cases(#[case] sid: &str, #[case] want: Option<&str>) {
+    let cap = crate::server::audit::capture::Capture::start();
+    let alice = agent_core::VerifiedPrincipal {
+        tenant: TENANT.into(),
+        subject: ALICE.into(),
+        roles: vec![],
+    };
+    let got = rpc_identity(Reply::new(200, ""), "Bearer t".into(), sid, &alice);
+    let events = cap.take();
+    match (got, want) {
+        (Ok(ok), Some(sid)) => {
+            assert_eq!(ok.header("x-agent-session-id"), Some(sid));
+            assert_eq!(ok.header("authorization"), Some("Bearer t"));
+            assert!(events.is_empty());
+        }
+        (Err(denied), None) => {
+            assert_eq!(denied.status, 401);
+            assert!(denied.headers.is_empty(), "{denied:?}");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].reason, "no_session_id");
+            assert_eq!(events[0].tenant, TENANT);
+            assert_eq!(events[0].subject, ALICE);
+        }
+        (got, want) => panic!("got {got:?}, want {want:?}"),
+    }
+}
+
+// --- /auth/setup (S26b) --------------------------------------------------------------
+
+/// A gate without `[auth.gate.setup]` has no setup routes; with one, they are
+/// the setup's (its own tables are in `setup/tests.rs`).
+#[tokio::test]
+async fn setup_routes_follow_the_config() {
+    let h = harness("alice", true);
+    assert_eq!(h.gate.setup("code=x").status, 404);
+    assert_eq!(
+        h.gate.setup_callback("code=a&state=b", None).await.status,
+        404
+    );
+
+    struct Never;
+    #[async_trait::async_trait]
+    impl super::super::setup::Conversion for Never {
+        async fn convert(&self, _: &str) -> Result<Vec<u8>, super::super::setup::ConversionError> {
+            Err(super::super::setup::ConversionError::Unreachable)
+        }
+    }
+    let dir = agent_testkit::tempdir().join("app");
+    let cfg = SetupConfig {
+        dir: dir.clone(),
+        ..SetupConfig::default()
+    };
+    let setup = AppSetup::new(&cfg, MAIN, now(), Arc::new(Never)).expect("setup");
+    let gate = harness("alice", true).gate.with_setup(setup);
+    let code = std::fs::read_to_string(dir.join(super::super::setup::SETUP_CODE_FILE))
+        .expect("code written");
+    let page = gate.setup(&format!("code={code}"));
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page
+        .body
+        .contains("https://front.test:8443/auth/setup/callback"));
+    assert_eq!(gate.setup("code=wrong").status, 403);
 }

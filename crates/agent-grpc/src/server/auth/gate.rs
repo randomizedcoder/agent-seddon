@@ -341,6 +341,7 @@ pub use routes::{
 };
 
 pub mod listener;
+pub mod setup;
 
 #[cfg(test)]
 mod tests;

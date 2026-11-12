@@ -155,7 +155,8 @@ HEADER_ACTIONS = ("kept", "removed", "replaced")
 FRONT_DOOR_UPSTREAMS = (
     "gate", "dex", "portal", "gateway", "sessions", "fleet", "grafana", "prometheus", "hyperdx")
 # The gate's own routes on the main listener; anything else under /auth/ is checked.
-GATE_PATHS = ("/auth/login", "/auth/callback", "/auth/logout")
+# `/auth/setup*` creates the GitHub App (S26b): the gate answers 404 once one exists.
+GATE_PATHS = ("/auth/login", "/auth/callback", "/auth/logout", "/auth/setup", "/auth/setup/callback")
 # What a denied check may send the browser (Envoy adds status and Location itself).
 DENIED_CLIENT_HEADERS = ("location", "set-cookie", "cache-control", "retry-after", "content-type")
 CHECK_TIMEOUT = "1s"
@@ -713,7 +714,9 @@ def access_log(auth: str) -> list:
             },
             "resource_attributes": {"values": [
                 {"key": "service.name", "value": {"string_value": "envoy-portal-bridge"}}]},
-            "body": {"string_value": "%REQ(:PATH)%"},
+            # Without the query: sign-in and setup URLs carry codes and states, and
+            # this log leaves the host.
+            "body": {"string_value": "%PATH(NQ)%"},
             "attributes": {"values": [
                 {"key": k, "value": {"string_value": v}} for k, v in attrs]},
         },
@@ -1057,6 +1060,9 @@ def front_route(match: dict, cluster_name: str, removed: Sequence[str], timeout:
     return r
 
 
+UNTRACED = {k: {"numerator": 0} for k in ("client_sampling", "random_sampling", "overall_sampling")}
+
+
 def front_routes(fd: FrontDoor) -> list[dict]:
     """The main listener's routes, most specific first. `path_separated_prefix`
     matches `/dex` and `/dex/…` but never `/dexfoo`; the gate's own routes are exact
@@ -1065,6 +1071,9 @@ def front_routes(fd: FrontDoor) -> list[dict]:
            for p in GATE_PATHS]
     out.append(front_route({"path_separated_prefix": "/dex"}, "front_dex", fd.removed("dex"),
                            "15s", check=False))
+    # A span records the whole URL, and these URLs carry codes and states.
+    for r in out:
+        r["tracing"] = UNTRACED
     rpc = fd.removed("rpc")
     for cluster_name, services in (("front_rpc_sessions", fd.sessions), ("front_rpc_fleet", fd.fleet)):
         out += [front_route({"prefix": f"/{s}/"}, cluster_name, rpc, "0s") for s in services]

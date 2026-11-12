@@ -511,6 +511,8 @@ class AuthState extends ChangeNotifier {
     try {
       final me = await client.whoAmI(WhoAmIRequest());
       platform.remove(doorLoginKey);
+      // The door keeps the token: no access token, expiry or refresh handle
+      // here (so no refresh timer runs), only who the cookie says we are.
       session = SignedIn('', 0, '', me);
       expired = false;
       _set(AuthPhase.signedIn);

@@ -6,6 +6,8 @@
 //! Paths:
 //! - `/auth/login`, `/auth/callback` (GET) and `/auth/logout` (POST): the browser's,
 //!   routed here by the front door.
+//! - `/auth/setup` and `/auth/setup/callback` (GET): creating the GitHub App from a
+//!   manifest (S26b, [`super::setup`]).
 //! - `/_check/main/<path>` and `/_check/hyperdx/<path>`: Envoy's `ext_authz` check
 //!   for each listener. Envoy's `http_service` appends the original path (query
 //!   included) to its `path_prefix`, so the listener is in the URL and nothing a
@@ -26,6 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::routes::{AuthGate, CheckRequest, Reply, MAX_QUERY};
+use super::setup::{SETUP_CALLBACK_PATH, SETUP_PATH};
 use super::Listener;
 
 /// Where Envoy's check for the main listener (:8443) lands.
@@ -49,6 +52,8 @@ pub trait GateRoutes: Send + Sync {
     async fn callback(&self, query: &str, cookie: Option<&str>, user_agent: &str) -> Reply;
     async fn logout(&self, method: &str, cookie: Option<&str>) -> Reply;
     async fn check(&self, req: CheckRequest<'_>) -> Reply;
+    async fn setup(&self, query: &str) -> Reply;
+    async fn setup_callback(&self, query: &str, cookie: Option<&str>) -> Reply;
 }
 
 #[async_trait]
@@ -64,6 +69,12 @@ impl GateRoutes for AuthGate {
     }
     async fn check(&self, req: CheckRequest<'_>) -> Reply {
         AuthGate::check(self, req).await
+    }
+    async fn setup(&self, query: &str) -> Reply {
+        AuthGate::setup(self, query)
+    }
+    async fn setup_callback(&self, query: &str, cookie: Option<&str>) -> Reply {
+        AuthGate::setup_callback(self, query, cookie).await
     }
 }
 
@@ -118,7 +129,11 @@ pub async fn dispatch(gate: &dyn GateRoutes, req: Incoming<'_>) -> Reply {
             let ua = req.values("user-agent").next().unwrap_or("");
             gate.callback(query, cookie, ua).await
         }
-        "/auth/login" | "/auth/callback" => Reply::new(405, "use GET").with("allow", "GET".into()),
+        SETUP_PATH if req.method == "GET" => gate.setup(query).await,
+        SETUP_CALLBACK_PATH if req.method == "GET" => gate.setup_callback(query, cookie).await,
+        "/auth/login" | "/auth/callback" | SETUP_PATH | SETUP_CALLBACK_PATH => {
+            Reply::new(405, "use GET").with("allow", "GET".into())
+        }
         "/auth/logout" => gate.logout(req.method, cookie).await,
         _ => {
             let Some((listener, original)) = checked(req.url) else {
@@ -267,8 +282,10 @@ fn answer(
 /// Write `reply`, or a bare 500 when [`writable`] refuses one of its headers.
 fn respond(req: tiny_http::Request, reply: Reply) {
     let reply = safe_to_write(reply);
-    let mut response = tiny_http::Response::from_string(reply.body).with_status_code(reply.status);
-    for h in headers_of(&reply).into_iter().flatten() {
+    let headers = headers_of(&reply);
+    let mut response =
+        tiny_http::Response::from_string(reply.body.into_owned()).with_status_code(reply.status);
+    for h in headers.into_iter().flatten() {
         response.add_header(h);
     }
     if let Err(e) = req.respond(response) {
@@ -292,13 +309,19 @@ pub(super) fn safe_to_write(reply: Reply) -> Reply {
     Reply::new(500, "internal error").with("cache-control", "no-store".into())
 }
 
-/// `reply`'s headers for `tiny_http`, after a content type; `None` unless
-/// [`writable`].
-fn headers_of(reply: &Reply) -> Option<Vec<tiny_http::Header>> {
+/// `reply`'s headers for `tiny_http`, after a plain-text content type unless it
+/// sets its own; `None` unless [`writable`].
+pub(super) fn headers_of(reply: &Reply) -> Option<Vec<tiny_http::Header>> {
     if !writable(reply) {
         return None;
     }
-    std::iter::once(("content-type", "text/plain; charset=utf-8"))
+    let own_type = reply
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
+    (!own_type)
+        .then_some(("content-type", "text/plain; charset=utf-8"))
+        .into_iter()
         .chain(reply.headers.iter().map(|(n, v)| (n.as_str(), v.as_str())))
         .map(|(n, v)| tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()).ok())
         .collect()

@@ -1408,6 +1408,19 @@ job         = "agent-seddon"
 # issuer      = "dex"
 # main_origin = "https://l2.example:8443"      # the front door's main listener
 #
+# Creating the GitHub App from a manifest (security-hardening 10, S26b). While no App
+# exists, the gate writes a single-use setup code to `<dir>/setup-code` (0600, valid an
+# hour, renewed at each start) and logs the file's path, never the code. Open
+# `<main_origin>/auth/setup?code=<it>`, press Create on GitHub, and the App's id, slug,
+# client id and secrets land in `dir` as 0600 files. Then `/auth/setup` is a 404.
+# [auth.gate.setup]
+# dir         = "/var/lib/agent-seddon/github-app"   # absolute
+# org         = ""             # create it under this organization; empty = your account
+# app_name    = ""             # empty = "agent-seddon"; GitHub App names are unique
+# webhook_url = ""             # e.g. "https://l2.example:8096/webhooks/github"; empty = none
+# github_url  = ""             # empty = https://github.com (GHES: its own)
+# api_url     = ""             # empty = https://api.github.com (GHES: .../api/v3)
+#
 # A person's credential (security-hardening S12). `agent login [--issuer NAME]` runs the
 # device flow at a login issuer above and keeps an agent token in
 # `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json` (0600); `agent whoami`, `agent logout`.
