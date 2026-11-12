@@ -146,7 +146,8 @@ in MongoDB but are not shown in local mode (turning `auth` back on shows them ag
 dashboards in HyperDX — *agent-seddon · Overview* (spans by service, error spans,
 slowest operations, gRPC methods), *Model calls* (calls by model, latency, tokens,
 finish reasons), *Tools* (calls, p95 latency and errors by tool, policy decisions) and
-*Review fleet* (reviews by repo, review duration, collectors, sandboxed commands) — and
+*Review fleet* (reviews by repo and outcome, review duration, collectors, sandboxed
+commands; the first two count only reviews that ran, `outcome` `drafted` or `failed`) — and
 four saved searches (error spans, model calls, tool calls over 10 s, fleet reviews). They
 are data in `nix/hyperdx/dashboards.nix`; each names its source by kind (`"$trace"`),
 because HyperDX gives the seeded sources random ids. `hyperdx-provision`
@@ -195,14 +196,19 @@ The dashboards are generated from `nix/grafana/dashboards.nix` into the store an
 can't be edited in place; save a copy to change one. Each dashboard picks its
 Prometheus and ClickHouse data sources with a variable, so it uses the Prometheus data
 source the host already has. Set `grafana.prometheusUrl` to provision one (uid
-`prometheus`) on a host without one. The module provisions a ClickHouse data source
+`prometheus`) on a host without one; behind the front door that is
+`http://127.0.0.1:9090/prometheus`, since Prometheus then serves under `/prometheus/`. The module provisions a ClickHouse data source
 (uid `clickhouse`) that logs in as the read-only `agent_viewer`. Grafana reads the
 viewer password from `$__file{/run/credentials/grafana.service/ch-viewer}`, which
 systemd `LoadCredential` copies from `/var/lib/agent-seddon/clickhouse/viewer.password`.
-The module links the ClickHouse plugin into Grafana's plugins directory. It does not
-use `declarativePlugins`, which turns off plugin preinstall, and Grafana 13.3 and later
-gets its Prometheus data source from preinstall. A host that sets `declarativePlugins`
-itself must add `grafanaPlugins.grafana-clickhouse-datasource` to that list.
+The module links the ClickHouse plugin into Grafana's plugins directory, which it makes
+grafana's own (systemd-tmpfiles refuses a link under a root-owned directory inside
+grafana's). It does not use `declarativePlugins`, which turns off plugin preinstall.
+Grafana 13.3 and later no longer bundles Prometheus, and preinstall downloads it from
+grafana.com, which an offline host can't reach; the module links nixpkgs'
+`grafanaPlugins.prometheus` too, keeping a copy preinstall already fetched. A host that
+sets `declarativePlugins` itself must add `grafanaPlugins.grafana-clickhouse-datasource`
+(and, on 13.3+, `grafanaPlugins.prometheus`) to that list.
 
 #### The admin password
 
@@ -228,6 +234,24 @@ Grafana does not start. The reset is not: if it keeps failing, Grafana stays up 
 the old password, so check `systemctl status agent-seddon-grafana-admin` after a change.
 Either one sets `services.grafana.settings.security.admin_password`, so remove any
 value the host sets there.
+
+#### Checking every panel
+
+`sudo agent-seddon-obs-check` (installed with `grafana.enable`) runs every query of the
+agent-seddon dashboards through Grafana's own query API (`/api/ds/query`), as `admin`
+over loopback, with the dashboard variables filled in the way the browser fills them
+and Grafana's macros left to Grafana. It prints each failed query with Grafana's
+message and a summary, and exits 1 if any failed. An empty result is not a failure (a
+quiet host has none); `--verbose` lists them. `--from now-24h` widens the window (the
+default is the last 6 hours). Without `adminPasswordFile` or `generateAdminPassword`,
+pass `--password-file` yourself. The password is read from the file and only ever sent
+as basic auth. The trace panels read `default.otel_traces`, which HyperDX's collector
+creates. Without `hyperdx.enable` the wrapper passes `--skip-table` for the collector's
+tables, so those queries are counted as skipped instead of sent (`--verbose` names each
+one). Only a query whose SQL names the table outright is skipped; any other query is
+still sent. The VM test runs it against Prometheus behind the door, and the
+`grafana-queries` check runs `obs-check --check` in the gate: every query's variables
+fill in and every data source it names is one the module provisions.
 
 ### Dex (sign-in with GitHub)
 

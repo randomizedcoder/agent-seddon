@@ -411,6 +411,9 @@ testChecks
   # source placeholders, unique tagged names, on-grid non-overlapping tiles (with
   # check-the-checks fixtures). nix/hyperdx/dashboards.nix, crates/agent-hyperdx.
   hyperdx-dashboards = import ./hyperdx-dashboards.nix { inherit pkgs agentSeddonDeploy; };
+  # Every Grafana panel query fills its variables and names a provisioned data source,
+  # through `obs-check --check` (with check-the-checks fixtures). crates/agent-obs-check.
+  grafana-queries = import ./grafana-queries.nix { inherit pkgs agentSeddonDeploy; };
 
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
   # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.

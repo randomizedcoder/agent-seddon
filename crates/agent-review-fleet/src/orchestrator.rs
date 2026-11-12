@@ -687,12 +687,15 @@ impl FleetOrchestrator {
         // stamped (`safe_segment`), so a malformed row attributes nothing.
         // `requested_by` (S19): who asked, when a person did — the review itself runs as
         // the fleet, so this attribute is what ties it back to them.
+        // `outcome` tells a review that ran (`drafted`, `failed`) from a trigger answered
+        // before any work (`uptodate`, `at_capacity`): every poll opens this span.
         let review_span = tracing::info_span!(
             "fleet.review",
             tenant = tracing::field::Empty,
             repo = tracing::field::Empty,
             pr,
             requested_by = tracing::field::Empty,
+            outcome = tracing::field::Empty,
         );
         if !trigger.requested_by.is_empty() {
             review_span.record("requested_by", trigger.requested_by.join(",").as_str());
@@ -719,6 +722,7 @@ impl FleetOrchestrator {
         if !self.host.has_capacity(&key) {
             tracing::debug!(session_id = %trigger.session_id, pr,
                 "fleet: host at capacity; shedding trigger before prep (retried next poll)");
+            review_span.record("outcome", "at_capacity");
             if let Some(fm) = &fm {
                 fm.on_review("at_capacity");
             }
@@ -751,6 +755,7 @@ impl FleetOrchestrator {
         if !trigger.force && !trigger.head_sha.is_empty() && up_to_date(&prior, &trigger.head_sha) {
             tracing::debug!(session_id = %trigger.session_id, pr, head = %trigger.head_sha,
                 "fleet: listed head already reviewed (up to date, nothing fetched)");
+            review_span.record("outcome", "uptodate");
             if let Some(fm) = &fm {
                 fm.on_review("uptodate");
             }
@@ -796,6 +801,7 @@ impl FleetOrchestrator {
         if !trigger.force && up_to_date(&prior, &head_oid) {
             tracing::debug!(session_id = %trigger.session_id, pr, head = %head_oid,
                 "fleet: head already reviewed (up to date)");
+            review_span.record("outcome", "uptodate");
             if let Some(fm) = &fm {
                 fm.on_review("uptodate");
             }
@@ -943,6 +949,7 @@ impl FleetOrchestrator {
         // metrics recorded from the (async) task, and the `(user, repo)` recorder itself.
         let user_evt = row.user.clone();
         let fm_task = fm.clone();
+        let span_task = review_span.clone();
         // Carry the prior round's still-open items into the draft so the tracker (C16) can
         // reconcile them against this round's findings (addressed vs still-open).
         let open_items = prior.open_items;
@@ -991,6 +998,7 @@ impl FleetOrchestrator {
                             // rows) under this review's identity, not the fleet process's.
                             match agent_core::scope(key_draft, drafter.draft(req)).await {
                                 Ok(_) => {
+                                    span_task.record("outcome", "drafted");
                                     if let Some(fm) = &fm_task {
                                         fm.on_review("drafted");
                                     }
@@ -1020,6 +1028,7 @@ impl FleetOrchestrator {
                     // trigger (poll or ReviewNow) re-reviews cleanly — PR #327's
                     // idempotent worktree makes that retry safe.
                     Err(e) => {
+                        span_task.record("outcome", "failed");
                         if let Some(fm) = &fm_task {
                             fm.on_review("failed");
                         }
@@ -4246,7 +4255,8 @@ mod tests {
     // omitted on purpose: this module's ~40 `#[tokio::test]`s drive `handle` (creating the
     // `fleet.review` callsite) under a no-op subscriber concurrently, which races the global
     // callsite-interest cache and makes a span capture flaky. The metric test below drives
-    // the same `handle` path.
+    // the same `handle` path. The span's `outcome` is recorded beside each terminal
+    // `on_review` (at_capacity, uptodate, drafted, failed), so those rows cover its sites.
 
     #[tokio::test]
     async fn positive_review_lifecycle_records_fleet_metrics() {

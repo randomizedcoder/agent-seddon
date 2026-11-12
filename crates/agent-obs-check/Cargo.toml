@@ -1,0 +1,30 @@
+[package]
+name = "agent-obs-check"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `obs-check`: runs every panel query of the provisioned Grafana dashboards through
+# Grafana's own query API (`/api/ds/query`) and fails on any query that errors, so a
+# broken query, macro, data source or grant shows up as a red check instead of a red
+# panel. The lib is the pure, testable core (which queries a dashboard holds, its
+# variables filled in as the browser would, the request, the reply's verdict); the
+# binary is a thin HTTP client.
+[lib]
+
+[[bin]]
+name = "obs-check"
+path = "src/main.rs"
+
+[dependencies]
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true

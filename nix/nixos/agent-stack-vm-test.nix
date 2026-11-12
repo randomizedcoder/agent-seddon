@@ -80,6 +80,27 @@ pkgs.testers.runNixOSTest {
       services.agentSeddon.grafana = {
         enable = true;
         generateAdminPassword = true;
+        # Behind the door Prometheus serves under /prometheus/.
+        prometheusUrl = "http://127.0.0.1:9090/prometheus";
+      };
+      # The host's Prometheus beside the door (loopback, under /prometheus/), scraping the
+      # three agents, so every Grafana panel query has a data source to run against.
+      services.prometheus = {
+        enable = true;
+        listenAddress = "127.0.0.1";
+        webExternalUrl = "${config.services.agentSeddon.frontDoor.origin}/prometheus/";
+        globalConfig.scrape_interval = "5s";
+        scrapeConfigs =
+          lib.mapAttrsToList
+            (job: port: {
+              job_name = "agent-${job}";
+              static_configs = [ { targets = [ "127.0.0.1:${toString port}" ]; } ];
+            })
+            {
+              gateway = 9700;
+              sessions = 9630;
+              fleet = 9636;
+            };
       };
       # The operator's own file instead (sops-nix, agenix); the test writes it, then
       # switches to this.
@@ -135,6 +156,7 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = [
         pkgs.curl
         pkgs.iproute2
+        pkgs.jq
       ];
     };
 
@@ -222,6 +244,29 @@ pkgs.testers.runNixOSTest {
             assert f"access-control-allow-origin: {origin}" in headers.lower(), headers
         headers = machine.succeed(preflight.format("http://evil.test:8092"))
         assert "access-control-allow-origin" not in headers.lower(), headers
+
+    with subtest("grafana: every provisioned panel query runs"):
+        machine.wait_for_unit("grafana.service")
+        machine.wait_for_unit("agent-seddon-grafana-admin.service")
+        machine.wait_for_unit("prometheus.service")
+        # A scrape of each agent, so the Prometheus panels have series to read.
+        machine.wait_until_succeeds(
+            "curl -fsS 'http://127.0.0.1:9090/prometheus/api/v1/query?query=sum(up)' "
+            "| jq -e '.data.result[0].value[1] == \"3\"'",
+            timeout=120,
+        )
+        out = machine.succeed("agent-seddon-obs-check --from now-1h --verbose")
+        print(out)
+        summary = out.strip().splitlines()[-1]
+        assert " 0 failed" in summary, summary
+        assert " 0 with data" not in summary, summary
+        # HyperDX is off here, so its collector's otel_* tables don't exist: the trace
+        # panels are skipped, by name, rather than failed.
+        assert " 0 skipped" not in summary, summary
+        assert "names default.otel_traces" in out, out
+        # The admin password is what lets it in: a wrong one fails, before any query.
+        machine.succeed("printf wrong > /root/wrong.password")
+        machine.fail("agent-seddon-obs-check --password-file /root/wrong.password")
 
     with subtest("grafana: the admin password is generated, applied and rotated"):
         pw_file = "/var/lib/agent-seddon-grafana/admin.password"

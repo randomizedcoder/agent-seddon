@@ -184,6 +184,25 @@ let
       a = graf.settings.server.http_addr;
     in
     if a == "" || a == "0.0.0.0" || a == "::" || a == "[::]" then "127.0.0.1" else a;
+  # `agent-seddon-obs-check`: every provisioned panel query through Grafana's API, as
+  # the admin, over loopback (behind the door Grafana serves under /grafana/, and basic
+  # auth answers only there). Without a managed admin password, pass --password-file.
+  # HyperDX's collector creates the otel_* tables, so without it the trace panels are
+  # skipped, not failed.
+  obsCheck = pkgs.writeShellApplication {
+    name = "agent-seddon-obs-check";
+    text = ''
+      exec ${seddon.obsCheck} \
+        --grafana "${graf.settings.server.protocol}://${grafLocalAddr}:${toString graf.settings.server.http_port}${lib.optionalString fd.enable "/grafana"}" \
+        --dashboards ${seddon.grafanaDashboards} \
+        ${
+          lib.optionalString (
+            !cfg.hyperdx.enable
+          ) "--skip-table default.otel_traces --skip-table default.otel_logs "
+        }\
+        ${lib.optionalString (grafAdminFile != null) "--password-file ${grafAdminFile} "}"$@"
+    '';
+  };
   # Written by agent-seddon-hyperdx-key once an account exists; the agents read it at
   # start (a missing file only turns the OTLP exporter off).
   otlpHeadersFile = "${hdxDir}/otlp.headers";
@@ -746,8 +765,9 @@ in
           dashboards choose their Prometheus data source with a variable, so they use
           the one the host already has. The viewer password reaches Grafana through
           systemd `LoadCredential`, never the store. The ClickHouse plugin is linked into
-          Grafana's plugins directory, so plugin preinstall (which provides Prometheus
-          on Grafana 13.3+) and plugins installed from the UI keep working; a host that
+          Grafana's plugins directory, so plugin preinstall and plugins installed from
+          the UI keep working. Grafana 13.3+ no longer bundles Prometheus, so its plugin
+          is linked too, unless preinstall already fetched one. A host that
           sets `services.grafana.declarativePlugins` must list
           `grafanaPlugins.grafana-clickhouse-datasource` there itself. Needs
           `clickhouse.enable`.
@@ -1024,10 +1044,10 @@ in
             assertion =
               cfg.grafana.prometheusUrl == null
               ||
-                builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" cfg.grafana.prometheusUrl
+                builtins.match "https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9][A-Za-z0-9._-]*)*/?" cfg.grafana.prometheusUrl
                 != null
                 && portOk cfg.grafana.prometheusUrl;
-            message = "services.agentSeddon.grafana.prometheusUrl must be `http(s)://host[:port]`.";
+            message = "services.agentSeddon.grafana.prometheusUrl must be `http(s)://host[:port][/path]` (behind the front door, Prometheus serves under /prometheus).";
           }
         ];
 
@@ -1301,6 +1321,7 @@ in
       })
 
       (lib.mkIf cfg.grafana.enable {
+        environment.systemPackages = [ obsCheck ];
         services.grafana = {
           enable = lib.mkDefault true;
           provision = {
@@ -1341,11 +1362,17 @@ in
           };
         };
 
-        # Linked, not `declarativePlugins`: that would turn off plugin preinstall, which is
-        # where Grafana 13.3+ gets its Prometheus data source.
+        # Linked, not `declarativePlugins`: that would turn off plugin preinstall, which
+        # provides Grafana's other plugins. The directory is made grafana's: tmpfiles
+        # refuses a link under a root-owned directory inside grafana's (an "unsafe path
+        # transition"), so on a fresh host the link would otherwise never be made.
         systemd.tmpfiles.rules = [
+          "d ${config.services.grafana.settings.paths.plugins} 0750 grafana grafana - -"
           "L+ ${config.services.grafana.settings.paths.plugins}/grafana-clickhouse-datasource - - - - ${pkgs.grafanaPlugins.grafana-clickhouse-datasource}"
-        ];
+        ]
+        # Grafana 13.3+ no longer bundles Prometheus and preinstall downloads it, which an
+        # offline host can't. `L`, not `L+`: a copy preinstall already made is kept.
+        ++ lib.optional (lib.versionAtLeast config.services.grafana.package.version "13.3") "L ${config.services.grafana.settings.paths.plugins}/prometheus - - - - ${pkgs.grafanaPlugins.prometheus}";
 
         # The viewer password is generated on first start (0700, the agent user);
         # LoadCredential copies it to a file only the grafana unit can read.

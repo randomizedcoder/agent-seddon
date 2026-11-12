@@ -672,6 +672,9 @@ let
     # `bin/hyperdx-provision` (crates/agent-hyperdx), built with the workspace and, like
     # k8s-secrets, kept out of the agent runtime.
     hyperdxProvision = "${agent-unwrapped}/bin/hyperdx-provision";
+    # `bin/obs-check` (crates/agent-obs-check): every Grafana panel query through
+    # Grafana's own API, likewise kept out of the agent runtime.
+    obsCheck = "${agent-unwrapped}/bin/obs-check";
     grafanaDashboards = grafana.dashboardsDir;
     # The front door's default certificate (security-hardening 10, F7).
     pkiDev = pki-dev;

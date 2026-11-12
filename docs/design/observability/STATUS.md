@@ -87,6 +87,61 @@ carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
   the dev container's read-only dashboards no longer claim `allowUiUpdates`. Still open:
   a VM subtest for `grafana.enable`, and confirming the data-source variables
   auto-select on the live Grafana.
+- **Every panel query, checked** (2026-11-12, after a live pass over l2's Prometheus,
+  Grafana dashboards and HyperDX): all 175 Grafana panel queries ran without an error
+  against l2's data (140 with data; the 35 empty ones name metrics the code registers
+  for events l2 hasn't had: auth, approvals, posts, priced calls, search). PR 🟡 (O1):
+  - **`obs-check`** (new crate `agent-obs-check`): fills a dashboard's variables as the
+    browser does, sends each query to Grafana's `/api/ds/query` (macros left to Grafana
+    and the plugins), and fails closed on the reply (a missing result is a failure).
+    The module installs it as `agent-seddon-obs-check`. Tables cover interpolation (one
+    pass, longest name first, macros untouched), variable values, data-source resolution
+    and refusals, the nesting and query caps, the request, and reply verdicts.
+  - **Gate:** `grafana-queries` (`obs-check --check`: 175 queries resolve; four broken
+    fixtures refused, a valid one accepted). **VM test:** Prometheus behind the door
+    (loopback, `/prometheus/`, scraping the three agents) and a subtest running
+    `agent-seddon-obs-check`: no query fails, some return data, and a wrong password is
+    refused. This closes the open "VM subtest for `grafana.enable`".
+  - **Found and fixed:**
+    - `grafana.prometheusUrl` refused a path, so Grafana couldn't reach Prometheus
+      behind the door. It now takes `/segments` (no `..`, query, fragment or empty
+      segment; eval rows).
+    - HyperDX reads ClickHouse as `agent_viewer`, which couldn't read
+      `system.data_skipping_indices`, so its searches skipped the indexes (a 403 per
+      search). Granted; the table lists only tables the user can already see. RLS
+      harness rows: the viewer may, the tenant reader may not.
+    - HyperDX table tiles applied the tile's `ms` format to their count columns
+      ("19 ms" runs). The three mixed tables drop it; the `p95 ms` alias carries the
+      unit.
+    - Every poll opens a `fleet.review` span (about 170 an hour on l2, around 12 ms
+      each), so HyperDX's "Reviews by repo" counted polls. The span now records
+      `outcome` (`drafted`, `failed`, `uptodate`, `at_capacity`), and the review tiles
+      and saved search count `drafted`/`failed` only.
+  - **Found by the new VM subtest** (all 175 queries failed "Plugin not registered"):
+    - On a fresh host, systemd-tmpfiles made Grafana's plugins directory as root
+      inside grafana's own directory. It then refused its own ClickHouse plugin link
+      ("unsafe path transition"). l2 works only because Grafana had made the directory
+      first. The module now makes the directory grafana's (eval row).
+    - Grafana 13.3+ no longer bundles Prometheus. Preinstall downloads it from
+      grafana.com, which an offline host can't reach. On 13.3+ the module links
+      nixpkgs' `grafanaPlugins.prometheus` with `L`, which keeps a copy preinstall
+      already fetched. Eval rows: linked on 13.3 and 14, not on 13.1.
+    - The 13 trace panels read `default.otel_traces`, which only HyperDX's collector
+      creates, so on a Grafana-only host they can never run. `obs-check --skip-table
+      db.table` counts a query whose SQL names that table (as a whole, case-insensitive
+      identifier) as skipped, not failed. Without `hyperdx.enable` the module's wrapper
+      skips the collector's tables (eval row both ways). Tables: `valid_table_cases`,
+      `names_table_cases` (a longer or prefixed name and a non-text field don't match;
+      a quoted name isn't matched, so that query runs and fails rather than being
+      hidden).
+  - **Still open:**
+    - O2: `obs-smoke`, a live read-only pass (Prometheus targets, Grafana panels,
+      HyperDX tiles through its own connection, and a Playwright contact sheet that
+      waits for tiles to fill).
+    - A HyperDX log source for `agent.agent_logs`: the agents' logs are in ClickHouse,
+      but HyperDX's only log source is `otel_logs` (Envoy's access log).
+    - On l2 itself: the `node` and `mq-cake` scrape targets are down (no node exporter,
+      nothing on 2112).
 
 ## Cross-references updated by Phase 0
 

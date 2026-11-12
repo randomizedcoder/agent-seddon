@@ -538,12 +538,35 @@ let
       && lib.elem "agent-seddon-clickhouse-creds.service" graf.systemd.services.grafana.after
       && lib.elem "agent-seddon-clickhouse-creds.service" graf.systemd.services.grafana.requires;
     # The plugin is linked into the plugins dir; declarativePlugins stays unset so
-    # plugin preinstall (Prometheus on Grafana 13.3+) keeps running.
+    # plugin preinstall keeps running. The dir is grafana's, or tmpfiles refuses the
+    # link (an unsafe path transition).
     grafanaClickhousePlugin =
       graf.services.grafana.declarativePlugins == null
+      && lib.elem "d /var/lib/grafana/plugins 0750 grafana grafana - -" graf.systemd.tmpfiles.rules
       && lib.any (
         r: lib.hasPrefix "L+ /var/lib/grafana/plugins/grafana-clickhouse-datasource " r
       ) graf.systemd.tmpfiles.rules;
+    # Grafana 13.3+ doesn't bundle Prometheus: its plugin is linked (`L`, keeping a
+    # preinstalled copy) so an offline host has it; an older Grafana that bundles it
+    # gets no link.
+    grafanaPrometheusPlugin =
+      let
+        linked =
+          c: lib.any (lib.hasPrefix "L /var/lib/grafana/plugins/prometheus ") c.systemd.tmpfiles.rules;
+        withVersion =
+          v:
+          evalWith {
+            services.agentSeddon.grafana.enable = true;
+            services.grafana.package = lib.mkForce (
+              pkgs.grafana.overrideAttrs {
+                version = v;
+                # Only `.version` is read; nothing is built.
+                __intentionallyOverridingVersion = true;
+              }
+            );
+          };
+      in
+      linked (withVersion "13.3.0") && linked (withVersion "14.0.1") && !linked (withVersion "13.1.6");
     grafanaNoPrometheusByDefault = lib.all (d: d.type != "prometheus") (grafDs graf);
     grafanaPrometheusWhenAsked = lib.any (
       d: d.uid == "prometheus" && d.url == "http://127.0.0.1:9090"
@@ -556,8 +579,44 @@ let
         "file:///etc/passwd"
         "http://x:9090/api, http://evil"
         "http://127.0.0.1:99999"
+        # A path is allowed (the door's /prometheus); traversal, a query, a fragment,
+        # an empty or spaced segment are not.
+        "http://127.0.0.1:9090/../etc"
+        "http://127.0.0.1:9090/prometheus?x=1"
+        "http://127.0.0.1:9090/prometheus#x"
+        "http://127.0.0.1:9090//prometheus"
+        "http://127.0.0.1:9090/prom etheus"
       ]
-      && !(grafFails { });
+      && !(grafFails { })
+      && lib.all (u: !(grafFails { grafana.prometheusUrl = u; })) [
+        "http://127.0.0.1:9090"
+        "http://127.0.0.1:9090/prometheus"
+        "http://127.0.0.1:9090/prometheus/"
+      ];
+    # The panel-query check ships with the dashboards (and only with them).
+    grafanaObsCheckInstalled =
+      let
+        named = c: lib.any (p: (p.name or "") == "agent-seddon-obs-check") c.environment.systemPackages;
+      in
+      named graf && !(named lo);
+    # Without HyperDX (whose collector creates otel_*) the trace panels are skipped;
+    # with it, every panel runs.
+    grafanaObsCheckSkipsOtelWithoutHyperdx =
+      let
+        text =
+          c:
+          (lib.findFirst (p: (p.name or "") == "agent-seddon-obs-check") {
+            text = "";
+          } c.environment.systemPackages).text;
+        skips = c: lib.hasInfix "--skip-table default.otel_traces --skip-table default.otel_logs" (text c);
+      in
+      skips graf
+      && !skips (evalWith {
+        services.agentSeddon = {
+          grafana.enable = true;
+          hyperdx.enable = true;
+        };
+      });
     # The dashboards go into the host's Grafana; turning that off while asking for them
     # is refused rather than provisioning into nothing.
     # The admin password: a file, through LoadCredential into both units; the reset

@@ -435,6 +435,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-obs-check"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rstest",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "agent-prompt"
 version = "0.1.0"
 dependencies = [
