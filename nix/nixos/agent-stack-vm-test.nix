@@ -102,7 +102,7 @@ pkgs.testers.runNixOSTest {
         pkgs.runCommand "vm-token-signer.key" { nativeBuildInputs = [ pkgs.openssl ]; } ''
           openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$out"
         '';
-      services.agentSeddon.gateway.settings.auth = {
+      services.agentSeddon.settings.auth = {
         mode = "oidc";
         redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
         issuers = [ config.services.agentSeddon.dex.issuerSettings ];
@@ -115,7 +115,7 @@ pkgs.testers.runNixOSTest {
         };
       };
       # Dex's mock user, bound: the base system leaves it unbound.
-      specialisation.signin.configuration.services.agentSeddon.gateway.settings.auth.operator_subjects = [
+      specialisation.signin.configuration.services.agentSeddon.settings.auth.operator_subjects = [
         "email:kilgore@kilgore.trout"
       ];
       # The GitHub connector instead (#708 draft): Dex starts with the operator's client
@@ -431,6 +431,17 @@ pkgs.testers.runNixOSTest {
         for extra in ["", "-H 'x-agent-session-id: ../forged'"]:
             status, body = grpc_web("agent.v1.PromptService/List", extra=extra)
             assert status == 200 and "grpc-status:0" in body, (extra, status, body)
+            # Send needs both the user (the AuthLayer's, from the tenant) and the
+            # session (the gate's): identity is checked before the goal, so the empty
+            # goal's INVALID_ARGUMENT (3) proves the pair arrived, where a missing or
+            # refused one is UNAUTHENTICATED (16). An early error is trailers-only.
+            status, _, hdrs = door_get(
+                f"{door}/agent.v1.AgentSessionService/Send", "/tmp/jar",
+                "-X POST -H 'content-type: application/grpc-web+proto' -H 'x-grpc-web: 1' "
+                f"--data-binary @/tmp/empty-frame {extra}",
+            )
+            reply = (hdrs + machine.succeed("cat /tmp/body")).replace(" ", "")
+            assert status == 200 and "grpc-status:3" in reply, (extra, status, reply)
         # S29 (F6): Grafana signs the user in from the gate's headers, under /grafana/,
         # as the role the gate maps (an operator is Admin).
         status, _, _ = door_get(f"{door}/grafana/api/user")

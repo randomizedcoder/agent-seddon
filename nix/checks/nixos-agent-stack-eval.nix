@@ -129,7 +129,8 @@ let
           enable = true;
           mockLogin = true;
         };
-        gateway.settings.auth = {
+        # Host-wide: sessions and fleet verify the door's token too.
+        settings.auth = {
           mode = "oidc";
           redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
           issuers = [ config.services.agentSeddon.dex.issuerSettings ];
@@ -786,8 +787,11 @@ let
           issuer = "dex";
           main_origin = "https://172.16.50.46:8443";
         }
-      && !(gw.sessions ? auth)
-      && !(gw.fleet ? auth)
+      # Sessions and the fleet verify the door's token, but host no gate.
+      && gw.sessions.auth.mode == "oidc"
+      && gw.fleet.auth.mode == "oidc"
+      && !(gw.sessions.auth ? gate)
+      && !(gw.fleet.auth ? gate)
       # Dex behind the door, and the gate's callback registered with it.
       && fd.services.agentSeddon.dex.issuer == "https://172.16.50.46:8443/dex"
       && builtins.elem "https://172.16.50.46:8443/auth/callback" fd.services.agentSeddon.dex.redirectUris
@@ -885,6 +889,9 @@ let
       ]
       # The host's `[auth]` is incomplete.
       && fdFails { gateway.settings.auth.mode = "off"; }
+      # Behind the door each agent names the tenant from the token itself.
+      && fdFails { sessions.settings.auth.mode = "off"; }
+      && fdFails { fleet.settings.auth.mode = "off"; }
       && fdFails { gateway.settings.auth.redirect_uris = [ "https://172.16.50.46:8443/other" ]; }
       && fdFails { frontDoor.issuer = "google"; }
       && !(fdFails { frontDoor.extraOrigins = [ "https://l2.example:8443" ]; });
@@ -1011,7 +1018,16 @@ let
         "off"
         ""
       ]
-      && !(fdFails { portal.defines.PORTAL_AUTH = "door"; });
+      && !(fdFails { portal.defines.PORTAL_AUTH = "door"; })
+      # door mode with no door would bounce off a /auth/login nothing serves.
+      &&
+        failedAssertions (evalWith {
+          services.agentSeddon.portal.defines.PORTAL_AUTH = "door";
+        }) != [ ]
+      &&
+        failedAssertions (evalWith {
+          services.agentSeddon.portal.defines.PORTAL_AUTH = "on";
+        }) == [ ];
     # S30 (F9): behind the door only the door listens beyond loopback, and the host's
     # firewall may open nothing it stands in front of.
     frontDoorLockdown =

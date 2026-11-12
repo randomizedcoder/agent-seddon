@@ -286,13 +286,16 @@ its agent token (the client's own `authorization` is overwritten).
 The module sets `[auth.gate]` on the gateway (listen `127.0.0.1:8097`, `frontDoor.issuer`,
 main origin `frontDoor.origin`), Dex's issuer to `<origin>/dex`, and adds the gate's
 callback to Dex's redirect URIs. Turning `[auth]` on stays the host's step, and the
-build refuses a front door until it is done:
+build refuses a front door until it is done. It goes in the host-wide `settings.auth`,
+not `gateway.settings.auth`: the door forwards the token to sessions and the fleet too,
+and removes the client's `x-agent-user-id`, so each one names the tenant by verifying
+the token itself. The build refuses an agent behind the door without `mode = "oidc"`.
 
 ```nix
 services.agentSeddon = {
   frontDoor.enable = true;
   dex = { enable = true; github = { … }; };
-  gateway.settings.auth = {
+  settings.auth = {
     mode = "oidc";
     redirect_uris = [ config.services.agentSeddon.frontDoor.callbackUrl ];
     issuers = [ config.services.agentSeddon.dex.issuerSettings ];

@@ -942,6 +942,11 @@ in
             message = "services.agentSeddon.portal.defines: PORTAL_AUTH must be \"door\" with frontDoor.enable (the door's cookie signs the portal in).";
           }
           {
+            # ...and without it there is no door to sign in at (/auth/login is the gate's).
+            assertion = fd.enable || (portalDefines.PORTAL_AUTH or "") != "door";
+            message = "services.agentSeddon.portal.defines: PORTAL_AUTH = \"door\" needs frontDoor.enable (there is no /auth/login without the door).";
+          }
+          {
             assertion = builtins.all (n: builtins.match "[A-Za-z0-9_.-]+" n != null) (
               builtins.attrNames cfg.credentials
             );
@@ -1113,6 +1118,19 @@ in
             # the build, not the gateway at start.
             assertion = (gwAuth.mode or "") == "oidc";
             message = "services.agentSeddon.frontDoor: the gateway needs `[auth] mode = \"oidc\"` (settings.auth or gateway.settings.auth).";
+          }
+          {
+            # The door forwards the token to sessions and fleet too, and removes the
+            # client's x-agent-user-id: only their own AuthLayer, verifying it, names
+            # the tenant (04-service-integration, D7). Without it, Send has no user and
+            # the fleet answers as the `local` tenant.
+            assertion =
+              builtins.all
+                (n: ((config.services.agentSeddon.renderedSettings.${n} or { }).auth.mode or "") == "oidc")
+                (
+                  builtins.attrNames (builtins.removeAttrs config.services.agentSeddon.renderedSettings [ "gateway" ])
+                );
+            message = "services.agentSeddon.frontDoor: every agent behind the door needs `[auth] mode = \"oidc\"` to verify the door's token; set it in settings.auth (host-wide), not gateway.settings.auth alone.";
           }
           {
             assertion = builtins.elem fdCallback (gwAuth.redirect_uris or [ ]);

@@ -1549,6 +1549,24 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       none and names none (Dart row `positive_door_send_names_no_session`). Every tab
       on one sign-in drives the same session.
     - The sign-in row seeds a login-trip stamp and checks that it is cleared.
+  - Second draft (no must-fix), fixed here:
+    - The empty-sid backstop records an audit refusal (`no_session_id`), like every
+      other refusal in `check()`.
+    - `PORTAL_AUTH = "door"` without the door is refused at eval time (there is no
+      `/auth/login` to go to); `portalCookieMode` has the row.
+    - VM: `AgentSessionService/Send` through the door, with and without a forged
+      session header. Its empty goal's INVALID_ARGUMENT (identity is checked first)
+      proves the AuthLayer's user and the gate's session both arrived.
+    - That `Send` row found a real gap: with `[auth]` on the gateway alone, sessions
+      and the fleet had no AuthLayer. The door removes the client's `x-agent-user-id`,
+      so `Send` was UNAUTHENTICATED ("requires (user, session) identity"), and the
+      fleet would have answered as the `local` tenant. The module now refuses the door
+      unless every agent behind it has `[auth] mode = "oidc"` (so it verifies the
+      token, D7). The VM, the eval fixture and `deployment-nixos.md` put `[auth]` in the
+      host-wide `settings.auth`. Eval rows: sessions or the fleet with `mode = "off"`.
+      Operator note: behind the door, a plaintext grpcurl to the fleet needs a token.
+    - The logout POST's cross-site question does not arise: the session cookie is
+      `SameSite=Lax` (already tested), so a cross-site form carries no cookie.
   - #720 (S30) merged as ce3812dc. Its draft's two must-fix items were checked and
     did not hold: the VM test runs green (in a NixOS test VM eth1 is vlan 1, and the
     driver does not use ssh), and nixpkgs declares `services.postgresql.settings.port`
