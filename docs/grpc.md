@@ -623,6 +623,17 @@ main_origin = "https://172.16.50.46:8443" # the front door; <origin>/auth/callba
   session gets a 302 to the login, an RPC a 401.
 - Login and callback wait on the IdP, so at most half the gate's workers answer them; the next
   gets a 503 and the checks keep the rest.
+- `[auth.gate.setup]` (S26b, [`gate/setup.rs`](../crates/agent-grpc/src/server/auth/gate/setup.rs))
+  creates the GitHub App from a manifest. While no App exists, the gate writes a single-use
+  setup code to `<dir>/setup-code` (0600, an hour, renewed at each start; each use writes the
+  next one, same deadline) and logs the file's
+  path; logs leave the host, so never the code. `GET /auth/setup?code=…` answers a page whose
+  button posts the manifest (URLs from `main_origin`, never the request) to GitHub with a
+  fresh `state`, bound to the browser by a `__Host-seddon-setup` cookie. GitHub's
+  `/auth/setup/callback` spends the `state`, trades the code once
+  (`POST /app-manifests/{code}/conversions`, a 64 KiB cap) and writes `app-id`, `slug`,
+  `client-id`, `client-secret`, `private-key.pem` and `webhook-secret` to `dir` (0600,
+  `app-id` last). None of it is logged or shown. After that both routes are 404.
 
 **Audit trail** (S11, [`server/audit.rs`](../crates/agent-grpc/src/server/audit.rs)). Every
 auth event is a row in ClickHouse `agent.agent_auth_events` when `[telemetry]` is on.

@@ -14,6 +14,8 @@ enum Called {
     Callback(String, Option<String>, String),
     Logout(String, Option<String>),
     Check(Listener, String, Option<String>, Option<String>),
+    Setup(String),
+    SetupCallback(String, Option<String>),
 }
 
 /// Records each call and answers with `reply`. With `idp`, a login waits for a
@@ -70,6 +72,12 @@ impl GateRoutes for Fake {
             req.authorization.map(Into::into),
         ))
     }
+    async fn setup(&self, query: &str) -> Reply {
+        self.saw(Called::Setup(query.into()))
+    }
+    async fn setup_callback(&self, query: &str, cookie: Option<&str>) -> Reply {
+        self.saw(Called::SetupCallback(query.into(), cookie.map(Into::into)))
+    }
 }
 
 fn ok() -> Reply {
@@ -102,6 +110,15 @@ fn s(v: &str) -> String {
     Some(Called::Check(Listener::Main, s("/"), Some(s("a=1; __Host-seddon=v")), None)), 200
 )]
 #[case::corner_header_names_any_case("GET", "/_check/main/", &[("AUTHORIZATION", "Bearer t")], Some(Called::Check(Listener::Main, s("/"), None, Some(s("Bearer t")))), 200)]
+#[case::positive_setup("GET", "/auth/setup?code=c", &[], Some(Called::Setup(s("code=c"))), 200)]
+#[case::positive_setup_callback(
+    "GET", "/auth/setup/callback?code=c&state=s", &[("cookie", "__Host-seddon-setup=v")],
+    Some(Called::SetupCallback(s("code=c&state=s"), Some(s("__Host-seddon-setup=v")))), 200
+)]
+#[case::negative_setup_post("POST", "/auth/setup?code=c", &[], None, 405)]
+#[case::negative_setup_callback_post("POST", "/auth/setup/callback", &[], None, 405)]
+#[case::adversarial_setup_lookalike("GET", "/auth/setupx?code=c", &[], None, 404)]
+#[case::adversarial_setup_trailing_slash("GET", "/auth/setup/?code=c", &[], None, 404)]
 #[case::negative_login_post("POST", "/auth/login", &[], None, 405)]
 #[case::negative_callback_post("POST", "/auth/callback?code=c&state=s", &[], None, 405)]
 #[case::negative_unknown_path("GET", "/", &[], None, 404)]
@@ -140,6 +157,8 @@ async fn dispatch_cases(
 #[case::positive_login("/auth/login", true)]
 #[case::positive_callback("/auth/callback", true)]
 #[case::positive_logout("/auth/logout", true)]
+#[case::positive_setup("/auth/setup", true)]
+#[case::positive_setup_callback("/auth/setup/callback", true)]
 #[case::negative_check("/_check/main/", false)]
 #[tokio::test]
 async fn browser_routes_are_never_cached(#[case] url: &str, #[case] no_store: bool) {
@@ -353,4 +372,23 @@ async fn corner_a_stalled_idp_leaves_the_checks_their_workers() {
     for h in held {
         assert_eq!(h.join().expect("joined"), "HTTP/1.1 200 OK");
     }
+}
+
+/// The content type written: plain text unless the reply sets its own (the setup
+/// pages), and never two.
+#[rstest]
+#[case::positive_plain_by_default(ok(), "text/plain; charset=utf-8")]
+#[case::positive_own_type_kept(
+    with_header("content-type", "text/html; charset=utf-8"),
+    "text/html; charset=utf-8"
+)]
+#[case::corner_own_type_any_case(with_header("Content-Type", "text/html"), "text/html")]
+fn content_type_cases(#[case] reply: Reply, #[case] want: &str) {
+    let headers = headers_of(&reply).expect("writable");
+    let types: Vec<String> = headers
+        .iter()
+        .filter(|h| h.field.equiv("content-type"))
+        .map(|h| h.value.as_str().to_string())
+        .collect();
+    assert_eq!(types, vec![want.to_string()]);
 }

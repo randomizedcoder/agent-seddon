@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError, StatusCode;
 import 'package:grpc/service_api.dart' as grpc;
 
 import '../clients.dart';
@@ -18,7 +19,11 @@ import '../theme/seddon_colors.dart';
 /// blanking the view.
 class AgentViewPage extends StatefulWidget {
   const AgentViewPage(
-      {super.key, required this.clients, this.tenant, this.door = false});
+      {super.key,
+      required this.clients,
+      this.tenant,
+      this.door = false,
+      this.onUnauthenticated});
 
   final PortalClients clients;
 
@@ -31,6 +36,12 @@ class AgentViewPage extends StatefulWidget {
   /// the page opens no registry session and sends no identity metadata. Every
   /// tab on one sign-in therefore drives the same session.
   final bool door;
+
+  /// Behind the front door, a stream that ends unauthenticated means the
+  /// door's session has ended: this sends the browser to sign in again
+  /// ([AuthState.sessionLost]). The interceptor reports unary calls; a stream's
+  /// error reaches only this page.
+  final void Function()? onUnauthenticated;
 
   @override
   State<AgentViewPage> createState() => _AgentViewPageState();
@@ -89,7 +100,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
     _streamDown = false;
     _sub = widget.clients.session.subscribe(SubscribeRequest()).listen(
       _onEvent,
-      onError: (Object e) => setState(() => _streamDown = true),
+      onError: _onStreamError,
       onDone: () => setState(() => _streamDown = true),
     );
   }
@@ -139,9 +150,18 @@ class _AgentViewPageState extends State<AgentViewPage> {
         .send(GoalRequest(goal: g), options: opts)
         .listen(
           _onEvent,
-          onError: (Object e) => setState(() => _streamDown = true),
+          onError: _onStreamError,
           onDone: () {}, // the run ended; keep the transcript (session is reusable)
         );
+  }
+
+  void _onStreamError(Object e) {
+    setState(() => _streamDown = true);
+    if (widget.door &&
+        e is GrpcError &&
+        e.code == StatusCode.unauthenticated) {
+      widget.onUnauthenticated?.call();
+    }
   }
 
   void _onEvent(SessionEvent ev) {

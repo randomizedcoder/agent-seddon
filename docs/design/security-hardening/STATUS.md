@@ -38,7 +38,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S24 | Native desktop TLS (and client certificate) to the agent | S23 live-check gap | ✅ | #573 |
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
-| S26b | GitHub App from a manifest (`/setup` bootstrap) | [10](10-sso-front-door.md) | ⬜ | |
+| S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | 🟡 | #722 |
+| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | ⬜ | |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -46,7 +47,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S28b | The front door in the module: options, certificate, unit, `[auth.gate]` wiring; VM rows (Dex `mockCallback` through the door) | [10](10-sso-front-door.md) F4, F7 | ✅ | #717 |
 | S29 | Grafana `auth.proxy`, Prometheus sub-path, HyperDX port | [10](10-sso-front-door.md) F6 | ✅ | #719 |
 | S30 | Loopback lockdown + firewall; the webhook receiver's own bind | [10](10-sso-front-door.md) F9 | ✅ | #720 |
-| S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | 🟡 | #721 |
+| S31 | Portal cookie mode + tool links | [10](10-sso-front-door.md) | ✅ | #721 |
 
 ## As-built log
 
@@ -1578,6 +1579,104 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Carried to S26b: warn at eval time when the door is on and an operator's
     `PORTAL_GRAFANA_URL`/`PORTAL_PROMETHEUS_URL` override is a loopback address (a dead
     link from the browser).
+
+- **2026-11-11 — S26b-i: creating the GitHub App from a manifest, on the gate.** S31 merged as
+  #721 (f2d07b7c). S26b is split: S26b-i is the gate's routes, S26b-ii the module wiring
+  (09's lanes).
+  - **Routes.** `GET /auth/setup?code=…` and `GET /auth/setup/callback?code=…&state=…` on the
+    gate (`gate/setup.rs`), configured by `[auth.gate.setup]` (`dir`, and optional `org`,
+    `app_name`, `webhook_url`, `github_url`, `api_url` for GHES). Without the table both are
+    404. Envoy routes the two exact paths to the gate past the check (`GATE_PATHS`).
+  - **The setup code.** While no App exists, the gate writes a single-use code (32 random
+    bytes) to `<dir>/setup-code` (0600; `dir` made 0700) and logs the file's path and the URL
+    shape, never the code. The design said "to its journal", but the agent's logs also go to
+    ClickHouse over OTLP, so the code stays in the file. It lasts an hour, and a restart writes
+    a new one. A code opens one page: under one lock, its use writes the next code to the file
+    (same deadline), so a URL a proxy or the browser's history kept opens nothing again; if the
+    next code can't be written, setup closes until a restart. A wrong, used, missing, repeated
+    (`code=a&code=b`) or expired code is a 403, audited as `setup_code_refused`.
+  - **Codes in URLs stay out of telemetry.** The front door's access log body is now
+    `%PATH(NQ)%` (it was `%REQ(:PATH)%`, which already exported the Dex
+    callback's `code` and `state`), and the gate and `/dex` routes are untraced (route
+    `tracing` sampling 0), since a span records the whole URL. Found by the commit security
+    review.
+  - **The page.** It posts the manifest to `https://github.com/settings/apps/new` (or an
+    organization's) with a fresh `state` (at most 16 open, 10 minutes each). The manifest's URLs
+    come from `main_origin`, never the request:
+    - `redirect_url` is `/auth/setup/callback`.
+    - `callback_urls` are the portal's root, which an install returns to (forge-auth F5), and
+      `/dex/callback`.
+    - Permissions: contents and metadata read, pull requests write, members read, email
+      addresses read.
+    - A webhook only when `webhook_url` is set.
+    - `request_oauth_on_install` is on.
+    - The page has no script. Its CSP is `default-src 'none'` with `form-action` set to GitHub
+      alone. A `__Host-seddon-setup` cookie, whose hash is kept with the `state`, binds the
+      callback to the browser.
+  - **The callback.** Checks run in this order:
+    1. The `state` is spent first, right or wrong.
+    2. The cookie must match it.
+    3. The code must be unreserved URL bytes, at most 128.
+    4. One conversion runs at a time, and the App's existence is checked again under that lock.
+    The conversion (`POST /app-manifests/{code}/conversions`) has no redirects, a 10 s timeout,
+    must answer 201, and is read to at most 64 KiB. The reply is shape-checked:
+    - a non-zero id;
+    - a slug of lowercase letters, digits and `-`;
+    - a client id of letters, digits and `.`;
+    - printable secrets with no space;
+    - exactly one PEM private-key block.
+    It is written to `app-id`, `slug`, `client-id`, `client-secret`, `private-key.pem` and
+    `webhook-secret` (0600, by rename, `app-id` last as the "exists" mark; an old webhook secret
+    is removed when the new App has none). Then the code file goes and both routes are 404.
+    `CreatedApp`'s `Debug` names no secret. The success page links to the App's install page
+    and shows no secret.
+  - **Refusals** (403 unless noted, each audited, the setup cookie cleared): a malformed
+    callback, an unknown or lapsed `state`, a missing, other or doubled cookie, a traversal
+    code, a failed or malformed conversion (502, setup stays open), unwritable files (500, no
+    `app-id`), an App already made by a concurrent callback (409).
+  - **The reply type.** `Reply.body` is a `Cow<'static, str>` so the pages can be built.
+    `Reply::html` sets the content type, CSP, `referrer-policy: no-referrer` and `nosniff`, and
+    the listener writes a reply's own content type in place of `text/plain`.
+  - **Tables.** `setup/tests.rs`:
+    - the conversion reply (21 rows: hostile slugs, CR/LF secrets, two PEM blocks, a public
+      key, non-ASCII, over the cap);
+    - the manifest code (traversal, encoded, CR/LF, at and over 128);
+    - HTML escaping;
+    - config (relative dir, plain-http GitHub, credentials in the API URL, a query, a
+      plain-http webhook, org and App-name boundaries and markup);
+    - the whole flow (modes 0700/0600, the manifest's URLs, files, closed afterwards);
+    - an org with a webhook;
+    - an existing App closing setup and removing a stale code;
+    - a restart's new code;
+    - the page's refusals (expiry boundary, a doubled code, a malformed escape, an oversized
+      query);
+    - the pending cap;
+    - the callback's refusals;
+    - a `state` spent by a wrong use;
+    - conversion failures;
+    - an unwritable directory;
+    - an old webhook secret removed;
+    - the real conversion call against a loopback server (201, 422, 200, a 302 not followed,
+      at and over the cap).
+    The listener rows cover the setup paths: GET only, lookalikes 404, no-store, and content
+    types. Routes: no setup ⇒ 404, `with_setup` serving the page. Config rows: an absolute
+    `dir` required. `portal_envoy` checks that both paths reach the gate unchecked, with no
+    prefix lookalike.
+  - **#721 carries done here:**
+    - The gate's empty-sid backstop is a function (`rpc_identity`) with a direct row: a 401,
+      no header, and a `no_session_id` audit naming the tenant.
+    - The door login test asserts no `x-agent-user-id`.
+    - The Agent page reports a stream that ends `unauthenticated` behind the door
+      (`onUnauthenticated` → `AuthState.sessionLost`), so Reconnect isn't the only way out.
+      Three rows: behind the door, off the door, and unavailable behind the door.
+    - The `SignedIn('', 0, '', me)` placeholder now has a comment.
+    - `06-portal-and-edge.md` gets an S31 note.
+  - **Still carried to S26b-ii:**
+    - #720's list (the stale `openFirewall` description, the 8123 half-comment, a door +
+      `postgres.enable = false` eval row, more tool ports in the `frontDoorLockdown` sample, a
+      webhook-host row with the door on, `PORTAL_WEBHOOK_HOST`'s fallback comments).
+    - The loopback-link warning.
+    - Dex's connector with a GitHub App's OAuth client.
 
 ## Cross-track note (not an S-increment)
 

@@ -3,6 +3,16 @@
 > For the NixOS module with `frontDoor.enable`, the front door in [10](10-sso-front-door.md)
 > (S25–S31) replaces the per-listener Envoy described here with two TLS listeners (:8443, and
 > :8444 for HyperDX) and `ext_authz`. With the front door off, this page still applies.
+>
+> Behind the front door the portal runs with `PORTAL_AUTH=door` (S31), not the sign-in
+> described below:
+> - It holds no token. It asks `WhoAmI` with the door's cookie, and a 401 sends the browser
+>   to `/auth/login?rd=<page>` (with a 30 s guard against a loop).
+> - Signing out is a form POST to `/auth/logout`.
+> - It sends no `x-agent-user-id` or `x-agent-session-id`: the gate sets the bearer and the
+>   session from the cookie's session.
+> - The Agent page opens no registry session. A stream that ends `unauthenticated` signs in
+>   again (S26b-i).
 
 Closes P0-4: Envoy binds `0.0.0.0`, allows every origin, omits `authorization`, has no `jwt_authn`;
 the portal hardcodes its identity.

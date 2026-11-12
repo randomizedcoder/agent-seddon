@@ -318,7 +318,8 @@ reuses the same pieces later; this design is the NixOS module.
 |---|---|---|
 | S25 | Grafana admin password from a file + reset oneshot (F8) | module, eval rows |
 | S26 | Dex in the module (GitHub connector, secrets as files), the agent issuer wired, `backchannel_url` (F12) | module, Rust, tables, VM test with Dex's `mockCallback` connector |
-| S26b | GitHub App from a manifest: `/setup` bootstrap, secrets to files, Dex restart | Rust, module, tables |
+| S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, secrets to files | Rust, `portal_envoy.py` route, tables |
+| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted when they change | module, eval rows, VM test |
 | S27a | `AuthGate` core: RBAC pairs (F5), the path map, `rd` (F11), browser cookie sessions (F3) | Rust, tables, catalogue |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `Check` (F4; F10's cookie attributes), the token cache | Rust, tables |
 | S27b-ii | The gate's loopback listener, config and wiring | Rust, `authz.toml` rows, `auth-e2e` row |
@@ -351,11 +352,12 @@ Forges tab's Connect GitHub); creating it is the manual step today (l2's App was
   for the account permission *Email addresses: read* so Dex can read the verified email F2 matches
   on. (Open item: confirm Dex's connector works with a GitHub App's client, user-to-server tokens.)
 - **Bootstrap, before anyone can sign in.** With no App, Dex has no GitHub client and nobody can
-  sign in, so the first creation cannot sit behind the sign-in. `/setup` on the front door is open
-  only while no App exists, and only with a single-use setup code the agent writes to its journal
-  at start (as Grafana and Jenkins do); the code expires in an hour and dies once used. After it
-  is used, `/setup` answers 404 for good, and the same flow later (rotate, recreate) needs the
-  operator role.
+  sign in, so the first creation cannot sit behind the sign-in. `/auth/setup` on the front door
+  is open only while no App exists, and only with a single-use setup code the agent writes at
+  start. The code goes to a root-only file in the setup directory, and the journal names the
+  file, not the code: the agent's logs also go to ClickHouse over OTLP. The code expires in an
+  hour and dies once used. After it is used, `/auth/setup` answers 404 for good. Rotating or
+  recreating the App later is a separate flow that will need the operator role.
 - **Where the secrets go.** The conversion response is written straight to files in the agent's
   state directory (mode 0600): the private key and webhook secret for `[github_app]`, the OAuth
   client secret for Dex. None of it is logged, returned to the browser, or put in the store. A
@@ -381,11 +383,11 @@ one l2 deploy (S30), with your go-ahead; `~/nixos/desktop/l2/lan-access.nix` the
 ## Open items
 
 - Dex's GitHub connector with a GitHub App's OAuth client (S26b).
-- Where `/setup` runs (S26b). The agent has no plain-HTTP server that could host it: the fleet's
-  webhook receiver runs only under `--serve-fleet`, and only once a webhook secret exists, which
-  is what the App creates. S27's `AuthGate` serves HTTP for login anyway, so S26b comes after S27
-  and adds `/setup` there. The module also has to take the GitHub client id from a file, since a
-  manifest-made App's id isn't known at eval.
+- Settled (S26b-i): `/setup` runs on the gate, as `/auth/setup` and `/auth/setup/callback`, which
+  Envoy routes past the check. The agent had no other plain-HTTP server that could host it: the
+  fleet's webhook receiver runs only under `--serve-fleet`, and only once a webhook secret
+  exists, which is what the App creates. Still open for S26b-ii: the module has to take the
+  GitHub client id and App id from files, since a manifest-made App's ids aren't known at eval.
 - `agent login --device` dials the public issuer and ignores `backchannel_url`
   (`crates/agent-grpc/src/client/login.rs`). Behind the front door the public issuer is
   reachable, so this only matters for a CLI on the host itself; settle it with S27's token rules.

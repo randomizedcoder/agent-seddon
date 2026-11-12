@@ -451,6 +451,8 @@ void main() {
             expect(h.authorization, isNull, reason: '$h: the door adds the bearer');
             expect(h.metadata.containsKey('x-agent-session-id'), isFalse,
                 reason: '$h: the door names the session');
+            expect(h.metadata.containsKey('x-agent-user-id'), isFalse,
+                reason: '$h: the agent takes the tenant from the door\'s token');
           }
           expect(robot.log.fired(LoginRobot.issuers), isFalse);
           expect(robot.platform.navigated, isEmpty);

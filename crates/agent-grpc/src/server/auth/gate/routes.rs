@@ -3,9 +3,11 @@
 //! few relevant parts and return a [`Reply`]. The HTTP listener that calls them is
 //! a thin adapter, so every decision here is tested without a socket.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use super::setup::{AppSetup, SetupConfig};
 use super::{
     admits, grafana_role, percent_decode, return_path, route, unauthenticated, Listener, Route,
     Unauthenticated, HOME,
@@ -34,12 +36,13 @@ pub const MAX_CACHED_TOKENS: usize = 4096;
 /// How long the login cookie lives: the `state` it is bound to lives as long.
 const LOGIN_COOKIE_SECS: u64 = crate::server::auth::code_flow::STATE_TTL_SECS;
 
-/// What the gate answers: a status, headers, and a short plain-text body.
+/// What the gate answers: a status, headers, and a body: short plain text, or
+/// one of `/auth/setup`'s pages ([`Reply::html`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body: &'static str,
+    pub body: Cow<'static, str>,
 }
 
 impl Reply {
@@ -47,8 +50,25 @@ impl Reply {
         Self {
             status,
             headers: Vec::new(),
-            body,
+            body: Cow::Borrowed(body),
         }
+    }
+
+    /// An HTML page that loads nothing: no script, style, image or frame, and
+    /// forms only as `form_action` (a CSP `form-action` directive) allows.
+    pub(super) fn html(status: u16, page: String, form_action: &str) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: Cow::Owned(page),
+        }
+        .with("content-type", "text/html; charset=utf-8".into())
+        .with(
+            "content-security-policy",
+            format!("default-src 'none'; base-uri 'none'; frame-ancestors 'none'; {form_action}"),
+        )
+        .with("referrer-policy", "no-referrer".into())
+        .with("x-content-type-options", "nosniff".into())
     }
 
     fn redirect(location: String) -> Self {
@@ -83,6 +103,9 @@ pub struct GateConfig {
     /// redirect_uris`, and HyperDX's listener sends a login here. One trailing `/`
     /// is dropped; anything else must already be the origin's canonical form.
     pub main_origin: String,
+    /// `[auth.gate.setup]`: creating the GitHub App from a manifest (S26b). `None`
+    /// leaves `/auth/setup` a 404.
+    pub setup: Option<SetupConfig>,
 }
 
 /// One `ext_authz` check: what Envoy forwards of the original request.
@@ -106,6 +129,7 @@ pub struct AuthGate {
     callback_url: String,
     clock: Arc<dyn Clock>,
     tokens: Mutex<HashMap<String, Cached>>,
+    setup: Option<AppSetup>,
 }
 
 struct Cached {
@@ -141,6 +165,11 @@ impl AuthGate {
                 "the gate's callback `{callback_url}` is not one of `[auth] redirect_uris`"
             ));
         }
+        let setup = cfg
+            .setup
+            .as_ref()
+            .map(|s| AppSetup::github(s, &main_origin, clock.now_secs()))
+            .transpose()?;
         Ok(Self {
             svc,
             issuer: cfg.issuer,
@@ -148,7 +177,32 @@ impl AuthGate {
             callback_url,
             clock,
             tokens: Mutex::new(HashMap::new()),
+            setup,
         })
+    }
+
+    /// The gate with `setup` in place of the one its config built (tests).
+    #[cfg(test)]
+    pub(crate) fn with_setup(mut self, setup: AppSetup) -> Self {
+        self.setup = Some(setup);
+        self
+    }
+
+    /// `GET /auth/setup?code=…` (S26b): 404 unless `[auth.gate.setup]` is set and
+    /// no GitHub App exists yet.
+    pub fn setup(&self, query: &str) -> Reply {
+        match &self.setup {
+            Some(s) => s.begin(query, self.clock.now_secs()),
+            None => Reply::new(404, "not found"),
+        }
+    }
+
+    /// `GET /auth/setup/callback?code=…&state=…` (S26b).
+    pub async fn setup_callback(&self, query: &str, cookie: Option<&str>) -> Reply {
+        match &self.setup {
+            Some(s) => s.complete(query, cookie, self.clock.now_secs()).await,
+            None => Reply::new(404, "not found"),
+        }
     }
 
     /// `GET /auth/login?rd=<path>`: begin a sign-in bound to this browser and send
@@ -267,27 +321,10 @@ impl AuthGate {
                     },
                     Caller::Bearer(t, _, _) => format!("Bearer {t}"),
                 };
-                // The token's own sid (S31): the portal in cookie mode names no
-                // session, and a client's header never reaches the agent. The
-                // issuer neither mints nor verifies a token with an empty sid
-                // (token/tests.rs `adversarial_empty_sid`), so this refusal is a
-                // backstop: never pass a call on unnamed, and say so if it fires.
-                let sid = caller.sid();
-                if sid.is_empty() {
-                    crate::server::audit::refused(
-                        GATE_CHECK,
-                        "no_session_id",
-                        crate::server::audit::Refused {
-                            tenant: &principal.tenant,
-                            subject: &principal.subject,
-                            sid: "",
-                        },
-                    );
-                    return Reply::new(401, "unauthenticated");
-                }
-                ok = ok
-                    .with("authorization", value)
-                    .with("x-agent-session-id", sid.to_string());
+                ok = match rpc_identity(ok, value, caller.sid(), principal) {
+                    Ok(ok) => ok,
+                    Err(denied) => return denied,
+                };
             }
             Route::Grafana => {
                 ok = ok
@@ -370,6 +407,34 @@ impl AuthGate {
             .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
+}
+
+/// An RPC's identity headers: the bearer and the token's own sid (S31). The
+/// portal in cookie mode names no session, and a client's header never reaches
+/// the agent. The issuer neither mints nor verifies a token with an empty sid
+/// (token/tests.rs `adversarial_empty_sid`), so the refusal here is a backstop:
+/// never pass a call on unnamed, and audit it if it fires.
+fn rpc_identity(
+    ok: Reply,
+    bearer: String,
+    sid: &str,
+    principal: &agent_core::VerifiedPrincipal,
+) -> Result<Reply, Reply> {
+    if sid.is_empty() {
+        crate::server::audit::refused(
+            GATE_CHECK,
+            "no_session_id",
+            crate::server::audit::Refused {
+                tenant: &principal.tenant,
+                subject: &principal.subject,
+                sid: "",
+            },
+        );
+        return Err(Reply::new(401, "unauthenticated"));
+    }
+    Ok(ok
+        .with("authorization", bearer)
+        .with("x-agent-session-id", sid.to_string()))
 }
 
 const CALLBACK: &str = "/auth/callback";
@@ -469,11 +534,11 @@ pub fn cookie_value<'a>(header: Option<&'a str>, name: &str) -> Result<Option<&'
 }
 
 /// A `Set-Cookie` value with F3's attributes.
-fn set_cookie(name: &str, value: &str, max_age: u64) -> String {
+pub(super) fn set_cookie(name: &str, value: &str, max_age: u64) -> String {
     format!("{name}={value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={max_age}")
 }
 
-fn clear_cookie(name: &str) -> String {
+pub(super) fn clear_cookie(name: &str) -> String {
     set_cookie(name, "", 0)
 }
 

@@ -1175,8 +1175,38 @@ class FrontDoorRender(unittest.TestCase):
         skipped = [r["match"] for r in front_routes_of(cfg) + front_routes_of(cfg, "front_door_hyperdx")
                    if "envoy.filters.http.ext_authz" in r.get("typed_per_filter_config", {})]
         self.assertEqual(skipped, [{"path": p} for p in E.GATE_PATHS] + [{"path_separated_prefix": "/dex"}])
-        for r in front_routes_of(cfg)[:4]:
+        for r in front_routes_of(cfg)[:len(E.GATE_PATHS) + 1]:
             self.assertIs(r["typed_per_filter_config"]["envoy.filters.http.ext_authz"]["disabled"], True)
+
+    def test_positive_app_setup_reaches_the_gate_unchecked(self):
+        # S26b: with no GitHub App nobody can sign in, so creating one can't sit behind
+        # the check; the gate guards it with its setup code. Exact paths only.
+        cfg = front_rendered()
+        for path in ("/auth/setup", "/auth/setup/callback"):
+            with self.subTest(path):
+                r = route_to(cfg, {"path": path})
+                self.assertEqual(r["route"]["cluster"], E.GATE_CLUSTER)
+                self.assertIs(r["typed_per_filter_config"]["envoy.filters.http.ext_authz"]["disabled"], True)
+        matches = [r["match"] for r in front_routes_of(cfg)]
+        for lookalike in ({"prefix": "/auth/setup"}, {"path": "/auth/setup/"}, {"path_separated_prefix": "/auth"}):
+            with self.subTest(lookalike):
+                self.assertNotIn(lookalike, matches)
+
+    def test_adversarial_codes_in_urls_stay_out_of_telemetry(self):
+        # /auth/callback?code=, /auth/setup?code= and /dex/callback?code= carry secrets:
+        # the access log drops the query, and those routes are never traced.
+        cfg = front_rendered()
+        rendered = json.dumps(cfg)
+        self.assertNotIn('"%REQ(:PATH)%"', rendered)
+        self.assertIn('"%PATH(NQ)%"', rendered)
+        secret = [{"path": p} for p in E.GATE_PATHS] + [{"path_separated_prefix": "/dex"}]
+        for r in front_routes_of(cfg):
+            with self.subTest(r["match"]):
+                if r["match"] in secret:
+                    self.assertEqual(r.get("tracing"), E.UNTRACED)
+                else:
+                    self.assertNotIn("tracing", r)
+        self.assertTrue(all(v == {"numerator": 0} for v in E.UNTRACED.values()))
 
     def test_positive_rpcs_reach_the_process_that_serves_them(self):
         cfg = front_rendered()
