@@ -151,6 +151,12 @@ pkgs.testers.runNixOSTest {
           clientSecretFile = "/run/secrets/dex-github";
         };
       };
+      # S26b-ii (#723 draft): the App `/auth/setup` creates, wired to Dex and the agents.
+      # The test writes the App's files as the gate's callback would; nothing dials GitHub.
+      specialisation.ghapp.configuration.services.agentSeddon = {
+        dex.mockLogin = lib.mkForce false;
+        githubApp.fromSetup = true;
+      };
       # S30: the door on the LAN address with the firewall opened, probed from `client`.
       specialisation.lan.configuration.services.agentSeddon = {
         publicHost = lib.mkForce config.networking.primaryIPAddress;
@@ -605,6 +611,54 @@ pkgs.testers.runNixOSTest {
         q = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
         assert q["client_id"] == ["Iv1.vmtest"], loc
         assert q["redirect_uri"] == [f"{public}/callback"], loc
+
+    with subtest("github app: the files /auth/setup writes start Dex and reach the agents"):
+        d = "/var/lib/agent-seddon/github-app"
+        agents = ["gateway", "sessions", "fleet"]
+        machine.succeed(f"{base}/specialisation/ghapp/bin/switch-to-configuration test")
+        for u in agents:
+            machine.wait_for_unit(f"agent-seddon-{u}.service")
+        # The directory is there before any App (tmpfiles), the agent's alone, and the
+        # gate wrote its setup code into it.
+        assert machine.succeed(f"stat -c '%a %U' {d}").strip() == "700 agent-seddon"
+        machine.wait_until_succeeds(f"test -s {d}/setup-code")
+        # No App yet: Dex is skipped, and each agent says so once its log is up.
+        machine.fail("systemctl is-active dex.service")
+        def invocation(u):
+            return machine.succeed(
+                f"systemctl show -p InvocationID --value agent-seddon-{u}.service"
+            ).strip()
+        before = {u: invocation(u) for u in agents}
+        for u, inv in before.items():
+            machine.wait_until_succeeds(
+                f"journalctl --no-pager _SYSTEMD_INVOCATION_ID={inv} | grep -q 'holds no GitHub App yet'"
+            )
+        # What the gate's callback writes, `app-id` last, as the agent's user. The key is
+        # a real one: the agents parse it at start.
+        machine.succeed(
+            f"runuser -u agent-seddon -- sh -c 'umask 077 && cd {d} && "
+            "${pkgs.openssl}/bin/openssl genrsa -out private-key.pem 2048 2>/dev/null && "
+            "printf agent-seddon-vm > slug && printf Iv23li.vmapp > client-id && "
+            "printf vm-app-secret-0123 > client-secret && printf 4242 > app-id'"
+        )
+        # The path unit's oneshot: Dex starts with the App's client spliced in...
+        machine.wait_for_unit("dex.service")
+        machine.wait_for_open_port(5556)
+        machine.succeed("grep -qF Iv23li.vmapp /run/dex/config.yaml")
+        machine.succeed("grep -qF vm-app-secret-0123 /run/dex/config.yaml")
+        machine.fail(f"grep -qF {d}/client-secret /run/dex/config.yaml")
+        # ...and every agent restarts and fills `[github_app]` from the files.
+        for u, inv in before.items():
+            machine.wait_until_succeeds(f"test \"$(systemctl show -p InvocationID --value agent-seddon-{u}.service)\" != {inv}")
+            machine.wait_for_unit(f"agent-seddon-{u}.service")
+            machine.sleep(2)
+            machine.require_unit_state(f"agent-seddon-{u}.service", "active")
+            now = invocation(u)
+            machine.fail(
+                f"journalctl --no-pager _SYSTEMD_INVOCATION_ID={now} | grep -q 'no GitHub App yet'"
+            )
+        # The App is made: setup is closed and its code is gone.
+        machine.wait_until_fails(f"test -e {d}/setup-code")
 
     with subtest("lockdown: from the LAN only the door answers (S30)"):
         machine.succeed(f"{base}/specialisation/lan/bin/switch-to-configuration test")

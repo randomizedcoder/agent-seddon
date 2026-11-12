@@ -357,7 +357,11 @@ Forges tab's Connect GitHub); creating it is the manual step today (l2's App was
   start. The code goes to a file only the agent's user can read, in the setup directory, and the journal names the
   file, not the code: the agent's logs also go to ClickHouse over OTLP. The code expires in an
   hour and dies once used. After it is used, `/auth/setup` answers 404 for good. Rotating or
-  recreating the App later is a separate flow that will need the operator role.
+  recreating the App later is a separate flow that will need the operator role. Until setup
+  is done, the agent's user can read the code, and so can the tools the gateway's model runs
+  as that user: a sandboxed tool could read it and create the App first. The file's modes,
+  the one-hour single use and the close once `app-id` exists bound that; finish setup soon
+  after the first start, before the agents take untrusted work.
 - **Where the secrets go.** The conversion response is written straight to files in the agent's
   state directory (mode 0600): the private key and webhook secret for `[github_app]`, the OAuth
   client secret for Dex. None of it is logged, returned to the browser, or put in the store. A

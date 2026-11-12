@@ -1333,6 +1333,8 @@ let
       && lib.any (lib.hasInfix "replace-secret ${dir}/client-secret ${dir}/client-secret /run/dex/config.yaml") pre
       # No App yet: Dex waits, and the path unit starts it and restarts the agents.
       && ghApp.systemd.services.dex.unitConfig.ConditionPathExists == "${dir}/app-id"
+      # The directory exists before the agents read it, so a missing one is a typo.
+      && lib.elem "d ${dir} 0700 agent-seddon agent-seddon - -" ghApp.systemd.tmpfiles.rules
       && ghApp.systemd.paths.agent-seddon-github-app.pathConfig.PathChanged == "${dir}/app-id"
       && lib.elem "multi-user.target" ghApp.systemd.paths.agent-seddon-github-app.wantedBy
       && lib.hasInfix "systemctl restart dex.service" restart
@@ -1378,6 +1380,11 @@ let
       && ghAppFails { githubApp.appName = lib.strings.replicate 35 "a"; }
       && ghAppFails { githubApp.webhookUrl = "http://hooks.example/webhooks/github"; }
       && ghAppFails { githubApp.webhookUrl = "https://hooks.example/x?y=1"; }
+      && ghAppFails { githubApp.webhookUrl = "https://hooks.example:99999/x"; }
+      && ghAppFails { githubApp.webhookUrl = "https://hooks.example:0/x"; }
+      && ghAppFails { githubApp.webhookUrl = "https://hooks.example:00000"; }
+      && !(ghAppFails { githubApp.webhookUrl = "https://hooks.example:65535/x"; })
+      && !(ghAppFails { githubApp.webhookUrl = "https://hooks.example:8443"; })
       && !(ghAppFails { githubApp.appName = lib.strings.replicate 34 "a"; });
     grafanaNeedsHostGrafana =
       failedAssertions (evalWith {

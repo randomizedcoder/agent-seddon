@@ -112,6 +112,12 @@ async fn main() -> Result<()> {
     config.source_path = Some(config_path.clone());
     // `[github_app] app_dir` (S26b): the App `/auth/setup` made, read once here.
     let github_app_note = config.resolve_github_app().map_err(anyhow::Error::msg)?;
+    // The one-shot commands below return before tracing starts: say it on stderr.
+    if fleet_cmd.is_some() || matches!(mode, Mode::Repo(_)) {
+        if let Some(note) = &github_app_note {
+            eprintln!("note: {note}");
+        }
+    }
     agent_runtime::repo_index::validate(&config)?;
     if let Some(cmd) = fleet_cmd {
         println!("{}", agent_runtime::fleet_cli::execute(&config, cmd).await?);
@@ -290,6 +296,10 @@ async fn main() -> Result<()> {
         headers,
     });
     let otel_guard = init_tracing(&telemetry, config.telemetry.stream_logs, otel_cfg);
+    // First thing once there is a subscriber, so no later early return can lose it.
+    if let Some(note) = &github_app_note {
+        tracing::warn!("{note}");
+    }
     if otlp_waiting_for_key {
         tracing::warn!(
             file = %config.telemetry.otlp_headers_file,
@@ -317,9 +327,6 @@ async fn main() -> Result<()> {
     // reads. Ignored keys are not fatal, but they must not be silent: this file
     // selects which implementation each seam uses, so a misplaced key means the
     // agent quietly runs something other than what was asked for.
-    if let Some(note) = &github_app_note {
-        tracing::warn!("{note}");
-    }
     for key in &unknown_config_keys {
         tracing::warn!(
             key = %key,

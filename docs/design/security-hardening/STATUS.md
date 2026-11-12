@@ -39,7 +39,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S25 | Grafana admin password from a file + reset oneshot | [10](10-sso-front-door.md) F8 | ✅ | #707 |
 | S26 | Dex (GitHub) in the module, agent issuer wired, `backchannel_url` | [10](10-sso-front-door.md) F1, F12 | ✅ | #708, follow-ups #712 |
 | S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | ✅ | #722 |
-| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | 🟡 | #723 |
+| S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | ✅ | #723 |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1745,6 +1745,41 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       - A mistyped `app_dir` looks the same as "not set up yet". Tell a missing directory
         apart from a directory with no `app-id`.
       - Log `github_app_note` as soon as it is computed.
+- **2026-11-12 — S26b-iii: #723's fleet-draft carries.** #723 merged as fdd13157.
+  - **Half a pair with `app_dir`.** `validate()` ran at parse, before the files fill the
+    empty keys, so `app_dir` with only `slug`, only `client_id` or only `client_secret_ref`
+    was refused although the files complete it. With `app_dir` the pair rules now wait; the
+    filled table is checked whole (`check(false)` in `fill_from_app_dir`). Shapes are still
+    checked at parse: an inline secret, a bad slug or a `ghapp:` key is refused. Rows: six in
+    `github_app_validate_cases`; `fill_from_app_dir` adds an operator's own `client_id` with
+    the files' secret.
+  - **A mistyped `app_dir` fails.** `github_app_dir::read` now errs when the directory is
+    missing or not a directory; an empty directory is still "no App yet". The module makes
+    the directory at boot (tmpfiles, `0700` to the agent's user, eval row in
+    `githubAppFromSetup`), so only a wrong path is missing. Rows: `read_cases`
+    (`negative_no_dir`, `adversarial_dir_is_a_file`, `corner_empty_dir_is_no_app_yet`) and
+    `fill_from_app_dir` (`negative_dir_missing`, `adversarial_relative_dir`).
+  - **The note is logged first thing.** `agent` logs `github_app_note` right after tracing
+    starts, so no early return before the old spot loses it. The one-shot `fleet` and `repo`
+    commands, which return before tracing, print it on stderr.
+  - **`webhookUrl`'s port** is checked to be 1–65535 (`portOk` reads only a port at the
+    URL's end, and this URL may have a path). Rows in `githubAppRefusals`: `:99999/x`,
+    `:0/x`, `:00000` refused; `:65535/x` and `:8443` accepted.
+  - **VM subtest of the restart sequence.** The `ghapp` specialisation turns on
+    `githubApp.fromSetup`. Before any App, the directory is `0700 agent-seddon`, the gate
+    has written its setup code, Dex is skipped, and each agent's invocation logs "holds no
+    GitHub App yet". The test then writes the App's files as the gate's callback would
+    (`app-id` last, a real RSA key). The path unit starts Dex with the App's client id and
+    secret spliced in, not their paths. Each agent restarts (a new invocation id), stays up
+    and logs no note. The gate removes the setup code.
+  - **Tests and nits.** `valid_client_id_cases` (10 rows). The `use` in `fill_from_app_dir`
+    moved to the top of the function. `forge.md`: names ending in `-`, and the half-a-pair
+    rule. `10-sso-front-door.md`: before setup, the setup code can be read by the tools
+    that run as the agent's user.
+  - **Still carried:** the `sleep 3` before the gateway restarts stays a heuristic (the VM
+    subtest shows the sequence works, not that the callback page always lands first); the
+    config service's snapshot after `resolve_github_app`; Dex's connector with a GitHub
+    App's OAuth client against real GitHub, at the l2 deploy.
 
 ## Cross-track note (not an S-increment)
 

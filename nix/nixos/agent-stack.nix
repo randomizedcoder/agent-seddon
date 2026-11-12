@@ -1758,11 +1758,30 @@ in
           {
             assertion =
               ghApp.webhookUrl == ""
-              ||
-                builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" ghApp.webhookUrl != null;
-            message = "services.agentSeddon.githubApp.webhookUrl: https://host[:port][/path], no query or fragment.";
+              || (
+                builtins.match "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*" ghApp.webhookUrl != null
+                # `portOk` reads only a port at the URL's end; this one may have a path.
+                && (
+                  let
+                    m = builtins.match "https://[^/:]+:0*([0-9]+).*" ghApp.webhookUrl;
+                  in
+                  m == null
+                  || (
+                    let
+                      p = lib.toInt (lib.head m);
+                    in
+                    p >= 1 && p <= 65535
+                  )
+                )
+              );
+            message = "services.agentSeddon.githubApp.webhookUrl: https://host[:port][/path], a port of 1-65535, no query or fragment.";
           }
         ];
+
+        # The App's directory exists before any unit starts, so an agent's
+        # `[github_app] app_dir` can tell "no App yet" (the directory, no `app-id`) from
+        # a mistyped path (no directory), which fails its start.
+        systemd.tmpfiles.rules = [ "d ${ghAppDir} 0700 ${cfg.user} ${cfg.group} - -" ];
 
         # Once the gate writes the App's `app-id` (its last file), Dex starts with the App's
         # client and the agents restart to read `[github_app] app_dir`. The short wait lets
