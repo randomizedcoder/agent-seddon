@@ -426,8 +426,10 @@ api_key = \"sekret\"
         let path = dir.join("agent.toml");
         std::fs::write(&path, toml).unwrap();
         let cfg = crate::parse_config(toml).unwrap();
-        let snap = serde_json::to_value(&cfg).unwrap();
-        (FileConfigStore::new(path.clone(), snap), path)
+        (
+            FileConfigStore::new(path.clone(), cfg.config_snapshot()),
+            path,
+        )
     }
 
     fn edit(path: &str, v: Value) -> ConfigEdit {
@@ -605,6 +607,9 @@ api_key = \"sekret\"
         TableRemoved,
         /// A fully explicit table, no `app_dir`: nothing is filled.
         Explicit,
+        /// `resolve_github_app` never ran: nothing is filled, so the table the
+        /// snapshot uses is still as written (`config_snapshot`'s precondition).
+        SkipResolve,
     }
 
     #[rstest]
@@ -615,12 +620,15 @@ api_key = \"sekret\"
     #[case::boundary_no_table(AppSnap::NoTable, false)]
     #[case::negative_table_removed_is_drift(AppSnap::TableRemoved, true)]
     #[case::corner_explicit_table(AppSnap::Explicit, false)]
+    #[case::corner_skip_resolve_no_drift(AppSnap::SkipResolve, false)]
     #[tokio::test]
     async fn github_app_snapshot_cases(#[case] case: AppSnap, #[case] restart: bool) {
         use agent_core::github_app_dir as f;
         let tmp = agent_testkit::tempdir();
         let dir = tmp.as_path().join("github-app");
         std::fs::create_dir_all(&dir).unwrap();
+        // The App's files, as the gate writes them; `Explicit` names only the key
+        // and `NoTable` none, so for those rows the rest are present but unread.
         let mut files = vec![
             (f::SLUG_FILE, "agent-seddon-l2"),
             (f::CLIENT_ID_FILE, "Iv23li.abc123"),
@@ -644,7 +652,9 @@ api_key = \"sekret\"
         let path = tmp.as_path().join("agent.toml");
         std::fs::write(&path, &toml).unwrap();
         let mut cfg = crate::parse_config(&toml).unwrap();
-        cfg.resolve_github_app().unwrap();
+        if !matches!(case, AppSnap::SkipResolve) {
+            cfg.resolve_github_app().unwrap();
+        }
         assert_eq!(
             cfg.github_app.is_some(),
             !matches!(case, AppSnap::NoAppYet | AppSnap::NoTable),

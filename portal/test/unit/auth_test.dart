@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:agent_portal/src/auth/auth_interceptor.dart';
@@ -5,6 +6,7 @@ import 'package:agent_portal/src/auth/auth_state.dart';
 import 'package:agent_portal/src/auth/capabilities.dart';
 import 'package:agent_portal/src/auth/pkce.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError;
 import 'package:grpc/service_api.dart';
 
 /// L0 tests for the sign-in helpers (security-hardening S13b): PKCE, the
@@ -109,6 +111,70 @@ void main() {
     });
   });
 
+  // S31 carry (#722's draft): a stream that ends unauthenticated reports the
+  // lost session like a unary call does, whichever page opened it.
+  group('AuthInterceptor streams', () {
+    final method = ClientMethod<String, String>('/t.S/M', (s) => s.codeUnits,
+        (b) => String.fromCharCodes(b));
+    // (name, events then the end: an error, or null for a clean close, reports)
+    for (final (name, events, Object? end, reports) in [
+      ('positive_unauthenticated_reported', ['a'], const GrpcError.unauthenticated('x'), 1),
+      ('negative_unavailable_not_reported', ['a'], const GrpcError.unavailable('x'), 0),
+      ('negative_clean_end_not_reported', ['a', 'b'], null, 0),
+      ('corner_custom_code_16_reported', <String>[], GrpcError.custom(16, 'x'), 1),
+      ('adversarial_plain_error_named_unauthenticated', ['a'],
+          Exception('unauthenticated'), 0),
+      ('adversarial_permission_denied_not_reported', ['a'],
+          const GrpcError.permissionDenied('x'), 0),
+      ('boundary_after_many_events', List.generate(1000, (i) => '$i'),
+          const GrpcError.unauthenticated('x'), 1),
+    ]) {
+      test(name, () async {
+        var lost = 0;
+        final inner = _FakeStream<String>(events, end);
+        final out = AuthInterceptor(() => 'tok', onUnauthenticated: () => lost++)
+            .interceptStreaming(method, const Stream.empty(), CallOptions(),
+                (m, r, options) => inner);
+        final got = <String>[];
+        Object? err;
+        final done = Completer<void>();
+        out.listen(got.add, onError: (Object e) => err = e, onDone: done.complete);
+        await done.future;
+        expect(got, events, reason: 'every event passes through');
+        expect(err, end, reason: 'the caller still sees the error');
+        expect(lost, reports);
+      });
+    }
+
+    test('corner_no_hook_returns_the_call_untouched', () {
+      final inner = _FakeStream<String>(const [], null);
+      final out = AuthInterceptor(() => 'tok').interceptStreaming(
+          method, const Stream.empty(), CallOptions(), (m, r, options) => inner);
+      expect(identical(out, inner), isTrue);
+    });
+
+    test('positive_cancel_reaches_the_call', () async {
+      final inner = _FakeStream<String>(const ['a'], null, hold: true);
+      final out = AuthInterceptor(() => 'tok', onUnauthenticated: () {})
+          .interceptStreaming(method, const Stream.empty(), CallOptions(),
+              (m, r, options) => inner);
+      final sub = out.listen((_) {});
+      await pumpEventQueue();
+      await sub.cancel();
+      expect(inner.cancelled, isTrue);
+    });
+
+    test('positive_stream_carries_the_bearer', () {
+      CallOptions? seen;
+      AuthInterceptor(() => 'tok', onUnauthenticated: () {}).interceptStreaming(
+          method, const Stream.empty(), CallOptions(), (m, r, options) {
+        seen = options;
+        return _FakeStream<String>(const [], null);
+      });
+      expect(seen?.metadata['authorization'], 'Bearer tok');
+    });
+  });
+
   group('parseAuthMode', () {
     for (final (name, raw, want) in [
       ('positive_on', 'on', AuthMode.on),
@@ -140,4 +206,35 @@ void main() {
       test(name, () => expect(doorLoginUrl(Uri.parse(page)), want));
     }
   });
+}
+
+/// A server stream: [events], then [end] as an error (or a clean close), unless
+/// [hold] keeps it open. Records whether its listener cancelled it.
+class _FakeStream<R> extends StreamView<R> implements ResponseStream<R> {
+  _FakeStream(List<R> events, Object? end, {bool hold = false})
+      : this._(StreamController<R>(), events, end, hold);
+
+  _FakeStream._(this._c, List<R> events, Object? end, bool hold)
+      : super(_c.stream) {
+    _c.onCancel = () => cancelled = true;
+    events.forEach(_c.add);
+    if (hold) return;
+    if (end != null) _c.addError(end);
+    _c.close();
+  }
+
+  final StreamController<R> _c;
+  bool cancelled = false;
+
+  @override
+  ResponseFuture<R> get single => throw UnimplementedError();
+
+  @override
+  Future<Map<String, String>> get headers async => const {};
+
+  @override
+  Future<Map<String, String>> get trailers async => const {};
+
+  @override
+  Future<void> cancel() async => cancelled = true;
 }

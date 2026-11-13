@@ -11,8 +11,9 @@
 > - Signing out is a form POST to `/auth/logout`.
 > - It sends no `x-agent-user-id` or `x-agent-session-id`: the gate sets the bearer and the
 >   session from the cookie's session.
-> - The Agent page opens no registry session. A stream that ends `unauthenticated` signs in
->   again (S26b-i).
+> - The Agent page opens no registry session.
+> - Any call, unary or streaming, that ends `unauthenticated` signs in again: the portal's
+>   `AuthInterceptor` reports it to `AuthState.sessionLost` (unary S31, streams S26b-vii).
 
 Closes P0-4: Envoy binds `0.0.0.0`, allows every origin, omits `authorization`, has no `jwt_authn`;
 the portal hardcodes its identity.

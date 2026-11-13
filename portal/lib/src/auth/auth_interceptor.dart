@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError, StatusCode;
 import 'package:grpc/service_api.dart';
 
@@ -6,7 +9,7 @@ import 'package:grpc/service_api.dart';
 /// token>`, and the identity the agent scopes the call by (see
 /// [AuthState.identityHeaders]). Both are read per call, so a refreshed token is
 /// used from the next call on; signed out, or sign-in off, adds nothing. A
-/// unary call that comes back unauthenticated is reported to
+/// call, unary or streaming, that comes back unauthenticated is reported to
 /// [onUnauthenticated] (S31: the front door's session ended); the caller still
 /// sees the error.
 class AuthInterceptor extends ClientInterceptor {
@@ -40,8 +43,44 @@ class AuthInterceptor extends ClientInterceptor {
           ClientMethod<Q, R> method,
           Stream<Q> requests,
           CallOptions options,
-          ClientStreamingInvoker<Q, R> invoker) =>
-      invoker(method, requests, withCredentials(options, token(), identity?.call()));
+          ClientStreamingInvoker<Q, R> invoker) {
+    final call =
+        invoker(method, requests, withCredentials(options, token(), identity?.call()));
+    final hook = onUnauthenticated;
+    return hook == null ? call : ReportingResponseStream(call, hook);
+  }
+}
+
+/// [inner] with every event passed through unchanged, and [onUnauthenticated]
+/// called when an error is `unauthenticated`. A stream's error reaches only its
+/// listener, so a side listener (as for unary calls) isn't possible on a
+/// single-subscription stream. Cancelling the listener cancels [inner], so the
+/// call is cancelled as before.
+@visibleForTesting
+class ReportingResponseStream<R> extends StreamView<R>
+    implements ResponseStream<R> {
+  ReportingResponseStream(this.inner, void Function() onUnauthenticated)
+      : super(inner.transform(StreamTransformer.fromHandlers(
+            handleError: (Object e, StackTrace st, EventSink<R> sink) {
+          if (e is GrpcError && e.code == StatusCode.unauthenticated) {
+            onUnauthenticated();
+          }
+          sink.addError(e, st);
+        })));
+
+  final ResponseStream<R> inner;
+
+  @override
+  ResponseFuture<R> get single => inner.single;
+
+  @override
+  Future<Map<String, String>> get headers => inner.headers;
+
+  @override
+  Future<Map<String, String>> get trailers => inner.trailers;
+
+  @override
+  Future<void> cancel() => inner.cancel();
 }
 
 /// [options] plus the bearer and the identity headers. The bearer replaces any

@@ -63,22 +63,10 @@ void main() {
           expect(robot.isStreamDown, isTrue);
           expect(robot.hasTranscript, isFalse);
 
-        case 'positive_door_stream_unauthenticated_signs_in_again':
+        case 'corner_door_stream_unauthenticated_shows_reconnect':
           robot.door = true;
           await robot.loadStreamDown(const GrpcError.unauthenticated('gone'));
           expect(robot.isStreamDown, isTrue);
-          expect(robot.sessionsLost, 1);
-
-        case 'corner_stream_unauthenticated_off_door_not_reported':
-          await robot.loadStreamDown(const GrpcError.unauthenticated('gone'));
-          expect(robot.isStreamDown, isTrue);
-          expect(robot.sessionsLost, 0);
-
-        case 'negative_door_stream_unavailable_not_reported':
-          robot.door = true;
-          await robot.loadStreamDown();
-          expect(robot.isStreamDown, isTrue);
-          expect(robot.sessionsLost, 0);
 
         case 'positive_reconnect_resubscribes':
           await robot.loadStreamDown();

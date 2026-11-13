@@ -191,8 +191,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       AgentViewPage(
           clients: _clients,
           tenant: () => _auth.tenant,
-          door: _auth.mode == AuthMode.door,
-          onUnauthenticated: _auth.sessionLost),
+          door: _auth.mode == AuthMode.door),
       RouterPage(clients: _clients),
       FleetPage(clients: _clients, tenant: () => _auth.tenant),
       ForgesPage(clients: _clients, platform: _auth.platform, now: _auth.nowSecs),

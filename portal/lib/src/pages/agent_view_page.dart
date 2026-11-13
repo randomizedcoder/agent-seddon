@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError, StatusCode;
 import 'package:grpc/service_api.dart' as grpc;
 
 import '../clients.dart';
@@ -22,8 +21,7 @@ class AgentViewPage extends StatefulWidget {
       {super.key,
       required this.clients,
       this.tenant,
-      this.door = false,
-      this.onUnauthenticated});
+      this.door = false});
 
   final PortalClients clients;
 
@@ -36,12 +34,6 @@ class AgentViewPage extends StatefulWidget {
   /// the page opens no registry session and sends no identity metadata. Every
   /// tab on one sign-in therefore drives the same session.
   final bool door;
-
-  /// Behind the front door, a stream that ends unauthenticated means the
-  /// door's session has ended: this sends the browser to sign in again
-  /// ([AuthState.sessionLost]). The interceptor reports unary calls; a stream's
-  /// error reaches only this page.
-  final void Function()? onUnauthenticated;
 
   @override
   State<AgentViewPage> createState() => _AgentViewPageState();
@@ -155,13 +147,10 @@ class _AgentViewPageState extends State<AgentViewPage> {
         );
   }
 
+  /// A stream that ends unauthenticated behind the front door is reported by
+  /// the portal's `AuthInterceptor`, which sends the browser to sign in again.
   void _onStreamError(Object e) {
     setState(() => _streamDown = true);
-    if (widget.door &&
-        e is GrpcError &&
-        e.code == StatusCode.unauthenticated) {
-      widget.onUnauthenticated?.call();
-    }
   }
 
   void _onEvent(SessionEvent ev) {

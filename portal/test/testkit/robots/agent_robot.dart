@@ -93,11 +93,7 @@ class AgentRobot extends Robot {
   /// Pump the page as it runs behind the front door (S31).
   bool door = false;
 
-  /// How often the page reported a lost session (its `onUnauthenticated`).
-  int sessionsLost = 0;
-
-  Future<void> pump() => pumpPage(AgentViewPage(
-      clients: clients, door: door, onUnauthenticated: () => sessionsLost++));
+  Future<void> pump() => pumpPage(AgentViewPage(clients: clients, door: door));
 
   /// Pump and settle to the connected state: the initial `Subscribe` is live and
   /// both pollers have fired once (from initState).

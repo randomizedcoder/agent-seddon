@@ -43,7 +43,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b-iii | #723's draft: half a pair with `app_dir`, a missing `app_dir` fails, one URL port parser, VM restart subtest | [10](10-sso-front-door.md) | ✅ | #727 |
 | S26b-iv | #727's draft: a TOML `client_id` is shape-checked, `urlPort` bounds its own digits | [10](10-sso-front-door.md) | ✅ | #728 |
 | S26b-v | The config service shows `[github_app]` as written, so a filled table isn't permanent drift | [10](10-sso-front-door.md) | ✅ | #729 |
-| S26b-vi | #729's carries: snapshot docs, more snapshot rows, a valid `clientId` example | [10](10-sso-front-door.md) | 🟡 | this PR |
+| S26b-vi | #729's carries: snapshot docs, more snapshot rows, a valid `clientId` example | [10](10-sso-front-door.md) | ✅ | #730 |
+| S26b-vii | Behind the door every portal stream's 401 signs in again (the interceptor, not the page); #730's carries | [06](06-portal-and-edge.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1841,6 +1842,26 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Three `github_app_snapshot_cases` rows: no `[github_app]` in the file (no drift, the
     portal shows no table), the table removed after the start (drift), and an explicit
     table without `app_dir` (no drift, the portal shows `app_id`).
+- **2026-11-13 — S26b-vii: every portal stream's 401 signs in again.** S26b-vi merged as
+  #730 (c3985890), its draft with no must-fix.
+  - **The carry (#722's draft):** behind the door only the Agent page sent a stream's
+    `unauthenticated` to the door's login; its own `onUnauthenticated` hook did it, and a
+    stream opened by any other page would only fail. `AuthInterceptor.interceptStreaming`
+    now wraps the call in `ReportingResponseStream`: every event and error passes through
+    unchanged, and an `unauthenticated` error also calls the hook (`AuthState.sessionLost`,
+    which acts only in door mode, signed in, once). A side listener, as for unary calls,
+    isn't possible on a single-subscription stream. Cancelling the listener still cancels
+    the call. The Agent page's hook is removed, so there is one reporter.
+  - Rows (`AuthInterceptor streams`): 401 reported; unavailable, a clean end and
+    `permissionDenied` not; `GrpcError.custom(16)` reported; a plain `Exception` whose text
+    says "unauthenticated" not; a 401 after 1000 events reported; every event and the error
+    still reach the caller; no hook ⇒ the call is returned untouched; cancel reaches the
+    call; the stream carries the bearer. The Agent page's three door rows become one: a 401
+    stream greys the view.
+  - **#730's draft (no must-fix), carried:** a `SkipResolve` row in
+    `github_app_snapshot_cases` pins `config_snapshot`'s precondition (no resolve ⇒ no
+    drift); `store_with` builds its snapshot with `config_snapshot()`; a comment says which
+    rows leave the App's files unread.
 
 ## Cross-track note (not an S-increment)
 

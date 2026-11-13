@@ -40,24 +40,10 @@ const agentSpec = PageSpec('agent', [
   ),
   SpecRow(
     elementId: 'agent.reconnect',
-    caseClass: CaseClass.positive,
-    name: 'door_stream_unauthenticated_signs_in_again',
-    description: 'behind the front door a stream ending 401 sends the browser '
-        'to sign in again',
-    expectedRpc: 'agent.v1.AgentSessionService/Subscribe',
-  ),
-  SpecRow(
-    elementId: 'agent.reconnect',
     caseClass: CaseClass.corner,
-    name: 'stream_unauthenticated_off_door_not_reported',
-    description: 'without the front door a 401 stream only greys the view',
-    expectedRpc: 'agent.v1.AgentSessionService/Subscribe',
-  ),
-  SpecRow(
-    elementId: 'agent.reconnect',
-    caseClass: CaseClass.negative,
-    name: 'door_stream_unavailable_not_reported',
-    description: 'behind the front door an unavailable stream is not a lost session',
+    name: 'door_stream_unauthenticated_shows_reconnect',
+    description: 'behind the front door a 401 stream greys the view; the '
+        "portal's AuthInterceptor reports the lost session",
     expectedRpc: 'agent.v1.AgentSessionService/Subscribe',
   ),
   SpecRow(
