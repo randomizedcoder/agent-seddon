@@ -347,7 +347,8 @@ files (shape-checked; an error names the file, never its contents), and `private
 the secrets are read where they are used. Fields set in the table win, so half of a pair (say
 `client_id`, with the secret from the file) may be set there; the pairs are checked once
 filled. While `app-id` is missing (no App yet) the agent drops the table, logs a warning and
-starts without the App. The directory itself must exist: a missing one is taken for a
+starts without the App. The portal's settings page shows the table as written (`app_dir`),
+not the filled fields. The directory itself must exist: a missing one is taken for a
 mistyped path and fails the start (the NixOS module makes it at boot). Give the App a name
 that doesn't end in `-`: GitHub's slug would then end in one, which `[github_app] slug`
 refuses, so the gate refuses the conversion and setup has to be run again. The

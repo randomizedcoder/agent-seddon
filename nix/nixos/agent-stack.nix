@@ -1621,6 +1621,14 @@ in
             message = "services.agentSeddon.dex.github: clientId and clientSecretFile go together.";
           }
           {
+            # The rule `[github_app] client_id` and the gate's `client-id` file follow
+            # (`valid_client_id`): Dex puts it in GitHub's authorize URL.
+            assertion =
+              dexCfg.github.clientId == null
+              || builtins.match "[A-Za-z0-9]([A-Za-z0-9.]{0,62}[A-Za-z0-9])?" dexCfg.github.clientId != null;
+            message = "services.agentSeddon.dex.github.clientId: GitHub's OAuth client id (letters, digits and inner `.`, at most 64).";
+          }
+          {
             assertion =
               dexCfg.github.clientSecretFile == null
               || (

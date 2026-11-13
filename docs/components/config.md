@@ -128,7 +128,10 @@ file — every other component's `[section]`.
   array paths — replace a whole array by its section path.
 - **`GetValues` returns the running snapshot**, so after a `Put` the values still
   show the *live* config (with `Status` reporting the pending change), not the new
-  on-disk value.
+  on-disk value. The one exception is `[github_app]` with `app_dir`: the snapshot holds
+  the table as the file wrote it, not the ids and `file:` references the agent filled
+  from the App's directory, which would otherwise read as drift that no restart clears
+  ([forge.md](forge.md#the-apps-files-app_dir-security-hardening-s26b)).
 - **Masking covers inline secrets** (`api_key` / `password` / `token` /
   `brave_api_key`), not `*_env` / `*_file` *references* (which are not secrets).
 
