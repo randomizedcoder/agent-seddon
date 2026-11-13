@@ -434,8 +434,10 @@ App. The directory itself must exist (the module creates it, 0700 to the agent's
 boot): an agent whose `app_dir` names a missing directory fails to start, since that is a
 mistyped path, not "no App yet". When `app-id` appears, the `agent-seddon-github-app` path unit restarts Dex, whose GitHub
 connector takes its `clientID` and `clientSecret` from the files at start, and the running
-agents, whose `[github_app] app_dir` (set on every agent) fills the App's ids and secret
-references.
+agents, whose `[github_app] app_dir` fills the App's ids and secret references. Every agent
+gets `app_dir` except one whose settings name its own App (`github_app.app_id` or
+`private_key_ref`, say a fleet that reviews with an App made by hand): that agent keeps its
+App, and the setup App is only Dex's sign-in and the other agents'.
 
 ```nix
 services.agentSeddon = {

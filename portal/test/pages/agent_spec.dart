@@ -42,8 +42,9 @@ const agentSpec = PageSpec('agent', [
     elementId: 'agent.reconnect',
     caseClass: CaseClass.corner,
     name: 'door_stream_unauthenticated_shows_reconnect',
-    description: 'behind the front door a 401 stream greys the view; the '
-        "portal's AuthInterceptor reports the lost session",
+    description: 'behind the front door a 401 Subscribe still greys the view '
+        'into the Reconnect panel; the sign-in again it causes is '
+        "login_test's door_stream_session_lost_mid_use",
     expectedRpc: 'agent.v1.AgentSessionService/Subscribe',
   ),
   SpecRow(

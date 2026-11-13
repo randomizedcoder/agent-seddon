@@ -499,6 +499,20 @@ void main() {
           expect(robot.auth.expired, isTrue);
           expect(robot.auth.session, isNull);
 
+        case 'corner_door_stream_session_lost_mid_use':
+          final robot = await LoginRobot.create(tester, uri: door);
+          robot.authFake.whoAmIResponse = principal();
+          await robot.load(mode: AuthMode.door);
+          expect(robot.platform.navigated, isEmpty, reason: 'signed in first');
+          robot.session.error = const GrpcError.unauthenticated('ended');
+          await robot.subscribeToEnd();
+          await robot.pumpUntil(() => robot.platform.navigated.isNotEmpty,
+              reason: "the stream's 401 to send the browser to the door");
+          expect(robot.log.methods, contains('agent.v1.AgentSessionService/Subscribe'));
+          expect(robot.platform.navigated, ['/auth/login?rd=%2F']);
+          expect(robot.auth.expired, isTrue);
+          expect(robot.auth.session, isNull);
+
         case 'adversarial_door_login_loop_stops':
           final robot = await LoginRobot.create(tester, uri: door);
           robot.platform.storage[AuthState.doorLoginKey] = '${now - 5}';

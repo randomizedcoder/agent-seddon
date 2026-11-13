@@ -344,15 +344,18 @@ app_dir = "/var/lib/agent-seddon/github-app"   # absolute
 At startup the agent fills each field left empty: `app_id`, `slug` and `client_id` from their
 files (shape-checked; an error names the file, never its contents), and `private_key_ref`,
 `client_secret_ref` and, when the file exists, `webhook_secret_ref` as `file:` references, so
-the secrets are read where they are used. Fields set in the table win, so half of a pair (say
-`client_id`, with the secret from the file) may be set there; the pairs are checked once
-filled. While `app-id` is missing (no App yet) the agent drops the table, logs a warning and
+the secrets are read where they are used. The App's identity (`app_id`, `private_key_ref`)
+comes from the files or from the table, never both: written beside `app_dir`, either is
+refused at start, since the fill would mint with one App's key under another's id. Other
+fields set in the table win, so half of a pair (say `client_id`, with the secret from the
+file) may be set there; the pairs are checked once filled. While `app-id` is missing (no App yet) the agent drops the table, logs a warning and
 starts without the App. The portal's settings page shows the table as written (`app_dir`),
 not the filled fields. The directory itself must exist: a missing one is taken for a
 mistyped path and fails the start (the NixOS module makes it at boot). Give the App a name
 that doesn't end in `-`: GitHub's slug would then end in one, which `[github_app] slug`
 refuses, so the gate refuses the conversion and setup has to be run again. The
-NixOS module sets `app_dir` on every agent and, with `githubApp.fromSetup`, gives Dex the App's
+NixOS module sets `app_dir` on every agent that doesn't name its own App (`app_id` or
+`private_key_ref` in its settings) and, with `githubApp.fromSetup`, gives Dex the App's
 OAuth client from the same files ([deployment-nixos.md](../deployment-nixos.md)).
 
 ## Deferred

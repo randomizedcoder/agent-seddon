@@ -162,6 +162,37 @@ let
       }
     )
   );
+  # l2: the fleet keeps its own App beside the setup App (no `app_dir` mixes the two).
+  ghAppFleetOwn = evalWith {
+    imports = [
+      (fdModule ghAppOn)
+      {
+        services.agentSeddon.fleet.settings.github_app = {
+          app_id = "5390283";
+          private_key_ref = "file:/run/credentials/@unit@/github-app.pem";
+        };
+      }
+    ];
+  };
+  # Only the key ref named: still the fleet's own App.
+  ghAppFleetKeyOnly = evalWith {
+    imports = [
+      (fdModule ghAppOn)
+      { services.agentSeddon.fleet.settings.github_app.private_key_ref = "env:K"; }
+    ];
+  };
+  # An `app_dir` the operator set beside an explicit App stays, so the agent refuses it.
+  ghAppFleetOwnDir = evalWith {
+    imports = [
+      (fdModule ghAppOn)
+      {
+        services.agentSeddon.fleet.settings.github_app = {
+          app_id = "5390283";
+          app_dir = "/srv/other-app";
+        };
+      }
+    ];
+  };
   ghAppFails = extra: fdFails (lib.recursiveUpdate ghAppOn extra);
   # S29: the door with the host's own tools beside it (`host` is a plain NixOS module).
   fdWith =
@@ -1401,7 +1432,25 @@ let
           org = "acme-co";
           app_name = "seddon l2";
           webhook_url = "https://hooks.example/webhooks/github";
-        };
+        }
+      # An agent naming its own App keeps it, with no `app_dir`; the others read the files.
+      && (
+        let
+          own = ghAppFleetOwn.services.agentSeddon.renderedSettings;
+          keyOnly = ghAppFleetKeyOnly.services.agentSeddon.renderedSettings;
+        in
+        failedAssertions ghAppFleetOwn == [ ]
+        &&
+          own.fleet.github_app == {
+            app_id = "5390283";
+            private_key_ref = "file:/run/credentials/@unit@/github-app.pem";
+          }
+        && own.gateway.github_app.app_dir == dir
+        && own.sessions.github_app.app_dir == dir
+        && keyOnly.fleet.github_app == { private_key_ref = "env:K"; }
+        &&
+          ghAppFleetOwnDir.services.agentSeddon.renderedSettings.fleet.github_app.app_dir == "/srv/other-app"
+      );
     githubAppOffByDefault =
       let
         gw = fd.services.agentSeddon.renderedSettings;
