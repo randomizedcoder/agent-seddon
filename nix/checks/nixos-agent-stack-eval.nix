@@ -865,6 +865,47 @@ let
             "/run/secrets/a b"
             "/run/secrets/x\nExecStartPre=/bin/sh"
           ]
+      # The client id has `valid_client_id`'s shape (#728 draft).
+      &&
+        lib.all
+          (
+            id:
+            dexFails {
+              mockLogin = false;
+              github = {
+                clientId = id;
+                clientSecretFile = "/run/secrets/x";
+              };
+            }
+          )
+          [
+            ""
+            "."
+            "Iv1."
+            ".Iv1"
+            "Iv1 x"
+            "Iv1.x&redirect_uri=https://evil"
+            "Iv1\nx"
+            (lib.concatStrings (lib.replicate 65 "a"))
+          ]
+      &&
+        lib.all
+          (
+            id:
+            !(dexFails {
+              mockLogin = false;
+              github = {
+                clientId = id;
+                clientSecretFile = "/run/secrets/x";
+              };
+            })
+          )
+          [
+            "Iv1.abc"
+            "Iv23liAbC123"
+            "a"
+            (lib.concatStrings (lib.replicate 64 "a"))
+          ]
       && lib.all (o: dexFails { github.orgs = [ o ]; }) [
         "a/b"
         "-x"

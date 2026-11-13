@@ -41,7 +41,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b-i | GitHub App from a manifest: the gate's `/auth/setup`, the setup code, the App's files | [10](10-sso-front-door.md) | ✅ | #722 |
 | S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | ✅ | #723 |
 | S26b-iii | #723's draft: half a pair with `app_dir`, a missing `app_dir` fails, one URL port parser, VM restart subtest | [10](10-sso-front-door.md) | ✅ | #727 |
-| S26b-iv | #727's draft: a TOML `client_id` is shape-checked, `urlPort` bounds its own digits | [10](10-sso-front-door.md) | 🟡 | this PR |
+| S26b-iv | #727's draft: a TOML `client_id` is shape-checked, `urlPort` bounds its own digits | [10](10-sso-front-door.md) | ✅ | #728 |
+| S26b-v | The config service shows `[github_app]` as written, so a filled table isn't permanent drift | [10](10-sso-front-door.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1795,6 +1796,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     config service's snapshot after `resolve_github_app`; Dex's connector with a GitHub
     App's OAuth client against real GitHub, at the l2 deploy.
 - **2026-11-12 — S26b-iv: #727's fleet-draft carries.** #727's second draft had no must-fix.
+  Merged as #728 (6e89e35b).
   - **A TOML `client_id` is shape-checked.** `[github_app] client_id` set by hand went into
     the OAuth URL unchecked, while the gate's `client-id` file had to pass
     `valid_client_id`. `check` now applies the same rule to both (the value is never
@@ -1809,6 +1811,24 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - **Not changed:** `agent token` doesn't read `app_dir` (it prints a stored login and
     uses no App), so a mistyped `app_dir` doesn't fail it.
   - **Still carried:** as S26b-iii.
+- **2026-11-12 — S26b-v: the config service's snapshot keeps `[github_app]` as written.**
+  The `ConfigStore` snapshot was the running `Config`, taken after `resolve_github_app`, and
+  `Status` diffs it against the file. With `app_dir` (set on every agent by the module) the
+  running table holds the filled ids and `file:` references, or is gone before setup, while
+  the file holds only `app_dir`. So `Status` reported drift and the portal's "restart
+  required" banner never cleared. `resolve_github_app` now keeps the table as written
+  (`github_app_as_written`, `serde(skip)`), and `Config::config_snapshot` puts it in the
+  snapshot. The fill only writes ids and `file:` references, so no secret was ever shown; the
+  portal now shows `app_dir` rather than the filled fields. `GithubAppCfg` derives `Clone`.
+  Rows: `github_app_snapshot_cases` through the real `status()`: filled and no-App-yet don't
+  drift; editing the file's `app_dir` still does; the old snapshot (`corner_unfixed_…`) drifts.
+  - **#728's draft (no must-fix), carried here:** the module's `dex.github.clientId` gets
+    the same shape rule, so all three sources of the OAuth client (the TOML key, the gate's
+    file, the module option) agree; rows in `dexRejects` refuse `.`, `Iv1.`, `.Iv1`, a space,
+    `&redirect_uri=…`, a newline and 65 bytes, and accept 1 and 64 bytes. The `client_id`
+    error now says "inner `.`" (`Iv1.` fit the old wording but is refused). A 64-byte accept
+    row in `github_app_validate_cases`. Not changed: a loopback issuer with a 21-digit port
+    also gets the "must use dex.port" message beside the range one.
 
 ## Cross-track note (not an S-increment)
 

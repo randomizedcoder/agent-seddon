@@ -134,6 +134,12 @@ pub struct Config {
     /// build a `Config` in memory.
     #[serde(skip)]
     pub source_path: Option<std::path::PathBuf>,
+    /// `[github_app]` as the file wrote it, kept by [`Config::resolve_github_app`]
+    /// before it fills (or drops) the table; never a TOML key. The config service's
+    /// snapshot ([`Config::config_snapshot`]) shows this, so the ids and file
+    /// references filled from `app_dir` don't read as drift from the file.
+    #[serde(skip)]
+    pub github_app_as_written: Option<GithubAppCfg>,
 }
 
 /// C29 config-ownership model — see
@@ -4379,7 +4385,7 @@ impl SecretsCfg {
 /// F3). Operator-global bootstrap config (the config two-tier rule). The runtime uses
 /// these to mint short-lived installation tokens for `ghapp:<installation_id>` forge
 /// credential references. Absent ⇒ no App, and a `ghapp:` ref fails closed at resolve.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(
     feature = "config-schema",
@@ -4537,7 +4543,7 @@ impl GithubAppCfg {
         // the value is never echoed.
         if has_client_id && !agent_core::github_app_dir::valid_client_id(&self.client_id) {
             return Err(
-                "[github_app] client_id must be GitHub's OAuth client id ([A-Za-z0-9.], <= 64)"
+                "[github_app] client_id must be GitHub's OAuth client id (letters, digits and inner `.`, at most 64)"
                     .into(),
             );
         }
@@ -5442,6 +5448,7 @@ impl Config {
     /// exists there, `[github_app]` is dropped, so a `ghapp:` reference fails closed
     /// as with no App configured, and the returned note says so (the caller logs it).
     pub fn resolve_github_app(&mut self) -> Result<Option<String>, String> {
+        self.github_app_as_written.clone_from(&self.github_app);
         let Some(ga) = self.github_app.as_mut() else {
             return Ok(None);
         };
@@ -5455,6 +5462,22 @@ impl Config {
         );
         self.github_app = None;
         Ok(Some(note))
+    }
+
+    /// The running config as JSON for the config service (portal settings), with
+    /// `[github_app]` as the file wrote it. What `app_dir` filled comes from the App's
+    /// directory, not the file: compared with the file it would read as drift, and the
+    /// portal's "restart required" would never clear.
+    #[cfg(feature = "config-schema")]
+    pub fn config_snapshot(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        if let (Some(written), Some(obj)) = (&self.github_app_as_written, v.as_object_mut()) {
+            obj.insert(
+                "github_app".into(),
+                serde_json::to_value(written).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        v
     }
 }
 
@@ -5559,6 +5582,7 @@ impl Config {
             tenancy: TenancyCfg::default(),
             secrets: SecretsCfg::default(),
             source_path: None,
+            github_app_as_written: None,
         }
     }
 }
@@ -5923,6 +5947,10 @@ mod tests {
     #[case::boundary_client_id_65_bytes(
         &format!("app_dir = \"/d\"\nclient_id = \"{}\"", "a".repeat(65)),
         Err("client_id must be")
+    )]
+    #[case::boundary_client_id_64_bytes(
+        &format!("app_dir = \"/d\"\nclient_id = \"{}\"", "a".repeat(64)),
+        Ok(())
     )]
     #[case::corner_client_id_trailing_dot(
         "app_dir = \"/d\"\nclient_id = \"Iv1.\"",

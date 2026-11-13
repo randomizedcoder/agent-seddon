@@ -1654,7 +1654,7 @@ pub async fn build_agent_with_mode(
     #[cfg(feature = "config")]
     let agent = match cfg.source_path.clone() {
         Some(path) => {
-            let snapshot = serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null);
+            let snapshot = cfg.config_snapshot();
             agent.with_config_store(Arc::new(crate::FileConfigStore::new(path, snapshot))
                 as Arc<dyn agent_core::ConfigStore>)
         }

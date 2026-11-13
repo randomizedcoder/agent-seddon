@@ -586,4 +586,76 @@ api_key = \"sekret\"
             "key not removed: {after}"
         );
     }
+
+    /// `[github_app] app_dir` (S26b): what the App's files fill is not drift from the file.
+    #[derive(Clone, Copy, Debug)]
+    enum AppSnap {
+        /// The App exists; the snapshot keeps the table as written.
+        Filled,
+        /// No App yet; the running config dropped the table.
+        NoAppYet,
+        /// The file's `app_dir` changed after the start: still drift.
+        FileEdited,
+        /// The old snapshot (the filled struct): the drift that never cleared.
+        UnfixedSnapshot,
+    }
+
+    #[rstest]
+    #[case::positive_filled(AppSnap::Filled, false)]
+    #[case::positive_no_app_yet(AppSnap::NoAppYet, false)]
+    #[case::negative_file_edited_is_still_drift(AppSnap::FileEdited, true)]
+    #[case::corner_unfixed_snapshot_drifts(AppSnap::UnfixedSnapshot, true)]
+    #[tokio::test]
+    async fn github_app_snapshot_cases(#[case] case: AppSnap, #[case] restart: bool) {
+        use agent_core::github_app_dir as f;
+        let tmp = agent_testkit::tempdir();
+        let dir = tmp.as_path().join("github-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut files = vec![
+            (f::SLUG_FILE, "agent-seddon-l2"),
+            (f::CLIENT_ID_FILE, "Iv23li.abc123"),
+            (f::CLIENT_SECRET_FILE, "s3cr3t"),
+            (f::PRIVATE_KEY_FILE, "pem"),
+        ];
+        if !matches!(case, AppSnap::NoAppYet) {
+            files.push((f::APP_ID_FILE, "4242"));
+        }
+        for (name, value) in files {
+            std::fs::write(dir.join(name), value).unwrap();
+        }
+        let toml = format!("{BASE}\n[github_app]\napp_dir = \"{}\"\n", dir.display());
+        let path = tmp.as_path().join("agent.toml");
+        std::fs::write(&path, &toml).unwrap();
+        let mut cfg = crate::parse_config(&toml).unwrap();
+        cfg.resolve_github_app().unwrap();
+        assert_eq!(
+            cfg.github_app.is_some(),
+            !matches!(case, AppSnap::NoAppYet),
+            "the fill ran"
+        );
+        let snap = match case {
+            AppSnap::UnfixedSnapshot => serde_json::to_value(&cfg).unwrap(),
+            _ => cfg.config_snapshot(),
+        };
+        let store = FileConfigStore::new(path.clone(), snap);
+        if matches!(case, AppSnap::FileEdited) {
+            let moved = tmp.as_path().join("moved");
+            std::fs::write(
+                &path,
+                toml.replace(&dir.display().to_string(), &moved.display().to_string()),
+            )
+            .unwrap();
+        }
+        let st = store.status().await.unwrap();
+        assert_eq!(st.restart_required, restart, "{:?}", st.pending);
+        // The portal shows the table as written: `app_dir`, nothing filled from it.
+        if !matches!(case, AppSnap::UnfixedSnapshot) {
+            let v = store.values().await.unwrap();
+            assert_eq!(
+                v["github_app"]["app_dir"],
+                Value::String(dir.display().to_string())
+            );
+            assert_eq!(v["github_app"]["client_id"], Value::String(String::new()));
+        }
+    }
 }
