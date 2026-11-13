@@ -5467,7 +5467,9 @@ impl Config {
     /// The running config as JSON for the config service (portal settings), with
     /// `[github_app]` as the file wrote it. What `app_dir` filled comes from the App's
     /// directory, not the file: compared with the file it would read as drift, and the
-    /// portal's "restart required" would never clear.
+    /// portal's "restart required" would never clear. The as-written copy is taken
+    /// by `resolve_github_app`; before that runs nothing is filled, so the table is
+    /// still as written and is used directly. Fill the table only through it.
     #[cfg(feature = "config-schema")]
     pub fn config_snapshot(&self) -> serde_json::Value {
         let mut v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
