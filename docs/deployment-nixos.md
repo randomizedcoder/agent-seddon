@@ -287,7 +287,7 @@ services.agentSeddon.dex = {
   issuer = "https://172.16.50.46:8443/dex";            # the front door's /dex; no trailing slash
   redirectUris = [ "https://172.16.50.46:8443/auth/callback" ];
   github = {
-    clientId = "Iv1.…";                                 # callback <issuer>/callback
+    clientId = "Iv1.abc123";                             # callback <issuer>/callback
     clientSecretFile = "/etc/agent-seddon/secrets/dex-github";
     orgs = [ "my-org" ];                                # optional
   };

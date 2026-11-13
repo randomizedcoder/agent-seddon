@@ -34,13 +34,14 @@ pub struct FileConfigStore {
     /// The config file the CLI read (write-back target).
     path: PathBuf,
     /// The running config serialized to JSON (defaults filled), captured at build
-    /// before `Config` was consumed. Secrets are held unmasked and masked on read.
+    /// before `Config` was consumed, with `[github_app]` as the file wrote it
+    /// (`Config::config_snapshot`). Secrets are held unmasked and masked on read.
     snapshot: Value,
 }
 
 impl FileConfigStore {
-    /// `snapshot` is `serde_json::to_value(&cfg)` of the config the agent booted
-    /// with (defaults already applied by serde).
+    /// `snapshot` is `cfg.config_snapshot()` of the config the agent booted with
+    /// (defaults already applied by serde, `[github_app]` as written).
     pub fn new(path: PathBuf, snapshot: Value) -> Self {
         Self { path, snapshot }
     }
@@ -598,6 +599,12 @@ api_key = \"sekret\"
         FileEdited,
         /// The old snapshot (the filled struct): the drift that never cleared.
         UnfixedSnapshot,
+        /// The file has no `[github_app]` at all.
+        NoTable,
+        /// The operator removed `[github_app]` from the file after the start: drift.
+        TableRemoved,
+        /// A fully explicit table, no `app_dir`: nothing is filled.
+        Explicit,
     }
 
     #[rstest]
@@ -605,6 +612,9 @@ api_key = \"sekret\"
     #[case::positive_no_app_yet(AppSnap::NoAppYet, false)]
     #[case::negative_file_edited_is_still_drift(AppSnap::FileEdited, true)]
     #[case::corner_unfixed_snapshot_drifts(AppSnap::UnfixedSnapshot, true)]
+    #[case::boundary_no_table(AppSnap::NoTable, false)]
+    #[case::negative_table_removed_is_drift(AppSnap::TableRemoved, true)]
+    #[case::corner_explicit_table(AppSnap::Explicit, false)]
     #[tokio::test]
     async fn github_app_snapshot_cases(#[case] case: AppSnap, #[case] restart: bool) {
         use agent_core::github_app_dir as f;
@@ -623,14 +633,21 @@ api_key = \"sekret\"
         for (name, value) in files {
             std::fs::write(dir.join(name), value).unwrap();
         }
-        let toml = format!("{BASE}\n[github_app]\napp_dir = \"{}\"\n", dir.display());
+        let toml = match case {
+            AppSnap::NoTable => BASE.to_owned(),
+            AppSnap::Explicit => format!(
+                "{BASE}\n[github_app]\napp_id = \"4242\"\nprivate_key_ref = \"file:{}\"\n",
+                dir.join(f::PRIVATE_KEY_FILE).display()
+            ),
+            _ => format!("{BASE}\n[github_app]\napp_dir = \"{}\"\n", dir.display()),
+        };
         let path = tmp.as_path().join("agent.toml");
         std::fs::write(&path, &toml).unwrap();
         let mut cfg = crate::parse_config(&toml).unwrap();
         cfg.resolve_github_app().unwrap();
         assert_eq!(
             cfg.github_app.is_some(),
-            !matches!(case, AppSnap::NoAppYet),
+            !matches!(case, AppSnap::NoAppYet | AppSnap::NoTable),
             "the fill ran"
         );
         let snap = match case {
@@ -646,11 +663,25 @@ api_key = \"sekret\"
             )
             .unwrap();
         }
+        if matches!(case, AppSnap::TableRemoved) {
+            std::fs::write(&path, BASE).unwrap();
+        }
         let st = store.status().await.unwrap();
         assert_eq!(st.restart_required, restart, "{:?}", st.pending);
         // The portal shows the table as written: `app_dir`, nothing filled from it.
-        if !matches!(case, AppSnap::UnfixedSnapshot) {
-            let v = store.values().await.unwrap();
+        let v = store.values().await.unwrap();
+        match case {
+            AppSnap::NoTable => assert!(v["github_app"].is_null(), "{}", v["github_app"]),
+            AppSnap::Explicit => {
+                assert_eq!(v["github_app"]["app_id"], Value::String("4242".into()));
+                assert_eq!(v["github_app"]["app_dir"], Value::String(String::new()));
+            }
+            _ => {}
+        }
+        if !matches!(
+            case,
+            AppSnap::UnfixedSnapshot | AppSnap::NoTable | AppSnap::Explicit
+        ) {
             assert_eq!(
                 v["github_app"]["app_dir"],
                 Value::String(dir.display().to_string())

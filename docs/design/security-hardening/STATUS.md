@@ -42,7 +42,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b-ii | The module: Dex's GitHub client and `[github_app]` from the setup files, Dex restarted on change | [10](10-sso-front-door.md) | ✅ | #723 |
 | S26b-iii | #723's draft: half a pair with `app_dir`, a missing `app_dir` fails, one URL port parser, VM restart subtest | [10](10-sso-front-door.md) | ✅ | #727 |
 | S26b-iv | #727's draft: a TOML `client_id` is shape-checked, `urlPort` bounds its own digits | [10](10-sso-front-door.md) | ✅ | #728 |
-| S26b-v | The config service shows `[github_app]` as written, so a filled table isn't permanent drift | [10](10-sso-front-door.md) | 🟡 | this PR |
+| S26b-v | The config service shows `[github_app]` as written, so a filled table isn't permanent drift | [10](10-sso-front-door.md) | ✅ | #729 |
+| S26b-vi | #729's carries: snapshot docs, more snapshot rows, a valid `clientId` example | [10](10-sso-front-door.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1829,6 +1830,17 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     error now says "inner `.`" (`Iv1.` fit the old wording but is refused). A 64-byte accept
     row in `github_app_validate_cases`. Not changed: a loopback issuer with a 21-digit port
     also gets the "must use dex.port" message beside the range one.
+- **2026-11-12 — S26b-vi: #729's draft (no must-fix), carried.**
+  - `FileConfigStore`'s doc comments said the snapshot is `serde_json::to_value(&cfg)`; they
+    now name `cfg.config_snapshot()` and the as-written `[github_app]`.
+  - `config_snapshot`'s doc states its precondition: the as-written copy is taken by
+    `resolve_github_app`, and before that runs nothing is filled, so the table it uses is
+    still as written. A caller that skips the resolve gets no drift, not the old bug.
+  - `deployment-nixos.md`'s example `clientId = "Iv1.…"` failed the new shape assertion
+    (`…` isn't in the set); it is now `"Iv1.abc123"`.
+  - Three `github_app_snapshot_cases` rows: no `[github_app]` in the file (no drift, the
+    portal shows no table), the table removed after the start (drift), and an explicit
+    table without `app_dir` (no drift, the portal shows `app_id`).
 
 ## Cross-track note (not an S-increment)
 
