@@ -45,7 +45,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b-v | The config service shows `[github_app]` as written, so a filled table isn't permanent drift | [10](10-sso-front-door.md) | ✅ | #729 |
 | S26b-vi | #729's carries: snapshot docs, more snapshot rows, a valid `clientId` example | [10](10-sso-front-door.md) | ✅ | #730 |
 | S26b-vii | Behind the door every portal stream's 401 signs in again (the interceptor, not the page); #730's carries | [06](06-portal-and-edge.md) | ✅ | #731 |
-| S26b-viii | An agent naming its own App keeps it beside `fromSetup` (no `app_dir`); `app_dir` with an explicit `app_id`/`private_key_ref` is refused; #731's carries | [10](10-sso-front-door.md) | 🟡 | this PR |
+| S26b-viii | An agent naming its own App keeps it beside `fromSetup` (no `app_dir`); `app_dir` with an explicit `app_id`/`private_key_ref` is refused; #731's carries | [10](10-sso-front-door.md) | ✅ | #732 |
+| S26b-ix | The App manifest asks for `emails`, GitHub's manifest name (`email_addresses` made GitHub refuse it) | [10](10-sso-front-door.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1898,6 +1899,22 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     dropped too, and an eval row pins it (the explicit App wins); every new eval config has no
     failed assertions; the listener-cancel row asserts it isn't the call's own cancel;
     `LoginRobot` disposes the session fake's controllers. Carried: none.
+- **2026-11-13 — S26b-ix: GitHub refused the App manifest.** S26b-viii merged as #732
+  (a5df23e2). l2's door went live with `fromSetup`, and the setup page's "Create on GitHub"
+  got GitHub's "Invalid GitHub App configuration: Default permission records resource is
+  not included in the list".
+  - **Cause:** the manifest's `default_permissions` takes GitHub's own resource names, and
+    the email permission there is `emails`; the manifest sent the REST API's
+    `email_addresses`. The VM test's fake GitHub takes any manifest, so nothing caught it.
+  - **The fix:** `emails: read`. `manifest_permission_cases` pins each permission the
+    manifest asks for, with or without a webhook, and checks every key against GitHub's
+    manifest names (Probot's `app.yml` list); the REST name `email_addresses` is an
+    adversarial row.
+  - The failed attempt spent the setup code, as designed; the gate wrote the next one.
+  - **#733's draft (no must-fix), fixed here:** the test pins the App's whole grant (the
+    exact permission set, so a new permission is a deliberate change) and each value is
+    `read` or `write`; the name list says it is a snapshot; doc 10's sentence reads
+    plainly. Carried: none.
 
 ## Cross-track note (not an S-increment)
 

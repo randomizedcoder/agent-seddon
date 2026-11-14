@@ -28,6 +28,82 @@ fn with(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
     v.to_string().into_bytes()
 }
 
+// --- the manifest's permissions ------------------------------------------------------
+
+/// GitHub's App-manifest permission names: its own resource names, as Probot's
+/// `app.yml` lists them, which differ from the REST API's in places. GitHub refuses
+/// a manifest naming anything else ("Default permission records resource is not
+/// included in the list"), and the VM test's fake GitHub can't tell. A snapshot:
+/// extend it when GitHub adds a resource the manifest wants.
+const GITHUB_MANIFEST_PERMISSIONS: &[&str] = &[
+    "actions",
+    "administration",
+    "checks",
+    "contents",
+    "deployments",
+    "emails",
+    "environments",
+    "followers",
+    "git_ssh_keys",
+    "gpg_keys",
+    "issues",
+    "members",
+    "metadata",
+    "organization_administration",
+    "organization_hooks",
+    "organization_plan",
+    "organization_projects",
+    "organization_secrets",
+    "organization_self_hosted_runners",
+    "packages",
+    "pages",
+    "pull_requests",
+    "repository_hooks",
+    "repository_projects",
+    "secrets",
+    "security_events",
+    "single_file",
+    "starring",
+    "statuses",
+    "team_discussions",
+    "vulnerability_alerts",
+    "workflows",
+];
+
+#[rstest]
+#[case::positive_contents("", "contents", Some("read"))]
+#[case::positive_metadata("", "metadata", Some("read"))]
+#[case::positive_pull_requests("", "pull_requests", Some("write"))]
+#[case::positive_members("", "members", Some("read"))]
+#[case::positive_emails_for_dex("", "emails", Some("read"))]
+#[case::corner_webhook_keeps_them("https://front.test:8443/hook", "emails", Some("read"))]
+#[case::negative_no_administration("", "administration", None)]
+#[case::adversarial_rest_name_email_addresses("", "email_addresses", None)]
+#[case::adversarial_rest_name_with_webhook("https://front.test:8443/hook", "email_addresses", None)]
+fn manifest_permission_cases(#[case] webhook: &str, #[case] key: &str, #[case] want: Option<&str>) {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest(MAIN, "agent-seddon-l2", webhook)).expect("json");
+    let perms = manifest["default_permissions"].as_object().expect("object");
+    assert_eq!(perms.get(key).and_then(|v| v.as_str()), want, "{perms:?}");
+    for (name, access) in perms {
+        assert!(
+            GITHUB_MANIFEST_PERMISSIONS.contains(&name.as_str()),
+            "GitHub has no manifest permission `{name}`"
+        );
+        assert!(
+            matches!(access.as_str(), Some("read" | "write")),
+            "`{name}`: {access}"
+        );
+    }
+    // The App's whole grant: a new permission is a deliberate change here.
+    let mut keys: Vec<&str> = perms.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["contents", "emails", "members", "metadata", "pull_requests"]
+    );
+}
+
 // --- the conversion reply ------------------------------------------------------------
 
 #[rstest]
@@ -256,7 +332,7 @@ async fn positive_the_whole_setup() {
         manifest["callback_urls"],
         json!([format!("{MAIN}/"), format!("{MAIN}/dex/callback")])
     );
-    assert_eq!(manifest["default_permissions"]["email_addresses"], "read");
+    assert_eq!(manifest["default_permissions"]["emails"], "read");
     assert_eq!(manifest["public"], false);
     assert!(manifest.get("hook_attributes").is_none());
 

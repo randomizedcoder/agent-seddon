@@ -350,7 +350,8 @@ Forges tab's Connect GitHub); creating it is the manual step today (l2's App was
 - **One App, two jobs.** The App's OAuth client is also Dex's GitHub connector, so there is no
   separate OAuth App. GitHub Apps use the same `login/oauth/authorize` web flow; the manifest asks
   for the account permission *Email addresses: read* so Dex can read the verified email F2 matches
-  on. (Open item: confirm Dex's connector works with a GitHub App's client, user-to-server tokens.)
+  on. The manifest names it `emails`: it takes GitHub's own resource names, not the REST API's
+  `email_addresses`. (Open item: confirm Dex's connector works with a GitHub App's client, user-to-server tokens.)
 - **Bootstrap, before anyone can sign in.** With no App, Dex has no GitHub client and nobody can
   sign in, so the first creation cannot sit behind the sign-in. `/auth/setup` on the front door
   is open only while no App exists, and only with a single-use setup code the agent writes at

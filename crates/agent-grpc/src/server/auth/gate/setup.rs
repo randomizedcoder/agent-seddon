@@ -574,7 +574,9 @@ fn manifest(main_origin: &str, name: &str, webhook_url: &str) -> String {
             "metadata": "read",
             "pull_requests": "write",
             "members": "read",
-            "email_addresses": "read",
+            // The manifest takes GitHub's own resource names, not the REST API's
+            // (`email_addresses`): an unknown one makes GitHub refuse the manifest.
+            "emails": "read",
         },
         "default_events": [],
     });
