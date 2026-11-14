@@ -1892,6 +1892,12 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     tests reach the class through the interceptor); the Agent page's door row says what
     it covers and where the sign-in is tested; the snapshot test's assertion message says
     what it checks.
+  - **#732's draft (no must-fix), fixed here:** the key-ref-only eval row says the agent
+    then refuses to start (no `app_id`), never filled from the setup files; doc 10 names the
+    own-App exception; the module comment says an operator's copy of the module's own path is
+    dropped too, and an eval row pins it (the explicit App wins); every new eval config has no
+    failed assertions; the listener-cancel row asserts it isn't the call's own cancel;
+    `LoginRobot` disposes the session fake's controllers. Carried: none.
 
 ## Cross-track note (not an S-increment)
 
