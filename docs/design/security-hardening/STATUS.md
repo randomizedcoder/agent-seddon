@@ -1911,6 +1911,10 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     manifest names (Probot's `app.yml` list); the REST name `email_addresses` is an
     adversarial row.
   - The failed attempt spent the setup code, as designed; the gate wrote the next one.
+  - **#733's draft (no must-fix), fixed here:** the test pins the App's whole grant (the
+    exact permission set, so a new permission is a deliberate change) and each value is
+    `read` or `write`; the name list says it is a snapshot; doc 10's sentence reads
+    plainly. Carried: none.
 
 ## Cross-track note (not an S-increment)
 

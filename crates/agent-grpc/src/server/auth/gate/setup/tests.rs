@@ -33,7 +33,8 @@ fn with(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
 /// GitHub's App-manifest permission names: its own resource names, as Probot's
 /// `app.yml` lists them, which differ from the REST API's in places. GitHub refuses
 /// a manifest naming anything else ("Default permission records resource is not
-/// included in the list"), and the VM test's fake GitHub can't tell.
+/// included in the list"), and the VM test's fake GitHub can't tell. A snapshot:
+/// extend it when GitHub adds a resource the manifest wants.
 const GITHUB_MANIFEST_PERMISSIONS: &[&str] = &[
     "actions",
     "administration",
@@ -84,12 +85,23 @@ fn manifest_permission_cases(#[case] webhook: &str, #[case] key: &str, #[case] w
         serde_json::from_str(&manifest(MAIN, "agent-seddon-l2", webhook)).expect("json");
     let perms = manifest["default_permissions"].as_object().expect("object");
     assert_eq!(perms.get(key).and_then(|v| v.as_str()), want, "{perms:?}");
-    for name in perms.keys() {
+    for (name, access) in perms {
         assert!(
             GITHUB_MANIFEST_PERMISSIONS.contains(&name.as_str()),
             "GitHub has no manifest permission `{name}`"
         );
+        assert!(
+            matches!(access.as_str(), Some("read" | "write")),
+            "`{name}`: {access}"
+        );
     }
+    // The App's whole grant: a new permission is a deliberate change here.
+    let mut keys: Vec<&str> = perms.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["contents", "emails", "members", "metadata", "pull_requests"]
+    );
 }
 
 // --- the conversion reply ------------------------------------------------------------
