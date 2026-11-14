@@ -338,8 +338,9 @@ let
 
   # An agent whose settings name an App (`app_id` or `private_key_ref`) keeps it: the
   # setup App's `app_dir` would mix the two Apps' ids and keys, and the agent refuses
-  # both together. Only the `app_dir` this module added is dropped; one the operator set
-  # beside an explicit App still fails the start, as written.
+  # both together. Only an `app_dir` equal to the module's is dropped (after the merge an
+  # operator's own copy of that path can't be told apart, and is dropped too, so the
+  # explicit App wins); any other `app_dir` beside an explicit App fails the start.
   withoutSetupAppDir =
     c:
     let

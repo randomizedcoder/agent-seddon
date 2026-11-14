@@ -368,7 +368,8 @@ Forges tab's Connect GitHub); creating it is the manual step today (l2's App was
   systemd path unit restarts Dex when its secret file appears or changes, since Dex reads its
   connector config only at start. As built (S26b-ii): the path unit watches `app-id`, which
   the gate writes last; it restarts Dex (skipped until then by `ConditionPathExists`) and the
-  agents, whose `[github_app] app_dir` reads the new App.
+  agents, whose `[github_app] app_dir` reads the new App. An agent whose settings name its own
+  App (`app_id` or `private_key_ref`, S26b-viii) keeps it and gets no `app_dir`.
 - **Then the existing flows.** The operator signs in through Dex (now working), installs the App on
   repositories from the Forges tab, and adds fleet sessions. Other people sign in with their own
   GitHub accounts and see nothing until bound (F2).
@@ -396,7 +397,7 @@ one l2 deploy (S30), with your go-ahead; `~/nixos/desktop/l2/lan-access.nix` the
 - Settled (S26b-ii): the ids a manifest-made App gets aren't known at eval, so the module reads
   them from files. Dex's `clientID` and `clientSecret` are placeholders that `replace-secret`
   fills from `client-id` and `client-secret` at start; the agents fill `[github_app]` from
-  `app_dir`.
+  `app_dir`, except one that names its own App (S26b-viii).
 - `agent login --device` dials the public issuer and ignores `backchannel_url`
   (`crates/agent-grpc/src/client/login.rs`). Behind the front door the public issuer is
   reachable, so this only matters for a CLI on the host itself; settle it with S27's token rules.

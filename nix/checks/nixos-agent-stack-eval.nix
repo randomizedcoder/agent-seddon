@@ -174,7 +174,9 @@ let
       }
     ];
   };
-  # Only the key ref named: still the fleet's own App.
+  # Only the key ref named: still the fleet's own App, so no `app_dir`. With no `app_id`
+  # the agent then refuses to start (`app_id is required`): fail closed, never filled
+  # from the setup App's files.
   ghAppFleetKeyOnly = evalWith {
     imports = [
       (fdModule ghAppOn)
@@ -189,6 +191,20 @@ let
         services.agentSeddon.fleet.settings.github_app = {
           app_id = "5390283";
           app_dir = "/srv/other-app";
+        };
+      }
+    ];
+  };
+  # The operator wrote the module's own path beside an explicit App: dropped like the
+  # module's, so the explicit App wins.
+  ghAppFleetOwnSameDir = evalWith {
+    imports = [
+      (fdModule ghAppOn)
+      {
+        services.agentSeddon.fleet.settings.github_app = {
+          app_id = "5390283";
+          private_key_ref = "env:K";
+          app_dir = "/var/lib/agent-seddon/github-app";
         };
       }
     ];
@@ -1439,7 +1455,12 @@ let
           own = ghAppFleetOwn.services.agentSeddon.renderedSettings;
           keyOnly = ghAppFleetKeyOnly.services.agentSeddon.renderedSettings;
         in
-        failedAssertions ghAppFleetOwn == [ ]
+        lib.all (c: failedAssertions c == [ ]) [
+          ghAppFleetOwn
+          ghAppFleetKeyOnly
+          ghAppFleetOwnDir
+          ghAppFleetOwnSameDir
+        ]
         &&
           own.fleet.github_app == {
             app_id = "5390283";
@@ -1450,6 +1471,11 @@ let
         && keyOnly.fleet.github_app == { private_key_ref = "env:K"; }
         &&
           ghAppFleetOwnDir.services.agentSeddon.renderedSettings.fleet.github_app.app_dir == "/srv/other-app"
+        &&
+          ghAppFleetOwnSameDir.services.agentSeddon.renderedSettings.fleet.github_app == {
+            app_id = "5390283";
+            private_key_ref = "env:K";
+          }
       );
     githubAppOffByDefault =
       let

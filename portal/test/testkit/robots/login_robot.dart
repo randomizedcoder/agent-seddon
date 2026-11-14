@@ -121,6 +121,7 @@ class LoginRobot extends Robot {
     final robot = LoginRobot._(tester, gw, authFake, fleet, session, platform);
     addTearDown(() => tester.runAsync(() async {
           robot.auth.dispose();
+          await session.disposeControllers();
           await robot.clients.terminate();
           await gw.shutdown();
         }));

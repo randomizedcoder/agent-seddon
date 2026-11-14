@@ -162,6 +162,8 @@ void main() {
       await pumpEventQueue();
       await sub.cancel();
       expect(inner.cancelled, isTrue);
+      // The listener's cancel, not the call's own (positive_call_cancel_delegates).
+      expect(inner.callCancelled, isFalse);
     });
 
     // #731 draft: the wrapper's own ResponseStream members reach the call.
