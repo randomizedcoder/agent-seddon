@@ -44,7 +44,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b-iv | #727's draft: a TOML `client_id` is shape-checked, `urlPort` bounds its own digits | [10](10-sso-front-door.md) | ✅ | #728 |
 | S26b-v | The config service shows `[github_app]` as written, so a filled table isn't permanent drift | [10](10-sso-front-door.md) | ✅ | #729 |
 | S26b-vi | #729's carries: snapshot docs, more snapshot rows, a valid `clientId` example | [10](10-sso-front-door.md) | ✅ | #730 |
-| S26b-vii | Behind the door every portal stream's 401 signs in again (the interceptor, not the page); #730's carries | [06](06-portal-and-edge.md) | 🟡 | this PR |
+| S26b-vii | Behind the door every portal stream's 401 signs in again (the interceptor, not the page); #730's carries | [06](06-portal-and-edge.md) | ✅ | #731 |
+| S26b-viii | An agent naming its own App keeps it beside `fromSetup` (no `app_dir`); `app_dir` with an explicit `app_id`/`private_key_ref` is refused; #731's carries | [10](10-sso-front-door.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1862,6 +1863,41 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     `github_app_snapshot_cases` pins `config_snapshot`'s precondition (no resolve ⇒ no
     drift); `store_with` builds its snapshot with `config_snapshot()`; a comment says which
     rows leave the App's files unread.
+
+- **2026-11-13 — S26b-viii: an agent's own App survives `fromSetup`.** S26b-vii merged as
+  #731 (fe5e0c77), its draft with no must-fix.
+  - **Found preparing l2's door deploy:** `githubApp.fromSetup` set `[github_app] app_dir`
+    on every agent, the fleet included, and l2's fleet names its own App (`app_id`
+    5390283, `private_key_ref` to its key). Until `/auth/setup` ran, `resolve_github_app`
+    dropped the fleet's whole table (no App, so reviews stopped); afterwards the fill kept
+    the explicit id and key and took the new App's slug, client id and client secret, a
+    mix of two Apps.
+  - **The fix, in two places.** The module leaves `app_dir` off an agent whose merged
+    settings name `github_app.app_id` or `private_key_ref` (only the `app_dir` it added; one
+    the operator wrote stays). `GithubAppCfg` refuses `app_dir` beside an explicit `app_id`
+    or `private_key_ref` at validation and again before the fill, so a hand-written mix
+    fails the start instead of minting with one App's key under the other's id. A
+    `client_id` or `slug` written beside `app_dir` still wins over its file, as before.
+  - Rows: `github_app_validate_cases` + `app_dir` with `app_id`, with a `file:` key ref,
+    with both (refused), a whole explicit App without `app_dir` (ok); the `ghapp:` key row
+    now meets the identity refusal first. `github_app_fill_from_app_dir_cases`:
+    `ExplicitIdWins` becomes `ExplicitIdRefused` + `ExplicitKeyRefused`. The eval check:
+    the fleet with its own App renders it with no `app_dir` while gateway and sessions read
+    the files; a key ref alone counts; an operator's own `app_dir` is kept as written.
+  - **#731's draft (no must-fix), carried:** a composed test (`login_test`
+    `door_stream_session_lost_mid_use`): a `Subscribe` that ends 401, through the real
+    interceptor and `AuthState` in door mode, sends the browser to the door login; the
+    wrapper's own `cancel()`, `headers` and `trailers` reach the call (a `callCancelled`
+    flag tells the call's cancel from a listener's); `@visibleForTesting` dropped (the
+    tests reach the class through the interceptor); the Agent page's door row says what
+    it covers and where the sign-in is tested; the snapshot test's assertion message says
+    what it checks.
+  - **#732's draft (no must-fix), fixed here:** the key-ref-only eval row says the agent
+    then refuses to start (no `app_id`), never filled from the setup files; doc 10 names the
+    own-App exception; the module comment says an operator's copy of the module's own path is
+    dropped too, and an eval row pins it (the explicit App wins); every new eval config has no
+    failed assertions; the listener-cancel row asserts it isn't the call's own cancel;
+    `LoginRobot` disposes the session fake's controllers. Carried: none.
 
 ## Cross-track note (not an S-increment)
 

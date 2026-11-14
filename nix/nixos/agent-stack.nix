@@ -336,6 +336,22 @@ let
     else
       lib.recursiveUpdate c { provider.api_key = "ollama"; };
 
+  # An agent whose settings name an App (`app_id` or `private_key_ref`) keeps it: the
+  # setup App's `app_dir` would mix the two Apps' ids and keys, and the agent refuses
+  # both together. Only an `app_dir` equal to the module's is dropped (after the merge an
+  # operator's own copy of that path can't be told apart, and is dropped too, so the
+  # explicit App wins); any other `app_dir` beside an explicit App fails the start.
+  withoutSetupAppDir =
+    c:
+    let
+      ga = c.github_app or { };
+      explicit = (ga.app_id or "") != "" || (ga.private_key_ref or "") != "";
+    in
+    if ghApp.fromSetup && explicit && (ga.app_dir or "") == ghAppDir then
+      c // { github_app = removeAttrs ga [ "app_dir" ]; }
+    else
+      c;
+
   # Settings every agent process shares, over the repo config: the prompt library +
   # context files (from this flake's source, read-only: they are versioned with the
   # code), with the managed ClickHouse the telemetry and digest ledger, and with the
@@ -429,14 +445,16 @@ let
   # text (not the attrset) so it reaches any nesting depth, including array tables.
   mergedSettings =
     name: svc:
-    withProviderKey (
-      lib.foldl' lib.recursiveUpdate repoConfig [
-        baseSettings
-        (lib.optionalAttrs hdxEnabled { telemetry.otel_service_name = unitName name; })
-        svc.extra
-        cfg.settings
-        cfg.${name}.settings
-      ]
+    withoutSetupAppDir (
+      withProviderKey (
+        lib.foldl' lib.recursiveUpdate repoConfig [
+          baseSettings
+          (lib.optionalAttrs hdxEnabled { telemetry.otel_service_name = unitName name; })
+          svc.extra
+          cfg.settings
+          cfg.${name}.settings
+        ]
+      )
     );
 
   configFile =
@@ -929,7 +947,8 @@ in
         creating the GitHub App in the browser (security-hardening S26b): the gate serves
         `/auth/setup` on the front door until an App exists, writes its files to
         `/var/lib/agent-seddon/github-app`, and every agent's `[github_app] app_dir` and
-        Dex's GitHub connector read them. Dex and the agents restart once the App exists.
+        Dex's GitHub connector read them. An agent whose settings name its own App
+        (`github_app.app_id` or `private_key_ref`) keeps that App and gets no `app_dir`. Dex and the agents restart once the App exists.
         The setup code is in `/var/lib/agent-seddon/github-app/setup-code` (root or the
         agent user can read it). Needs `frontDoor` and `dex`
       '';

@@ -658,7 +658,7 @@ api_key = \"sekret\"
         assert_eq!(
             cfg.github_app.is_some(),
             !matches!(case, AppSnap::NoAppYet | AppSnap::NoTable),
-            "the fill ran"
+            "the table is kept unless the file has none or no App exists yet"
         );
         let snap = match case {
             AppSnap::UnfixedSnapshot => serde_json::to_value(&cfg).unwrap(),

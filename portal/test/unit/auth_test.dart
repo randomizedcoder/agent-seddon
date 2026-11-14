@@ -162,7 +162,33 @@ void main() {
       await pumpEventQueue();
       await sub.cancel();
       expect(inner.cancelled, isTrue);
+      // The listener's cancel, not the call's own (positive_call_cancel_delegates).
+      expect(inner.callCancelled, isFalse);
     });
+
+    // #731 draft: the wrapper's own ResponseStream members reach the call.
+    for (final (name, check) in [
+      ('positive_call_cancel_delegates', (ResponseStream<String> out, _FakeStream<String> inner) async {
+        await out.cancel();
+        expect(inner.callCancelled, isTrue);
+      }),
+      ('positive_headers_delegate', (ResponseStream<String> out, _FakeStream<String> inner) async {
+        expect(await out.headers, {'h': 'head'});
+        expect(inner.callCancelled, isFalse);
+      }),
+      ('positive_trailers_delegate', (ResponseStream<String> out, _FakeStream<String> inner) async {
+        expect(await out.trailers, {'t': 'trail'});
+      }),
+    ]) {
+      test(name, () async {
+        final inner = _FakeStream<String>(const ['a'], null, hold: true);
+        final out = AuthInterceptor(() => 'tok', onUnauthenticated: () {})
+            .interceptStreaming(method, const Stream.empty(), CallOptions(),
+                (m, r, options) => inner);
+        expect(identical(out, inner), isFalse, reason: 'the hook wraps the call');
+        await check(out, inner);
+      });
+    }
 
     test('positive_stream_carries_the_bearer', () {
       CallOptions? seen;
@@ -226,15 +252,18 @@ class _FakeStream<R> extends StreamView<R> implements ResponseStream<R> {
   final StreamController<R> _c;
   bool cancelled = false;
 
+  /// Set only by [cancel] (the call's own cancel), not by a listener's cancel.
+  bool callCancelled = false;
+
   @override
   ResponseFuture<R> get single => throw UnimplementedError();
 
   @override
-  Future<Map<String, String>> get headers async => const {};
+  Future<Map<String, String>> get headers async => const {'h': 'head'};
 
   @override
-  Future<Map<String, String>> get trailers async => const {};
+  Future<Map<String, String>> get trailers async => const {'t': 'trail'};
 
   @override
-  Future<void> cancel() async => cancelled = true;
+  Future<void> cancel() async => cancelled = callCancelled = true;
 }

@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:grpc/grpc_or_grpcweb.dart' show GrpcError, StatusCode;
 import 'package:grpc/service_api.dart';
 
@@ -56,7 +55,6 @@ class AuthInterceptor extends ClientInterceptor {
 /// listener, so a side listener (as for unary calls) isn't possible on a
 /// single-subscription stream. Cancelling the listener cancels [inner], so the
 /// call is cancelled as before.
-@visibleForTesting
 class ReportingResponseStream<R> extends StreamView<R>
     implements ResponseStream<R> {
   ReportingResponseStream(this.inner, void Function() onUnauthenticated)

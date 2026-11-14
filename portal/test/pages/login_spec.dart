@@ -241,6 +241,14 @@ const loginSpec = PageSpec('login', [
     expectedRpc: 'agent.v1.ReviewFleetService/ListReviews',
   ),
   SpecRow(
+    elementId: 'login.progress',
+    caseClass: CaseClass.corner,
+    name: 'door_stream_session_lost_mid_use',
+    description: "door: a Subscribe stream that ends 401 (the door's session ended) "
+        'goes to the door login, through the same interceptor as unary calls',
+    expectedRpc: 'agent.v1.AgentSessionService/Subscribe',
+  ),
+  SpecRow(
     elementId: 'login.error',
     caseClass: CaseClass.adversarial,
     name: 'door_login_loop_stops',

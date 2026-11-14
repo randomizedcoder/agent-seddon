@@ -4395,9 +4395,11 @@ pub struct GithubAppCfg {
     /// The directory the gate's `/auth/setup` writes the App's files to
     /// (`[auth.gate.setup] dir`, security-hardening S26b). Set, it fills every empty
     /// key below from those files at start: `app_id`, `slug` and `client_id` from
-    /// their files, and the `*_ref`s as `file:` references to the secrets. A key set
-    /// here wins over its file, so half of a pair may be set here and the other half
-    /// come from the files. Until the App exists (the directory holds no `app-id`) the
+    /// their files, and the `*_ref`s as `file:` references to the secrets. The App's
+    /// identity (`app_id`, `private_key_ref`) comes from the files or from here, never
+    /// both: an explicit one names another App, and mixing the two would mint with one
+    /// App's key under the other's id. Any other key set here wins over its file, so
+    /// half of a pair may be set here and the other half come from the files. Until the App exists (the directory holds no `app-id`) the
     /// agent runs with no App, as if `[github_app]` were absent. The directory itself
     /// must exist (the NixOS module makes it at boot): a missing one is a mistyped path
     /// and fails the start. Absolute; empty ⇒ unused.
@@ -4482,6 +4484,13 @@ impl GithubAppCfg {
                 "[github_app] app_dir `{}` must be absolute",
                 self.app_dir
             ));
+        }
+        // Before the fill: once filled, both are set by design.
+        if unfilled && !(self.app_id.is_empty() && self.private_key_ref.is_empty()) {
+            return Err(
+                "[github_app] app_dir names the App by its files; app_id and private_key_ref name one here: set one or the other"
+                    .into(),
+            );
         }
         if self.app_id.is_empty() && !unfilled {
             return Err("[github_app] app_id is required".into());
@@ -4606,13 +4615,9 @@ impl GithubAppCfg {
         if self.app_dir.is_empty() {
             return Ok(true);
         }
+        // The shape as written (absolute, no explicit identity), before anything fills.
+        self.check(true)?;
         let dir = std::path::Path::new(&self.app_dir);
-        if !dir.is_absolute() {
-            return Err(format!(
-                "[github_app] app_dir `{}` must be absolute",
-                self.app_dir
-            ));
-        }
         let Some(ids) = files::read(dir).map_err(|e| format!("[github_app] app_dir: {e}"))? else {
             return Ok(false);
         };
@@ -5960,7 +5965,24 @@ mod tests {
     )]
     #[case::adversarial_app_dir_still_refuses_a_ghapp_key(
         "app_dir = \"/d\"\nprivate_key_ref = \"ghapp:1\"",
-        Err("not a `ghapp:` mint")
+        Err("set one or the other")
+    )]
+    // l2 draft: an explicit App beside `app_dir` would mix two Apps' id and key.
+    #[case::negative_app_dir_with_app_id(
+        "app_dir = \"/d\"\napp_id = \"5390283\"",
+        Err("set one or the other")
+    )]
+    #[case::negative_app_dir_with_key_ref(
+        "app_dir = \"/d\"\nprivate_key_ref = \"file:/run/k.pem\"",
+        Err("set one or the other")
+    )]
+    #[case::negative_app_dir_with_a_whole_explicit_app(
+        "app_dir = \"/d\"\napp_id = \"5390283\"\nprivate_key_ref = \"env:K\"",
+        Err("set one or the other")
+    )]
+    #[case::corner_whole_explicit_app_without_app_dir(
+        "app_id = \"5390283\"\nprivate_key_ref = \"env:K\"",
+        Ok(())
     )]
     fn github_app_validate_cases(#[case] toml_src: &str, #[case] want: Result<(), &str>) {
         let cfg: GithubAppCfg = toml::from_str(toml_src).expect("parses");
@@ -5981,7 +6003,9 @@ mod tests {
         Whole,
         WithWebhook,
         NoAppYet,
-        ExplicitIdWins,
+        /// An explicit `app_id` names another App: refused before any file is read.
+        ExplicitIdRefused,
+        ExplicitKeyRefused,
         MissingKey,
         HostileSlug,
         NoAppDir,
@@ -5996,7 +6020,14 @@ mod tests {
     #[case::positive_whole_app(AppDirCase::Whole, Ok(true))]
     #[case::positive_webhook_secret_ref(AppDirCase::WithWebhook, Ok(true))]
     #[case::corner_no_app_yet(AppDirCase::NoAppYet, Ok(false))]
-    #[case::corner_explicit_id_wins(AppDirCase::ExplicitIdWins, Ok(true))]
+    #[case::negative_explicit_id_refused(
+        AppDirCase::ExplicitIdRefused,
+        Err("set one or the other")
+    )]
+    #[case::negative_explicit_key_refused(
+        AppDirCase::ExplicitKeyRefused,
+        Err("set one or the other")
+    )]
     #[case::corner_no_app_dir_is_untouched(AppDirCase::NoAppDir, Ok(true))]
     #[case::negative_missing_key(AppDirCase::MissingKey, Err("private-key.pem` is missing"))]
     #[case::adversarial_hostile_slug(AppDirCase::HostileSlug, Err("slug` is malformed"))]
@@ -6029,7 +6060,8 @@ mod tests {
                 std::fs::write(dir.join(f::WEBHOOK_SECRET_FILE), "w").unwrap();
             }
             AppDirCase::NoAppYet => std::fs::remove_file(dir.join(f::APP_ID_FILE)).unwrap(),
-            AppDirCase::ExplicitIdWins => ga.app_id = "77".into(),
+            AppDirCase::ExplicitIdRefused => ga.app_id = "77".into(),
+            AppDirCase::ExplicitKeyRefused => ga.private_key_ref = "env:K".into(),
             AppDirCase::MissingKey => std::fs::remove_file(dir.join(f::PRIVATE_KEY_FILE)).unwrap(),
             AppDirCase::HostileSlug => std::fs::write(dir.join(f::SLUG_FILE), "a\"\nx").unwrap(),
             AppDirCase::NoAppDir => ga.app_dir.clear(),
@@ -6049,21 +6081,13 @@ mod tests {
         }
         let file = |name: &str| format!("file:{}", dir.join(name).display());
         match case {
-            AppDirCase::Whole
-            | AppDirCase::WithWebhook
-            | AppDirCase::ExplicitIdWins
-            | AppDirCase::ExplicitClientIdWins => {
-                let id = if matches!(case, AppDirCase::ExplicitIdWins) {
-                    "77"
-                } else {
-                    "4242"
-                };
+            AppDirCase::Whole | AppDirCase::WithWebhook | AppDirCase::ExplicitClientIdWins => {
                 let client = if matches!(case, AppDirCase::ExplicitClientIdWins) {
                     "Iv1.operator"
                 } else {
                     "Iv23li.abc123"
                 };
-                assert_eq!(ga.app_id, id);
+                assert_eq!(ga.app_id, "4242");
                 assert_eq!(ga.slug, "agent-seddon-l2");
                 assert_eq!(ga.client_id, client);
                 assert_eq!(ga.private_key_ref, file(f::PRIVATE_KEY_FILE));
@@ -6084,7 +6108,9 @@ mod tests {
             AppDirCase::MissingKey
             | AppDirCase::HostileSlug
             | AppDirCase::DirMissing
-            | AppDirCase::RelativeDir => unreachable!(),
+            | AppDirCase::RelativeDir
+            | AppDirCase::ExplicitIdRefused
+            | AppDirCase::ExplicitKeyRefused => unreachable!(),
         }
     }
 

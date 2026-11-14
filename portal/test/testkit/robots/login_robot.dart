@@ -5,11 +5,14 @@ import 'package:agent_portal/src/auth/auth_interceptor.dart';
 import 'package:agent_portal/src/auth/auth_platform.dart';
 import 'package:agent_portal/src/auth/auth_state.dart';
 import 'package:agent_portal/src/auth/cli_login.dart';
+import 'package:agent_portal/src/gen/agent/v1/agent_session.pb.dart';
 import 'package:agent_portal/src/pages/fleet_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:grpc/grpc.dart' show GrpcError;
 
 import '../fake_gateway.dart';
+import '../fakes/agent_session_service.dart';
 import '../fakes/auth_service.dart';
 import '../fakes/review_fleet_service.dart';
 import '../recording.dart';
@@ -64,7 +67,8 @@ class _CapturedTimer implements Timer {
 /// client carries the portal's real [AuthInterceptor]. The clock is fixed at
 /// [now] and refresh timers are captured in [scheduled], never armed.
 class LoginRobot extends Robot {
-  LoginRobot._(super.tester, this.gw, this.authFake, this.fleet, this.platform);
+  LoginRobot._(super.tester, this.gw, this.authFake, this.fleet, this.session,
+      this.platform);
 
   static const now = 1000000;
 
@@ -82,6 +86,7 @@ class LoginRobot extends Robot {
   final FakeGateway gw;
   final FakeAuthService authFake;
   final FakeReviewFleetService fleet;
+  final FakeAgentSessionService session;
   final MemoryAuthPlatform platform;
   final List<ScheduledRefresh> scheduled = [];
   late final AuthState auth;
@@ -101,19 +106,22 @@ class LoginRobot extends Robot {
   }) async {
     late FakeAuthService authFake;
     late FakeReviewFleetService fleet;
+    late FakeAgentSessionService session;
     late FakeGateway gw;
     await tester.runAsync(() async {
       gw = await FakeGateway.start((log) {
         authFake = FakeAuthService(log);
         fleet = FakeReviewFleetService(log);
-        return [authFake, fleet];
+        session = FakeAgentSessionService(log);
+        return [authFake, fleet, session];
       });
     });
     final platform =
         MemoryAuthPlatform(uri: Uri.parse(uri), canRedirect: canRedirect);
-    final robot = LoginRobot._(tester, gw, authFake, fleet, platform);
+    final robot = LoginRobot._(tester, gw, authFake, fleet, session, platform);
     addTearDown(() => tester.runAsync(() async {
           robot.auth.dispose();
+          await session.disposeControllers();
           await robot.clients.terminate();
           await gw.shutdown();
         }));
@@ -165,6 +173,20 @@ class LoginRobot extends Robot {
   Future<void> pumpReal() async {
     await real(() => tester.pump());
     await tester.pump();
+  }
+
+  /// Open a `Subscribe` stream through the portal's clients (so through the real
+  /// [AuthInterceptor]) and read it to its end, as the Agent page does; its error
+  /// is the page's to show, so it is swallowed here.
+  Future<void> subscribeToEnd() async {
+    await real(() async {
+      try {
+        await clients.session.subscribe(SubscribeRequest()).drain<void>();
+      } on GrpcError {
+        // The page greys into Reconnect; the interceptor already reported it.
+      }
+    });
+    await pumpReal();
   }
 
   /// Store a pending sign-in, as `Begin` would have, for a callback test.
