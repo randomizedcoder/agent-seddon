@@ -217,6 +217,11 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     every file. The roster dialog edits a `deepCopy()` of the stored row, so these fields
     survive a portal edit as unknown fields. Showing and editing them in the portal is a
     follow-up.
+  - **The fleet's draft of this PR was unusable:** GLM 5.3 returned token soup under
+    concurrent load (see the GLM note under follow-ups). A single clean GLM pass found no
+    must-fix; its one cheap point is fixed here: an author listed twice in two cases
+    (`me`, `ME`) is searched once (`corner_duplicate_author_searched_once`). Its worry that
+    GitHub's search might refuse `draft:false` was checked live: the qualifier works.
 
 ## Decisions of record
 

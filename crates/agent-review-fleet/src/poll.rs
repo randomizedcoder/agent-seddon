@@ -118,7 +118,13 @@ async fn poll_authors(
     let mut report = PollReport::default();
     // PR number → listed head. A PR found under two authors (a duplicate entry) is one.
     let mut found: BTreeMap<u64, String> = BTreeMap::new();
+    // Logins are case-insensitive: `me` and `ME` are one author, searched once.
+    let mut seen: Vec<&str> = Vec::with_capacity(authors.len());
     'authors: for author in authors {
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(author)) {
+            continue;
+        }
+        seen.push(author);
         let mut page: u32 = 1;
         let mut mine = 0usize;
         loop {
@@ -677,6 +683,19 @@ mod tests {
             "{}: the author listing is used",
             case.desc
         );
+    }
+
+    /// desc: an author listed twice in two cases is one login. expect: one search.
+    #[tokio::test]
+    async fn corner_duplicate_author_searched_once() {
+        let forge = FakeForge::new(vec![page(vec![by(1, "me", false)], None)], None);
+        let sink = RecordingSink::default();
+        let authors = ["me".to_string(), "ME".to_string(), "me".to_string()];
+        poll_session(&forge, "acme", "sess", &sink, 10, &authors)
+            .await
+            .unwrap();
+        assert_eq!(forge.by_author.lock().unwrap().len(), 1);
+        assert_eq!(sink.got.lock().unwrap().len(), 1);
     }
 
     /// desc: a row with no authors keeps the plain listing. expect: no author call.
