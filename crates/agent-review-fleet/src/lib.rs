@@ -178,6 +178,8 @@ pub(crate) mod testdata {
             updated_at: 1,
             forge_id: String::new(),
             transport_id: String::new(),
+            pr_authors: Vec::new(),
+            max_prs: 0,
         }
     }
 }
@@ -252,6 +254,12 @@ mod tests {
         Op::Put(Box::new(r))
     }
 
+    fn put_with_authors(authors: &[&str]) -> Op {
+        let mut r = row("x");
+        r.pr_authors = authors.iter().map(ToString::to_string).collect();
+        Op::Put(Box::new(r))
+    }
+
     // --- CRUD contract: one table over every op class, `desc` + `expect` per row ---
 
     #[rstest]
@@ -294,6 +302,19 @@ mod tests {
     #[case::adversarial_traversal_forge_id("a traversal forge_id is rejected", put_with_forge_id("../../etc".into()), Expect::Err)]
     #[case::positive_transport_id_card_ref("a path-safe transport_id (card ref, config D2b) is accepted", put_with_transport_id("slack-primary".into()), Expect::Ok)]
     #[case::adversarial_traversal_transport_id("a traversal transport_id is rejected", put_with_transport_id("../../etc".into()), Expect::Err)]
+    #[case::positive_pr_authors_logins("forge logins as pr_authors are accepted", put_with_authors(&["randomizedcoder", "bob-2"]), Expect::Ok)]
+    #[case::boundary_pr_authors_at_max("MAX_FLEET_PR_AUTHORS authors are accepted", put_with_authors(&["a"; agent_core::MAX_FLEET_PR_AUTHORS]), Expect::Ok)]
+    #[case::boundary_pr_authors_over_max("one author past MAX_FLEET_PR_AUTHORS is rejected", put_with_authors(&["a"; agent_core::MAX_FLEET_PR_AUTHORS + 1]), Expect::Err)]
+    #[case::boundary_login_39_chars("a 39-character login is accepted", put_with_authors(&["a23456789012345678901234567890123456789"]), Expect::Ok)]
+    #[case::boundary_login_40_chars("a 40-character login is rejected", put_with_authors(&["a234567890123456789012345678901234567890"]), Expect::Err)]
+    #[case::negative_empty_author("an empty author is rejected", put_with_authors(&[""]), Expect::Err)]
+    #[case::adversarial_author_traversal("a traversal author is rejected", put_with_authors(&["../x"]), Expect::Err)]
+    #[case::adversarial_author_space("an author with a space is rejected", put_with_authors(&["a b"]), Expect::Err)]
+    #[case::adversarial_author_query_injection("a search-qualifier author is rejected", put_with_authors(&["x repo:evil/y"]), Expect::Err)]
+    #[case::adversarial_author_plus_injection("a +-joined qualifier author is rejected", put_with_authors(&["x+author:y"]), Expect::Err)]
+    #[case::adversarial_author_leading_hyphen("a leading-hyphen author is rejected", put_with_authors(&["-lead"]), Expect::Err)]
+    #[case::adversarial_author_double_hyphen("a double-hyphen author is rejected", put_with_authors(&["a--b"]), Expect::Err)]
+    #[case::adversarial_author_unicode("a non-ASCII author is rejected", put_with_authors(&["\u{430}dmin"]), Expect::Err)]
     #[tokio::test]
     async fn crud_contract(#[case] desc: &str, #[case] op: Op, #[case] expect: Expect) {
         let store = MemoryFleet::new();
@@ -343,6 +364,23 @@ mod tests {
     }
 
     // --- Corner: upsert-in-place + empty optionals ---------------------------
+
+    /// desc: `max_prs` is a hostile number; it is clamped on put, and `pr_cap` never
+    /// passes the poll's own cap. expect: the stored value and the effective cap.
+    #[rstest]
+    #[case::zero_means_the_poll_cap(0, 0, 64)]
+    #[case::positive_ten(10, 10, 10)]
+    #[case::boundary_at_ceiling(agent_core::MAX_FLEET_PRS, agent_core::MAX_FLEET_PRS, 64)]
+    #[case::adversarial_huge_clamped(u32::MAX, agent_core::MAX_FLEET_PRS, 64)]
+    #[tokio::test]
+    async fn boundary_max_prs_clamped(#[case] input: u32, #[case] stored: u32, #[case] cap: usize) {
+        let store = MemoryFleet::new();
+        let mut r = row("r");
+        r.max_prs = input;
+        let got = store.put(r).await.expect("put clamps max_prs");
+        assert_eq!(got.max_prs, stored, "max_prs {input}");
+        assert_eq!(got.pr_cap(64), cap, "pr_cap for {input}");
+    }
 
     #[tokio::test]
     async fn corner_put_same_id_updates_in_place() {

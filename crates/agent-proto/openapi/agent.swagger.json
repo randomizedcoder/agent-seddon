@@ -7882,6 +7882,18 @@
         "index": {
           "$ref": "#/definitions/agent.v1.FleetIndexStatus",
           "description": "Output only (review-graph 5a): where the row's repo index stands. Set by List/Get\nwhen the server indexes rows; ignored on Put."
+        },
+        "prAuthors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Forge logins whose PRs the poll reviews (empty ⇒ every author; at most 16, each a\nlogin — server-validated)."
+        },
+        "maxPrs": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Most PRs one poll reviews: the newest matching (0 ⇒ the poll cap; clamped to 64)."
         }
       },
       "description": "One durable roster row — a review session's identity, the repo it watches, how\nit reaches its forge, and its triggers. Mirrors `agent_core::FleetSession`."

@@ -2905,6 +2905,8 @@ impl From<agent_core::FleetSession> for pb::FleetSession {
             transport_id: s.transport_id,
             // Output only: the server fills it from its indexer on List/Get.
             index: None,
+            pr_authors: s.pr_authors,
+            max_prs: s.max_prs,
         }
     }
 }
@@ -2942,6 +2944,8 @@ impl From<pb::FleetSession> for agent_core::FleetSession {
             updated_at: s.updated_at,
             forge_id: s.forge_id,
             transport_id: s.transport_id,
+            pr_authors: s.pr_authors,
+            max_prs: s.max_prs,
         };
         // Wire → core clamps hostile numbers (poll bounds, timestamps); the store
         // validates fail-closed on put.
@@ -5646,6 +5650,8 @@ mod tests {
             // A card reference rides the wire verbatim (config C36 / D1b).
             forge_id: "acme-github".into(),
             transport_id: "slack-primary".into(),
+            pr_authors: vec!["alice".into(), "bob-2".into()],
+            max_prs: 10,
         }
     }
 

@@ -192,6 +192,31 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     client and server. `resolve` destructures `Pr` and `PrAt` once each (a shared `pr_base`).
     The fleet test double records the head and asserts grounding gets the fetched one. A remote
     collector must hold the oid (`docs/components/git.md`).
+- **Roster author filter (follow-up PR, 2026-11-24).** A row can now poll one person's PRs on a busy
+  repo (NixOS/nixpkgs has about 12k open). `FleetSession` gains `pr_authors` (forge logins;
+  empty ⇒ every author) and `max_prs` (the newest N matching PRs per poll; `0` ⇒ the 64 cap;
+  clamped to `MAX_FLEET_PRS`). Both are `serde(default)` and proto fields 17/18, so existing
+  rows and stores are unchanged.
+  - **Validation (fail closed):** each author must be a GitHub-shaped login (`is_forge_login`:
+    1–39 ASCII alphanumerics and inner single hyphens), and a row may name at most 16. A login
+    is pasted into a search query, so a space, `:` or `+` is refused rather than escaped.
+  - **The forge:** `Forge::list_prs_by_author` defaults to `list_prs` plus a case-insensitive
+    author filter (used by Gitea, GitLab, Bitbucket and the gRPC forge). GitHub overrides it
+    with one search call:
+    `search/issues?q=repo:o/r+is:pr+is:open+draft:false+author:<login>&sort=created&order=desc&per_page=100`.
+    Search items carry no head, so the trigger's head hint is empty and the orchestrator fetches
+    the PR before its dedup.
+  - **The poll:** `poll_session` re-checks the author and draft flag (the answer is untrusted).
+    It merges every author's PRs by number, emits the newest `max_prs`, and all authors share
+    one `MAX_POLL_PAGES` budget.
+  - **Tests:** `poll_author_cases` (11 rows: filtering, merge order, case, duplicates, caps 1,
+    10 and clamped, a forge that ignores the filter, endless pages), `search_prs_cases`, and
+    `adversarial_bad_author_is_refused`. Plus 13 roster-validation rows in `crud_contract` and
+    `boundary_max_prs_clamped`.
+  - **The portal:** the Dart stubs were not regenerated, because the generator now rewrites
+    every file. The roster dialog edits a `deepCopy()` of the stored row, so these fields
+    survive a portal edit as unknown fields. Showing and editing them in the portal is a
+    follow-up.
 
 ## Decisions of record
 
