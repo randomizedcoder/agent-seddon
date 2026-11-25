@@ -4461,6 +4461,12 @@ pub struct GithubAppCfg {
     /// Example: `installations = { acme = ["123", "456"] }`.
     #[serde(default)]
     pub installations: std::collections::BTreeMap<String, Vec<String>>,
+    /// Set by [`Self::fill_from_app_dir`] once `app_dir`'s files have filled the
+    /// identity: a later [`Self::validate`] (the minter's, at build) then checks the
+    /// whole table instead of refusing the `app_id` the files just wrote. Never read
+    /// from a config file.
+    #[serde(skip)]
+    filled: bool,
 }
 
 impl GithubAppCfg {
@@ -4473,7 +4479,7 @@ impl GithubAppCfg {
     /// `slug` without the client): the files fill the rest. Both are checked again,
     /// whole, once filled.
     pub fn validate(&self) -> Result<(), String> {
-        self.check(!self.app_dir.is_empty())
+        self.check(!self.app_dir.is_empty() && !self.filled)
     }
 
     /// [`Self::validate`]; `unfilled` while `app_dir`'s files are still to fill the
@@ -4612,7 +4618,7 @@ impl GithubAppCfg {
     /// App whose files are incomplete or malformed is an error naming the file.
     pub fn fill_from_app_dir(&mut self) -> Result<bool, String> {
         use agent_core::github_app_dir as files;
-        if self.app_dir.is_empty() {
+        if self.app_dir.is_empty() || self.filled {
             return Ok(true);
         }
         // The shape as written (absolute, no explicit identity), before anything fills.
@@ -4640,6 +4646,7 @@ impl GithubAppCfg {
             self.webhook_secret_ref = file_ref(files::WEBHOOK_SECRET_FILE);
         }
         self.check(false)?;
+        self.filled = true;
         Ok(true)
     }
 
@@ -6088,6 +6095,11 @@ mod tests {
                     "Iv23li.abc123"
                 };
                 assert_eq!(ga.app_id, "4242");
+                // Filled, the table validates whole (the minter validates it again at
+                // build), and a second fill changes nothing.
+                assert_eq!(ga.validate(), Ok(()));
+                assert_eq!(ga.fill_from_app_dir(), Ok(true));
+                assert_eq!(ga.app_id, "4242");
                 assert_eq!(ga.slug, "agent-seddon-l2");
                 assert_eq!(ga.client_id, client);
                 assert_eq!(ga.private_key_ref, file(f::PRIVATE_KEY_FILE));
@@ -6132,6 +6144,58 @@ mod tests {
         let mut plain = Config::minimal_for_test();
         assert_eq!(plain.resolve_github_app(), Ok(None));
         assert!(plain.github_app.is_none());
+    }
+
+    /// The start path end to end: parse (`validate` as written) → `resolve_github_app`
+    /// (the fill) → `validate` again, as the App minter does at build. Before the fix
+    /// the last step refused the `app_id` the files had just filled, so the gateway
+    /// crash-looped as soon as `/auth/setup` had created the App.
+    #[rstest::rstest]
+    #[case::positive_app_dir_filled_validates_again(None, Ok(()))]
+    #[case::negative_explicit_id_still_refused_at_parse(
+        Some("app_id = \"77\"\n"),
+        Err("set one or the other")
+    )]
+    #[case::adversarial_filled_not_settable_from_toml(
+        Some("filled = true\n"),
+        Err("unknown field")
+    )]
+    fn github_app_resolve_then_validate_cases(
+        #[case] extra: Option<&str>,
+        #[case] want: Result<(), &str>,
+    ) {
+        use agent_core::github_app_dir as f;
+        let dir = agent_testkit::tempdir().join("github-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, value) in [
+            (f::SLUG_FILE, "agent-seddon-l2"),
+            (f::CLIENT_ID_FILE, "Iv23li.abc123"),
+            (f::CLIENT_SECRET_FILE, "s3cr3t"),
+            (f::PRIVATE_KEY_FILE, "pem"),
+            (f::APP_ID_FILE, "4242"),
+        ] {
+            std::fs::write(dir.join(name), value).unwrap();
+        }
+        let toml = format!(
+            "[agent]\nprovider = \"openai-compat\"\n[provider]\nmodel = \"m\"\n\
+             [github_app]\napp_dir = \"{}\"\n{}",
+            dir.display(),
+            extra.unwrap_or("")
+        );
+        let parsed = crate::parse_config(&toml);
+        let mut cfg = match (parsed, want) {
+            (Ok(cfg), Ok(())) => cfg,
+            (Err(e), Err(frag)) => {
+                let e = format!("{e:#}");
+                assert!(e.contains(frag), "{e}");
+                return;
+            }
+            (got, want) => panic!("parse: got {:?}, want {want:?}", got.map(|_| ())),
+        };
+        assert_eq!(cfg.resolve_github_app(), Ok(None));
+        let ga = cfg.github_app.as_ref().expect("the App is configured");
+        assert_eq!(ga.app_id, "4242");
+        assert_eq!(ga.validate(), Ok(()));
     }
 
     /// The web host the install page + user OAuth live on, derived from the API base.
