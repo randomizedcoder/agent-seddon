@@ -62,8 +62,11 @@ component was chosen by the factory in `builder.rs`. One iteration:
    calls; it is **not** a final answer. Returning it would score a cut-off fragment
    as success and silently drop a pending action (e.g. a large file-write tool call
    truncated before its closing brace — the failure that scored graph-arena graph
-   arms a "valid 0"). Instead the loop appends a short "continue where you left off"
-   user nudge and loops. A model that truncates `MAX_CONSECUTIVE_TRUNCATIONS` (3)
+   arms a "valid 0"). Instead the loop drops the fragment from the prompt (it stays
+   in the transcript), appends a short "respond again, more briefly" user nudge (once,
+   not again for a second runaway in a row) and loops. The fragment is never resent:
+   on 2026-11-24 a degraded GLM server's runaway token soup, fed back as history,
+   poisoned the next turn, which became the fleet's "review". A model that truncates `MAX_CONSECUTIVE_TRUNCATIONS` (3)
    times in a row `bail!`s (→ an honest DNF), so it fails fast rather than spinning
    to `max_iterations`; any productive (tool-call) turn resets the streak.
 3. **Authorize (sequential).** For each requested call, `policy.authorize(call)

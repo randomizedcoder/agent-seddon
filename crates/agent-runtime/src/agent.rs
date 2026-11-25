@@ -2749,10 +2749,14 @@ impl Agent {
             // length/max_tokens). A truncated turn was cut off mid-emission, often
             // mid tool call (e.g. a large file write), so it parses to zero tool
             // calls; returning it would score a cut-off fragment as a successful
-            // answer and silently drop the pending action. Instead, nudge the model
-            // to finish and continue the loop. A model that keeps truncating fails
-            // after MAX_CONSECUTIVE_TRUNCATIONS so the caller records a DNF rather
-            // than a fake answer.
+            // answer and silently drop the pending action. Instead, drop the fragment
+            // from the prompt, nudge the model to answer again, and continue the loop.
+            // The fragment is never resent: a runaway (a degraded server's token soup,
+            // or reasoning that never ends, salvaged as text) fed back as history
+            // poisons every later turn, and the final answer the loop returns is one
+            // turn's text anyway, so a continuation never joins the pieces. A model
+            // that keeps truncating fails after MAX_CONSECUTIVE_TRUNCATIONS so the
+            // caller records a DNF rather than a fake answer.
             if assistant.tool_calls.is_empty() {
                 if is_truncated_finish(&resp.finish_reason) {
                     consecutive_truncations += 1;
@@ -2769,7 +2773,18 @@ impl Agent {
                         "completion truncated at max_tokens with no tool call — nudging to continue \
                          (a truncated response is not a final answer)"
                     );
-                    working.messages.push(Message::user(TRUNCATION_NUDGE));
+                    // The fragment is the turn pushed above; it stays in the transcript.
+                    // A second runaway in a row finds the nudge already last: one is enough.
+                    working.messages.pop();
+                    if working
+                        .messages
+                        .last()
+                        .map(Message::content_text)
+                        .as_deref()
+                        != Some(TRUNCATION_NUDGE)
+                    {
+                        working.messages.push(Message::user(TRUNCATION_NUDGE));
+                    }
                     continue;
                 }
                 // An empty completion (finish=stop, no content, no tool call) is a
@@ -3677,9 +3692,9 @@ fn now_ms() -> u64 {
 
 /// The nudge appended after a truncated turn so the model resumes where it was
 /// cut off (e.g. finishes a large file-write tool call) rather than restarting.
-const TRUNCATION_NUDGE: &str = "Your previous message was cut off at the output-token \
-limit before it was complete. Continue exactly where you left off and finish it — if you \
-were emitting a tool call (for example writing a file), send the whole tool call this time.";
+const TRUNCATION_NUDGE: &str = "Your previous message ran past the output-token limit \
+and was discarded. Respond again, more briefly: either call a tool (send the whole tool \
+call), or write your complete final answer concisely.";
 
 /// Sent when a turn produced an empty completion (no text, no tool call, and not a
 /// truncation). An empty stop is a degraded-provider non-answer, not a final answer, so
@@ -7932,6 +7947,60 @@ mod tests {
             (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
             "three nudged continuations, then the real answer"
         );
+    }
+
+    /// A truncated turn is dropped from the prompt, never resent as history: a
+    /// runaway completion (a degraded server's token soup) fed back would poison
+    /// every later turn. desc / truncations before the answer.
+    #[rstest]
+    #[case::positive_one_runaway_is_dropped("one runaway, then an answer", 1)]
+    #[case::boundary_max_runaways_are_dropped(
+        "MAX runaways in a row, then an answer",
+        MAX_CONSECUTIVE_TRUNCATIONS as usize
+    )]
+    #[tokio::test]
+    async fn adversarial_truncated_fragment_never_resent(
+        #[case] desc: &str,
+        #[case] runaways: usize,
+    ) {
+        const SOUP: &str = "079 the above7 I the04 the0 Then280748";
+        // Each request's (message count, whether any message carries the soup, the
+        // last message's text).
+        type Seen = (usize, bool, String);
+        let seen: Arc<std::sync::Mutex<Vec<Seen>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let provider = FnProvider::new(move |req: &CompletionRequest| {
+            let mut seen = seen2.lock().unwrap();
+            seen.push((
+                req.messages.len(),
+                req.messages.iter().any(|m| m.content_text().contains(SOUP)),
+                req.messages
+                    .last()
+                    .map(agent_core::Message::content_text)
+                    .unwrap_or_default(),
+            ));
+            if seen.len() <= runaways {
+                truncated_turn(SOUP)
+            } else {
+                final_turn("done")
+            }
+        });
+        let out = agent_over(Arc::new(provider), 10).run("go").await.unwrap();
+        assert_eq!(out, "done", "{desc}");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), runaways + 1, "{desc}: one call per turn");
+        assert!(
+            seen.iter().all(|(_, soup, _)| !soup),
+            "{desc}: no request carries the runaway: {seen:?}"
+        );
+        for (n, _, last) in &seen[1..] {
+            assert_eq!(
+                *last, TRUNCATION_NUDGE,
+                "{desc}: the nudge follows a runaway"
+            );
+            // The fragment is replaced by the nudge, so the prompt doesn't grow.
+            assert_eq!(*n, seen[0].0 + 1, "{desc}: prompt size stays flat");
+        }
     }
 
     /// `corner_`: a model that truncates forever fails fast (an honest error the
