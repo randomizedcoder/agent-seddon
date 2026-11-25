@@ -223,6 +223,26 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     (`me`, `ME`) is searched once (`corner_duplicate_author_searched_once`). Its worry that
     GitHub's search might refuse `draft:false` was checked live: the qualifier works.
 
+- **A runaway turn is not resent (follow-up PR, 2026-11-25).** On 2026-11-24 the drafts of
+  #734 and #735 were token soup. GLM 5.3 degraded under concurrent load: several
+  long-context streams in flight ran to the 16384-token cap with multilingual garbage, while
+  single requests were clean. The loop then fed the truncated turn back as history ("continue
+  where you left off"), and the next turn, poisoned by it, became the review.
+  - **The fix (`agent.rs`):** a turn cut off at the cap is dropped from the prompt (the
+    transcript keeps it), and the nudge asks for a brief new answer, once per streak. The
+    three-strikes DNF is unchanged, so a server that keeps running away fails the review
+    instead of drafting it.
+  - **Test:** `adversarial_truncated_fragment_never_resent` (1 and MAX runaways, and a
+    streak broken by a tool turn or an empty turn): no later request carries the fragment,
+    the prompt grows by at most the nudge, each streak gets one nudge, and the transcript
+    keeps every runaway.
+  - **On l2 (host config in `~/nixos/desktop/l2`, not this repo):** the fleet's concurrency
+    is cut to 2 (`review_fleet.max_total`/`max_per_user`) until the GLM server holds up
+    under load.
+  - **Carried:** a test that renders a post-truncation prompt (`user(goal)`,
+    `user(nudge)`, no assistant between) through the Anthropic conversion, which coalesces
+    consecutive same-role turns today.
+
 ## Decisions of record
 
 - **Multi-tenancy is its own track** (2026-09-05): the system-wide tenancy work (process
