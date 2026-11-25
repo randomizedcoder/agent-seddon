@@ -332,7 +332,8 @@ struct TenantPass {
 }
 
 /// Poll one job's row: under its tenant's scope, re-read the row, build its forge (inline
-/// or by card) and emit a trigger per open non-draft PR, each stamped with the tenant.
+/// or by card) and emit a trigger per open non-draft PR, each stamped with the tenant. A row
+/// with `pr_authors` polls only their PRs, and `max_prs` caps how many one poll emits.
 /// A row whose last polls failed is skipped until its `backoff` wait has passed, so a
 /// failing or rate-limiting forge is not asked again at the row's full cadence.
 pub(crate) async fn poll_job(
@@ -368,7 +369,8 @@ pub(crate) async fn poll_job(
                     tenant,
                     id,
                     sink.as_ref(),
-                    agent_review_fleet::MAX_TRIGGERS_PER_TICK,
+                    row.pr_cap(agent_review_fleet::MAX_TRIGGERS_PER_TICK),
+                    &row.pr_authors,
                 )
                 .await?;
                 Ok(format!(

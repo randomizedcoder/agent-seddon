@@ -26,7 +26,7 @@
 //! A row whose polls keep failing is backed off between ticks ([`PollBackoff`]).
 
 use agent_core::{FleetTrigger, Forge, Result, TriggerSink};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -56,16 +56,21 @@ pub struct PollReport {
 /// Poll one session's forge for open, non-draft PRs and emit a [`FleetTrigger`] for each
 /// onto `sink`. `max_triggers` is clamped to [`MAX_TRIGGERS_PER_TICK`]. `tenant` is the
 /// roster scope the row was read from (forge-auth F6; empty ⇒ unscoped) and is stamped on
-/// every trigger so the drain resolves the row in that tenant. See the module docs for the
-/// untrusted-response contract.
+/// every trigger so the drain resolves the row in that tenant. A non-empty `authors` (the
+/// row's `pr_authors`) narrows the poll to those authors' PRs, the newest `max_triggers`
+/// of them. See the module docs for the untrusted-response contract.
 pub async fn poll_session(
     forge: &dyn Forge,
     tenant: &str,
     session_id: &str,
     sink: &dyn TriggerSink,
     max_triggers: usize,
+    authors: &[String],
 ) -> Result<PollReport> {
     let cap = max_triggers.min(MAX_TRIGGERS_PER_TICK);
+    if !authors.is_empty() {
+        return poll_authors(forge, tenant, session_id, sink, cap, authors).await;
+    }
     let mut report = PollReport::default();
     let mut page: u32 = 1;
     loop {
@@ -85,16 +90,7 @@ pub async fn poll_session(
                 report.capped = true;
                 return Ok(report);
             }
-            sink.enqueue(FleetTrigger {
-                force: false,
-                source: agent_core::TriggerSource::Poll,
-                // The listed head lets the orchestrator skip an unchanged PR unfetched.
-                head_sha: pr.head_sha.clone(),
-                session_id: session_id.to_string(),
-                pr_number: pr.number,
-                requested_by: Vec::new(),
-                tenant: tenant.to_string(),
-            });
+            sink.enqueue(poll_trigger(tenant, session_id, pr.number, &pr.head_sha));
             report.emitted += 1;
         }
         match result.next_page {
@@ -106,6 +102,73 @@ pub async fn poll_session(
         }
     }
     Ok(report)
+}
+
+/// The author-filtered poll: each author's open non-draft PRs (at most `cap` apiece),
+/// merged by number, and the newest `cap` emitted. Every author shares the one
+/// [`MAX_POLL_PAGES`] budget, so a long author list stays a bounded number of calls.
+async fn poll_authors(
+    forge: &dyn Forge,
+    tenant: &str,
+    session_id: &str,
+    sink: &dyn TriggerSink,
+    cap: usize,
+    authors: &[String],
+) -> Result<PollReport> {
+    let mut report = PollReport::default();
+    // PR number → listed head. A PR found under two authors (a duplicate entry) is one.
+    let mut found: BTreeMap<u64, String> = BTreeMap::new();
+    // Logins are case-insensitive: `me` and `ME` are one author, searched once.
+    let mut seen: Vec<&str> = Vec::with_capacity(authors.len());
+    'authors: for author in authors {
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(author)) {
+            continue;
+        }
+        seen.push(author);
+        let mut page: u32 = 1;
+        let mut mine = 0usize;
+        loop {
+            if report.pages >= MAX_POLL_PAGES {
+                break 'authors;
+            }
+            let result = forge.list_prs_by_author(author, page).await?;
+            report.pages += 1;
+            for pr in &result.items {
+                report.scanned += 1;
+                // The forge filtered by author; check again, it is untrusted.
+                if pr.draft || !pr.author.eq_ignore_ascii_case(author) {
+                    continue;
+                }
+                found
+                    .entry(pr.number)
+                    .or_insert_with(|| pr.head_sha.clone());
+                mine += 1;
+            }
+            match result.next_page {
+                Some(next) if next > page && mine < cap => page = next,
+                _ => break,
+            }
+        }
+    }
+    report.capped = found.len() > cap;
+    for (number, head) in found.iter().rev().take(cap) {
+        sink.enqueue(poll_trigger(tenant, session_id, *number, head));
+        report.emitted += 1;
+    }
+    Ok(report)
+}
+
+fn poll_trigger(tenant: &str, session_id: &str, pr_number: u64, head_sha: &str) -> FleetTrigger {
+    FleetTrigger {
+        force: false,
+        source: agent_core::TriggerSource::Poll,
+        // The listed head lets the orchestrator skip an unchanged PR unfetched.
+        head_sha: head_sha.to_string(),
+        session_id: session_id.to_string(),
+        pr_number,
+        requested_by: Vec::new(),
+        tenant: tenant.to_string(),
+    }
 }
 
 /// The backoff base after a failed poll. With equal jitter the first wait falls in
@@ -214,11 +277,17 @@ mod tests {
     struct FakeForge {
         pages: Vec<Page<PullRequest>>,
         err_on: Option<u32>,
+        /// Every `(author, page)` the author poll asked for.
+        by_author: Mutex<Vec<(String, u32)>>,
     }
 
     impl FakeForge {
         fn new(pages: Vec<Page<PullRequest>>, err_on: Option<u32>) -> Self {
-            Self { pages, err_on }
+            Self {
+                pages,
+                err_on,
+                by_author: Mutex::new(Vec::new()),
+            }
         }
     }
 
@@ -239,6 +308,14 @@ mod tests {
                 items: vec![],
                 next_page: None,
             }))
+        }
+        // Unfiltered on purpose: the poll must re-check the author itself.
+        async fn list_prs_by_author(&self, author: &str, page: u32) -> Result<Page<PullRequest>> {
+            self.by_author
+                .lock()
+                .unwrap()
+                .push((author.to_string(), page));
+            self.list_prs(page).await
         }
         async fn list_issues(&self, _: u32) -> Result<Page<Issue>> {
             unreachable!("poll never calls list_issues")
@@ -414,7 +491,7 @@ mod tests {
     async fn poll_session_cases(#[case] case: Case) {
         let forge = FakeForge::new(case.pages, case.err_on);
         let sink = RecordingSink::default();
-        let got = poll_session(&forge, "acme", "sess", &sink, case.max_triggers).await;
+        let got = poll_session(&forge, "acme", "sess", &sink, case.max_triggers, &[]).await;
 
         match case.expect {
             Expect::Err => {
@@ -468,11 +545,179 @@ mod tests {
         listed.head_sha = head.to_string();
         let forge = FakeForge::new(vec![page(vec![listed], None)], None);
         let sink = RecordingSink::default();
-        poll_session(&forge, "acme", "sess", &sink, MAX_TRIGGERS_PER_TICK)
+        poll_session(&forge, "acme", "sess", &sink, MAX_TRIGGERS_PER_TICK, &[])
             .await
             .unwrap();
         let got = sink.got.lock().unwrap();
         assert_eq!(got[0].head_sha, head, "{desc}");
+    }
+
+    fn by(number: u64, author: &str, draft: bool) -> PullRequest {
+        PullRequest {
+            author: author.to_string(),
+            ..pr(number, draft)
+        }
+    }
+
+    struct AuthorCase {
+        desc: &'static str,
+        pages: Vec<Page<PullRequest>>,
+        authors: &'static [&'static str],
+        max_triggers: usize,
+        emitted: Vec<u64>,
+        capped: bool,
+    }
+
+    #[rstest]
+    #[case::positive_only_the_authors_prs(AuthorCase {
+        desc: "only the named author's PRs are emitted, newest first",
+        pages: vec![page(vec![by(5, "me", false), by(4, "you", false), by(3, "me", false)], None)],
+        authors: &["me"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![5, 3],
+        capped: false,
+    })]
+    #[case::positive_two_authors_merged_newest_first(AuthorCase {
+        desc: "two authors' PRs merge into one newest-first list",
+        pages: vec![page(vec![by(2, "a", false), by(9, "b", false), by(4, "a", false)], None)],
+        authors: &["a", "b"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![9, 4, 2],
+        capped: false,
+    })]
+    #[case::negative_no_matching_prs(AuthorCase {
+        desc: "no PR by the author emits nothing",
+        pages: vec![page(vec![by(1, "you", false)], None)],
+        authors: &["me"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![],
+        capped: false,
+    })]
+    #[case::negative_drafts_skipped(AuthorCase {
+        desc: "the author's draft PR is skipped",
+        pages: vec![page(vec![by(2, "me", true), by(1, "me", false)], None)],
+        authors: &["me"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![1],
+        capped: false,
+    })]
+    #[case::corner_login_case_insensitive(AuthorCase {
+        desc: "a login matches whatever case the forge reports",
+        pages: vec![page(vec![by(1, "RandomizedCoder", false)], None)],
+        authors: &["randomizedcoder"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![1],
+        capped: false,
+    })]
+    #[case::corner_duplicate_author_is_one_pr(AuthorCase {
+        desc: "the same author listed twice reviews each PR once",
+        pages: vec![page(vec![by(1, "me", false)], None)],
+        authors: &["me", "ME"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![1],
+        capped: false,
+    })]
+    #[case::boundary_cap_one(AuthorCase {
+        desc: "max_prs 1 emits only the newest",
+        pages: vec![page(vec![by(1, "me", false), by(3, "me", false), by(2, "me", false)], None)],
+        authors: &["me"],
+        max_triggers: 1,
+        emitted: vec![3],
+        capped: true,
+    })]
+    #[case::boundary_cap_ten(AuthorCase {
+        desc: "max_prs 10 of 14 emits the newest ten",
+        pages: vec![page((1..=14).map(|n| by(n, "me", false)).collect(), None)],
+        authors: &["me"],
+        max_triggers: 10,
+        emitted: (5..=14).rev().collect(),
+        capped: true,
+    })]
+    #[case::boundary_cap_clamped(AuthorCase {
+        desc: "a cap above MAX_TRIGGERS_PER_TICK is clamped to it",
+        pages: vec![page((1..=100).map(|n| by(n, "me", false)).collect(), None)],
+        authors: &["me"],
+        max_triggers: 1000,
+        emitted: (37..=100).rev().collect(),
+        capped: true,
+    })]
+    #[case::adversarial_forge_ignores_the_filter(AuthorCase {
+        desc: "a forge answering with other authors' PRs is filtered again",
+        pages: vec![page(vec![by(7, "evil", false), by(6, "me", false)], None)],
+        authors: &["me"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: vec![6],
+        capped: false,
+    })]
+    #[case::adversarial_endless_pages_share_one_budget(AuthorCase {
+        desc: "two authors on a forge that always claims more stay within MAX_POLL_PAGES",
+        pages: (1..=MAX_POLL_PAGES + 5)
+            .map(|i| page(vec![by(i as u64, "a", false)], Some(i + 1)))
+            .collect(),
+        authors: &["a", "b"],
+        max_triggers: MAX_TRIGGERS_PER_TICK,
+        emitted: (1..=MAX_POLL_PAGES as u64).rev().collect(),
+        capped: false,
+    })]
+    #[tokio::test]
+    async fn poll_author_cases(#[case] case: AuthorCase) {
+        let forge = FakeForge::new(case.pages, None);
+        let sink = RecordingSink::default();
+        let authors: Vec<String> = case.authors.iter().map(ToString::to_string).collect();
+        let report = poll_session(&forge, "acme", "sess", &sink, case.max_triggers, &authors)
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", case.desc));
+        let nums: Vec<u64> = sink
+            .got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.pr_number)
+            .collect();
+        assert_eq!(nums, case.emitted, "{}: emitted", case.desc);
+        assert_eq!(report.emitted, case.emitted.len(), "{}: count", case.desc);
+        assert_eq!(report.capped, case.capped, "{}: capped", case.desc);
+        assert!(report.pages <= MAX_POLL_PAGES, "{}: page budget", case.desc);
+        assert!(
+            !forge.by_author.lock().unwrap().is_empty(),
+            "{}: the author listing is used",
+            case.desc
+        );
+    }
+
+    /// desc: an author listed twice in two cases is one login. expect: one search.
+    #[tokio::test]
+    async fn corner_duplicate_author_searched_once() {
+        let forge = FakeForge::new(vec![page(vec![by(1, "me", false)], None)], None);
+        let sink = RecordingSink::default();
+        let authors = ["me".to_string(), "ME".to_string(), "me".to_string()];
+        poll_session(&forge, "acme", "sess", &sink, 10, &authors)
+            .await
+            .unwrap();
+        assert_eq!(forge.by_author.lock().unwrap().len(), 1);
+        assert_eq!(sink.got.lock().unwrap().len(), 1);
+    }
+
+    /// desc: a row with no authors keeps the plain listing. expect: no author call.
+    #[tokio::test]
+    async fn negative_no_authors_never_searches() {
+        let forge = FakeForge::new(vec![page(vec![by(1, "me", false)], None)], None);
+        let sink = RecordingSink::default();
+        poll_session(&forge, "acme", "sess", &sink, MAX_TRIGGERS_PER_TICK, &[])
+            .await
+            .unwrap();
+        assert!(forge.by_author.lock().unwrap().is_empty());
+        assert_eq!(sink.got.lock().unwrap().len(), 1);
+    }
+
+    /// desc: an author listing that fails is a failed poll. expect: Err, nothing emitted.
+    #[tokio::test]
+    async fn negative_author_listing_error_propagates() {
+        let forge = FakeForge::new(vec![page(vec![by(1, "me", false)], None)], Some(1));
+        let sink = RecordingSink::default();
+        let got = poll_session(&forge, "acme", "sess", &sink, 10, &["me".to_string()]).await;
+        assert!(got.is_err());
+        assert!(sink.got.lock().unwrap().is_empty());
     }
 
     // ---- PollBackoff -----------------------------------------------------

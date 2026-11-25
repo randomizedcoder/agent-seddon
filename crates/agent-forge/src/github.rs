@@ -41,6 +41,39 @@ impl GitHubForge {
     fn repo_path(&self, tail: &str) -> String {
         format!("repos/{}/{}/{tail}", self.owner, self.repo)
     }
+
+    /// The search path for `author`'s open, non-draft PRs on this repo, newest first.
+    /// One page of [`SEARCH_PER_PAGE`] covers a poll ([`agent_core::MAX_FLEET_PRS`] is
+    /// smaller), so later pages are never asked for.
+    fn author_search_path(&self, author: &str) -> String {
+        format!(
+            "search/issues?q=repo:{}/{}+is:pr+is:open+draft:false+author:{author}\
+             &sort=created&order=desc&per_page={SEARCH_PER_PAGE}",
+            self.owner, self.repo
+        )
+    }
+}
+
+/// Results asked of one search call (GitHub's maximum).
+const SEARCH_PER_PAGE: u32 = 100;
+
+/// A search answer's PRs: `items` that are PRs (carry `pull_request`) with a number.
+/// Search results have no head, so `head_sha` stays empty and the fleet fetches the PR.
+fn search_prs(v: &serde_json::Value) -> Vec<PullRequest> {
+    v.get("items")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|i| {
+                    i.get("pull_request")
+                        .is_some_and(serde_json::Value::is_object)
+                })
+                .map(to_pr)
+                .filter(|pr| pr.number > 0)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn to_pr(v: &serde_json::Value) -> PullRequest {
@@ -124,6 +157,27 @@ impl Forge for GitHubForge {
         Ok(Page {
             items: items.iter().map(to_pr).collect(),
             next_page,
+        })
+    }
+
+    async fn list_prs_by_author(&self, author: &str, page: u32) -> Result<Page<PullRequest>> {
+        self.http.require_token("github")?;
+        // The roster validated it; the query is built from it, so check again here.
+        if !agent_core::is_forge_login(author) {
+            return Err(agent_core::Error::Repo(
+                "github: pr author is not a forge login".into(),
+            ));
+        }
+        if page > 1 {
+            return Ok(Page {
+                items: Vec::new(),
+                next_page: None,
+            });
+        }
+        let v = self.http.get_json(&self.author_search_path(author)).await?;
+        Ok(Page {
+            items: search_prs(&v),
+            next_page: None,
         })
     }
 
@@ -263,6 +317,92 @@ mod tests {
         let _ = to_pr(&v);
         let _ = to_issue(&v);
         let _ = to_comment(&v);
+    }
+
+    fn forge(token: &str) -> GitHubForge {
+        GitHubForge::new(
+            "https://unused.test".into(),
+            "NixOS".into(),
+            "nixpkgs".into(),
+            agent_core::Secret::new(token.to_string()),
+            5,
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn positive_author_search_path() {
+        assert_eq!(
+            forge("t").author_search_path("randomizedcoder"),
+            "search/issues?q=repo:NixOS/nixpkgs+is:pr+is:open+draft:false\
+             +author:randomizedcoder&sort=created&order=desc&per_page=100"
+        );
+    }
+
+    /// desc: a search answer is remote-controlled; only numbered PR items survive.
+    /// expect: the PR numbers kept, in the answer's order.
+    #[rstest]
+    #[case::positive_prs_kept(
+        "two PR items map to two PRs",
+        serde_json::json!({"items": [
+            {"number": 9, "user": {"login": "a"}, "pull_request": {}},
+            {"number": 7, "user": {"login": "a"}, "pull_request": {}}
+        ]}),
+        vec![9, 7]
+    )]
+    #[case::negative_issue_dropped(
+        "an issue (no pull_request) is not a PR",
+        serde_json::json!({"items": [{"number": 3}, {"number": 4, "pull_request": {}}]}),
+        vec![4]
+    )]
+    #[case::boundary_no_items("an answer with no items is empty", serde_json::json!({}), vec![])]
+    #[case::adversarial_missing_number(
+        "a PR item without a number is dropped",
+        serde_json::json!({"items": [{"pull_request": {}}, {"number": "x", "pull_request": {}}]}),
+        vec![]
+    )]
+    #[case::adversarial_wrong_shapes(
+        "items that is not an array, or a pull_request that is not an object, yields nothing",
+        serde_json::json!({"items": {"number": 1}}),
+        vec![]
+    )]
+    #[case::adversarial_pull_request_scalar(
+        "a scalar pull_request is not a PR marker",
+        serde_json::json!({"items": [{"number": 1, "pull_request": true}]}),
+        vec![]
+    )]
+    fn search_prs_cases(#[case] desc: &str, #[case] v: serde_json::Value, #[case] want: Vec<u64>) {
+        let got: Vec<u64> = search_prs(&v).iter().map(|p| p.number).collect();
+        assert_eq!(got, want, "{desc}");
+        assert!(
+            search_prs(&v).iter().all(|p| p.head_sha.is_empty()),
+            "{desc}: no head from search"
+        );
+    }
+
+    /// desc: an author that is not a login never reaches the query, even past the roster.
+    /// expect: an error before any request (the base URL is unreachable).
+    #[rstest]
+    #[case::adversarial_qualifier_injection("a+repo:evil/x")]
+    #[case::adversarial_space("a b")]
+    #[case::adversarial_traversal("../x")]
+    #[case::adversarial_ampersand("a&per_page=1")]
+    #[case::negative_empty("")]
+    #[tokio::test]
+    async fn adversarial_bad_author_is_refused(#[case] author: &str) {
+        let err = forge("t").list_prs_by_author(author, 1).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not a forge login"),
+            "{author:?}: {err}"
+        );
+    }
+
+    /// desc: one search page covers a poll. expect: a later page is empty, unrequested.
+    #[tokio::test]
+    async fn boundary_later_search_page_is_empty() {
+        let page = forge("t").list_prs_by_author("alice", 2).await.unwrap();
+        assert!(page.items.is_empty() && page.next_page.is_none());
     }
 
     /// A missing token must be a distinct, early error — not an opaque 401 from

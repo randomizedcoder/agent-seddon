@@ -2093,6 +2093,15 @@ impl agent_core::Forge for MeteredForge {
     ) -> agent_core::Result<agent_core::Page<agent_core::PullRequest>> {
         self.record("list_prs", self.inner.list_prs(p)).await
     }
+    async fn list_prs_by_author(
+        &self,
+        a: &str,
+        p: u32,
+    ) -> agent_core::Result<agent_core::Page<agent_core::PullRequest>> {
+        self.record("list_prs_by_author", self.inner.list_prs_by_author(a, p))
+            .await
+    }
+
     async fn list_issues(&self, p: u32) -> agent_core::Result<agent_core::Page<agent_core::Issue>> {
         self.record("list_issues", self.inner.list_issues(p)).await
     }

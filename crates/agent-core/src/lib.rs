@@ -3359,9 +3359,42 @@ pub struct FleetSession {
     /// inline `slack_*` fields + the `[review_fleet.slack]` default token are used
     /// (unchanged). Path-safe (it is a registry key).
     pub transport_id: String,
+    /// Forge logins whose PRs the poll reviews (empty ⇒ every author). Each is a forge
+    /// login (see [`is_forge_login`]); at most [`MAX_FLEET_PR_AUTHORS`].
+    #[serde(default)]
+    pub pr_authors: Vec<String>,
+    /// How many PRs one poll reviews at most: the newest matching ones (`0` ⇒ the
+    /// poll's own cap). Clamped to [`MAX_FLEET_PRS`].
+    #[serde(default)]
+    pub max_prs: u32,
+}
+
+/// Most authors a roster row may filter on.
+pub const MAX_FLEET_PR_AUTHORS: usize = 16;
+/// The ceiling on a row's `max_prs` (the poll's per-tick trigger cap).
+pub const MAX_FLEET_PRS: u32 = 64;
+
+/// A forge login as GitHub spells one: 1–39 ASCII letters, digits and single inner
+/// hyphens. A login is pasted into a forge search query, so anything else (a space, a
+/// `:` qualifier, a separator) fails closed rather than being escaped.
+pub fn is_forge_login(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 39
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--")
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 impl FleetSession {
+    /// The most PRs one poll of this row emits: `max_prs`, or `poll_cap` when unset.
+    pub fn pr_cap(&self, poll_cap: usize) -> usize {
+        match self.max_prs {
+            0 => poll_cap,
+            n => (n as usize).min(poll_cap),
+        }
+    }
+
     /// Clamp hostile/unset *numbers* in place, fail-soft (mirrors
     /// [`Upstream::sanitize`]): `poll_secs` into its bounds (unset ⇒ default), negative
     /// timestamps ⇒ `0`. Structural problems (a bad id, an over-long field, a raw token)
@@ -3375,6 +3408,7 @@ impl FleetSession {
         };
         self.created_at = self.created_at.max(0);
         self.updated_at = self.updated_at.max(0);
+        self.max_prs = self.max_prs.min(MAX_FLEET_PRS);
     }
 
     /// Fail-closed structural validation: `id`/`user`/`repo` must be path-safe segments,
@@ -3432,6 +3466,20 @@ impl FleetSession {
                 "fleet session `{}`: transport_id {:?} is not a path-safe segment",
                 self.id,
                 truncate_for_log(&self.transport_id)
+            ));
+        }
+        // Each author is pasted into a forge search query: a login or nothing.
+        if self.pr_authors.len() > MAX_FLEET_PR_AUTHORS {
+            return err(format!(
+                "fleet session `{}`: more than {MAX_FLEET_PR_AUTHORS} pr_authors",
+                self.id
+            ));
+        }
+        if let Some(bad) = self.pr_authors.iter().find(|a| !is_forge_login(a)) {
+            return err(format!(
+                "fleet session `{}`: pr_authors entry {:?} is not a forge login",
+                self.id,
+                truncate_for_log(bad)
             ));
         }
         Ok(())
@@ -4302,6 +4350,16 @@ pub trait Forge: Send + Sync {
     // --- read -------------------------------------------------------------
     async fn get_pr(&self, number: u64) -> Result<PullRequest>;
     async fn list_prs(&self, page: u32) -> Result<Page<PullRequest>>;
+    /// Open PRs by `author` (a validated [`is_forge_login`]), newest first. The default
+    /// filters [`Self::list_prs`]' page case-insensitively; a forge with a search API
+    /// overrides it so an author's older PRs are reachable too.
+    async fn list_prs_by_author(&self, author: &str, page: u32) -> Result<Page<PullRequest>> {
+        let mut listed = self.list_prs(page).await?;
+        listed
+            .items
+            .retain(|pr| pr.author.eq_ignore_ascii_case(author));
+        Ok(listed)
+    }
     async fn list_issues(&self, page: u32) -> Result<Page<Issue>>;
     /// An issue with its comment thread, for injecting into context.
     async fn import_issue(&self, number: u64) -> Result<Issue>;

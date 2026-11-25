@@ -1274,6 +1274,8 @@ mod tests {
             updated_at: 0,
             forge_id: String::new(),
             transport_id: String::new(),
+            pr_authors: Vec::new(),
+            max_prs: 0,
         }
     }
 

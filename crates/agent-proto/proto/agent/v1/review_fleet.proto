@@ -62,6 +62,11 @@ message FleetSession {
   // Output only (review-graph 5a): where the row's repo index stands. Set by List/Get
   // when the server indexes rows; ignored on Put.
   FleetIndexStatus index = 16;
+  // Forge logins whose PRs the poll reviews (empty ⇒ every author; at most 16, each a
+  // login — server-validated).
+  repeated string pr_authors = 17;
+  // Most PRs one poll reviews: the newest matching (0 ⇒ the poll cap; clamped to 64).
+  uint32 max_prs = 18;
 }
 
 // A fleet row's repo index status (review-graph 5a). Mirrors

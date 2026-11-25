@@ -64,6 +64,8 @@ extra fields:
 | `skill` | Review skill/prompt selector |
 | `slack_trigger_channel`, `slack_progress_channel` | Slack triggers / progress (inc 4/7) |
 | `poll_secs` | Forge poll interval, clamped to `[MIN_FLEET_POLL_SECS, MAX_FLEET_POLL_SECS]` |
+| `pr_authors` | Forge logins whose PRs the poll reviews (empty ⇒ every author); each must pass `is_forge_login`, at most `MAX_FLEET_PR_AUTHORS` (16) |
+| `max_prs` | The most PRs one poll emits — the **newest** matching ones (`0` ⇒ the 64 cap; clamped to `MAX_FLEET_PRS`) |
 | `enabled` | Whether the fleet server admits/drives it |
 | `created_at`, `updated_at` | Unix-seconds metadata (clamped non-negative) |
 
@@ -421,6 +423,13 @@ and never past `MAX_POLL_PAGES` (10), and at most `MAX_TRIGGERS_PER_TICK` (64) t
 one tick, so a hostile paging chain or a PR flood is bounded. Dedup is coarse here (by PR
 number, via the queue's coalescing + the orchestrator's per-`(session, pr)` guard); precise
 head-oid re-review dedup lands in inc 6b (C16), resolving the head at fetch time.
+
+A row with `pr_authors` polls only those authors (`Forge::list_prs_by_author`). GitHub answers
+it with one search call per author (`is:pr is:open draft:false author:<login>`, newest first,
+100 per page), so an author's older PRs on a busy repo are reachable; other forges filter the
+plain listing. The poll re-checks each answer's author and draft flag, merges authors by PR
+number and emits the newest `max_prs`. Search results carry no head, so those triggers are
+fetched before the dedup.
 
 The poll is built to be a **good citizen** of the forge (most of all GitHub):
 
