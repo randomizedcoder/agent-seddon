@@ -66,9 +66,13 @@ component was chosen by the factory in `builder.rs`. One iteration:
    in the transcript), appends a short "respond again, more briefly" user nudge (once,
    not again for a second runaway in a row) and loops. The fragment is never resent:
    on 2026-11-24 a degraded GLM server's runaway token soup, fed back as history,
-   poisoned the next turn, which became the fleet's "review". A model that truncates `MAX_CONSECUTIVE_TRUNCATIONS` (3)
-   times in a row `bail!`s (→ an honest DNF), so it fails fast rather than spinning
-   to `max_iterations`; any productive (tool-call) turn resets the streak.
+   poisoned the next turn, which became the fleet's "review". A model that
+   truncates `MAX_CONSECUTIVE_TRUNCATIONS` (3) times in a row `bail!`s (→ an honest
+   DNF), so it fails fast rather than spinning to `max_iterations`; any productive
+   (tool-call) turn resets the streak. One consequence: a tool call that genuinely
+   needs more than `max_tokens` (a very large file write) can't be pieced together
+   across turns, so it ends in that DNF; the fix for it is a larger `max_tokens` /
+   `reserve_output`, not a continuation.
 3. **Authorize (sequential).** For each requested call, `policy.authorize(call)
    .await`, collected into `decisions` in call order. Authorization runs
    sequentially on purpose — interactive approval prompts must not interleave.

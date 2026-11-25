@@ -2770,8 +2770,9 @@ impl Agent {
                         iter,
                         consecutive_truncations,
                         finish = %resp.finish_reason,
-                        "completion truncated at max_tokens with no tool call — nudging to continue \
-                         (a truncated response is not a final answer)"
+                        "completion truncated at max_tokens with no tool call — dropped from the \
+                         prompt, asking for a brief new answer (a truncated response is not a \
+                         final answer)"
                     );
                     // The fragment is the turn pushed above; it stays in the transcript.
                     // A second runaway in a row finds the nudge already last: one is enough.
@@ -2808,6 +2809,8 @@ impl Agent {
                         "empty completion with no tool call — nudging to continue \
                          (an empty response is not a final answer)"
                     );
+                    // Unlike a truncated turn, the empty one stays in the prompt: it
+                    // carries no text, so there is nothing to poison later turns.
                     working.messages.push(Message::user(EMPTY_ANSWER_NUDGE));
                     continue;
                 }
@@ -3690,8 +3693,8 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The nudge appended after a truncated turn so the model resumes where it was
-/// cut off (e.g. finishes a large file-write tool call) rather than restarting.
+/// The nudge appended after a truncated turn, which the loop drops from the prompt:
+/// the model starts its answer (or its tool call) again, more briefly.
 const TRUNCATION_NUDGE: &str = "Your previous message ran past the output-token limit \
 and was discarded. Respond again, more briefly: either call a tool (send the whole tool \
 call), or write your complete final answer concisely.";
@@ -7949,58 +7952,125 @@ mod tests {
         );
     }
 
+    /// One scripted turn of `adversarial_truncated_fragment_never_resent`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Turn {
+        /// A runaway: token soup cut off at the output-token cap.
+        Soup,
+        Empty,
+        Tool,
+        Answer,
+    }
+
     /// A truncated turn is dropped from the prompt, never resent as history: a
     /// runaway completion (a degraded server's token soup) fed back would poison
-    /// every later turn. desc / truncations before the answer.
+    /// every later turn. The transcript (memory) still records it. An unbroken
+    /// streak shares one nudge; a streak broken by real work or by an empty turn
+    /// gets a fresh one. desc / the scripted turns (the last is the answer).
     #[rstest]
-    #[case::positive_one_runaway_is_dropped("one runaway, then an answer", 1)]
+    #[case::positive_one_runaway_is_dropped("one runaway", &[Turn::Soup, Turn::Answer])]
     #[case::boundary_max_runaways_are_dropped(
-        "MAX runaways in a row, then an answer",
-        MAX_CONSECUTIVE_TRUNCATIONS as usize
+        "MAX (3) runaways in a row",
+        &[Turn::Soup, Turn::Soup, Turn::Soup, Turn::Answer]
+    )]
+    #[case::corner_tool_turn_breaks_the_streak(
+        "runaway, tool call, runaway",
+        &[Turn::Soup, Turn::Tool, Turn::Soup, Turn::Answer]
+    )]
+    #[case::corner_empty_turn_breaks_the_streak(
+        "runaway, empty turn, runaway",
+        &[Turn::Soup, Turn::Empty, Turn::Soup, Turn::Answer]
     )]
     #[tokio::test]
     async fn adversarial_truncated_fragment_never_resent(
         #[case] desc: &str,
-        #[case] runaways: usize,
+        #[case] script: &'static [Turn],
     ) {
         const SOUP: &str = "079 the above7 I the04 the0 Then280748";
-        // Each request's (message count, whether any message carries the soup, the
-        // last message's text).
-        type Seen = (usize, bool, String);
+        // Each request's message count, whether any message carries the soup, the
+        // last message's text, and how many truncation nudges it carries.
+        #[derive(Clone, Debug)]
+        struct Seen {
+            len: usize,
+            soup: bool,
+            last: String,
+            nudges: usize,
+        }
         let seen: Arc<std::sync::Mutex<Vec<Seen>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen2 = seen.clone();
         let provider = FnProvider::new(move |req: &CompletionRequest| {
             let mut seen = seen2.lock().unwrap();
-            seen.push((
-                req.messages.len(),
-                req.messages.iter().any(|m| m.content_text().contains(SOUP)),
-                req.messages
-                    .last()
-                    .map(agent_core::Message::content_text)
-                    .unwrap_or_default(),
-            ));
-            if seen.len() <= runaways {
-                truncated_turn(SOUP)
-            } else {
-                final_turn("done")
+            let texts: Vec<String> = req
+                .messages
+                .iter()
+                .map(agent_core::Message::content_text)
+                .collect();
+            seen.push(Seen {
+                len: texts.len(),
+                soup: texts.iter().any(|t| t.contains(SOUP)),
+                last: texts.last().cloned().unwrap_or_default(),
+                nudges: texts.iter().filter(|t| *t == TRUNCATION_NUDGE).count(),
+            });
+            match script[seen.len() - 1] {
+                Turn::Soup => truncated_turn(SOUP),
+                Turn::Empty => empty_turn(),
+                Turn::Tool => tool_turn(vec![tool_call("t0", "noop")]),
+                Turn::Answer => final_turn("done"),
             }
         });
-        let out = agent_over(Arc::new(provider), 10).run("go").await.unwrap();
+        let memory = RecordingMemory::new();
+        let mut s = settings(false);
+        s.max_iterations = 10;
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        let out = agent.run("go").await.unwrap();
         assert_eq!(out, "done", "{desc}");
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), runaways + 1, "{desc}: one call per turn");
+        assert_eq!(seen.len(), script.len(), "{desc}: one call per turn");
         assert!(
-            seen.iter().all(|(_, soup, _)| !soup),
+            seen.iter().all(|r| !r.soup),
             "{desc}: no request carries the runaway: {seen:?}"
         );
-        for (n, _, last) in &seen[1..] {
+        for i in 1..script.len() {
+            let streaks = (0..i)
+                .filter(|&j| script[j] == Turn::Soup && (j == 0 || script[j - 1] != Turn::Soup))
+                .count();
             assert_eq!(
-                *last, TRUNCATION_NUDGE,
-                "{desc}: the nudge follows a runaway"
+                seen[i].nudges, streaks,
+                "{desc}: request {i}: one nudge per runaway streak: {seen:?}"
             );
-            // The fragment is replaced by the nudge, so the prompt doesn't grow.
-            assert_eq!(*n, seen[0].0 + 1, "{desc}: prompt size stays flat");
+            if script[i - 1] == Turn::Soup {
+                assert_eq!(
+                    seen[i].last, TRUNCATION_NUDGE,
+                    "{desc}: request {i}: the nudge follows a runaway"
+                );
+                // The fragment is replaced by the nudge (or by nothing, when the
+                // nudge is already last), so the prompt never carries it.
+                let grew = usize::from(i < 2 || script[i - 2] != Turn::Soup);
+                assert_eq!(
+                    seen[i].len,
+                    seen[i - 1].len + grew,
+                    "{desc}: request {i}: the runaway adds at most the nudge"
+                );
+            }
         }
+        let recorded = memory
+            .events()
+            .iter()
+            .filter(|e| e.kind == "assistant" && e.message.content_text().contains(SOUP))
+            .count();
+        let runaways = script.iter().filter(|t| **t == Turn::Soup).count();
+        assert_eq!(
+            recorded, runaways,
+            "{desc}: the transcript keeps every runaway"
+        );
     }
 
     /// `corner_`: a model that truncates forever fails fast (an honest error the

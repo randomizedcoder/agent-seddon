@@ -232,10 +232,16 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
     transcript keeps it), and the nudge asks for a brief new answer, once per streak. The
     three-strikes DNF is unchanged, so a server that keeps running away fails the review
     instead of drafting it.
-  - **Test:** `adversarial_truncated_fragment_never_resent` (1 and MAX runaways): no later
-    request carries the fragment, and the prompt doesn't grow.
-  - **On l2:** the fleet's concurrency is cut to 2 (`max_total`/`max_per_user`) until the
-    GLM server holds up under load.
+  - **Test:** `adversarial_truncated_fragment_never_resent` (1 and MAX runaways, and a
+    streak broken by a tool turn or an empty turn): no later request carries the fragment,
+    the prompt grows by at most the nudge, each streak gets one nudge, and the transcript
+    keeps every runaway.
+  - **On l2 (host config in `~/nixos/desktop/l2`, not this repo):** the fleet's concurrency
+    is cut to 2 (`review_fleet.max_total`/`max_per_user`) until the GLM server holds up
+    under load.
+  - **Carried:** a test that renders a post-truncation prompt (`user(goal)`,
+    `user(nudge)`, no assistant between) through the Anthropic conversion, which coalesces
+    consecutive same-role turns today.
 
 ## Decisions of record
 
