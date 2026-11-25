@@ -46,7 +46,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S26b-vi | #729's carries: snapshot docs, more snapshot rows, a valid `clientId` example | [10](10-sso-front-door.md) | ✅ | #730 |
 | S26b-vii | Behind the door every portal stream's 401 signs in again (the interceptor, not the page); #730's carries | [06](06-portal-and-edge.md) | ✅ | #731 |
 | S26b-viii | An agent naming its own App keeps it beside `fromSetup` (no `app_dir`); `app_dir` with an explicit `app_id`/`private_key_ref` is refused; #731's carries | [10](10-sso-front-door.md) | ✅ | #732 |
-| S26b-ix | The App manifest asks for `emails`, GitHub's manifest name (`email_addresses` made GitHub refuse it) | [10](10-sso-front-door.md) | 🟡 | this PR |
+| S26b-ix | The App manifest asks for `emails`, GitHub's manifest name (`email_addresses` made GitHub refuse it) | [10](10-sso-front-door.md) | ✅ | #733 |
+| S26b-x | A filled `[github_app]` validates again at build (the gateway crash-looped once the App existed) | [10](10-sso-front-door.md) | 🟡 | this PR |
 | S27a | `AuthGate` core: `read:`/`write:observability`, the path map, `rd`, browser cookie sessions | [10](10-sso-front-door.md) F3, F5, F11 | ✅ | #713 |
 | S27b-i | `AuthGate` route logic: login / callback / logout, `ext_authz` `Check`, the token cache | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #714 |
 | S27b-ii | The gate's loopback listener (`tiny_http`), config, wiring, `authz.toml` + `auth-e2e` rows | [10](10-sso-front-door.md) F3, F4, F10 | ✅ | #715 |
@@ -1915,6 +1916,20 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     exact permission set, so a new permission is a deliberate change) and each value is
     `read` or `write`; the name list says it is a snapshot; doc 10's sentence reads
     plainly. Carried: none.
+- **2026-11-24 — S26b-x: the App was created, and the gateway and sessions crash-looped.**
+  S26b-ix merged as #733 (a54a511f). On l2, `/auth/setup` created the App (`agent-seddon-l2`)
+  and wrote its files; the path unit restarted the agents, and both units then refused to
+  start: "app_dir names the App by its files; app_id and private_key_ref name one here".
+  - **Cause:** `resolve_github_app` fills the table from `app_dir` at start, then the App
+    minter (`install_github_app_minter`) calls `validate()` on it again. `validate()` treated
+    any table with `app_dir` as not yet filled, so it refused the `app_id` the files had just
+    written. Every test validated the table as written or after the fill, never both in
+    order, and the VM subtest's agent has no App minter.
+  - **The fix:** `fill_from_app_dir` marks the table filled (a private `#[serde(skip)]`
+    flag), so a later `validate()` checks the whole table; a second fill is a no-op.
+    `github_app_resolve_then_validate_cases` runs parse → resolve → validate as the start
+    does; an explicit `app_id` beside `app_dir` is still refused at parse, and `filled`
+    can't be set from a config file (an adversarial row).
 
 ## Cross-track note (not an S-increment)
 
